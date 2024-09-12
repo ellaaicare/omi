@@ -1,10 +1,10 @@
 ---
 layout: default
-title: Install firmware
+title: Compiling the device firmware
 nav_order: 3
 ---
 
-# Install firmware
+# Compile firmware
 
 {: .note }
 Important: If you purchased an assembled device please skip this step
