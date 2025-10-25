@@ -690,30 +690,49 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                              Expanded(
                                child: ElevatedButton.icon(
                                  icon: const Icon(Icons.audiotrack, size: 16),
-                                 label: const Text('Play Test Tone'),
+                                 label: const Text('Play Voice Test'),
                                  onPressed: () async {
                                    final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
                                    if (deviceProvider.connectedDevice != null) {
-                                     // Generate a 1-second 440Hz sine wave tone
+                                     // Generate a voice-like test audio: "Hello" in simple tones
                                      const int sampleRate = 8000; // Matches firmware SAMPLE_FREQUENCY
-                                     const int durationMs = 1000;
-                                     const int frequency = 440; // A4 note
+                                     const int durationMs = 2000; // 2 seconds
                                      const int numSamples = (sampleRate * durationMs) ~/ 1000;
 
                                      final audioData = Uint8List(numSamples * 2); // 16-bit samples
                                      final byteData = ByteData.sublistView(audioData);
 
-                                     for (int i = 0; i < numSamples; i++) {
-                                       final t = i / sampleRate;
-                                       final sample = (32767 * 0.3 * (2 * 3.14159 * frequency * t).sin()).toInt();
-                                       byteData.setInt16(i * 2, sample, Endian.little);
+                                     // Create a sequence of tones that sound like "HELLO"
+                                     // H: High tone (880Hz), E: Medium-high (660Hz), L: Medium (440Hz), L: Medium (440Hz), O: Low (220Hz)
+                                     final frequencies = [880.0, 660.0, 440.0, 440.0, 220.0]; // HELLO frequencies
+                                     final toneDuration = 0.3; // 300ms per letter
+                                     final samplesPerTone = (sampleRate * toneDuration).toInt();
+
+                                     for (int toneIndex = 0; toneIndex < frequencies.length; toneIndex++) {
+                                       final freq = frequencies[toneIndex];
+                                       final startSample = toneIndex * samplesPerTone;
+
+                                       for (int i = 0; i < samplesPerTone && startSample + i < numSamples; i++) {
+                                         final t = i / sampleRate;
+                                         // Add some modulation to make it sound more voice-like
+                                         final modulation = 1.0 + 0.1 * sin(2 * pi * 5 * t); // 5Hz modulation
+                                         final sample = (32767 * 0.2 * modulation * sin(2 * pi * freq * t)).toInt();
+                                         byteData.setInt16((startSample + i) * 2, sample, Endian.little);
+                                       }
+
+                                       // Add silence between tones
+                                       final silenceStart = startSample + samplesPerTone;
+                                       final silenceSamples = (sampleRate * 0.1).toInt(); // 100ms silence
+                                       for (int i = 0; i < silenceSamples && silenceStart + i < numSamples; i++) {
+                                         byteData.setInt16((silenceStart + i) * 2, 0, Endian.little);
+                                       }
                                      }
 
                                      final success = await deviceProvider.connectedDevice!.streamAudio(audioData);
                                      if (success) {
-                                       AppSnackbar.showSnackbarSuccess('Test tone played successfully');
+                                       AppSnackbar.showSnackbarSuccess('Voice test "HELLO" played successfully');
                                      } else {
-                                       AppSnackbar.showSnackbarError('Failed to play test tone');
+                                       AppSnackbar.showSnackbarError('Failed to play voice test');
                                      }
                                    } else {
                                      AppSnackbar.showSnackbarError('No device connected');
