@@ -1,0 +1,127 @@
+{
+  "name": "Omi Memories to Letta AI (Simple)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "omi-memory-capture",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "omi-webhook-trigger",
+      "name": "Omi Webhook Trigger",
+      "webhookId": "omi-memory-webhook"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and transform Omi conversation data\nconst omiData = $input.item.json;\n\n// Build transcript from segments\nlet transcript = '';\nif (omiData.transcript_segments && omiData.transcript_segments.length > 0) {\n  transcript = omiData.transcript_segments\n    .map(seg => `${seg.is_user ? 'User' : 'Speaker ' + seg.speaker_id}: ${seg.text}`)\n    .join('\\n');\n}\n\n// Extract structured data\nconst structured = omiData.structured || {};\nconst title = structured.title || 'Untitled Conversation';\nconst overview = structured.overview || '';\nconst category = structured.category || 'other';\nconst emoji = structured.emoji || '💬';\n\n// Format timestamps\nconst createdAt = omiData.created_at || new Date().toISOString();\nconst startedAt = omiData.started_at || createdAt;\nconst finishedAt = omiData.finished_at || new Date().toISOString();\n\n// Calculate duration in minutes\nconst duration = omiData.started_at && omiData.finished_at \n  ? Math.round((new Date(omiData.finished_at) - new Date(omiData.started_at)) / 60000)\n  : 0;\n\n// Build message exactly like Telegram flow does\nconst message = `${emoji} ${title}\\n\\nCategory: ${category}\\nDuration: ${duration} minutes\\nTime: ${new Date(createdAt).toLocaleString()}\\n\\n📝 Overview:\\n${overview}\\n\\n💬 Full Transcript:\\n${transcript}\\n\\n---\\nThis is a memory from my Omi wearable device.`;\n\n// Return in same format as Telegram trigger does\nreturn [{\n  json: {\n    message: {\n      text: message\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ],
+      "id": "transform-omi-data",
+      "name": "Transform to Message Format"
+    },
+    {
+      "parameters": {
+        "agentId": "YOUR_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-ai-agent",
+      "name": "Letta AI Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        560,
+        0
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"Memory captured successfully\",\n  \"status\": \"success\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        840,
+        0
+      ],
+      "id": "respond-to-omi",
+      "name": "Respond to Omi"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Omi Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Transform to Message Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform to Message Format": {
+      "main": [
+        [
+          {
+            "node": "Letta AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond to Omi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "simple-version-1.2-telegram-pattern",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "omi-letta-simple",
+  "tags": [
+    {
+      "name": "omi"
+    },
+    {
+      "name": "letta"
+    },
+    {
+      "name": "memory-capture"
+    }
+  ]
+}

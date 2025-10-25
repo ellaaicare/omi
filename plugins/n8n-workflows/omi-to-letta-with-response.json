@@ -1,0 +1,209 @@
+{
+  "name": "Omi to Letta AI (With Response Back to Omi)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "omi-letta-bidirectional",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "omi-webhook-trigger",
+      "name": "Omi Webhook Trigger",
+      "webhookId": "omi-letta-bidirectional"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and transform Omi conversation data for Letta\nconst omiData = $input.item.json;\n\n// Skip discarded conversations\nif (omiData.discarded === true) {\n  return { json: { skip: true, reason: 'discarded' } };\n}\n\n// Build transcript from segments\nlet transcript = '';\nif (omiData.transcript_segments && omiData.transcript_segments.length > 0) {\n  transcript = omiData.transcript_segments\n    .map(seg => `${seg.is_user ? 'User' : 'Speaker ' + seg.speaker_id}: ${seg.text}`)\n    .join('\\n');\n}\n\n// Extract structured data\nconst structured = omiData.structured || {};\nconst title = structured.title || 'Untitled Conversation';\nconst overview = structured.overview || '';\nconst category = structured.category || 'other';\nconst emoji = structured.emoji || '💬';\n\n// Format timestamps\nconst createdAt = omiData.created_at || new Date().toISOString();\nconst duration = omiData.started_at && omiData.finished_at \n  ? Math.round((new Date(omiData.finished_at) - new Date(omiData.started_at)) / 60000)\n  : 0;\n\n// Build message for Letta\nconst lettaMessage = `${emoji} ${title}\n\nCategory: ${category}\nDuration: ${duration} minutes\n\n📝 Overview:\n${overview}\n\n💬 Transcript:\n${transcript}`;\n\n// Return formatted data\nreturn {\n  json: {\n    skip: false,\n    message: lettaMessage,\n    metadata: {\n      source: 'omi',\n      title: title,\n      category: category,\n      emoji: emoji,\n      duration_minutes: duration,\n      created_at: createdAt\n    }\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "id": "transform-omi-data",
+      "name": "Transform Omi Data"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        400,
+        0
+      ],
+      "id": "check-if-skip",
+      "name": "Should Process?"
+    },
+    {
+      "parameters": {
+        "agentId": "YOUR_AGENT_ID_HERE",
+        "message": "={{ $json.message }}",
+        "additionalOptions": {
+          "metadata": "={{ JSON.stringify($json.metadata) }}"
+        }
+      },
+      "id": "letta-ai-agent",
+      "name": "Letta AI Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        600,
+        -100
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract Letta's response and format for Omi\nconst lettaResponse = $input.item.json;\nconst metadata = $node['Transform Omi Data'].json.metadata;\n\n// Get Letta's actual response (usually the assistant message)\nconst assistantMessage = lettaResponse.messages?.find(m => m.role === 'assistant');\nconst responseText = assistantMessage?.content || 'Memory stored in Letta';\n\n// Create a notification message for Omi user\n// Keep it short (20 words max as per Omi plugin spec)\nlet notification = '';\n\n// Only send notification if Letta has something meaningful to say\nif (responseText && responseText.length > 10 && !responseText.includes('Memory stored')) {\n  // Truncate to ~20 words\n  const words = responseText.split(' ');\n  notification = words.slice(0, 20).join(' ');\n  if (words.length > 20) notification += '...';\n}\n\nreturn {\n  json: {\n    message: notification,\n    full_response: responseText,\n    title: metadata.title,\n    category: metadata.category\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        -100
+      ],
+      "id": "format-letta-response",
+      "name": "Format Letta Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"{{ $json.message }}\",\n  \"status\": \"success\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        0
+      ],
+      "id": "respond-to-omi",
+      "name": "Respond to Omi"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"\",\n  \"status\": \"skipped\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        600,
+        100
+      ],
+      "id": "respond-skipped",
+      "name": "Respond Skipped"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Omi Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Transform Omi Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Omi Data": {
+      "main": [
+        [
+          {
+            "node": "Should Process?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Process?": {
+      "main": [
+        [
+          {
+            "node": "Letta AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Format Letta Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Letta Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Omi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "bidirectional-version-1.0",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "omi-letta-bidirectional",
+  "tags": [
+    {
+      "name": "omi"
+    },
+    {
+      "name": "letta"
+    },
+    {
+      "name": "bidirectional"
+    },
+    {
+      "name": "notifications"
+    }
+  ]
+}

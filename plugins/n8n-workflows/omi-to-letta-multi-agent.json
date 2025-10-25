@@ -1,0 +1,536 @@
+{
+  "name": "Omi to Letta Multi-Agent Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "omi-multi-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "omi-webhook-trigger",
+      "name": "Omi Webhook Trigger"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate and classify Omi payload\nconst payload = $input.item.json;\n\n// Skip discarded conversations\nif (payload.discarded === true) {\n  return [{ json: { skip: true, reason: 'discarded' } }];\n}\n\n// Check if it's a realtime payload (deprecated)\nconst isRealtime = payload.session_id && !payload.structured;\nif (isRealtime) {\n  return [{ json: { skip: true, reason: 'realtime-payload-not-supported' } }];\n}\n\n// Check for empty content\nif (!payload.transcript_segments || payload.transcript_segments.length === 0) {\n  return [{ json: { skip: true, reason: 'empty-transcript' } }];\n}\n\n// Extract structured data\nconst structured = payload.structured || {};\nconst category = structured.category || 'other';\nconst actionItemCount = structured.action_items?.length || 0;\nconst eventCount = structured.events?.length || 0;\nconst photoCount = payload.photos?.length || 0;\nconst segmentCount = payload.transcript_segments?.length || 0;\n\n// Calculate duration in minutes\nconst duration = payload.started_at && payload.finished_at\n  ? Math.round((new Date(payload.finished_at) - new Date(payload.started_at)) / 60000)\n  : 0;\n\n// Determine routing based on content\nlet routingType = 'general';\nlet priority = 'normal';\n\n// Work-related routing\nif (category === 'work' || category === 'business' || category === 'entrepreneurship') {\n  routingType = 'work';\n  priority = actionItemCount > 2 ? 'high' : 'normal';\n}\n// Health tracking\nelse if (category === 'health' || category === 'fitness') {\n  routingType = 'health';\n}\n// Personal/journaling\nelse if (category === 'personal' || category === 'philosophy' || category === 'spiritual') {\n  routingType = 'personal';\n}\n// Learning/education\nelse if (category === 'education' || category === 'science' || category === 'technology') {\n  routingType = 'learning';\n}\n// Visual memories (photos)\nif (photoCount > 0) {\n  routingType = 'visual';\n}\n// Task-heavy conversations\nif (actionItemCount > 3) {\n  routingType = 'tasks';\n  priority = 'high';\n}\n\nreturn [{\n  json: {\n    skip: false,\n    routing_type: routingType,\n    priority: priority,\n    metadata: {\n      category: category,\n      duration_minutes: duration,\n      action_items_count: actionItemCount,\n      events_count: eventCount,\n      photos_count: photoCount,\n      segments_count: segmentCount\n    },\n    original_payload: payload\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "id": "classify-payload",
+      "name": "Classify Payload"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        400,
+        0
+      ],
+      "id": "should-process",
+      "name": "Should Process?"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Build message for Letta based on routing type\nconst data = $input.item.json;\nconst payload = data.original_payload;\nconst routingType = data.routing_type;\nconst metadata = data.metadata;\n\n// Build transcript\nlet transcript = '';\nif (payload.transcript_segments) {\n  transcript = payload.transcript_segments\n    .map(seg => `${seg.is_user ? 'User' : 'Speaker ' + seg.speaker_id}: ${seg.text}`)\n    .join('\\n');\n}\n\n// Base message components\nconst title = payload.structured?.title || 'Untitled';\nconst overview = payload.structured?.overview || '';\nconst category = payload.structured?.category || 'other';\nconst emoji = payload.structured?.emoji || '💬';\n\n// Build message based on routing type\nlet message = '';\n\nif (routingType === 'work') {\n  message = `${emoji} WORK: ${title}\\n\\n`;\n  message += `Overview: ${overview}\\n`;\n  message += `Duration: ${metadata.duration_minutes} minutes\\n\\n`;\n  \n  if (metadata.action_items_count > 0) {\n    message += `ACTION ITEMS (${metadata.action_items_count}):\\n`;\n    payload.structured.action_items.forEach((item, i) => {\n      message += `${i + 1}. ${item.description}\\n`;\n    });\n    message += `\\n`;\n  }\n  \n  message += `TRANSCRIPT:\\n${transcript}`;\n} \nelse if (routingType === 'health') {\n  message = `${emoji} HEALTH LOG: ${title}\\n\\n`;\n  message += `Summary: ${overview}\\n\\n`;\n  message += `Details:\\n${transcript}`;\n}\nelse if (routingType === 'personal') {\n  message = `${emoji} JOURNAL ENTRY: ${title}\\n\\n`;\n  message += `${overview}\\n\\n`;\n  message += `Full entry:\\n${transcript}`;\n}\nelse if (routingType === 'learning') {\n  message = `${emoji} LEARNING NOTE: ${title}\\n\\n`;\n  message += `Key takeaways: ${overview}\\n\\n`;\n  message += `Full content:\\n${transcript}`;\n}\nelse if (routingType === 'visual') {\n  message = `${emoji} VISUAL MEMORY: ${title}\\n\\n`;\n  message += `Context: ${overview}\\n\\n`;\n  message += `Photos (${metadata.photos_count}):\\n`;\n  payload.photos.forEach((photo, i) => {\n    message += `${i + 1}. ${photo.description}\\n`;\n  });\n  message += `\\nConversation:\\n${transcript}`;\n}\nelse if (routingType === 'tasks') {\n  message = `${emoji} TASK LIST: ${title}\\n\\n`;\n  message += `Context: ${overview}\\n\\n`;\n  message += `TASKS TO COMPLETE (${metadata.action_items_count}):\\n`;\n  payload.structured.action_items.forEach((item, i) => {\n    message += `${i + 1}. ${item.description}\\n`;\n  });\n  message += `\\nFull conversation:\\n${transcript}`;\n}\nelse {\n  // General routing\n  message = `${emoji} ${title}\\n\\n`;\n  message += `Category: ${category}\\n`;\n  message += `Duration: ${metadata.duration_minutes} minutes\\n\\n`;\n  message += `Summary: ${overview}\\n\\n`;\n  message += `Transcript:\\n${transcript}`;\n}\n\nmessage += `\\n---\\nSource: Omi wearable device`;\n\n// Return formatted for Letta\nreturn [{\n  json: {\n    message: {\n      text: message\n    },\n    routing_type: routingType,\n    priority: data.priority,\n    metadata: metadata\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        -100
+      ],
+      "id": "format-message",
+      "name": "Format Message"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "work"
+                  }
+                ]
+              },
+              "output": 0
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "health"
+                  }
+                ]
+              },
+              "output": 1
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "personal"
+                  }
+                ]
+              },
+              "output": 2
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "learning"
+                  }
+                ]
+              },
+              "output": 3
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "visual"
+                  }
+                ]
+              },
+              "output": 4
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.routing_type }}",
+                    "value2": "tasks"
+                  }
+                ]
+              },
+              "output": 5
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        800,
+        -100
+      ],
+      "id": "route-to-agent",
+      "name": "Route to Agent"
+    },
+    {
+      "parameters": {
+        "agentId": "WORK_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-work-agent",
+      "name": "Letta Work Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        -400
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "HEALTH_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-health-agent",
+      "name": "Letta Health Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        -300
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "PERSONAL_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-personal-agent",
+      "name": "Letta Personal Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        -200
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "LEARNING_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-learning-agent",
+      "name": "Letta Learning Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        -100
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "VISUAL_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-visual-agent",
+      "name": "Letta Visual Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        0
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "TASKS_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-tasks-agent",
+      "name": "Letta Tasks Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        100
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "agentId": "GENERAL_AGENT_ID_HERE",
+        "message": "={{ $json.message.text }}",
+        "additionalOptions": {}
+      },
+      "id": "letta-general-agent",
+      "name": "Letta General Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        200
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"Memory processed by {{ $node['Route to Agent'].json.routing_type }} agent\",\n  \"status\": \"success\",\n  \"agent_type\": \"{{ $node['Route to Agent'].json.routing_type }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "respond-success",
+      "name": "Respond Success"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"Memory skipped: {{ $json.reason }}\",\n  \"status\": \"skipped\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        600,
+        100
+      ],
+      "id": "respond-skipped",
+      "name": "Respond Skipped"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Omi Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Classify Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Payload": {
+      "main": [
+        [
+          {
+            "node": "Should Process?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Process?": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Route to Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route to Agent": {
+      "main": [
+        [
+          {
+            "node": "Letta Work Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta Health Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta Personal Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta Learning Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta Visual Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta Tasks Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Letta General Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Work Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Health Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Personal Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Learning Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Visual Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta Tasks Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta General Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "multi-agent-v1.0",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "omi-letta-multi-agent",
+  "tags": [
+    {
+      "name": "omi"
+    },
+    {
+      "name": "letta"
+    },
+    {
+      "name": "multi-agent"
+    },
+    {
+      "name": "routing"
+    }
+  ]
+}

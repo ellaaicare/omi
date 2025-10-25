@@ -1,0 +1,207 @@
+{
+  "name": "Omi Memories to Letta AI (Enhanced)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "omi-memory-capture",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "omi-webhook-trigger",
+      "name": "Omi Webhook Trigger",
+      "webhookId": "omi-memory-webhook-enhanced"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Validate incoming Omi data\nconst omiData = $input.item.json;\n\n// Check if conversation is discarded\nif (omiData.discarded === true) {\n  throw new Error('Conversation was discarded by user - skipping');\n}\n\n// Check if there's actual content\nif (!omiData.transcript_segments || omiData.transcript_segments.length === 0) {\n  throw new Error('No transcript segments found - skipping empty conversation');\n}\n\nreturn { json: omiData };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ],
+      "id": "validate-omi-data",
+      "name": "Validate Omi Data"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Extract and transform Omi conversation data for Letta\nconst omiData = $input.item.json;\n\n// Build transcript from segments\nlet transcript = '';\nif (omiData.transcript_segments && omiData.transcript_segments.length > 0) {\n  transcript = omiData.transcript_segments\n    .map(seg => `${seg.is_user ? 'User' : 'Speaker ' + seg.speaker_id}: ${seg.text}`)\n    .join('\\n');\n}\n\n// Extract structured data\nconst structured = omiData.structured || {};\nconst title = structured.title || 'Untitled Conversation';\nconst overview = structured.overview || '';\nconst category = structured.category || 'other';\nconst emoji = structured.emoji || '💬';\n\n// Format timestamps\nconst createdAt = omiData.created_at || new Date().toISOString();\nconst startedAt = omiData.started_at || createdAt;\nconst finishedAt = omiData.finished_at || new Date().toISOString();\n\n// Calculate duration in minutes\nconst duration = omiData.started_at && omiData.finished_at \n  ? Math.round((new Date(omiData.finished_at) - new Date(omiData.started_at)) / 60000)\n  : 0;\n\n// Extract action items if present\nconst actionItems = omiData.structured?.action_items || [];\nconst actionItemsText = actionItems.length > 0\n  ? '\\n\\n✅ Action Items:\\n' + actionItems.map((item, i) => `${i + 1}. ${item.description}`).join('\\n')\n  : '';\n\n// Extract photo descriptions if present\nconst photoDescriptions = omiData.photos && omiData.photos.length > 0\n  ? '\\n\\n📸 Photos:\\n' + omiData.photos.map((photo, i) => `${i + 1}. ${photo.description}`).join('\\n')\n  : '';\n\n// Build rich message for Letta with context\nconst lettaMessage = `${emoji} ${title}\n\nCategory: ${category}\nDuration: ${duration} minutes\nTime: ${new Date(createdAt).toLocaleString()}\n\n📝 Overview:\n${overview}${actionItemsText}${photoDescriptions}\n\n💬 Full Transcript:\n${transcript}\n\n---\nThis is a memory from my Omi wearable device.`;\n\n// Return formatted data for Letta\nreturn {\n  json: {\n    message: lettaMessage,\n    metadata: {\n      source: 'omi',\n      title: title,\n      category: category,\n      emoji: emoji,\n      duration_minutes: duration,\n      created_at: createdAt,\n      started_at: startedAt,\n      finished_at: finishedAt,\n      has_transcript: transcript.length > 0,\n      segment_count: omiData.transcript_segments?.length || 0,\n      photos_count: omiData.photos?.length || 0,\n      action_items_count: actionItems.length,\n      discarded: omiData.discarded || false\n    }\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        0
+      ],
+      "id": "transform-omi-data",
+      "name": "Transform Omi to Letta Format"
+    },
+    {
+      "parameters": {
+        "agentId": "YOUR_AGENT_ID_HERE",
+        "message": "={{ $json.message }}",
+        "additionalOptions": {
+          "metadata": "={{ JSON.stringify($json.metadata) }}"
+        }
+      },
+      "id": "letta-ai-agent",
+      "name": "Letta AI Agent",
+      "type": "@letta-ai/n8n-nodes-letta.letta",
+      "typeVersion": 1,
+      "position": [
+        600,
+        0
+      ],
+      "credentials": {
+        "lettaApi": {
+          "id": "YOUR_LETTA_CREDENTIAL_ID",
+          "name": "Letta account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"Memory captured successfully in Letta\",\n  \"status\": \"success\",\n  \"title\": \"{{ $node['Transform Omi to Letta Format'].json.metadata.title }}\",\n  \"category\": \"{{ $node['Transform Omi to Letta Format'].json.metadata.category }}\",\n  \"duration_minutes\": {{ $node['Transform Omi to Letta Format'].json.metadata.duration_minutes }},\n  \"letta_response\": \"{{ $json.messages[1]?.content || 'Memory stored' }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        800,
+        0
+      ],
+      "id": "respond-success",
+      "name": "Respond Success"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"{{ $json.message || 'Memory skipped' }}\",\n  \"status\": \"skipped\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        400,
+        200
+      ],
+      "id": "respond-skipped",
+      "name": "Respond Skipped"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"message\": \"Error capturing memory\",\n  \"status\": \"error\",\n  \"error\": \"{{ $json.message || 'Unknown error' }}\"\n}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        600,
+        200
+      ],
+      "id": "respond-error",
+      "name": "Respond Error"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Omi Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Omi Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Omi Data": {
+      "main": [
+        [
+          {
+            "node": "Transform Omi to Letta Format",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transform Omi to Letta Format": {
+      "main": [
+        [
+          {
+            "node": "Letta AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Letta AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true
+  },
+  "versionId": "enhanced-version-1.0",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "id": "omi-letta-enhanced",
+  "tags": [
+    {
+      "name": "omi"
+    },
+    {
+      "name": "letta"
+    },
+    {
+      "name": "memory-capture"
+    },
+    {
+      "name": "production"
+    }
+  ]
+}

@@ -278,4 +278,18 @@ class AppleWatchDeviceConnection extends DeviceConnection {
       {required void Function(OrientedImage orientedImage) onImageReceived}) {
     throw UnimplementedError();
   }
+
+  @override
+  Future<bool> performPlayBootSound() async {
+    // Apple Watch devices may not have speakers for this purpose
+    debugPrint('AppleWatchDeviceConnection: Boot sound not supported on Apple Watch');
+    return false;
+  }
+
+  @override
+  Future<bool> performStreamAudio(Uint8List audioData) async {
+    // Apple Watch devices may not have speakers for this purpose
+    debugPrint('AppleWatchDeviceConnection: Audio streaming not supported on Apple Watch');
+    return false;
+  }
 }

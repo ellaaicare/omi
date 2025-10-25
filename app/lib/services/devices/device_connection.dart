@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -437,6 +438,26 @@ abstract class DeviceConnection {
   }
 
   Future<int?> performGetMicGain();
+
+  // Audio playback methods
+  Future<bool> performPlayBootSound();
+  Future<bool> performStreamAudio(Uint8List audioData);
+
+  Future<bool> playBootSound() async {
+    if (await isConnected()) {
+      return await performPlayBootSound();
+    }
+    _showDeviceDisconnectedNotification();
+    return false;
+  }
+
+  Future<bool> streamAudio(Uint8List audioData) async {
+    if (await isConnected()) {
+      return await performStreamAudio(audioData);
+    }
+    _showDeviceDisconnectedNotification();
+    return false;
+  }
 
   void _showDeviceDisconnectedNotification() {
     NotificationService.instance.createNotification(

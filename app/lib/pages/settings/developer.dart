@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:omi/backend/http/api/conversations.dart';
@@ -10,6 +11,7 @@ import 'package:omi/pages/settings/widgets/mcp_api_key_list_item.dart';
 import 'package:omi/pages/settings/widgets/developer_api_keys_section.dart';
 import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/mcp_provider.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -622,10 +624,109 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       'Suggest follow up question',
                       style: TextStyle(color: Colors.white, fontSize: 16),
                     ),
-                    value: provider.followUpQuestionEnabled,
-                    onChanged: provider.onFollowUpQuestionChanged,
-                  ),
-                ],
+                     value: provider.followUpQuestionEnabled,
+                     onChanged: provider.onFollowUpQuestionChanged,
+                   ),
+
+                   // Speaker Output Test Section
+                   const SizedBox(height: 32.0),
+                   const Text(
+                     'Device Testing',
+                     style: TextStyle(
+                       color: Colors.white,
+                       fontSize: 18,
+                       fontWeight: FontWeight.w600,
+                     ),
+                   ),
+                   const SizedBox(height: 16.0),
+                   Container(
+                     decoration: BoxDecoration(
+                       color: Theme.of(context).colorScheme.surface.withOpacity(0.1),
+                       borderRadius: BorderRadius.circular(12),
+                     ),
+                     padding: const EdgeInsets.all(16),
+                     child: Column(
+                       crossAxisAlignment: CrossAxisAlignment.start,
+                       children: [
+                         const Text(
+                           'Speaker Output Test',
+                           style: TextStyle(
+                             color: Colors.white,
+                             fontSize: 16,
+                             fontWeight: FontWeight.w500,
+                           ),
+                         ),
+                         const SizedBox(height: 8),
+                         const Text(
+                           'Test audio playback on connected Omi devices',
+                           style: TextStyle(
+                             color: Colors.white70,
+                             fontSize: 14,
+                           ),
+                         ),
+                         const SizedBox(height: 16),
+                         Row(
+                           children: [
+                             Expanded(
+                               child: ElevatedButton.icon(
+                                 icon: const Icon(Icons.volume_up, size: 16),
+                                 label: const Text('Play Boot Sound'),
+                                 onPressed: () async {
+                                   final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+                                   if (deviceProvider.connectedDevice != null) {
+                                     final success = await deviceProvider.connectedDevice!.playBootSound();
+                                     if (success) {
+                                       AppSnackbar.showSnackbarSuccess('Boot sound played successfully');
+                                     } else {
+                                       AppSnackbar.showSnackbarError('Failed to play boot sound');
+                                     }
+                                   } else {
+                                     AppSnackbar.showSnackbarError('No device connected');
+                                   }
+                                 },
+                               ),
+                             ),
+                             const SizedBox(width: 12),
+                             Expanded(
+                               child: ElevatedButton.icon(
+                                 icon: const Icon(Icons.audiotrack, size: 16),
+                                 label: const Text('Play Test Tone'),
+                                 onPressed: () async {
+                                   final deviceProvider = Provider.of<DeviceProvider>(context, listen: false);
+                                   if (deviceProvider.connectedDevice != null) {
+                                     // Generate a 1-second 440Hz sine wave tone
+                                     const int sampleRate = 8000; // Matches firmware SAMPLE_FREQUENCY
+                                     const int durationMs = 1000;
+                                     const int frequency = 440; // A4 note
+                                     const int numSamples = (sampleRate * durationMs) ~/ 1000;
+
+                                     final audioData = Uint8List(numSamples * 2); // 16-bit samples
+                                     final byteData = ByteData.sublistView(audioData);
+
+                                     for (int i = 0; i < numSamples; i++) {
+                                       final t = i / sampleRate;
+                                       final sample = (32767 * 0.3 * (2 * 3.14159 * frequency * t).sin()).toInt();
+                                       byteData.setInt16(i * 2, sample, Endian.little);
+                                     }
+
+                                     final success = await deviceProvider.connectedDevice!.streamAudio(audioData);
+                                     if (success) {
+                                       AppSnackbar.showSnackbarSuccess('Test tone played successfully');
+                                     } else {
+                                       AppSnackbar.showSnackbarError('Failed to play test tone');
+                                     }
+                                   } else {
+                                     AppSnackbar.showSnackbarError('No device connected');
+                                   }
+                                 },
+                               ),
+                             ),
+                           ],
+                         ),
+                       ],
+                     ),
+                   ),
+                 ],
               ),
             ),
           );

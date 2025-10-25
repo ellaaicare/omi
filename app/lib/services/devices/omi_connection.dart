@@ -615,4 +615,47 @@ class OmiDeviceConnection extends DeviceConnection {
 
     return deviceInfo;
   }
+
+  @override
+  Future<bool> performPlayBootSound() async {
+    try {
+      debugPrint('About to play boot sound on speaker');
+      // Send command to play boot sound (this uses the existing haptic characteristic)
+      // The firmware will interpret this as a request to play the boot chime
+      await transport.writeCharacteristic(speakerDataStreamServiceUuid, speakerDataStreamCharacteristicUuid, [0x01]);
+      return true;
+    } catch (e) {
+      debugPrint('OmiDeviceConnection: Error playing boot sound: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> performStreamAudio(Uint8List audioData) async {
+    try {
+      debugPrint('About to stream audio data to speaker: ${audioData.length} bytes');
+
+      // First send the length of the audio data (4 bytes, little-endian)
+      final lengthBytes = Uint8List(4);
+      final byteData = ByteData.sublistView(lengthBytes);
+      byteData.setUint32(0, audioData.length, Endian.little);
+      await transport.writeCharacteristic(speakerDataStreamServiceUuid, speakerDataStreamCharacteristicUuid, lengthBytes);
+
+      // Then send the audio data in chunks
+      const int chunkSize = 400; // Based on firmware PACKET_SIZE
+      for (int i = 0; i < audioData.length; i += chunkSize) {
+        final end = (i + chunkSize < audioData.length) ? i + chunkSize : audioData.length;
+        final chunk = audioData.sublist(i, end);
+        await transport.writeCharacteristic(speakerDataStreamServiceUuid, speakerDataStreamCharacteristicUuid, chunk);
+        // Small delay to prevent overwhelming the BLE connection
+        await Future.delayed(const Duration(milliseconds: 10));
+      }
+
+      debugPrint('Audio streaming completed');
+      return true;
+    } catch (e) {
+      debugPrint('OmiDeviceConnection: Error streaming audio: $e');
+      return false;
+    }
+  }
 }

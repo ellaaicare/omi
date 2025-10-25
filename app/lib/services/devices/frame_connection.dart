@@ -283,4 +283,18 @@ class FrameDeviceConnection extends DeviceConnection {
   // Existing getters already provide backward compatibility
 
   // Frame SDK helper methods are now handled by FrameTransport
+
+  @override
+  Future<bool> performPlayBootSound() async {
+    // Frame devices may not have speakers
+    debugPrint('FrameDeviceConnection: Boot sound not supported on Frame devices');
+    return false;
+  }
+
+  @override
+  Future<bool> performStreamAudio(Uint8List audioData) async {
+    // Frame devices may not have speakers
+    debugPrint('FrameDeviceConnection: Audio streaming not supported on Frame devices');
+    return false;
+  }
 }
