@@ -24,6 +24,20 @@ if os.path.exists(opus_lib_path):
     else:
         os.environ['DYLD_LIBRARY_PATH'] = opus_lib_path
 
+# Set GitHub token for torch.hub downloads
+github_token = os.environ.get('GITHUB_TOKEN')
+if github_token:
+    # torch.hub will use this when downloading from GitHub
+    os.environ['GITHUB_TOKEN'] = github_token
+
+# Set SSL certificate file for macOS Python
+try:
+    import certifi
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+except ImportError:
+    pass
+
 # Start uvicorn
 if __name__ == "__main__":
     import uvicorn
