@@ -14,6 +14,7 @@ class DeveloperModeProvider extends BaseProvider {
   final TextEditingController webhookAudioBytesDelay = TextEditingController();
   final TextEditingController webhookWsAudioBytes = TextEditingController();
   final TextEditingController webhookDaySummary = TextEditingController();
+  final TextEditingController customApiBaseUrl = TextEditingController();
 
   bool conversationEventsToggled = false;
   bool transcriptsToggled = false;
@@ -95,6 +96,7 @@ class DeveloperModeProvider extends BaseProvider {
     webhookOnTranscriptReceived.text = SharedPreferencesUtil().webhookOnTranscriptReceived;
     webhookAudioBytes.text = SharedPreferencesUtil().webhookAudioBytes;
     webhookAudioBytesDelay.text = SharedPreferencesUtil().webhookAudioBytesDelay;
+    customApiBaseUrl.text = SharedPreferencesUtil().customApiBaseUrl;
     followUpQuestionEnabled = SharedPreferencesUtil().devModeJoanFollowUpEnabled;
     transcriptionDiagnosticEnabled = SharedPreferencesUtil().transcriptionDiagnosticEnabled;
     autoCreateSpeakersEnabled = SharedPreferencesUtil().autoCreateSpeakersEnabled;
@@ -163,6 +165,11 @@ class DeveloperModeProvider extends BaseProvider {
       setIsLoading(false);
       return;
     }
+    if (customApiBaseUrl.text.isNotEmpty && !isValidUrl(customApiBaseUrl.text)) {
+      AppSnackbar.showSnackbarError('Invalid custom API base URL');
+      setIsLoading(false);
+      return;
+    }
 
     // if (webhookWsAudioBytes.text.isNotEmpty && !isValidWebSocketUrl(webhookWsAudioBytes.text)) {
     //   AppSnackbar.showSnackbarError('Invalid audio bytes websocket URL');
@@ -185,6 +192,7 @@ class DeveloperModeProvider extends BaseProvider {
       prefs.webhookOnTranscriptReceived = webhookOnTranscriptReceived.text;
       prefs.webhookOnConversationCreated = webhookOnConversationCreated.text;
       prefs.webhookDaySummary = webhookDaySummary.text;
+      prefs.customApiBaseUrl = customApiBaseUrl.text.trim();
     } catch (e) {
       Logger.error('Error occurred while updating endpoints: $e');
     }

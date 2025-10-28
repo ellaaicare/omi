@@ -120,6 +120,11 @@ class SharedPreferencesUtil {
 
   bool get autoCreateSpeakersEnabled => getBool('autoCreateSpeakersEnabled') ?? true;
 
+  // Custom API Base URL
+  String get customApiBaseUrl => getString('customApiBaseUrl') ?? '';
+
+  set customApiBaseUrl(String value) => saveString('customApiBaseUrl', value);
+
   set conversationEventsToggled(bool value) => saveBool('conversationEventsToggled', value);
 
   bool get conversationEventsToggled => getBool('conversationEventsToggled') ?? false;
