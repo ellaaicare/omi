@@ -71,6 +71,34 @@ Troubleshooting reference for common setup issues:
 
 ---
 
+### 6. **HOW_TO_VIEW_TRANSCRIPTS.md**
+Detailed guide on viewing transcript output:
+- Real-time console output methods
+- Firestore database verification
+- Compressed transcript decompression
+- Backend server logs analysis
+- Production behavior expectations
+
+**When to Read**: To understand where and how to verify transcription output.
+
+---
+
+### 7. **VPS_PRODUCTION_DEPLOYMENT.md** - **NEW**
+Complete VPS deployment guide for public iOS testing:
+- nginx reverse proxy configuration with subdomain
+- Let's Encrypt SSL certificate setup
+- Systemd service for auto-restart and boot startup
+- Backend transfer and installation on VPS
+- Security hardening and firewall configuration
+- Resource monitoring and troubleshooting
+- Migration path from testing to production
+
+**When to Read**: **BEFORE deploying backend for iOS app testing** - enables realistic end-to-end testing without special software.
+
+⭐ **RECOMMENDED**: Use this for production-grade deployment that works with any test device.
+
+---
+
 ## 🚀 Quick Navigation
 
 **Just Starting?**
