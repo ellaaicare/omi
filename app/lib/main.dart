@@ -110,14 +110,22 @@ Future _init() async {
   await ServiceManager.init();
 
   // Firebase
-  if (PlatformService.isWindows) {
-    // Windows does not support flavors
-    await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
-  } else {
-    if (F.env == Environment.prod) {
+  // Initialize Firebase if not already initialized (e.g., from GoogleService-Info.plist on iOS)
+  try {
+    if (PlatformService.isWindows) {
+      // Windows does not support flavors
       await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
     } else {
-      await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform);
+      if (F.env == Environment.prod) {
+        await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
+      } else {
+        await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform);
+      }
+    }
+  } catch (e) {
+    // Firebase already initialized from GoogleService-Info.plist, continue
+    if (!e.toString().contains('duplicate-app')) {
+      rethrow;
     }
   }
 

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 	<dict>
+		<key>GIDClientID</key>
+		<string>374648418085-ddorq5b330oinpfntbs5l74sv6cgelue.apps.googleusercontent.com</string>
+		<key>FirebaseAppDelegateProxyEnabled</key>
+		<false/>
 		<key>ITSAppUsesNonExemptEncryption</key>
 		<false/>
 		<key>BGTaskSchedulerPermittedIdentifiers</key>
@@ -50,7 +54,7 @@
 				<string>h.omi.me</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
-					<string>$(GOOGLE_REVERSE_CLIENT_ID)</string>
+					<string>com.googleusercontent.apps.374648418085-ddorq5b330oinpfntbs5l74sv6cgelue</string>
 				</array>
 			</dict>
 			<dict>
