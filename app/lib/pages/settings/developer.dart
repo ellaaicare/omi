@@ -18,6 +18,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -350,7 +351,76 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Leave empty to use default Omi infrastructure. Restart the app after changing this setting.',
+                    'Leave empty to use default Ella infrastructure. Restart the app after changing this setting.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // TTS Audio Testing Section
+                  const Text(
+                    '🎧 Audio & TTS Testing',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test text-to-speech audio routing to Bluetooth headsets.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Info card about Bluetooth status
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: Colors.blue, size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Connect AirPods or Bluetooth headset for audio routing test',
+                            style: TextStyle(color: Colors.grey.shade300, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Quick test buttons
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _buildTtsTestButton(
+                        context,
+                        label: '🔊 Test Message',
+                        message: EllaTtsService.sampleMessages['welcome']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '💊 Medication',
+                        message: EllaTtsService.sampleMessages['medication']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '📅 Appointment',
+                        message: EllaTtsService.sampleMessages['appointment']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '🏃 Activity',
+                        message: EllaTtsService.sampleMessages['activity']!,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Tap any button above to hear audio through your connected Bluetooth device or phone speaker.',
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
@@ -679,6 +749,27 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
         borderSide: BorderSide(color: Colors.grey),
       ),
       suffixIcon: suffixIcon,
+    );
+  }
+
+  // TTS Test Button Builder
+  Widget _buildTtsTestButton(BuildContext context, {required String label, required String message}) {
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        foregroundColor: Colors.white,
+        backgroundColor: Colors.grey.shade700,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+      onPressed: () async {
+        try {
+          final tts = EllaTtsService();
+          await tts.speak(message);
+          AppSnackbar.showSnackbar('🎧 Playing audio...');
+        } catch (e) {
+          AppSnackbar.showSnackbarError('TTS Error: $e');
+        }
+      },
+      child: Text(label, style: const TextStyle(fontSize: 14)),
     );
   }
 }
