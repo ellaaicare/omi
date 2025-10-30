@@ -1,9 +1,12 @@
 import 'package:flutter_tts/flutter_tts.dart';
 import 'dart:io';
+import 'package:flutter/services.dart';
 
 /// Ella TTS Service - Text-to-Speech with automatic Bluetooth routing
 ///
 /// Features:
+/// - Native iOS implementation for iOS 26+ (better voice support)
+/// - Flutter TTS fallback for older iOS or other platforms
 /// - Automatically routes audio to connected Bluetooth headsets (AirPods, etc.)
 /// - Falls back to phone speaker if no Bluetooth audio device connected
 /// - Supports voice selection and customization
@@ -12,36 +15,62 @@ class EllaTtsService {
   static final EllaTtsService _instance = EllaTtsService._internal();
   factory EllaTtsService() => _instance;
 
+  // Native iOS TTS (for iOS 26+)
+  static const MethodChannel _nativeChannel = MethodChannel('ella.ai/native_tts');
+
+  // Flutter TTS fallback (kept for compatibility)
   final FlutterTts _flutterTts = FlutterTts();
+
   bool _isInitialized = false;
+  bool _useNative = false; // Will be set to true on iOS
+  String? _selectedVoiceId; // Store selected voice ID for native TTS
 
   EllaTtsService._internal();
 
-  /// Initialize TTS engine
+  /// Initialize TTS engine with premium voice quality
   Future<void> initialize() async {
     if (_isInitialized) return;
 
     try {
-      // Configure TTS settings
-      await _flutterTts.setLanguage("en-US");
-      await _flutterTts.setSpeechRate(0.5); // Normal speed (0.0-1.0)
-      await _flutterTts.setVolume(1.0); // Full volume (0.0-1.0)
-      await _flutterTts.setPitch(1.0); // Normal pitch (0.5-2.0)
-
-      // iOS-specific: Audio automatically routes to Bluetooth if available!
       if (Platform.isIOS) {
-        await _flutterTts.setSharedInstance(true);
-        // iOS AVAudioSession will handle routing to:
-        // - AirPods (if connected)
-        // - Bluetooth headset (if connected)
-        // - Phone speaker (fallback)
+        // Try native iOS TTS first (works with iOS 26)
+        try {
+          await _nativeChannel.invokeMethod('initialize');
+          _useNative = true;
+          print('✅ Using Native iOS TTS (iOS 26 compatible)');
+        } catch (e) {
+          print('⚠️ Native TTS unavailable, falling back to Flutter TTS: $e');
+          _useNative = false;
+          await _initializeFlutterTts();
+        }
+      } else {
+        // Android or other platforms use Flutter TTS
+        await _initializeFlutterTts();
       }
 
       _isInitialized = true;
     } catch (e) {
-      print('EllaTtsService initialization error: $e');
-      rethrow;
+      print('⚠️ EllaTtsService initialization error: $e');
+      _isInitialized = true; // Continue even if initialization fails
     }
+  }
+
+  /// Initialize Flutter TTS (fallback method)
+  Future<void> _initializeFlutterTts() async {
+    await _flutterTts.setLanguage("en-US");
+    await _flutterTts.setSharedInstance(true);
+
+    // Try to set enhanced voice (may not work on all devices)
+    try {
+      await _flutterTts.setVoice({"name": "com.apple.voice.enhanced.en-US.Samantha", "locale": "en-US"});
+      print('✅ Flutter TTS using enhanced voice');
+    } catch (e) {
+      print('⚠️ Enhanced voice not available, using default');
+    }
+
+    await _flutterTts.setSpeechRate(0.52);
+    await _flutterTts.setVolume(1.0);
+    await _flutterTts.setPitch(1.0);
   }
 
   /// Speak text - automatically routes to Bluetooth headset if connected
@@ -56,7 +85,19 @@ class EllaTtsService {
     if (text.isEmpty) return;
 
     try {
-      await _flutterTts.speak(text);
+      if (_useNative) {
+        // Use native iOS TTS with selected voice
+        print('🎤 Speaking with voice ID: $_selectedVoiceId');
+        await _nativeChannel.invokeMethod('speak', {
+          'text': text,
+          'voiceId': _selectedVoiceId, // Pass the selected voice ID
+          'rate': 1.0, // Normal speed (was 0.52 - too slow)
+          'pitch': 1.0,
+        });
+      } else {
+        // Use Flutter TTS fallback
+        await _flutterTts.speak(text);
+      }
     } catch (e) {
       print('EllaTtsService speak error: $e');
     }
@@ -65,7 +106,11 @@ class EllaTtsService {
   /// Stop speaking immediately
   Future<void> stop() async {
     try {
-      await _flutterTts.stop();
+      if (_useNative) {
+        await _nativeChannel.invokeMethod('stop');
+      } else {
+        await _flutterTts.stop();
+      }
     } catch (e) {
       print('EllaTtsService stop error: $e');
     }
@@ -74,7 +119,11 @@ class EllaTtsService {
   /// Pause speaking (can be resumed)
   Future<void> pause() async {
     try {
-      await _flutterTts.pause();
+      if (_useNative) {
+        await _nativeChannel.invokeMethod('pause');
+      } else {
+        await _flutterTts.pause();
+      }
     } catch (e) {
       print('EllaTtsService pause error: $e');
     }
@@ -83,28 +132,91 @@ class EllaTtsService {
   /// Check if TTS is currently speaking
   Future<bool> isSpeaking() async {
     try {
-      // Note: This may not be available on all platforms
-      return false; // Placeholder
+      // Not implemented for native yet
+      return false;
     } catch (e) {
       return false;
     }
   }
 
   /// Get available voices
-  Future<List<dynamic>> getVoices() async {
+  Future<List<Map<String, String>>> getVoices() async {
     await initialize();
+
+    print('🔍 getVoices: _useNative = $_useNative');
+
     try {
-      return await _flutterTts.getVoices ?? [];
+      if (_useNative) {
+        // Get voices from native iOS
+        print('📱 Calling native iOS getVoices...');
+        final List<dynamic>? voices = await _nativeChannel.invokeMethod('getVoices');
+        print('📱 Native iOS returned ${voices?.length ?? 0} voices');
+
+        if (voices == null || voices.isEmpty) {
+          print('⚠️ No voices returned from native iOS');
+          return [];
+        }
+
+        final mappedVoices = voices.map((voice) {
+          return {
+            'id': voice['id']?.toString() ?? '',
+            'name': voice['name']?.toString() ?? '',
+            'locale': voice['language']?.toString() ?? '',
+            'quality': voice['quality']?.toString() ?? 'default',
+          };
+        }).toList();
+
+        print('✅ Loaded ${mappedVoices.length} iOS voices');
+        return mappedVoices;
+      } else {
+        // Get voices from Flutter TTS
+        print('📱 Using Flutter TTS fallback...');
+        final dynamic voicesRaw = await _flutterTts.getVoices;
+        print('📱 Flutter TTS returned: $voicesRaw');
+
+        if (voicesRaw == null) {
+          print('⚠️ No voices available from Flutter TTS');
+          return [];
+        }
+
+        final List<dynamic> voices = voicesRaw as List<dynamic>;
+        print('📱 Cast to ${voices.length} voices');
+
+        if (voices.isEmpty) {
+          print('⚠️ No voices in list from Flutter TTS');
+          return [];
+        }
+
+        final mappedVoices = voices.map((voice) {
+          final voiceMap = voice as Map<Object?, Object?>;
+          return {
+            'id': voiceMap['name']?.toString() ?? '',
+            'name': voiceMap['name']?.toString() ?? '',
+            'locale': voiceMap['locale']?.toString() ?? '',
+            'quality': 'default',
+          };
+        }).toList();
+
+        print('✅ Loaded ${mappedVoices.length} Flutter TTS voices');
+        return mappedVoices;
+      }
     } catch (e) {
-      print('EllaTtsService getVoices error: $e');
+      print('❌ EllaTtsService getVoices error: $e');
       return [];
     }
   }
 
-  /// Set voice by name (e.g., "com.apple.ttsbundle.Samantha-compact")
-  Future<void> setVoice(Map<String, String> voice) async {
+  /// Set voice by ID (native) or name (flutter_tts)
+  Future<void> setVoice(String voiceId, String locale) async {
     try {
-      await _flutterTts.setVoice(voice);
+      if (_useNative) {
+        // Store the selected voice ID for native iOS TTS
+        _selectedVoiceId = voiceId;
+        print('✅ Voice selected: $voiceId (will be used in next speak() call)');
+      } else {
+        await _flutterTts.setVoice({"name": voiceId, "locale": locale});
+        print('✅ Voice changed to: $voiceId');
+      }
     } catch (e) {
       print('EllaTtsService setVoice error: $e');
     }
@@ -113,7 +225,9 @@ class EllaTtsService {
   /// Set speech rate (0.0 = very slow, 1.0 = very fast)
   Future<void> setSpeechRate(double rate) async {
     try {
-      await _flutterTts.setSpeechRate(rate.clamp(0.0, 1.0));
+      if (!_useNative) {
+        await _flutterTts.setSpeechRate(rate.clamp(0.0, 1.0));
+      }
     } catch (e) {
       print('EllaTtsService setSpeechRate error: $e');
     }
@@ -122,7 +236,9 @@ class EllaTtsService {
   /// Set pitch (0.5 = low, 1.0 = normal, 2.0 = high)
   Future<void> setPitch(double pitch) async {
     try {
-      await _flutterTts.setPitch(pitch.clamp(0.5, 2.0));
+      if (!_useNative) {
+        await _flutterTts.setPitch(pitch.clamp(0.5, 2.0));
+      }
     } catch (e) {
       print('EllaTtsService setPitch error: $e');
     }
@@ -131,7 +247,9 @@ class EllaTtsService {
   /// Set volume (0.0 = silent, 1.0 = full)
   Future<void> setVolume(double volume) async {
     try {
-      await _flutterTts.setVolume(volume.clamp(0.0, 1.0));
+      if (!_useNative) {
+        await _flutterTts.setVolume(volume.clamp(0.0, 1.0));
+      }
     } catch (e) {
       print('EllaTtsService setVolume error: $e');
     }

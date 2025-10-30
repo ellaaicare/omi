@@ -29,8 +29,10 @@ extension FlutterError: Error {}
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
-      
-      
+
+      // Register Native TTS Plugin for iOS 26 compatibility
+      NativeTtsPlugin.register(with: registrar(forPlugin: "NativeTtsPlugin")!)
+
       if WCSession.isSupported() {
           session = WCSession.default
           session?.delegate = self
@@ -375,5 +377,155 @@ extension AppDelegate: WCSessionDelegate {
                 print("Unknown background method: \(method)")
             }
         }
+    }
+}
+
+// MARK: - Native TTS Plugin for iOS 26 Compatibility
+
+/// Native iOS TTS plugin using AVSpeechSynthesizer
+/// This provides full access to all iOS voices and works reliably on iOS 26+
+public class NativeTtsPlugin: NSObject, FlutterPlugin, AVSpeechSynthesizerDelegate {
+    private var synthesizer: AVSpeechSynthesizer?
+    private var channel: FlutterMethodChannel?
+
+    public static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(
+            name: "ella.ai/native_tts",
+            binaryMessenger: registrar.messenger()
+        )
+        let instance = NativeTtsPlugin()
+        instance.channel = channel
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "initialize":
+            initialize(result: result)
+
+        case "getVoices":
+            getVoices(result: result)
+
+        case "speak":
+            guard let args = call.arguments as? [String: Any],
+                  let text = args["text"] as? String else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing text", details: nil))
+                return
+            }
+            let voiceId = args["voiceId"] as? String
+            let rate = args["rate"] as? Float ?? 0.5
+            let pitch = args["pitch"] as? Float ?? 1.0
+            speak(text: text, voiceId: voiceId, rate: rate, pitch: pitch, result: result)
+
+        case "stop":
+            stop(result: result)
+
+        case "pause":
+            pause(result: result)
+
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func initialize(result: @escaping FlutterResult) {
+        synthesizer = AVSpeechSynthesizer()
+        synthesizer?.delegate = self
+
+        // Try to configure audio session for Bluetooth routing, but don't fail if it doesn't work
+        // (The watch app may already have the audio session configured)
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            NSLog("✅ Native TTS audio session configured successfully")
+        } catch {
+            NSLog("⚠️ Native TTS couldn't configure audio session (OSStatus \(error)), but continuing anyway")
+            // Don't fail initialization - TTS will still work, just might not auto-route to Bluetooth
+        }
+
+        result(true)
+    }
+
+    private func getVoices(result: @escaping FlutterResult) {
+        let voices = AVSpeechSynthesisVoice.speechVoices()
+
+        // Convert voices to Flutter-compatible format
+        let voiceList = voices.compactMap { voice -> [String: String]? in
+            // Only include English voices
+            guard voice.language.hasPrefix("en") else { return nil }
+
+            return [
+                "id": voice.identifier,
+                "name": voice.name,
+                "language": voice.language,
+                "quality": qualityString(for: voice.quality)
+            ]
+        }
+
+        result(voiceList)
+    }
+
+    private func speak(text: String, voiceId: String?, rate: Float, pitch: Float, result: @escaping FlutterResult) {
+        guard let synthesizer = synthesizer else {
+            result(FlutterError(code: "NOT_INITIALIZED", message: "TTS not initialized", details: nil))
+            return
+        }
+
+        let utterance = AVSpeechUtterance(string: text)
+
+        // Set voice
+        if let voiceId = voiceId, let voice = AVSpeechSynthesisVoice(identifier: voiceId) {
+            utterance.voice = voice
+        } else {
+            // Default to enhanced quality voice if available
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        }
+
+        // Set speech parameters
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * rate
+        utterance.pitchMultiplier = pitch
+        utterance.volume = 1.0
+
+        // Speak
+        synthesizer.speak(utterance)
+        result(true)
+    }
+
+    private func stop(result: @escaping FlutterResult) {
+        synthesizer?.stopSpeaking(at: .immediate)
+        result(true)
+    }
+
+    private func pause(result: @escaping FlutterResult) {
+        synthesizer?.pauseSpeaking(at: .word)
+        result(true)
+    }
+
+    private func qualityString(for quality: AVSpeechSynthesisVoiceQuality) -> String {
+        switch quality {
+        case .default:
+            return "default"
+        case .enhanced:
+            return "enhanced"
+        case .premium:
+            return "premium"
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    // MARK: - AVSpeechSynthesizerDelegate
+
+    public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        channel?.invokeMethod("onStart", arguments: nil)
+    }
+
+    public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        channel?.invokeMethod("onComplete", arguments: nil)
+    }
+
+    public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        channel?.invokeMethod("onCancel", arguments: nil)
     }
 }

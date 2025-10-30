@@ -31,13 +31,38 @@ class DeveloperSettingsPage extends StatefulWidget {
 }
 
 class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
+  List<Map<String, String>> _availableVoices = [];
+  String? _selectedVoiceId; // Store unique voice ID instead of name
+  String? _selectedVoiceLocale;
+  bool _loadingVoices = true;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await Provider.of<DeveloperModeProvider>(context, listen: false).initialize();
       context.read<McpProvider>().fetchKeys();
+      _loadAvailableVoices();
     });
     super.initState();
+  }
+
+  Future<void> _loadAvailableVoices() async {
+    try {
+      final tts = EllaTtsService();
+      final voices = await tts.getVoices();
+      setState(() {
+        _availableVoices = voices.where((v) => v['locale']?.contains('en-') == true).toList();
+        _loadingVoices = false;
+        if (_availableVoices.isNotEmpty) {
+          _selectedVoiceId = _availableVoices[0]['id']; // Use unique ID
+          _selectedVoiceLocale = _availableVoices[0]['locale'];
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _loadingVoices = false;
+      });
+    }
   }
 
   @override
@@ -389,6 +414,65 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 16),
+
+                  // Voice Selector
+                  const Text(
+                    'Select Voice:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_loadingVoices)
+                    const Center(child: CircularProgressIndicator())
+                  else if (_availableVoices.isEmpty)
+                    Text(
+                      'No voices available. Check iOS Settings → Accessibility → Spoken Content → Voices',
+                      style: TextStyle(color: Colors.orange.shade300, fontSize: 13),
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade800,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: DropdownButton<String>(
+                        value: _selectedVoiceId,
+                        isExpanded: true,
+                        dropdownColor: Colors.grey.shade800,
+                        underline: const SizedBox(),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        items: _availableVoices.map((voice) {
+                          final quality = voice['quality'] ?? 'default';
+                          final displayName = quality != 'default'
+                              ? '${voice['name']} ($quality)'
+                              : voice['name'];
+                          return DropdownMenuItem<String>(
+                            value: voice['id'], // Use unique ID as value
+                            child: Text(
+                              '$displayName - ${voice['locale']}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                        onChanged: (newVoiceId) async {
+                          if (newVoiceId != null) {
+                            final selectedVoice = _availableVoices.firstWhere((v) => v['id'] == newVoiceId);
+                            setState(() {
+                              _selectedVoiceId = newVoiceId;
+                              _selectedVoiceLocale = selectedVoice['locale'];
+                            });
+                            final tts = EllaTtsService();
+                            await tts.setVoice(newVoiceId, selectedVoice['locale'] ?? 'en-US');
+                            final quality = selectedVoice['quality'] ?? 'default';
+                            final displayName = quality != 'default'
+                                ? '${selectedVoice['name']} ($quality)'
+                                : selectedVoice['name'];
+                            AppSnackbar.showSnackbar('Voice changed to: $displayName');
+                          }
+                        },
+                      ),
+                    ),
                   const SizedBox(height: 16),
 
                   // Quick test buttons
