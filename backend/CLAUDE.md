@@ -1,8 +1,205 @@
 # OMI Backend - Developer Guide
 
-**Last Updated**: October 28, 2025
+**Last Updated**: October 30, 2025
 **Branch**: `feature/backend-infrastructure`
-**Status**: ✅ Fully operational and tested
+**Status**: ✅ Production deployment on VPS + Local development environment
+
+---
+
+## 🌐 Production Deployment (VPS)
+
+### Server Information
+- **URL**: https://api.ella-ai-care.com
+- **Server**: Vultr VPS (100.101.168.91)
+- **OS**: Ubuntu 22.04
+- **Service**: systemd (`omi-backend.service`)
+- **Auto-start**: Enabled on boot
+- **Monitoring**: journalctl logs
+
+### Quick Access
+```bash
+# SSH into VPS
+ssh root@100.101.168.91
+
+# Check service status
+systemctl status omi-backend
+
+# View live logs
+journalctl -u omi-backend -f
+
+# Restart service
+systemctl restart omi-backend
+
+# View recent errors
+journalctl -u omi-backend -n 100 --no-pager | grep ERROR
+```
+
+### Production Environment
+- **Working Directory**: `/root/omi/backend`
+- **Virtual Environment**: `/root/omi/backend/venv`
+- **Google Credentials**: `/root/omi/backend/google-credentials.json`
+- **Environment File**: `/root/omi/backend/.env`
+
+### VPS Configuration Files
+
+**Systemd Service** (`/etc/systemd/system/omi-backend.service`):
+```ini
+[Unit]
+Description=OMI Backend API Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/omi/backend
+Environment="PATH=/root/omi/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/root/omi/backend/google-credentials.json"
+ExecStart=/root/omi/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Environment Variables** (`.env`):
+```bash
+# Redis Configuration (n8n Docker container)
+REDIS_DB_HOST=172.21.0.4
+REDIS_DB_PORT=6379
+REDIS_DB_PASSWORD=
+
+# GCS Bucket Configuration
+BUCKET_PRIVATE_CLOUD_SYNC=omi-dev-ca005.firebasestorage.app
+
+# Firebase Configuration
+FIREBASE_PROJECT_ID=omi-dev-ca005
+GOOGLE_APPLICATION_CREDENTIALS=./google-credentials.json
+
+# API Keys (same as local development)
+DEEPGRAM_API_KEY=...
+OPENAI_API_KEY=...
+# ... other keys ...
+```
+
+### Firestore Configuration
+
+**Composite Indexes Created**:
+1. **Conversations Index** (October 30, 2025):
+   - Collection: `conversations`
+   - Fields: `discarded`, `status`, `created_at`
+   - Status: ✅ Active
+
+2. **Memories Index** (October 30, 2025):
+   - Collection: `memories`
+   - Fields: `scoring`, `created_at`
+   - Status: ✅ Active (user added)
+
+### GCS Bucket Permissions
+
+**Service Account**: `firebase-adminsdk-fbsvc@omi-dev-ca005.iam.gserviceaccount.com`
+**Bucket**: `gs://omi-dev-ca005.firebasestorage.app`
+**Role**: Storage Object Admin
+
+```bash
+# Grant permissions (already done)
+gsutil iam ch serviceAccount:firebase-adminsdk-fbsvc@omi-dev-ca005.iam.gserviceaccount.com:roles/storage.objectAdmin \
+  gs://omi-dev-ca005.firebasestorage.app
+```
+
+### Redis Integration
+
+**Docker Container**: `n8n-redis`
+- **Network**: Docker bridge (172.21.0.0/16)
+- **IP Address**: 172.21.0.4
+- **Port**: 6379
+- **Password**: None (internal network only)
+- **Purpose**: Conversation state tracking only (NOT chunk buffering)
+
+### Testing Production Deployment
+
+```bash
+# Health check
+curl https://api.ella-ai-care.com/health
+
+# Test language endpoint (iOS app requirement)
+curl -X PATCH https://api.ella-ai-care.com/v1/users/language \
+  -H "Content-Type: application/json" \
+  -d '{"language": "en"}'
+
+# Check WebSocket endpoint (requires device)
+# iOS app connects to: wss://api.ella-ai-care.com/v4/listen
+```
+
+### Real-Time Data Flow
+
+**Current Architecture** (October 30, 2025):
+```
+iOS Device → wss://api.ella-ai-care.com/v4/listen → Deepgram API → Transcription
+                                                       ↓
+                                    [600ms chunk processing in-memory buffer]
+                                                       ↓
+                                                  Firestore DB
+                                                   (on session end)
+```
+
+**Buffering System**:
+- **Type**: In-memory Python lists (NOT Redis)
+- **Chunk Interval**: 600ms (see `routers/transcribe.py` line 858-869)
+- **Buffer**: `realtime_segment_buffers` list
+- **Webhook**: Optional 1-second batching to external webhook
+- **Firestore**: Final storage after 2-minute timeout or manual stop
+
+**See**: `docs/LETTA_INTEGRATION_ARCHITECTURE.md` for 2-way conversation design
+
+### Deployment History
+
+**October 30, 2025 - Session 2**:
+- ✅ Fixed missing Firestore composite indexes (conversations, memories)
+- ✅ Configured GCS bucket permissions for audio storage
+- ✅ Added Redis configuration for n8n integration
+- ✅ Enabled Deepgram logging for debugging
+- ✅ Verified real-time chunk processing working
+- ✅ Documented Letta integration architecture (3 options)
+- ✅ iOS app successfully connecting and transcribing
+
+**October 28, 2025 - Initial Deployment**:
+- ✅ VPS provisioned and configured
+- ✅ Backend deployed with systemd service
+- ✅ SSL certificate configured (Let's Encrypt)
+- ✅ Firebase credentials deployed
+- ✅ Environment variables configured
+
+### Known Issues & Solutions
+
+1. **Memories Disappearing from App**:
+   - **Cause**: Missing Firestore composite index for memories collection
+   - **Solution**: Index created on October 30, 2025
+   - **Status**: ✅ Resolved (pending verification)
+
+2. **GCS Bucket Permission Errors**:
+   - **Cause**: Service account missing Storage Object Admin role
+   - **Solution**: Granted via gsutil iam command
+   - **Status**: ✅ Resolved
+
+3. **Redis Connection Errors**:
+   - **Cause**: Missing Redis configuration in .env
+   - **Solution**: Added Redis config for n8n-redis container
+   - **Status**: ✅ Resolved
+
+4. **Deepgram Logging Silent**:
+   - **Cause**: Print statements commented out in streaming.py
+   - **Solution**: Uncommented lines 268, 270, 273
+   - **Status**: ✅ Resolved
+
+### Future Enhancements
+
+See `docs/LETTA_INTEGRATION_ARCHITECTURE.md` for:
+- 2-way conversation capabilities
+- Real-time response system (under 2-second latency)
+- Postgres agent lookup integration
+- Fast LLM alert scanning
+- Redis chunk aggregation with backpressure handling
 
 ---
 
