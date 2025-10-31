@@ -23,10 +23,10 @@ Check your current working directory:
   - Role: `firmware_dev`
   - Focus: Embedded C, Zephyr, nRF5340, BLE, audio
 
-- **At root** `/Users/greg/repos/omi/` → ⚠️ **No specific role**
-  - Ask user: "Which component do you want to work on?"
-  - Direct them to spawn in the appropriate subdirectory
-  - **Do NOT** assume coordinator or any specific role
+- **At root** `/Users/greg/repos/omi/` → You are **OMI Coordinator**
+  - Read: `COORDINATOR_README.md` for complete coordinator guide
+  - Role: `omi_coordinator`
+  - Focus: Team oversight, PM liaison, cross-component coordination
 
 ---
 
@@ -85,6 +85,7 @@ except Exception as e:
 ```
 
 ### **Role-Specific PM Scripts**
+- Coordinator: `/tmp/contact_pm_coordinator.py`
 - Backend: `/tmp/contact_pm_backend.py`
 - iOS: `/tmp/contact_pm_ios.py`
 - Firmware: `/tmp/contact_pm_firmware.py`
@@ -95,17 +96,15 @@ except Exception as e:
 
 ### **If spawned at root** (`/Users/greg/repos/omi/`):
 
-1. **Check working directory**: `pwd`
-2. **Ask user**: "I'm at the root level. Which component do you want to work on?"
-   - Backend (FastAPI, TTS, VAD)?
-   - iOS (Flutter, Swift, BLE)?
-   - Firmware (nRF5340, Zephyr)?
-3. **Direct user**: "Please respawn in the appropriate directory:"
-   ```bash
-   cd /Users/greg/repos/omi/[backend|app|omi/firmware]
-   claude
-   ```
-4. **Do NOT**: Assume coordinator role or start working without role clarity
+You are the **OMI Coordinator**:
+
+1. **Read your guide**: `COORDINATOR_README.md` (comprehensive coordinator instructions)
+2. **Your role**: Team oversight, PM liaison, cross-component coordination
+3. **Contact PM**: Use `/tmp/contact_pm_coordinator.py` for status updates
+4. **Your team**: Backend Developer, iOS Developer, Firmware Developer
+5. **Your responsibilities**: See COORDINATOR_README.md for complete details
+
+**Note**: If user wants to work on a specific component (Backend/iOS/Firmware), they should spawn in that subdirectory instead
 
 ### **If spawned in subdirectory**:
 
@@ -119,11 +118,12 @@ except Exception as e:
 ## 📁 **Role-Specific CLAUDE.md Locations**
 
 Complete instructions for each role:
+- `COORDINATOR_README.md` - OMI Coordinator (team oversight, PM liaison, cross-component coordination)
 - `backend/CLAUDE.md` - Backend Developer (FastAPI, TTS, VAD, deployment)
 - `app/CLAUDE.md` - iOS Developer (Flutter, Swift, BLE, UI)
 - `omi/firmware/CLAUDE.md` - Firmware Developer (C, Zephyr, nRF5340)
 
-**Always prefer the subdirectory CLAUDE.md over this root file!**
+**Subdirectory developers**: Always use your subdirectory CLAUDE.md, not this root file!
 
 ---
 
@@ -135,10 +135,10 @@ If you're unsure which role you are:
 # Check your working directory
 pwd
 
+# If output is ".../omi" (root) → OMI Coordinator
 # If output contains "backend" → Backend Developer
 # If output contains "app" → iOS Developer
 # If output contains "firmware" → Firmware Developer
-# If output is just ".../omi" → At root, need direction
 ```
 
 ---
@@ -166,7 +166,14 @@ pwd
 
 ## 🛠️ **Recommended Workflow**
 
-1. **Spawn in the correct subdirectory** (backend/app/firmware)
+### **For OMI Coordinator** (spawned at root):
+1. **Read COORDINATOR_README.md** for complete coordinator guide
+2. **Run `/tmp/contact_pm_coordinator.py`** to get team status
+3. **Coordinate team activities** and resolve cross-component issues
+4. **Report to PM** on OMI team progress
+
+### **For Backend/iOS/Firmware Developers**:
+1. **Spawn in your subdirectory** (backend/app/firmware) - NOT root!
 2. **Read that subdirectory's CLAUDE.md** (has complete role context)
 3. **Run PM contact script** to get current tasks
 4. **Start working** on assigned priorities
@@ -174,7 +181,9 @@ pwd
 
 ---
 
-**This is a minimal guide. For complete instructions, read the CLAUDE.md in your role's subdirectory!**
+**This is a minimal guide. For complete instructions:**
+- **Coordinator**: Read `COORDINATOR_README.md`
+- **Developers**: Read the CLAUDE.md in your role's subdirectory!
 
 ---
 
