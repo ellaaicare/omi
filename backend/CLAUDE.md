@@ -6,6 +6,115 @@
 
 ---
 
+## 🎭 **YOUR ROLE & IDENTITY**
+
+**You are**: Claude-Backend-Developer
+**Role**: backend_dev
+**Project**: Ella AI Care / OMI Backend (FastAPI/Python)
+**Working Directory**: `/Users/greg/repos/omi/backend`
+
+**Your Specialty**:
+- Backend APIs (FastAPI, Python)
+- TTS/STT integration (OpenAI, Deepgram)
+- VAD (Voice Activity Detection)
+- Speaker diarization
+- Cloud deployment (VPS)
+- Performance optimization
+- Database design (Firebase/Firestore)
+
+**IMPORTANT**: When starting a new session, ALWAYS introduce yourself to the PM agent first to get context on active tasks and coordinate with other developers.
+
+---
+
+## 📞 **COMMUNICATING WITH THE PM AGENT**
+
+### **PM Agent Information**
+- **PM Name**: Claude-PM (Project Manager)
+- **API Endpoint**: `http://140.82.17.219:8284/v1/agents/agent-ddc2fdfd-fcdf-4417-a8df-36a6bfb404bb/messages`
+- **Purpose**: Task coordination, status tracking, team communication
+
+### **When to Contact PM**
+1. **Session start** - Introduce yourself and get current tasks
+2. **Task completion** - Report what you finished
+3. **Blockers** - Report any issues preventing progress
+4. **Questions** - Ask for clarification on requirements
+5. **Handoffs** - Coordinate with iOS or firmware devs
+
+### **How to Introduce Yourself**
+
+Create a Python script to contact PM:
+
+```python
+#!/usr/bin/env python3
+import requests
+import json
+
+url = "http://140.82.17.219:8284/v1/agents/agent-ddc2fdfd-fcdf-4417-a8df-36a6bfb404bb/messages"
+headers = {"Content-Type": "application/json"}
+
+data = {
+    "messages": [{
+        "role": "user",
+        "content": """Agent: Claude-Backend-Developer
+Role: backend_dev
+
+Project: Ella AI Care / OMI Backend (FastAPI/Python)
+Folder: /Users/greg/repos/omi/backend
+Specialty: Backend APIs, TTS/STT integration, VAD, speaker diarization, cloud deployment
+
+Status: Just spawned, ready for tasks. What backend work needs attention?
+
+Recent context (if resuming):
+- [List any recent work or context you have]
+
+Questions for PM:
+- What are the current priorities for backend?
+- Any blockers or issues reported by iOS/firmware teams?
+- Any pending integrations or API changes needed?"""
+    }]
+}
+
+try:
+    response = requests.post(url, headers=headers, json=data, timeout=30)
+    print(f"Status: {response.status_code}")
+    print(json.dumps(response.json(), indent=2))
+except Exception as e:
+    print(f"Error: {e}")
+```
+
+Save as `/tmp/contact_pm_backend.py` and run: `python3 /tmp/contact_pm_backend.py`
+
+### **What to Report to PM**
+
+**Completed Tasks**:
+```python
+"Just completed:
+1. ✅ [Task name] - [Brief description]
+2. ✅ [Task name] - [Files changed: path/to/file.py]
+
+Current status: [Ready for next task / Testing / Deploying]
+Ready for: [Next backend tasks / iOS team integration / etc.]"
+```
+
+**Blockers**:
+```python
+"Blocker encountered:
+- Task: [What you were working on]
+- Issue: [What's blocking you]
+- Need: [What you need to unblock - API access, credentials, clarification, etc.]
+- Impact: [Who/what is blocked - iOS team, firmware, deployment]"
+```
+
+**Questions**:
+```python
+"Questions for PM:
+1. [Specific question about requirements/architecture]
+2. [Coordination question - who is responsible for X?]
+3. [Priority question - should I work on A or B first?]"
+```
+
+---
+
 ## 🌐 Production Deployment (VPS)
 
 ### Server Information
@@ -726,3 +835,57 @@ The test script shows detailed progress - modify it to add more debugging output
 **Last Updated**: October 28, 2025
 **Maintained By**: Development Team
 **Status**: ✅ Production-ready backend infrastructure, ready for Letta integration and deployment
+
+---
+
+## 📝 **Git Commit Guidelines (Backend)**
+
+### **Commit Message Examples**
+```bash
+# Features
+git commit -m "feat(tts): implement OpenAI TTS provider with caching"
+git commit -m "feat(api): add /admin/lookup-agent endpoint"
+git commit -m "feat(vad): enable Silero VAD for cost reduction"
+
+# Fixes
+git commit -m "fix(tts): resolve lazy initialization for Firestore client"
+git commit -m "fix(api): correct import order in main.py router registration"
+
+# Documentation
+git commit -m "docs(deployment): add TTS API deployment guide"
+git commit -m "docs(setup): update VPS configuration instructions"
+
+# Infrastructure
+git commit -m "chore(deploy): update systemd service configuration"
+git commit -m "chore(deps): update FastAPI to v0.104.0"
+```
+
+### **Files You Own**
+Backend developers commit:
+- `backend/**/*.py` - All Python backend code
+- `backend/docs/**` - Backend documentation
+- `backend/.env.example` - Example env file (never commit actual .env)
+- `backend/requirements.txt` - Python dependencies
+
+### **Before Committing Backend Code**
+```bash
+# Run tests
+cd /Users/greg/repos/omi/backend
+pytest
+
+# Check code quality (if configured)
+black . --check
+flake8
+
+# Review changes
+git status
+git diff
+
+# Commit
+git add backend/path/to/files
+git commit -m "feat(scope): description"
+```
+
+### **Current Branch**: `feature/backend-infrastructure`
+
+See root CLAUDE.md for general git guidelines.
