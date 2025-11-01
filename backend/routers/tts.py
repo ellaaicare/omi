@@ -129,7 +129,7 @@ async def generate_tts(
     try:
         # Check rate limit
         manager = get_tts_manager()
-        allowed, remaining, reset_time, retry_after = check_tts_rate_limit(uid, manager.redis_client)
+        allowed, remaining, reset_time, retry_after = check_tts_rate_limit(uid, manager.redis)
 
         # Prepare rate limit headers
         headers = {
