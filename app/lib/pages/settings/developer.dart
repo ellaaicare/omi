@@ -36,6 +36,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   String? _selectedVoiceLocale;
   bool _loadingVoices = true;
 
+  // Cloud TTS state
+  final TextEditingController _cloudTtsTextController = TextEditingController(
+    text: 'Hello, this is a test of the cloud text to speech system.',
+  );
+  String _selectedCloudVoice = 'nova';
+  bool _forceGenerate = false;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -44,6 +51,12 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
       _loadAvailableVoices();
     });
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    _cloudTtsTextController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadAvailableVoices() async {
@@ -505,6 +518,161 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   const SizedBox(height: 8),
                   Text(
                     'Tap any button above to hear audio through your connected Bluetooth device or phone speaker.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Cloud TTS Testing Section
+                  const Text(
+                    '☁️ Cloud TTS Testing (OpenAI)',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test high-quality cloud TTS powered by OpenAI. Better quality than native iOS TTS.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Info card about cloud TTS
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.green.withOpacity(0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.cloud, color: Colors.green, size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Cloud TTS uses OpenAI HD voices with smart caching (25x faster on repeat)',
+                            style: TextStyle(color: Colors.grey.shade300, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Custom text input
+                  const Text(
+                    'Custom Test Sentence:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _cloudTtsTextController,
+                    maxLines: 3,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: 'Enter text to convert to speech...',
+                      hintStyle: TextStyle(color: Colors.grey.shade500),
+                      filled: true,
+                      fillColor: Colors.grey.shade800,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.all(12),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Cloud voice selector
+                  const Text(
+                    'Select Cloud Voice:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: DropdownButton<String>(
+                      value: _selectedCloudVoice,
+                      isExpanded: true,
+                      dropdownColor: Colors.grey.shade800,
+                      underline: const SizedBox(),
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      items: const [
+                        DropdownMenuItem(value: 'nova', child: Text('Nova (recommended - warm, caring)')),
+                        DropdownMenuItem(value: 'shimmer', child: Text('Shimmer (soft, friendly)')),
+                        DropdownMenuItem(value: 'alloy', child: Text('Alloy (neutral, balanced)')),
+                        DropdownMenuItem(value: 'echo', child: Text('Echo (male, authoritative)')),
+                        DropdownMenuItem(value: 'fable', child: Text('Fable (British, warm)')),
+                        DropdownMenuItem(value: 'onyx', child: Text('Onyx (deep, confident)')),
+                      ],
+                      onChanged: (newVoice) {
+                        if (newVoice != null) {
+                          setState(() => _selectedCloudVoice = newVoice);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Force generate checkbox
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Force Generate (bypass cache)',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      'Generate new audio instead of using cached version. Useful for testing.',
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                    ),
+                    value: _forceGenerate,
+                    onChanged: (value) {
+                      setState(() => _forceGenerate = value ?? false);
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Test button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.cloud, size: 20),
+                    label: const Text('🎧 Test Cloud TTS'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.green.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      final text = _cloudTtsTextController.text.trim();
+                      if (text.isEmpty) {
+                        AppSnackbar.showSnackbarError('Please enter some text to test');
+                        return;
+                      }
+
+                      try {
+                        AppSnackbar.showSnackbar(
+                          '☁️ Generating cloud TTS with $_selectedCloudVoice voice...',
+                        );
+
+                        final tts = EllaTtsService();
+                        await tts.speakFromBackend(
+                          text,
+                          voice: _selectedCloudVoice,
+                          forceGenerate: _forceGenerate,
+                        );
+
+                        AppSnackbar.showSnackbar('✅ Cloud TTS playback started!');
+                      } catch (e) {
+                        AppSnackbar.showSnackbarError('Cloud TTS Error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _forceGenerate
+                        ? 'Cache disabled: Will generate new audio (~3-5s)'
+                        : 'Cache enabled: Second play will be instant (<500ms)',
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),

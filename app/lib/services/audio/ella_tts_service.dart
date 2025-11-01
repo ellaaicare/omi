@@ -1,6 +1,10 @@
 import 'package:flutter_tts/flutter_tts.dart';
 import 'dart:io';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:just_audio/just_audio.dart';
+import 'package:omi/backend/preferences.dart';
 
 /// Ella TTS Service - Text-to-Speech with automatic Bluetooth routing
 ///
@@ -20,6 +24,9 @@ class EllaTtsService {
 
   // Flutter TTS fallback (kept for compatibility)
   final FlutterTts _flutterTts = FlutterTts();
+
+  // Cloud TTS audio player
+  final AudioPlayer _cloudAudioPlayer = AudioPlayer();
 
   bool _isInitialized = false;
   bool _useNative = false; // Will be set to true on iOS
@@ -252,6 +259,88 @@ class EllaTtsService {
       }
     } catch (e) {
       print('EllaTtsService setVolume error: $e');
+    }
+  }
+
+  /// Speak text using backend cloud TTS (OpenAI, high quality)
+  ///
+  /// This calls the backend API to generate high-quality TTS audio.
+  /// - Uses OpenAI TTS with HD quality
+  /// - Caching enabled for faster subsequent requests
+  /// - Automatically routes to Bluetooth headset (iOS handles routing)
+  /// - Falls back to native TTS if API fails
+  ///
+  /// Parameters:
+  /// - text: Text to speak
+  /// - voice: Voice to use (nova, shimmer, alloy, echo, fable, onyx)
+  /// - forceGenerate: If true, bypasses cache (for testing new audio)
+  Future<void> speakFromBackend(
+    String text, {
+    String voice = 'nova',
+    bool forceGenerate = false,
+  }) async {
+    if (text.isEmpty) return;
+
+    try {
+      print('🌩️ Cloud TTS: Generating audio with voice: $voice');
+
+      // Get API base URL from preferences or use default
+      final baseUrl = SharedPreferencesUtil().customApiBaseUrl.isNotEmpty
+          ? SharedPreferencesUtil().customApiBaseUrl
+          : 'https://api.ella-ai-care.com';
+
+      // Call backend TTS API
+      final response = await http.post(
+        Uri.parse('$baseUrl/v1/tts/generate'),
+        headers: {
+          'Authorization': 'Bearer test-admin-key-local-dev-only',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'text': text,
+          'voice': voice,
+          'model': 'hd',
+          'cache_key': forceGenerate ? null : text.hashCode.toString(),
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final audioUrl = data['audio_url'] as String;
+        final cached = data['cached'] as bool;
+        final durationMs = data['duration_ms'] as int;
+
+        print('✅ Cloud TTS: Got audio URL (cached: $cached, duration: ${durationMs}ms)');
+        print('🔊 Playing audio from: $audioUrl');
+
+        // Play audio using just_audio
+        await _cloudAudioPlayer.setUrl(audioUrl);
+        await _cloudAudioPlayer.play();
+
+        print('✅ Cloud TTS: Audio playback started');
+      } else {
+        print('❌ Cloud TTS API error: ${response.statusCode}');
+        print('Response: ${response.body}');
+
+        // Fallback to native TTS
+        print('⚠️ Falling back to native TTS');
+        await speak(text);
+      }
+    } catch (e) {
+      print('❌ Cloud TTS error: $e');
+
+      // Fallback to native TTS
+      print('⚠️ Falling back to native TTS');
+      await speak(text);
+    }
+  }
+
+  /// Stop cloud audio playback
+  Future<void> stopCloudAudio() async {
+    try {
+      await _cloudAudioPlayer.stop();
+    } catch (e) {
+      print('EllaTtsService stopCloudAudio error: $e');
     }
   }
 
