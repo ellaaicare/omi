@@ -5,9 +5,11 @@ Text-to-Speech generation with caching and provider abstraction.
 """
 
 import os
-from fastapi import APIRouter, HTTPException, Depends
+from datetime import datetime
+from typing import Optional, Tuple
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 import redis
 from google.cloud import firestore
 
@@ -19,6 +21,10 @@ router = APIRouter()
 
 # Global TTS Manager instance (lazy-loaded)
 _tts_manager = None
+
+# Rate limit settings for TTS API
+RATE_LIMIT_PERIOD = 3600  # 1 hour in seconds
+MAX_TTS_REQUESTS_PER_HOUR = 100  # Maximum TTS generations per hour per user
 
 
 def get_tts_manager() -> TTSManager:
@@ -42,6 +48,38 @@ def get_tts_manager() -> TTSManager:
         )
 
     return _tts_manager
+
+
+def check_tts_rate_limit(uid: str, redis_client: redis.Redis) -> Tuple[bool, int, int, int]:
+    """
+    Check if the user has exceeded TTS rate limit
+    Returns: (allowed, remaining, reset_time, retry_after)
+    """
+    now = datetime.utcnow()
+    hour_key = f"tts_rate_limit:{uid}:{now.strftime('%Y-%m-%d-%H')}"
+
+    # Check hourly limit
+    hour_count = redis_client.get(hour_key)
+    if hour_count is None:
+        redis_client.setex(hour_key, RATE_LIMIT_PERIOD, 1)
+        hour_count = 1
+    else:
+        hour_count = int(hour_count)
+
+    # Calculate reset time
+    hour_reset = RATE_LIMIT_PERIOD - (int(now.timestamp()) % RATE_LIMIT_PERIOD)
+    reset_time = hour_reset
+
+    # Check if hourly limit is exceeded
+    if hour_count >= MAX_TTS_REQUESTS_PER_HOUR:
+        retry_after = hour_reset
+        return False, 0, reset_time, retry_after
+
+    # Increment counter
+    redis_client.incr(hour_key)
+    remaining = MAX_TTS_REQUESTS_PER_HOUR - hour_count
+
+    return True, remaining, reset_time, 0
 
 
 class GenerateTTSRequest(BaseModel):
@@ -89,6 +127,25 @@ async def generate_tts(
     """
 
     try:
+        # Check rate limit
+        manager = get_tts_manager()
+        allowed, remaining, reset_time, retry_after = check_tts_rate_limit(uid, manager.redis_client)
+
+        # Prepare rate limit headers
+        headers = {
+            'X-RateLimit-Limit': str(MAX_TTS_REQUESTS_PER_HOUR),
+            'X-RateLimit-Remaining': str(remaining),
+            'X-RateLimit-Reset': str(reset_time),
+        }
+
+        if not allowed:
+            # Rate limit exceeded
+            raise HTTPException(
+                status_code=429,
+                detail=f'Rate limit exceeded. Maximum {MAX_TTS_REQUESTS_PER_HOUR} TTS requests per hour.',
+                headers=headers
+            )
+
         tts_request = TTSRequest(
             text=request.text,
             voice=request.voice,
@@ -97,7 +154,6 @@ async def generate_tts(
             speed=request.speed
         )
 
-        manager = get_tts_manager()
         response = await manager.generate(
             request=tts_request,
             provider_name=request.provider,
