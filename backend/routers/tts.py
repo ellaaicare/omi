@@ -12,9 +12,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import redis
 from google.cloud import firestore
+import openai
 
 from utils.other import endpoints as auth
 from utils.tts import TTSManager, TTSRequest, TTSResponse, TTSVoice, TTSModel, TTSGenerationError
+
+# Initialize OpenAI client
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 router = APIRouter()
@@ -90,6 +94,7 @@ class GenerateTTSRequest(BaseModel):
     cache_key: Optional[str] = Field(None, description="Optional cache identifier for reuse")
     provider: Optional[str] = Field(None, description="TTS provider (openai, coqui, or auto)")
     speed: float = Field(1.0, description="Playback speed (0.25 - 4.0)", ge=0.25, le=4.0)
+    gen_ai_enabled: bool = Field(False, description="Enable AI-powered response generation (requires Firebase JWT)")
 
 
 class TTSProvidersResponse(BaseModel):
@@ -98,7 +103,7 @@ class TTSProvidersResponse(BaseModel):
     default: str
 
 
-@router.post("/v1/tts/generate", response_model=TTSResponse, tags=["tts"])
+@router.post("/v1/tts/generate", tags=["tts"])
 async def generate_tts(
     request: GenerateTTSRequest,
     uid: str = Depends(auth.get_current_user_uid)
@@ -146,8 +151,47 @@ async def generate_tts(
                 headers=headers
             )
 
+        # Log user_id extraction for verification
+        print(f"🔐 JWT Decoded - User ID: {uid}")
+
+        # Process text through AI if enabled
+        text_to_speak = request.text
+        ai_processed = False
+
+        if request.gen_ai_enabled:
+            print(f"🤖 Gen AI enabled for user {uid}, processing text: {request.text[:100]}...")
+
+            try:
+                # Simple OpenAI completion (test mode)
+                completion = openai.chat.completions.create(
+                    model="gpt-4o-mini",  # Fast, cheap model for testing
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are Ella AI, a caring health assistant. Respond warmly and concisely in 1-2 sentences. Keep responses under 50 words."
+                        },
+                        {
+                            "role": "user",
+                            "content": request.text
+                        }
+                    ],
+                    max_tokens=100,
+                    temperature=0.7
+                )
+
+                text_to_speak = completion.choices[0].message.content
+                ai_processed = True
+
+                print(f"✅ AI Response generated for user {uid}: {text_to_speak[:100]}...")
+
+            except Exception as ai_error:
+                print(f"❌ AI generation error for user {uid}: {ai_error}")
+                # Fall back to original text if AI fails
+                text_to_speak = request.text
+                ai_processed = False
+
         tts_request = TTSRequest(
-            text=request.text,
+            text=text_to_speak,
             voice=request.voice,
             model=request.model,
             cache_key=request.cache_key,
@@ -160,7 +204,14 @@ async def generate_tts(
             uid=uid
         )
 
-        return response
+        # Add AI processing flag to response
+        response_dict = response.dict()
+        response_dict['ai_processed'] = ai_processed
+        if ai_processed:
+            response_dict['original_text'] = request.text
+            response_dict['ai_response'] = text_to_speak
+
+        return response_dict
 
     except TTSGenerationError as e:
         raise HTTPException(status_code=502, detail=str(e))
