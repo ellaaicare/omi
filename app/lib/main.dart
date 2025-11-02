@@ -15,6 +15,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/prod_env.dart';
@@ -79,7 +80,48 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
   final data = message.data;
   final messageType = data['type'];
+  final action = data['action'];
   const channelKey = 'channel';
+
+  // Handle TTS silent push notifications
+  if (action == 'speak_tts' || action == 'tts_available') {
+    try {
+      print('📱 Background TTS push received: ${message.messageId}');
+
+      // Initialize TTS service
+      final tts = EllaTtsService();
+
+      // Get TTS parameters from push data
+      final text = data['text'];
+      final voice = data['voice'] ?? 'nova';
+      final audioUrl = data['audio_url']; // May be provided directly
+      final requestId = data['request_id'];
+
+      print('🎤 TTS Parameters: text=${text != null}, voice=$voice, audioUrl=${audioUrl != null}');
+
+      if (audioUrl != null) {
+        // Audio URL provided directly in push - play it immediately
+        print('🔊 Playing pre-generated audio from URL');
+        await tts.speakFromBackend(text ?? '', voice: voice, forceGenerate: false);
+      } else if (text != null) {
+        // Text provided - generate and play TTS
+        print('🌩️ Generating cloud TTS for: ${text.substring(0, text.length > 50 ? 50 : text.length)}...');
+        await tts.speakFromBackend(text, voice: voice, forceGenerate: false);
+      } else if (requestId != null) {
+        // Only request ID provided - fetch from backend
+        print('📥 Fetching TTS audio for request: $requestId');
+        // TODO: Implement fetch endpoint call
+        // final audio = await fetchTtsAudio(requestId);
+        // await playAudio(audio);
+      }
+
+      print('✅ Background TTS completed successfully');
+    } catch (e) {
+      print('❌ Background TTS error: $e');
+      // Silently fail - don't show error to user in background
+    }
+    return;
+  }
 
   // Handle action item messages
   if (messageType == 'action_item_reminder') {
