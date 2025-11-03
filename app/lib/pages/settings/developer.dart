@@ -724,19 +724,25 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     ),
                     onPressed: () async {
                       try {
+                        print('🔔 [DEBUG] Register Device Token button pressed');
                         AppSnackbar.showSnackbar('🔐 Checking notification permissions...');
 
                         // Import notification service
                         final notificationService = NotificationService.instance;
 
                         // Check if permissions granted
+                        print('🔔 [DEBUG] Checking hasNotificationPermissions...');
                         bool hasPermission = await notificationService.hasNotificationPermissions();
+                        print('🔔 [DEBUG] hasNotificationPermissions: $hasPermission');
 
                         if (!hasPermission) {
                           AppSnackbar.showSnackbar('📱 Requesting notification permissions...');
+                          print('🔔 [DEBUG] Requesting permissions...');
                           hasPermission = await notificationService.requestNotificationPermissions();
+                          print('🔔 [DEBUG] Permission request result: $hasPermission');
 
                           if (!hasPermission) {
+                            print('🔔 [DEBUG] Permissions denied by user');
                             AppSnackbar.showSnackbarError(
                               '❌ Notification permissions denied.\n'
                               'Go to Settings → Omi → Notifications and enable.',
@@ -745,19 +751,28 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           }
                         }
 
+                        print('🔔 [DEBUG] Permissions granted! Getting Firebase Auth token...');
+                        final authToken = SharedPreferencesUtil().authToken;
+                        print('🔔 [DEBUG] Firebase JWT (first 50 chars): ${authToken.substring(0, authToken.length > 50 ? 50 : authToken.length)}...');
+
                         AppSnackbar.showSnackbar('✅ Permissions granted! Registering FCM token...');
 
+                        print('🔔 [DEBUG] Calling saveNotificationToken()...');
                         // Register device token
                         notificationService.saveNotificationToken();
 
                         // Wait a moment for registration
-                        await Future.delayed(const Duration(seconds: 2));
+                        print('🔔 [DEBUG] Waiting 3 seconds for registration to complete...');
+                        await Future.delayed(const Duration(seconds: 3));
 
+                        print('🔔 [DEBUG] Registration should be complete now');
                         AppSnackbar.showSnackbar(
                           '✅ Device token registered!\n'
-                          'Check backend logs to verify.',
+                          'Check backend logs and console for details.',
                         );
-                      } catch (e) {
+                      } catch (e, stackTrace) {
+                        print('🔔 [DEBUG] Registration error: $e');
+                        print('🔔 [DEBUG] Stack trace: $stackTrace');
                         AppSnackbar.showSnackbarError('Registration error: $e');
                       }
                     },

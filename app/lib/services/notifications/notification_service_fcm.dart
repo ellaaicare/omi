@@ -127,23 +127,47 @@ class _FCMNotificationService implements NotificationInterface {
 
   @override
   Future<void> saveFcmToken(String? token) async {
-    if (token == null) return;
+    debugPrint('🔔 [DEBUG] saveFcmToken called with token: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
+    if (token == null) {
+      debugPrint('🔔 [DEBUG] Token is null, returning early');
+      return;
+    }
+    debugPrint('🔔 [DEBUG] Getting timezone...');
     String timeZone = await getTimeZone();
-    if (FirebaseAuth.instance.currentUser != null && token.isNotEmpty) {
+    debugPrint('🔔 [DEBUG] Timezone: $timeZone');
+    debugPrint('🔔 [DEBUG] Checking Firebase current user...');
+    final currentUser = FirebaseAuth.instance.currentUser;
+    debugPrint('🔔 [DEBUG] Firebase current user: ${currentUser != null ? "YES (${currentUser.uid})" : "NULL"}');
+    if (currentUser != null && token.isNotEmpty) {
+      debugPrint('🔔 [DEBUG] Sending token to Intercom...');
       await Intercom.instance.sendTokenToIntercom(token);
+      debugPrint('🔔 [DEBUG] Sending token to backend server...');
       await saveFcmTokenServer(token: token, timeZone: timeZone);
+      debugPrint('🔔 [DEBUG] saveFcmToken completed');
+    } else {
+      debugPrint('🔔 [DEBUG] Cannot save token: currentUser=${currentUser != null}, tokenNotEmpty=${token.isNotEmpty}');
     }
   }
 
   @override
   void saveNotificationToken() async {
+    debugPrint('🔔 [DEBUG] saveNotificationToken called');
     if (Platform.isIOS) {
+      debugPrint('🔔 [DEBUG] iOS platform: Getting APNS token...');
       await _firebaseMessaging.getAPNSToken();
     }
-    if (Platform.isMacOS) return;
+    if (Platform.isMacOS) {
+      debugPrint('🔔 [DEBUG] macOS platform: Returning early');
+      return;
+    }
+    debugPrint('🔔 [DEBUG] Getting FCM token from Firebase Messaging...');
     String? token = await _firebaseMessaging.getToken();
+    debugPrint('🔔 [DEBUG] FCM token received: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
+    debugPrint('🔔 [DEBUG] Calling saveFcmToken...');
     await saveFcmToken(token);
+    debugPrint('🔔 [DEBUG] Setting up token refresh listener...');
     _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
+    debugPrint('🔔 [DEBUG] saveNotificationToken completed');
   }
 
   @override
