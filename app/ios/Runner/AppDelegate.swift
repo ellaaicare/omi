@@ -573,16 +573,17 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
     private func playFromUrl(url: URL, result: @escaping FlutterResult) {
         NSLog("🔊 [BackgroundAudio] Playing audio from URL: \(url)")
 
-        // Configure audio session for background playback
+        // Try to configure audio session for background playback
+        // This may fail if another part of the app (watch, native TTS) already has it
+        // That's OK - we'll try to play anyway
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            NSLog("✅ [BackgroundAudio] Audio session activated for background playback")
+            NSLog("✅ [BackgroundAudio] Audio session configured successfully")
         } catch {
-            NSLog("❌ [BackgroundAudio] Failed to configure audio session: \(error)")
-            result(FlutterError(code: "AUDIO_SESSION_ERROR", message: "Failed to configure audio session", details: error.localizedDescription))
-            return
+            NSLog("⚠️ [BackgroundAudio] Couldn't configure audio session (error: \(error)), but continuing anyway")
+            // Don't fail - the session might already be configured correctly
         }
 
         // Download and play audio

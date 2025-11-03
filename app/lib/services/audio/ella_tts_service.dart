@@ -265,6 +265,48 @@ class EllaTtsService {
     }
   }
 
+  /// Play audio directly from a URL (for push notifications with pre-generated audio)
+  Future<void> playFromUrl(String audioUrl) async {
+    if (audioUrl.isEmpty) return;
+
+    try {
+      print('🔊 Playing pre-generated audio from URL: $audioUrl');
+
+      // Use native background audio player on iOS for better background support
+      if (Platform.isIOS) {
+        try {
+          print('🍎 Using native iOS background audio player');
+          await _backgroundAudioChannel.invokeMethod('playFromUrl', {'url': audioUrl});
+          print('✅ Audio playback started successfully');
+        } catch (e) {
+          print('⚠️ Native audio player failed, falling back to just_audio: $e');
+          // Fallback to just_audio
+          await _cloudAudioPlayer.setAudioSource(
+            AudioSource.uri(Uri.parse(audioUrl)),
+            initialPosition: Duration.zero,
+            preload: true,
+          );
+          await _cloudAudioPlayer.play();
+          print('✅ just_audio playback started');
+        }
+      } else {
+        // Android: use just_audio
+        await _cloudAudioPlayer.setAudioSource(
+          AudioSource.uri(Uri.parse(audioUrl)),
+          initialPosition: Duration.zero,
+          preload: true,
+        );
+        await _cloudAudioPlayer.play();
+        print('✅ Audio playback started');
+      }
+    } catch (e) {
+      print('❌ Audio playback error: $e');
+      // Fallback to native TTS
+      print('⚠️ Falling back to native TTS');
+      await speak('Audio playback failed');
+    }
+  }
+
   /// Speak text using backend cloud TTS (OpenAI, high quality)
   ///
   /// This calls the backend API to generate high-quality TTS audio.

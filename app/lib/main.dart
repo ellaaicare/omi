@@ -112,8 +112,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
       if (audioUrl != null) {
         // Audio URL provided directly in push - play it immediately
-        print('🔊 Playing pre-generated audio from URL');
-        await tts.speakFromBackend(text ?? '', voice: voice, forceGenerate: false);
+        print('🔊 Audio URL provided in push notification - playing directly');
+        await tts.playFromUrl(audioUrl);
       } else if (text != null) {
         // Text provided - generate and play TTS
         print('🌩️ Generating cloud TTS for: ${text.substring(0, text.length > 50 ? 50 : text.length)}...');
