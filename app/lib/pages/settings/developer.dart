@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:flutter/services.dart';
+import 'package:omi/env/env.dart';
 import 'package:omi/pages/settings/widgets/create_mcp_api_key_dialog.dart';
 import 'package:omi/pages/settings/widgets/mcp_api_key_list_item.dart';
 import 'package:omi/pages/settings/widgets/developer_api_keys_section.dart';
@@ -694,6 +696,66 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     _forceGenerate
                         ? 'Cache disabled: Will generate new audio (~3-5s)'
                         : 'Cache enabled: Second play will be instant (<500ms)',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Test Push Notification Section
+                  const Text(
+                    '🔔 Test Push Notifications',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test background audio playback via silent push notifications (app must be backgrounded, not terminated).',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Request test push button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.notifications_active, size: 20),
+                    label: const Text('🔔 Request Test Push from Backend'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.blue.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        AppSnackbar.showSnackbar('📤 Requesting test push from backend...');
+
+                        final response = await http.post(
+                          Uri.parse('${Env.apiBaseUrl}v1/notifications/test-tts-push'),
+                          headers: {
+                            'Authorization': 'Bearer ${SharedPreferencesUtil().authToken}',
+                            'Content-Type': 'application/json',
+                          },
+                          body: jsonEncode({
+                            'text': 'Test push notification from backend. This is your medication reminder.',
+                            'voice': _selectedCloudVoice,
+                            'pregenerate': true,
+                          }),
+                        );
+
+                        if (response.statusCode == 200) {
+                          AppSnackbar.showSnackbar(
+                            '✅ Push sent! Background your app now.\n'
+                            'Audio should play in ~3 seconds.',
+                          );
+                        } else {
+                          AppSnackbar.showSnackbarError(
+                            'Push failed: ${response.statusCode}\n${response.body}',
+                          );
+                        }
+                      } catch (e) {
+                        AppSnackbar.showSnackbarError('Push error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'After tapping, quickly background the app (press home button). Audio should play automatically.',
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
