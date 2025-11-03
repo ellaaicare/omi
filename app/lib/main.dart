@@ -63,6 +63,14 @@ import 'package:window_manager/window_manager.dart';
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  print('🔔 [DEBUG] ========================================');
+  print('🔔 [DEBUG] PUSH NOTIFICATION RECEIVED IN BACKGROUND!');
+  print('🔔 [DEBUG] Message ID: ${message.messageId}');
+  print('🔔 [DEBUG] Sent Time: ${message.sentTime}');
+  print('🔔 [DEBUG] Data: ${message.data}');
+  print('🔔 [DEBUG] Notification: ${message.notification}');
+  print('🔔 [DEBUG] ========================================');
+
   await Firebase.initializeApp();
 
   await AwesomeNotifications().initialize(
@@ -82,6 +90,9 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   final messageType = data['type'];
   final action = data['action'];
   const channelKey = 'channel';
+
+  print('🔔 [DEBUG] Message Type: $messageType');
+  print('🔔 [DEBUG] Action: $action');
 
   // Handle TTS silent push notifications
   if (action == 'speak_tts' || action == 'tts_available') {

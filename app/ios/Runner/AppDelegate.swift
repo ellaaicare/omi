@@ -33,6 +33,9 @@ extension FlutterError: Error {}
       // Register Native TTS Plugin for iOS 26 compatibility
       NativeTtsPlugin.register(with: registrar(forPlugin: "NativeTtsPlugin")!)
 
+      // Register Background Audio Player for push notifications
+      BackgroundAudioPlayerPlugin.register(with: registrar(forPlugin: "BackgroundAudioPlayerPlugin")!)
+
       if WCSession.isSupported() {
           session = WCSession.default
           session?.delegate = self
@@ -527,5 +530,101 @@ public class NativeTtsPlugin: NSObject, FlutterPlugin, AVSpeechSynthesizerDelega
 
     public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         channel?.invokeMethod("onCancel", arguments: nil)
+    }
+}
+
+// MARK: - Background Audio Player Plugin for Push Notifications
+
+/// Native iOS audio player that works in background
+/// Properly configures audio session for background playback
+public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayerDelegate {
+    private var audioPlayer: AVAudioPlayer?
+    private var channel: FlutterMethodChannel?
+
+    public static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(
+            name: "ella.ai/background_audio",
+            binaryMessenger: registrar.messenger()
+        )
+        let instance = BackgroundAudioPlayerPlugin()
+        instance.channel = channel
+        registrar.addMethodCallDelegate(instance, channel: channel)
+    }
+
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "playFromUrl":
+            guard let args = call.arguments as? [String: Any],
+                  let urlString = args["url"] as? String,
+                  let url = URL(string: urlString) else {
+                result(FlutterError(code: "INVALID_ARGS", message: "Missing or invalid URL", details: nil))
+                return
+            }
+            playFromUrl(url: url, result: result)
+
+        case "stop":
+            stop(result: result)
+
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func playFromUrl(url: URL, result: @escaping FlutterResult) {
+        NSLog("🔊 [BackgroundAudio] Playing audio from URL: \(url)")
+
+        // Configure audio session for background playback
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            NSLog("✅ [BackgroundAudio] Audio session activated for background playback")
+        } catch {
+            NSLog("❌ [BackgroundAudio] Failed to configure audio session: \(error)")
+            result(FlutterError(code: "AUDIO_SESSION_ERROR", message: "Failed to configure audio session", details: error.localizedDescription))
+            return
+        }
+
+        // Download and play audio
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                NSLog("✅ [BackgroundAudio] Downloaded \(data.count) bytes")
+
+                self.audioPlayer = try AVAudioPlayer(data: data)
+                self.audioPlayer?.delegate = self
+                self.audioPlayer?.prepareToPlay()
+
+                let success = self.audioPlayer?.play() ?? false
+                if success {
+                    NSLog("✅ [BackgroundAudio] Audio playback started successfully")
+                    result(true)
+                } else {
+                    NSLog("❌ [BackgroundAudio] Audio playback failed to start")
+                    result(FlutterError(code: "PLAYBACK_ERROR", message: "Failed to start playback", details: nil))
+                }
+            } catch {
+                NSLog("❌ [BackgroundAudio] Error downloading or playing audio: \(error)")
+                result(FlutterError(code: "DOWNLOAD_ERROR", message: "Failed to download audio", details: error.localizedDescription))
+            }
+        }
+    }
+
+    private func stop(result: @escaping FlutterResult) {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        result(true)
+    }
+
+    // MARK: - AVAudioPlayerDelegate
+
+    public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        NSLog("✅ [BackgroundAudio] Audio playback finished successfully: \(flag)")
+        channel?.invokeMethod("onComplete", arguments: ["success": flag])
+    }
+
+    public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        NSLog("❌ [BackgroundAudio] Audio decode error: \(error?.localizedDescription ?? "unknown")")
+        channel?.invokeMethod("onError", arguments: ["error": error?.localizedDescription ?? "unknown"])
     }
 }

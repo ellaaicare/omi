@@ -22,6 +22,9 @@ class EllaTtsService {
   // Native iOS TTS (for iOS 26+)
   static const MethodChannel _nativeChannel = MethodChannel('ella.ai/native_tts');
 
+  // Native iOS background audio player (for push notifications)
+  static const MethodChannel _backgroundAudioChannel = MethodChannel('ella.ai/background_audio');
+
   // Flutter TTS fallback (kept for compatibility)
   final FlutterTts _flutterTts = FlutterTts();
 
@@ -330,11 +333,33 @@ class EllaTtsService {
         print('✅ Cloud TTS: Got audio URL (cached: $cached, duration: ${durationMs}ms)');
         print('🔊 Playing audio from: $audioUrl');
 
-        // Play audio using just_audio
-        await _cloudAudioPlayer.setUrl(audioUrl);
-        await _cloudAudioPlayer.play();
-
-        print('✅ Cloud TTS: Audio playback started');
+        // Use native background audio player on iOS for better background support
+        if (Platform.isIOS) {
+          try {
+            print('🍎 Using native iOS background audio player');
+            await _backgroundAudioChannel.invokeMethod('playFromUrl', {'url': audioUrl});
+            print('✅ Cloud TTS: Native audio playback started');
+          } catch (e) {
+            print('⚠️ Native audio player failed, falling back to just_audio: $e');
+            // Fallback to just_audio
+            await _cloudAudioPlayer.setAudioSource(
+              AudioSource.uri(Uri.parse(audioUrl)),
+              initialPosition: Duration.zero,
+              preload: true,
+            );
+            await _cloudAudioPlayer.play();
+            print('✅ Cloud TTS: just_audio playback started');
+          }
+        } else {
+          // Android: use just_audio
+          await _cloudAudioPlayer.setAudioSource(
+            AudioSource.uri(Uri.parse(audioUrl)),
+            initialPosition: Duration.zero,
+            preload: true,
+          );
+          await _cloudAudioPlayer.play();
+          print('✅ Cloud TTS: Audio playback started');
+        }
       } else {
         print('❌ Cloud TTS API error: ${response.statusCode}');
         print('Response: ${response.body}');

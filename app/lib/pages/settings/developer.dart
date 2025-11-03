@@ -795,7 +795,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     ),
                     onPressed: () async {
                       try {
+                        debugPrint('🔔 [DEBUG] Test push button pressed');
                         AppSnackbar.showSnackbar('📤 Requesting test push from backend...');
+
+                        debugPrint('🔔 [DEBUG] Calling backend test-tts-push endpoint...');
+                        debugPrint('🔔 [DEBUG] URL: ${Env.apiBaseUrl}v1/notifications/test-tts-push');
+                        debugPrint('🔔 [DEBUG] Voice: $_selectedCloudVoice');
+                        debugPrint('🔔 [DEBUG] Text: Test push notification from backend...');
 
                         final response = await http.post(
                           Uri.parse('${Env.apiBaseUrl}v1/notifications/test-tts-push'),
@@ -810,17 +816,25 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           }),
                         );
 
+                        debugPrint('🔔 [DEBUG] Response status: ${response.statusCode}');
+                        debugPrint('🔔 [DEBUG] Response body: ${response.body}');
+
                         if (response.statusCode == 200) {
+                          debugPrint('🔔 [DEBUG] ✅ Push request succeeded!');
+                          debugPrint('🔔 [DEBUG] Waiting for push notification to arrive...');
                           AppSnackbar.showSnackbar(
                             '✅ Push sent! Background your app now.\n'
                             'Audio should play in ~3 seconds.',
                           );
                         } else {
+                          debugPrint('🔔 [DEBUG] ❌ Push request failed: ${response.statusCode}');
                           AppSnackbar.showSnackbarError(
                             'Push failed: ${response.statusCode}\n${response.body}',
                           );
                         }
-                      } catch (e) {
+                      } catch (e, stackTrace) {
+                        debugPrint('🔔 [DEBUG] ❌ Push error: $e');
+                        debugPrint('🔔 [DEBUG] Stack trace: $stackTrace');
                         AppSnackbar.showSnackbarError('Push error: $e');
                       }
                     },

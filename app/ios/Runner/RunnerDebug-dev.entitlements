@@ -5,9 +5,5 @@
 	<!-- Push Notifications -->
 	<key>aps-environment</key>
 	<string>development</string>
-
-	<!-- Background Modes for push notifications -->
-	<key>com.apple.developer.usernotifications.filtering</key>
-	<true/>
 </dict>
 </plist>
