@@ -154,7 +154,25 @@ class _FCMNotificationService implements NotificationInterface {
     debugPrint('🔔 [DEBUG] saveNotificationToken called');
     if (Platform.isIOS) {
       debugPrint('🔔 [DEBUG] iOS platform: Getting APNS token...');
-      await _firebaseMessaging.getAPNSToken();
+
+      // Wait for APNS token to be available (iOS requirement)
+      String? apnsToken;
+      int retries = 0;
+      while (apnsToken == null && retries < 10) {
+        apnsToken = await _firebaseMessaging.getAPNSToken();
+        if (apnsToken == null) {
+          debugPrint('🔔 [DEBUG] APNS token not ready yet, waiting 500ms... (attempt ${retries + 1}/10)');
+          await Future.delayed(const Duration(milliseconds: 500));
+          retries++;
+        }
+      }
+
+      if (apnsToken != null) {
+        debugPrint('🔔 [DEBUG] APNS token received: ${apnsToken.substring(0, apnsToken.length > 20 ? 20 : apnsToken.length)}...');
+      } else {
+        debugPrint('🔔 [DEBUG] ⚠️ Failed to get APNS token after 10 retries (5 seconds)');
+        debugPrint('🔔 [DEBUG] This is normal if device is not registered with APNs yet');
+      }
     }
     if (Platform.isMacOS) {
       debugPrint('🔔 [DEBUG] macOS platform: Returning early');
