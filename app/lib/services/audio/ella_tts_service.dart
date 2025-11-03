@@ -274,26 +274,42 @@ class EllaTtsService {
   /// - text: Text to speak
   /// - voice: Voice to use (nova, shimmer, alloy, echo, fable, onyx)
   /// - forceGenerate: If true, bypasses cache (for testing new audio)
+  /// - useRealAuth: If true, uses Firebase JWT (for user_id). If false, uses ADMIN_KEY
+  /// - genAiEnabled: If true, tells backend to use AI routing (OpenAI/Claude/Letta)
   Future<void> speakFromBackend(
     String text, {
     String voice = 'nova',
     bool forceGenerate = false,
+    bool useRealAuth = false,
+    bool genAiEnabled = false,
   }) async {
     if (text.isEmpty) return;
 
     try {
-      print('🌩️ Cloud TTS: Generating audio with voice: $voice');
+      print('🌩️ Cloud TTS: Generating audio with voice: $voice, genAI: $genAiEnabled');
 
       // Get API base URL from preferences or use default
       final baseUrl = SharedPreferencesUtil().customApiBaseUrl.isNotEmpty
           ? SharedPreferencesUtil().customApiBaseUrl
           : 'https://api.ella-ai-care.com';
 
+      // Determine auth header
+      String authHeader;
+      if (useRealAuth) {
+        // Use real Firebase JWT (so backend can extract user_id)
+        authHeader = 'Bearer ${SharedPreferencesUtil().authToken}';
+        print('🔐 Using Firebase JWT auth (user_id will be extracted by backend)');
+      } else {
+        // Use ADMIN_KEY for testing
+        authHeader = 'Bearer test-admin-key-local-dev-only';
+        print('🔑 Using ADMIN_KEY auth (no user_id)');
+      }
+
       // Call backend TTS API
       final response = await http.post(
         Uri.parse('$baseUrl/v1/tts/generate'),
         headers: {
-          'Authorization': 'Bearer test-admin-key-local-dev-only',
+          'Authorization': authHeader,
           'Content-Type': 'application/json',
         },
         body: jsonEncode({
@@ -301,6 +317,7 @@ class EllaTtsService {
           'voice': voice,
           'model': 'hd',
           'cache_key': forceGenerate ? null : text.hashCode.toString(),
+          'gen_ai_enabled': genAiEnabled,  // Tell backend to use AI routing
         }),
       );
 

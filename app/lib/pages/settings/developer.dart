@@ -42,6 +42,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   );
   String _selectedCloudVoice = 'nova';
   bool _forceGenerate = false;
+  bool _genAiEnabled = false;
 
   @override
   void initState() {
@@ -632,6 +633,24 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       setState(() => _forceGenerate = value ?? false);
                     },
                   ),
+                  const SizedBox(height: 8),
+
+                  // Gen AI checkbox
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Gen AI Test (Advanced)',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      'Enable AI-powered responses. Backend routes to OpenAI/Claude/Letta based on your user_id.',
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                    ),
+                    value: _genAiEnabled,
+                    onChanged: (value) {
+                      setState(() => _genAiEnabled = value ?? false);
+                    },
+                  ),
                   const SizedBox(height: 16),
 
                   // Test button
@@ -660,6 +679,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           text,
                           voice: _selectedCloudVoice,
                           forceGenerate: _forceGenerate,
+                          useRealAuth: _genAiEnabled,
+                          genAiEnabled: _genAiEnabled,
                         );
 
                         AppSnackbar.showSnackbar('✅ Cloud TTS playback started!');
