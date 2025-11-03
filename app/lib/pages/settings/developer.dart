@@ -21,6 +21,7 @@ import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
+import 'package:omi/services/notifications.dart';
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -709,6 +710,62 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   Text(
                     'Test background audio playback via silent push notifications (app must be backgrounded, not terminated).',
                     style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Register FCM Token button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.app_registration, size: 20),
+                    label: const Text('📱 Register Device Token'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.orange.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        AppSnackbar.showSnackbar('🔐 Checking notification permissions...');
+
+                        // Import notification service
+                        final notificationService = NotificationService.instance;
+
+                        // Check if permissions granted
+                        bool hasPermission = await notificationService.hasNotificationPermissions();
+
+                        if (!hasPermission) {
+                          AppSnackbar.showSnackbar('📱 Requesting notification permissions...');
+                          hasPermission = await notificationService.requestNotificationPermissions();
+
+                          if (!hasPermission) {
+                            AppSnackbar.showSnackbarError(
+                              '❌ Notification permissions denied.\n'
+                              'Go to Settings → Omi → Notifications and enable.',
+                            );
+                            return;
+                          }
+                        }
+
+                        AppSnackbar.showSnackbar('✅ Permissions granted! Registering FCM token...');
+
+                        // Register device token
+                        notificationService.saveNotificationToken();
+
+                        // Wait a moment for registration
+                        await Future.delayed(const Duration(seconds: 2));
+
+                        AppSnackbar.showSnackbar(
+                          '✅ Device token registered!\n'
+                          'Check backend logs to verify.',
+                        );
+                      } catch (e) {
+                        AppSnackbar.showSnackbarError('Registration error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Register your device with backend. Required before testing push notifications.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
 
