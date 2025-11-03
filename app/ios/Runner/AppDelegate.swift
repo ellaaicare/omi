@@ -540,6 +540,7 @@ public class NativeTtsPlugin: NSObject, FlutterPlugin, AVSpeechSynthesizerDelega
 public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayerDelegate {
     private var audioPlayer: AVAudioPlayer?
     private var channel: FlutterMethodChannel?
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
@@ -573,17 +574,23 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
     private func playFromUrl(url: URL, result: @escaping FlutterResult) {
         NSLog("🔊 [BackgroundAudio] Playing audio from URL: \(url)")
 
-        // Try to configure audio session for background playback
-        // This may fail if another part of the app (watch, native TTS) already has it
-        // That's OK - we'll try to play anyway
+        // Request background execution time to ensure audio can play
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask {
+            NSLog("⚠️ [BackgroundAudio] Background time expiring, ending task")
+            UIApplication.shared.endBackgroundTask(self.backgroundTaskID)
+            self.backgroundTaskID = .invalid
+        }
+        NSLog("🕐 [BackgroundAudio] Background task started: \(backgroundTaskID)")
+
+        // Configure audio session for background playback
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            NSLog("✅ [BackgroundAudio] Audio session configured successfully")
+            // Set category and activate for background playback
+            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
+            try audioSession.setActive(true, options: [])
+            NSLog("✅ [BackgroundAudio] Audio session activated successfully")
         } catch {
-            NSLog("⚠️ [BackgroundAudio] Couldn't configure audio session (error: \(error)), but continuing anyway")
-            // Don't fail - the session might already be configured correctly
+            NSLog("⚠️ [BackgroundAudio] Audio session error (error: \(error)), continuing anyway")
         }
 
         // Download and play audio
@@ -602,12 +609,22 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
                     result(true)
                 } else {
                     NSLog("❌ [BackgroundAudio] Audio playback failed to start")
+                    self.endBackgroundTask()
                     result(FlutterError(code: "PLAYBACK_ERROR", message: "Failed to start playback", details: nil))
                 }
             } catch {
                 NSLog("❌ [BackgroundAudio] Error downloading or playing audio: \(error)")
+                self.endBackgroundTask()
                 result(FlutterError(code: "DOWNLOAD_ERROR", message: "Failed to download audio", details: error.localizedDescription))
             }
+        }
+    }
+
+    private func endBackgroundTask() {
+        if backgroundTaskID != .invalid {
+            NSLog("🕐 [BackgroundAudio] Ending background task: \(backgroundTaskID)")
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
         }
     }
 
@@ -621,11 +638,13 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
 
     public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         NSLog("✅ [BackgroundAudio] Audio playback finished successfully: \(flag)")
+        endBackgroundTask()
         channel?.invokeMethod("onComplete", arguments: ["success": flag])
     }
 
     public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         NSLog("❌ [BackgroundAudio] Audio decode error: \(error?.localizedDescription ?? "unknown")")
+        endBackgroundTask()
         channel?.invokeMethod("onError", arguments: ["error": error?.localizedDescription ?? "unknown"])
     }
 }
