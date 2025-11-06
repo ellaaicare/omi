@@ -3,6 +3,7 @@
 **Date**: November 6, 2025
 **Status**: ✅ Implementation Complete
 **Branch**: `feature/ios-backend-integration`
+**Architecture**: Option B (Synchronous, Pluggable LLM)
 
 ## Overview
 
@@ -10,9 +11,22 @@ The Ella integration replaces hard-coded LLM calls in the OMI backend with calls
 
 **Core Principle**: Backend acts as a thin API wrapper between Ella's agents and OMI's infrastructure (TTS, STT, push notifications, Firestore storage).
 
+**Architecture Decision**: **Option B (Synchronous)**
+- Backend calls Ella webhooks and waits for response (30s timeout)
+- Ella returns JSON data synchronously (same format as old hard-coded LLM)
+- Backend converts JSON to Pydantic models and stores in Firestore
+- **Zero backend code changes** - plug-and-play LLM replacement
+- Safe fallback to local LLM if Ella fails or times out
+
+**Why Not Option A (Fire-and-Forget + Callbacks)?**
+- Option B is simpler (one code path, easier debugging)
+- Backend maintains full control over all API flows
+- Callback endpoints (`/v1/ella/*`) are kept for **external integrations only** (web apps, chatbots, etc.)
+- For internal OMI device flows, backend uses direct Firestore writes after Ella returns
+
 ---
 
-## Architecture Diagram
+## Architecture Diagram (Option B - Synchronous)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -25,20 +39,28 @@ The Ella integration replaces hard-coded LLM calls in the OMI backend with calls
                               │ (Firestore + Push Notifications)
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│ OMI Backend (Thin Wrapper)                                      │
+│ OMI Backend (Synchronous Flow)                                  │
 │                                                                  │
-│ OUTBOUND → Ella:                                                │
-│ 1. Realtime chunks → Ella scanner (every 600ms)                │
-│ 2. Full transcript → Ella summary agent (on conversation end)  │
-│ 3. Transcript segments → Ella memory agent (on conversation end)│
+│ INTERNAL OMI DEVICE FLOW:                                       │
+│ 1. Realtime chunks → POST Ella scanner (1s, fire-and-forget)   │
+│                   ← Returns alert/notification immediately      │
+│                   → Backend generates TTS + push notification   │
 │                                                                  │
-│ INBOUND ← Ella:                                                 │
-│ 1. POST /v1/ella/memory - Store memories in Firestore          │
-│ 2. POST /v1/ella/conversation - Store summaries in Firestore   │
-│ 3. POST /v1/ella/notification - Generate TTS + push to iOS     │
+│ 2. Conversation end → POST Ella summary agent (30s wait)       │
+│                    ← Returns JSON summary                       │
+│                    → Backend stores directly in Firestore       │
+│                                                                  │
+│ 3. Conversation end → POST Ella memory agent (30s wait)        │
+│                    ← Returns JSON memories                      │
+│                    → Backend stores directly in Firestore       │
+│                                                                  │
+│ EXTERNAL INTEGRATION ENDPOINTS (web apps, chatbots):           │
+│ - POST /v1/ella/memory - Store memories from external sources   │
+│ - POST /v1/ella/conversation - Store conversations externally   │
+│ - POST /v1/ella/notification - Trigger notifications externally │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
-                              │ (HTTP Webhooks)
+                              │ (HTTP Webhooks - Synchronous)
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │ Ella's n8n Workflows (AI Brain)                                 │
@@ -46,15 +68,17 @@ The Ella integration replaces hard-coded LLM calls in the OMI backend with calls
 │ 1. Scanner Agent (realtime)                                     │
 │    - Groq LLM (~200ms)                                          │
 │    - Detects: EMERGENCY, QUESTION, WAKE_WORD, etc.             │
-│    - If alert → Main Agent → Callback to backend               │
+│    - Returns: alert type + suggested response                   │
 │                                                                  │
 │ 2. Summary Agent (conversation end)                             │
-│    - Letta config → Generate structured summary                 │
-│    - Returns: title, overview, emoji, category, action_items   │
+│    - Pulls config from Letta (Postgres cached)                  │
+│    - Runs inference on Groq/OpenAI/Anthropic                    │
+│    - Returns: JSON with title, overview, emoji, category, etc.  │
 │                                                                  │
 │ 3. Memory Agent (conversation end)                              │
-│    - Letta config → Extract facts from transcript               │
-│    - Returns: memories with category (interesting/system)       │
+│    - Pulls config from Letta (Postgres cached)                  │
+│    - Runs inference on Groq/OpenAI/Anthropic                    │
+│    - Returns: JSON with memories array                          │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
                               │ (Postgres Cache)
@@ -71,14 +95,19 @@ The Ella integration replaces hard-coded LLM calls in the OMI backend with calls
 
 ## Implementation Details
 
-### Phase 1: Callback Endpoints
+### Phase 1: External Integration Endpoints
 
 **File**: `routers/ella.py` (NEW)
 
-Three new endpoints for Ella to send results back:
+**Purpose**: Provide public API endpoints for external apps (web dashboards, chatbots, email processors) to submit memories, conversations, and trigger notifications to the OMI system.
+
+**NOT USED** for internal OMI device flow (that uses synchronous Ella calls + direct Firestore writes).
+
+Three endpoints available:
 
 #### 1. POST /v1/ella/memory
-- **Purpose**: Store memories extracted by Ella's memory agent
+- **Purpose**: Store memories from external integrations (web chatbots, email processors, etc.)
+- **Use Case**: External apps can submit memories directly to user's OMI memory store
 - **Request**:
 ```json
 {
@@ -100,7 +129,8 @@ Three new endpoints for Ella to send results back:
   - iOS app polls `GET /v3/memories` to fetch
 
 #### 2. POST /v1/ella/conversation
-- **Purpose**: Store conversation summary generated by Ella's summary agent
+- **Purpose**: Store conversation summaries from external sources (web apps, manual entry, etc.)
+- **Use Case**: External systems can create conversations in user's OMI history
 - **Request**:
 ```json
 {
@@ -122,7 +152,8 @@ Three new endpoints for Ella to send results back:
   - iOS app polls `GET /v1/conversations` to fetch
 
 #### 3. POST /v1/ella/notification
-- **Purpose**: Send urgent notifications detected by Ella's scanner
+- **Purpose**: Trigger notifications from external systems (scheduled reminders, alerts, etc.)
+- **Use Case**: External automation can send push notifications with TTS audio to user's device
 - **Request**:
 ```json
 {
@@ -139,7 +170,9 @@ Three new endpoints for Ella to send results back:
 
 ---
 
-### Phase 2: Replace LLM Calls
+### Phase 2: Replace Hard-Coded LLM Calls (Synchronous)
+
+**Architecture**: Backend calls Ella webhooks, waits for response, stores directly in Firestore
 
 #### 1. Summary Generation
 
@@ -149,8 +182,9 @@ Three new endpoints for Ella to send results back:
 
 **Changes**:
 - Added `uid` parameter
-- Calls `https://n8n.ella-ai-care.com/webhook/summary-agent`
-- Converts Ella's JSON response to `Structured` object
+- Calls `https://n8n.ella-ai-care.com/webhook/summary-agent` (30s timeout, waits for response)
+- Converts Ella's JSON response to `Structured` Pydantic object (same as old LLM)
+- **Backend stores directly in Firestore** (no callback needed)
 - Falls back to local LLM if Ella unavailable
 
 **Request to Ella**:
@@ -173,9 +207,10 @@ Three new endpoints for Ella to send results back:
 **Function**: `new_memories_extractor()`
 
 **Changes**:
-- Calls `https://n8n.ella-ai-care.com/webhook/memory-agent`
-- Converts segments to simple dict format
-- Converts Ella's JSON response to `Memory` objects
+- Calls `https://n8n.ella-ai-care.com/webhook/memory-agent` (30s timeout, waits for response)
+- Converts segments to simple dict format for Ella
+- Converts Ella's JSON response to `Memory` Pydantic objects (same as old LLM)
+- **Returns list directly to caller** (caller stores in Firestore, no callback needed)
 - Falls back to local LLM if Ella unavailable
 
 **Request to Ella**:

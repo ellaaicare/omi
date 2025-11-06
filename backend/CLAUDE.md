@@ -1,8 +1,8 @@
 # OMI Backend - Developer Guide
 
-**Last Updated**: October 30, 2025
-**Branch**: `feature/backend-infrastructure`
-**Status**: ✅ Production deployment on VPS + Local development environment
+**Last Updated**: November 6, 2025
+**Branch**: `feature/ios-backend-integration`
+**Status**: ✅ Ella AI integration complete + Production deployment on VPS
 
 ---
 
@@ -111,6 +111,145 @@ Ready for: [Next backend tasks / iOS team integration / etc.]"
 1. [Specific question about requirements/architecture]
 2. [Coordination question - who is responsible for X?]
 3. [Priority question - should I work on A or B first?]"
+```
+
+---
+
+## 🤖 **ELLA AI INTEGRATION**
+
+**Date**: November 6, 2025
+**Status**: ✅ Implementation Complete
+**Architecture**: Option B (Synchronous, Pluggable LLM)
+
+### **Overview**
+
+The Ella integration replaces hard-coded OpenAI LLM calls with calls to Ella's Letta-powered agents. This provides:
+- ✅ Centralized AI brain (all agent configs in Letta)
+- ✅ Pluggable LLM architecture (swap between Groq/OpenAI/Anthropic)
+- ✅ Zero backend changes (same Pydantic models, same Firestore structure)
+- ✅ Safe fallback (local LLM if Ella unavailable)
+
+### **Key Files**
+
+1. **`routers/ella.py`** (NEW - 407 lines)
+   - External integration endpoints for web apps/chatbots
+   - `POST /v1/ella/memory` - Submit memories from external sources
+   - `POST /v1/ella/conversation` - Submit conversations from external sources
+   - `POST /v1/ella/notification` - Trigger push notifications externally
+
+2. **`utils/llm/conversation_processing.py`** (Modified - +66 lines)
+   - `get_transcript_structure()` now calls Ella summary agent
+   - Waits for response (30s timeout), converts to `Structured` object
+   - Falls back to local LLM if Ella fails
+
+3. **`utils/llm/memories.py`** (Modified - +48 lines)
+   - `new_memories_extractor()` now calls Ella memory agent
+   - Waits for response (30s timeout), converts to `Memory` objects
+   - Falls back to local LLM if Ella fails
+
+4. **`routers/transcribe.py`** (Modified - +21 lines)
+   - Sends realtime chunks to Ella scanner (fire-and-forget, 1s timeout)
+   - Silent failure if Ella unavailable
+
+### **Data Flow (Option B - Synchronous)**
+
+```
+OMI Device → Backend WebSocket
+            ↓
+    [Conversation ends]
+            ↓
+Backend → POST https://n8n.ella-ai-care.com/webhook/summary-agent (30s wait)
+       ← Ella returns JSON summary
+       → Backend stores in Firestore
+            ↓
+Backend → POST https://n8n.ella-ai-care.com/webhook/memory-agent (30s wait)
+       ← Ella returns JSON memories
+       → Backend stores in Firestore
+            ↓
+        iOS app polls GET /v1/conversations and GET /v3/memories
+```
+
+### **Ella's Response Formats**
+
+**Summary Agent** (`/webhook/summary-agent`):
+```json
+{
+  "title": "Morning Health Check-In",
+  "overview": "User discussed...",
+  "emoji": "💊",
+  "category": "health",
+  "action_items": [{"description": "...", "due_at": "..."}],
+  "events": [{"title": "...", "start": "...", "duration": 30}]
+}
+```
+
+**Memory Agent** (`/webhook/memory-agent`):
+```json
+{
+  "memories": [
+    {
+      "content": "User takes medication daily",
+      "category": "interesting",
+      "visibility": "private",
+      "tags": ["health"]
+    }
+  ]
+}
+```
+
+### **Testing Ella Integration**
+
+```bash
+# Health check
+curl https://api.ella-ai-care.com/v1/ella/health
+
+# Test memory callback endpoint
+curl -X POST https://api.ella-ai-care.com/v1/ella/memory \
+  -H "Content-Type: application/json" \
+  -d '{"uid":"123","conversation_id":"test","memories":[{"content":"Test","category":"interesting"}]}'
+
+# Test notification endpoint
+curl -X POST https://api.ella-ai-care.com/v1/ella/notification \
+  -H "Content-Type: application/json" \
+  -d '{"uid":"123","message":"Test","urgency":"QUESTION","generate_audio":true}'
+```
+
+### **Documentation**
+
+- **Complete Spec**: `docs/ELLA_INTEGRATION.md` - Architecture diagrams, implementation details
+- **Response Formats**: `docs/ELLA_RESPONSE_FORMATS.md` - Exact JSON formats for Ella Dev
+- **Deployment Checklist**: See ELLA_INTEGRATION.md for VPS deployment steps
+
+### **Monitoring Ella Integration**
+
+```bash
+# Watch backend logs for Ella calls
+journalctl -u omi-backend -f | grep -E "(Ella|📤|✅|⚠️)"
+
+# Look for these messages:
+# 📤 Calling Ella summary agent for uid=123
+# ✅ Ella summary agent returned: Morning Health Check-In
+# ⚠️  Ella summary agent returned status 500, falling back to local LLM
+# 🔄 Using local LLM for summary generation
+```
+
+### **Rollback Plan**
+
+If Ella integration causes issues:
+
+1. **Automatic fallback**: Already built-in, local LLM takes over if Ella fails
+2. **Disable Ella temporarily**: Set env var `ELLA_ENABLED=false` (not yet implemented)
+3. **Comment out Ella calls**: Search for `# ====== ELLA INTEGRATION ======` markers
+4. **Zero downtime**: iOS app sees no difference, all infrastructure unchanged
+
+### **Git Commits**
+
+```
+c64d2d3 - feat(ella): add Ella integration callback endpoints
+145df32 - feat(ella): replace summary generation with Ella agent call
+acf4505 - feat(ella): replace memory extraction with Ella agent call
+5043461 - feat(ella): add realtime chunk sending to Ella scanner
+1e53a09 - docs(ella): add comprehensive Ella integration documentation
 ```
 
 ---
