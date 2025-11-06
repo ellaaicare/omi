@@ -30,6 +30,8 @@ from routers import (
     other,
     developer,
     tts,
+    ai,
+    ella,
 )
 
 from utils.other.timeout import TimeoutMiddleware
@@ -73,6 +75,8 @@ app.include_router(payment.router)
 app.include_router(mcp.router)
 app.include_router(developer.router)
 app.include_router(tts.router)
+app.include_router(ai.router)
+app.include_router(ella.router)
 
 
 methods_timeout = {
