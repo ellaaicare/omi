@@ -58,6 +58,54 @@ def new_memories_extractor(
     # TODO: include negative facts too? Things the user doesn't like?
     # TODO: make it more strict?
 
+    # ====== ELLA INTEGRATION ======
+    # Try calling Ella's memory agent first
+    try:
+        import requests
+
+        print(f"📤 Calling Ella memory agent for uid={uid}")
+
+        # Convert segments to simple dict format for Ella
+        segments_data = [
+            {"text": s.text, "speaker": s.speaker or f"SPEAKER_{s.speaker_id}"}
+            for s in segments
+        ]
+
+        response = requests.post(
+            "https://n8n.ella-ai-care.com/webhook/memory-agent",
+            json={
+                "uid": uid,
+                "segments": segments_data
+            },
+            timeout=30  # 30 second timeout
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            memories_list = result.get('memories', [])
+            print(f"✅ Ella memory agent returned {len(memories_list)} memories")
+
+            # Convert Ella's response to Memory objects
+            memories = []
+            for mem in memories_list:
+                memory = Memory(
+                    content=mem['content'],
+                    category=MemoryCategory(mem.get('category', 'interesting')),
+                    visibility=mem.get('visibility', 'private'),
+                    tags=mem.get('tags', [])
+                )
+                memories.append(memory)
+
+            return memories
+        else:
+            print(f"⚠️  Ella memory agent returned status {response.status_code}, falling back to local LLM")
+
+    except Exception as e:
+        print(f"⚠️  Ella memory agent failed: {e}, falling back to local LLM")
+
+    # ====== FALLBACK: Original hard-coded LLM ======
+    print(f"🔄 Using local LLM for memory extraction")
+
     try:
         parser = PydanticOutputParser(pydantic_object=Memories)
         chain = extract_memories_prompt | llm_mini | parser
