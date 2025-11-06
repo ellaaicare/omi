@@ -920,6 +920,27 @@ async def _listen(
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])
 
+                    # ====== ELLA INTEGRATION: Send chunks to scanner ======
+                    # Fire-and-forget call to Ella's realtime scanner
+                    try:
+                        import requests
+                        from datetime import datetime
+
+                        text = " ".join([s.text for s in transcript_segments])
+                        if text.strip():  # Only send if there's actual text
+                            requests.post(
+                                "https://n8n.ella-ai-care.com/webhook/omi-scanner",
+                                json={
+                                    "uid": uid,
+                                    "text": text,
+                                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                                },
+                                timeout=1  # Non-blocking, fire-and-forget
+                            )
+                    except Exception as e:
+                        # Silently fail - don't break transcription if Ella is down
+                        pass
+
                 if translation_enabled:
                     await translate(conversation.transcript_segments[starts:ends], conversation.id)
 
