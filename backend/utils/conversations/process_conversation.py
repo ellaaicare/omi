@@ -88,6 +88,7 @@ def _get_structured(
                     language_code,
                     tz,
                     existing_action_items=existing_action_items,
+                    uid=uid,
                 )
                 return structured, False
 
@@ -136,6 +137,7 @@ def _get_structured(
                 tz,
                 photos=conversation.photos,
                 existing_action_items=existing_action_items,
+                uid=uid,
             ),
             False,
         )
