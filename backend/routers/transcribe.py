@@ -1109,7 +1109,8 @@ async def _listen(
                                     is_user=False,
                                     start=json_data.get('start', 0),
                                     end=json_data.get('end', 0),
-                                    person_id=None
+                                    person_id=None,
+                                    source='edge_asr'  # Mark as edge ASR for analytics
                                 )
                                 stream_transcript([segment])
                                 print(f"📱 Edge ASR segment: {text[:50]}...", uid, session_id)
