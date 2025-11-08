@@ -924,18 +924,26 @@ async def _listen(
                     # Fire-and-forget call to Ella's realtime scanner
                     try:
                         import requests
-                        from datetime import datetime
 
-                        text = " ".join([s.text for s in transcript_segments])
-                        if text.strip():  # Only send if there's actual text
+                        # Convert transcript segments to format Ella expects
+                        scanner_segments = [
+                            {
+                                "text": s.text,
+                                "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
+                                "start": s.start,
+                                "end": s.end
+                            }
+                            for s in transcript_segments
+                        ]
+
+                        if scanner_segments:  # Only send if there are segments
                             requests.post(
-                                "https://n8n.ella-ai-care.com/webhook/omi-scanner",
+                                "https://n8n.ella-ai-care.com/webhook/scanner-agent",
                                 json={
                                     "uid": uid,
-                                    "text": text,
-                                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                                    "segments": scanner_segments
                                 },
-                                timeout=1  # Non-blocking, fire-and-forget
+                                timeout=2  # Realtime scanner should be fast (~1s)
                             )
                     except Exception as e:
                         # Silently fail - don't break transcription if Ella is down
