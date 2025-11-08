@@ -384,7 +384,7 @@ def get_transcript_structure(
                     "language_code": language_code,
                     "timezone": tz,
                 },
-                timeout=30  # 30 second timeout
+                timeout=120  # 120 second timeout (summaries not time-critical)
             )
 
             if response.status_code == 200:

@@ -77,7 +77,7 @@ def new_memories_extractor(
                 "uid": uid,
                 "segments": segments_data
             },
-            timeout=30  # 30 second timeout
+            timeout=120  # 120 second timeout (memory extraction not time-critical)
         )
 
         if response.status_code == 200:
