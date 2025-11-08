@@ -1102,6 +1102,7 @@ async def _listen(
                             # Handle pre-transcribed text from iOS on-device ASR
                             text = json_data.get('text', '').strip()
                             if text:
+                                asr_provider = json_data.get('asr_provider')  # Optional: apple_speech, parakeet, etc.
                                 segment = TranscriptSegment(
                                     text=text,
                                     speaker=json_data.get('speaker', 'SPEAKER_00'),
@@ -1110,10 +1111,12 @@ async def _listen(
                                     start=json_data.get('start', 0),
                                     end=json_data.get('end', 0),
                                     person_id=None,
-                                    source='edge_asr'  # Mark as edge ASR for analytics
+                                    source='edge_asr',  # Mark as edge ASR for analytics
+                                    asr_provider=asr_provider  # Track which ASR framework (apple_speech, parakeet, etc.)
                                 )
                                 stream_transcript([segment])
-                                print(f"📱 Edge ASR segment: {text[:50]}...", uid, session_id)
+                                provider_info = f" (provider: {asr_provider})" if asr_provider else ""
+                                print(f"📱 Edge ASR segment{provider_info}: {text[:50]}...", uid, session_id)
                         elif json_data.get('type') == 'speaker_assigned':
                             segment_ids = json_data.get('segment_ids', [])
                             can_assign = False

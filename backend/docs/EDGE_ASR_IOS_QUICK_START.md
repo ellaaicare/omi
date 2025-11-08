@@ -50,7 +50,8 @@ Send this exact JSON format via existing WebSocket:
   "start": 0.0,
   "end": 3.5,
   "is_final": true,
-  "confidence": 0.95
+  "confidence": 0.95,
+  "asr_provider": "apple_speech"
 }
 ```
 
@@ -65,7 +66,9 @@ Send this exact JSON format via existing WebSocket:
 | `end` | ⚪ No | number | `0` | End time in seconds |
 | `is_final` | ⚪ No | boolean | `true` | Is this the final transcription? |
 | `confidence` | ⚪ No | number | `null` | Confidence score (0.0-1.0) |
+| `asr_provider` | ⚪ No | string | `null` | ASR framework: `"apple_speech"`, `"parakeet"`, `"whisper"`, etc. |
 
+**🎯 RECOMMENDED**: Send `asr_provider` field to track which ASR framework you're testing!
 **🚫 DO NOT SEND** `source` field - backend sets this automatically to `"edge_asr"`
 
 ---
@@ -130,13 +133,15 @@ func sendTranscriptSegment(text: String) {
 func sendTranscriptSegment(
     text: String,
     confidence: Double? = nil,
-    timestamp: Double? = nil
+    timestamp: Double? = nil,
+    asrProvider: String = "apple_speech"  // 🆕 Track which ASR you're using!
 ) {
     var message: [String: Any] = [
         "type": "transcript_segment",
         "text": text,
         "speaker": "SPEAKER_00",
-        "is_final": true
+        "is_final": true,
+        "asr_provider": asrProvider  // 🆕 Backend tracks this for A/B testing
     ]
 
     // Add optional fields if available

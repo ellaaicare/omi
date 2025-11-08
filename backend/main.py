@@ -32,6 +32,7 @@ from routers import (
     tts,
     ai,
     ella,
+    analytics,
 )
 
 from utils.other.timeout import TimeoutMiddleware
@@ -77,6 +78,7 @@ app.include_router(developer.router)
 app.include_router(tts.router)
 app.include_router(ai.router)
 app.include_router(ella.router)
+app.include_router(analytics.router)
 
 
 methods_timeout = {
