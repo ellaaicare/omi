@@ -1097,6 +1097,22 @@ async def _listen(
                             await handle_image_chunk(
                                 uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers
                             )
+                        elif json_data.get('type') == 'transcript_segment':
+                            # ====== EDGE ASR INTEGRATION ======
+                            # Handle pre-transcribed text from iOS on-device ASR
+                            text = json_data.get('text', '').strip()
+                            if text:
+                                segment = TranscriptSegment(
+                                    text=text,
+                                    speaker=json_data.get('speaker', 'SPEAKER_00'),
+                                    speaker_id=0,
+                                    is_user=False,
+                                    start=json_data.get('start', 0),
+                                    end=json_data.get('end', 0),
+                                    person_id=None
+                                )
+                                stream_transcript([segment])
+                                print(f"📱 Edge ASR segment: {text[:50]}...", uid, session_id)
                         elif json_data.get('type') == 'speaker_assigned':
                             segment_ids = json_data.get('segment_ids', [])
                             can_assign = False
