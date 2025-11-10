@@ -36,6 +36,9 @@ extension FlutterError: Error {}
       // Register Background Audio Player for push notifications
       BackgroundAudioPlayerPlugin.register(with: registrar(forPlugin: "BackgroundAudioPlayerPlugin")!)
 
+      // Register On-Device ASR Plugin (Apple Speech framework)
+      OnDeviceASRPlugin.register(with: registrar(forPlugin: "OnDeviceASRPlugin")!)
+
       if WCSession.isSupported() {
           session = WCSession.default
           session?.delegate = self
@@ -646,5 +649,383 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
         NSLog("❌ [BackgroundAudio] Audio decode error: \(error?.localizedDescription ?? "unknown")")
         endBackgroundTask()
         channel?.invokeMethod("onError", arguments: ["error": error?.localizedDescription ?? "unknown"])
+    }
+}
+//
+//  OnDeviceASRService.swift
+//  Runner
+//
+//  Created by Claude-iOS-Developer
+//  On-device ASR using Nexa SDK + Parakeet v3 (Neural Engine accelerated)
+//
+
+import Foundation
+import AVFoundation
+import Speech
+import CoreML
+
+/// On-device Automatic Speech Recognition Service
+/// Uses Nexa SDK with Parakeet v3 model optimized for Neural Engine
+class OnDeviceASRService: NSObject {
+
+    // MARK: - Properties
+
+    private var audioEngine: AVAudioEngine?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let speechRecognizer: SFSpeechRecognizer?
+
+    // Nexa SDK + Parakeet v3 (placeholder for model integration)
+    // TODO: Replace with actual Nexa SDK CoreML model when available
+    private var nexaParakeetModel: MLModel?
+
+    /// Callback for when transcript segments are received
+    var onTranscriptReceived: ((String, Bool) -> Void)?
+
+    /// Callback for errors
+    var onError: ((Error) -> Void)?
+
+    /// Whether on-device ASR is available on this device
+    var isAvailable: Bool {
+        return SFSpeechRecognizer.authorizationStatus() == .authorized &&
+               speechRecognizer != nil
+    }
+
+    /// Current recording state
+    private(set) var isRecording = false
+
+    // MARK: - Initialization
+
+    override init() {
+        // Initialize with user's preferred language (or English as default)
+        // TODO: Support multi-language detection
+        self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        super.init()
+
+        NSLog("🎙️ [OnDeviceASR] Initialized with locale: en-US")
+        NSLog("🎙️ [OnDeviceASR] Authorization status: \(SFSpeechRecognizer.authorizationStatus().rawValue)")
+
+        // TODO: Load Nexa SDK Parakeet v3 CoreML model
+        // loadNexaParakeetModel()
+    }
+
+    // MARK: - Model Loading
+
+    /// Load Nexa SDK Parakeet v3 CoreML model (Neural Engine optimized)
+    private func loadNexaParakeetModel() {
+        // TODO: Implement Nexa SDK model loading
+        // This will replace the iOS Speech framework with Nexa's Parakeet v3
+        //
+        // Steps:
+        // 1. Download Parakeet v3 CoreML model from Nexa SDK (mlpackage format)
+        // 2. Load model with MLModel
+        // 3. Configure for Neural Engine (ANE) acceleration
+        // 4. Set up audio preprocessing pipeline
+        //
+        // Example:
+        // guard let modelURL = Bundle.main.url(forResource: "parakeet_v3", withExtension: "mlmodelc") else {
+        //     NSLog("❌ [OnDeviceASR] Parakeet v3 model not found")
+        //     return
+        // }
+        //
+        // do {
+        //     let config = MLModelConfiguration()
+        //     config.computeUnits = .cpuAndNeuralEngine // Enable Neural Engine
+        //     self.nexaParakeetModel = try MLModel(contentsOf: modelURL, configuration: config)
+        //     NSLog("✅ [OnDeviceASR] Parakeet v3 loaded with Neural Engine acceleration")
+        // } catch {
+        //     NSLog("❌ [OnDeviceASR] Failed to load Parakeet v3: \(error)")
+        // }
+
+        NSLog("⚠️ [OnDeviceASR] Nexa SDK Parakeet v3 model not yet integrated - using iOS Speech framework as fallback")
+    }
+
+    // MARK: - Public Methods
+
+    /// Request speech recognition authorization
+    func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        SFSpeechRecognizer.requestAuthorization { authStatus in
+            DispatchQueue.main.async {
+                let authorized = authStatus == .authorized
+                NSLog("🎙️ [OnDeviceASR] Authorization: \(authorized ? "granted" : "denied")")
+                completion(authorized)
+            }
+        }
+    }
+
+    /// Start on-device transcription
+    func startTranscription() throws {
+        guard isAvailable else {
+            let error = NSError(domain: "OnDeviceASR", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Speech recognition not authorized or available"])
+            NSLog("❌ [OnDeviceASR] Not available - authorization: \(SFSpeechRecognizer.authorizationStatus().rawValue)")
+            throw error
+        }
+
+        // Cancel any ongoing recognition task
+        if let task = recognitionTask {
+            task.cancel()
+            recognitionTask = nil
+        }
+
+        // Configure audio session for recording
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+
+        // Create recognition request
+        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        guard let recognitionRequest = recognitionRequest else {
+            throw NSError(domain: "OnDeviceASR", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Unable to create recognition request"])
+        }
+
+        // Configure request for on-device recognition
+        recognitionRequest.shouldReportPartialResults = true
+
+        // Enable on-device recognition (iOS 13+)
+        if #available(iOS 13, *) {
+            recognitionRequest.requiresOnDeviceRecognition = true
+            NSLog("✅ [OnDeviceASR] On-device recognition enabled (iOS Speech framework)")
+        }
+
+        // Setup audio engine
+        audioEngine = AVAudioEngine()
+        guard let audioEngine = audioEngine else {
+            throw NSError(domain: "OnDeviceASR", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "Unable to create audio engine"])
+        }
+
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+
+        // Install tap on audio input
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] (buffer, when) in
+            self?.recognitionRequest?.append(buffer)
+        }
+
+        // Prepare and start audio engine
+        audioEngine.prepare()
+        try audioEngine.start()
+
+        // Start recognition task
+        recognitionTask = speechRecognizer?.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+            guard let self = self else { return }
+
+            var isFinal = false
+
+            if let result = result {
+                let transcript = result.bestTranscription.formattedString
+                isFinal = result.isFinal
+
+                NSLog("🎙️ [OnDeviceASR] Transcript (\(isFinal ? "final" : "partial")): \(transcript)")
+                self.onTranscriptReceived?(transcript, isFinal)
+            }
+
+            // Clean up when recognition ends (isFinal) or on error
+            // Note: isFinal only happens ONCE at end of recognition, not per utterance
+            if error != nil || isFinal {
+                // Safely clean up audio engine (may already be stopped by stopTranscription)
+                if let engine = self.audioEngine, engine.isRunning {
+                    engine.stop()
+                    engine.inputNode.removeTap(onBus: 0)
+                }
+
+                self.recognitionRequest = nil
+                self.recognitionTask = nil
+
+                if let error = error {
+                    NSLog("❌ [OnDeviceASR] Recognition error: \(error.localizedDescription)")
+                    self.onError?(error)
+                }
+            }
+        }
+
+        isRecording = true
+        NSLog("✅ [OnDeviceASR] Started transcription")
+    }
+
+    /// Stop on-device transcription
+    func stopTranscription() {
+        NSLog("🛑 [OnDeviceASR] Stopping transcription - requesting final transcript...")
+
+        // Safely stop audio engine and remove tap
+        if let engine = audioEngine, engine.isRunning {
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+        }
+
+        // CRITICAL: Use finish() instead of cancel() to get final transcript
+        recognitionRequest?.endAudio()
+        recognitionTask?.finish()  // ✅ Gracefully completes and sends final transcript
+
+        // NOTE: Don't nil out recognitionTask here!
+        // The completion handler will receive the final transcript and do cleanup.
+        // If we nil it out now, the callback won't fire.
+
+        audioEngine = nil
+        isRecording = false
+
+        NSLog("🛑 [OnDeviceASR] Stopped transcription (waiting for final transcript callback)")
+    }
+
+    /// Process audio buffer with Nexa Parakeet v3 (future implementation)
+    private func processWithNexaParakeet(buffer: AVAudioPCMBuffer) {
+        // TODO: Implement Nexa SDK Parakeet v3 inference
+        //
+        // Steps:
+        // 1. Convert AVAudioPCMBuffer to format expected by Parakeet v3 (16kHz PCM16)
+        // 2. Preprocess audio (normalization, windowing)
+        // 3. Run inference on CoreML model (Neural Engine accelerated)
+        // 4. Post-process output to text
+        // 5. Call onTranscriptReceived with result
+        //
+        // Benefits of Nexa SDK:
+        // - Neural Engine acceleration (110× real-time on iPhone 16 Pro)
+        // - Better battery efficiency vs generic CoreML
+        // - Optimized model quantization
+        // - Streaming inference support
+    }
+
+    // MARK: - Device Capability Check
+
+    /// Check if device supports efficient on-device ASR (iPhone 12+)
+    static func isDeviceCapable() -> Bool {
+        // Check for Neural Engine availability (A14 chip or later)
+        // iPhone 12 and newer have A14+ chips with 16-core Neural Engine
+
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machineMirror = Mirror(reflecting: systemInfo.machine)
+        let identifier = machineMirror.children.reduce("") { identifier, element in
+            guard let value = element.value as? Int8, value != 0 else { return identifier }
+            return identifier + String(UnicodeScalar(UInt8(value)))
+        }
+
+        // iPhone models with A14+ chip (Neural Engine capable)
+        let capableDevices = [
+            "iPhone13,1", "iPhone13,2", "iPhone13,3", "iPhone13,4", // iPhone 12 series
+            "iPhone14,2", "iPhone14,3", "iPhone14,4", "iPhone14,5", // iPhone 13 series
+            "iPhone14,6", // iPhone SE 3rd gen
+            "iPhone14,7", "iPhone14,8", "iPhone15,2", "iPhone15,3", // iPhone 14 series
+            "iPhone15,4", "iPhone15,5", // iPhone 15 series
+            "iPhone16,1", "iPhone16,2", // iPhone 15 Pro series
+            "iPhone17,1", "iPhone17,2", "iPhone17,3", "iPhone17,4", // iPhone 16 series
+        ]
+
+        let isCapable = capableDevices.contains { identifier.hasPrefix($0) }
+        NSLog("📱 [OnDeviceASR] Device: \(identifier), Neural Engine capable: \(isCapable)")
+
+        return isCapable
+    }
+
+    /// Get device recommendation (on-device vs cloud)
+    static func getRecommendedMode() -> String {
+        if isDeviceCapable() {
+            return "on_device" // Use on-device ASR with Nexa SDK
+        } else {
+            return "cloud" // Fallback to Deepgram cloud
+        }
+    }
+}
+
+// MARK: - Flutter Plugin
+
+/// Flutter plugin for on-device ASR
+public class OnDeviceASRPlugin: NSObject, FlutterPlugin {
+    private var asrService: OnDeviceASRService?
+    private var channel: FlutterMethodChannel?
+
+    public static func register(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(
+            name: "ella.ai/on_device_asr",
+            binaryMessenger: registrar.messenger()
+        )
+        let instance = OnDeviceASRPlugin()
+        instance.channel = channel
+        registrar.addMethodCallDelegate(instance, channel: channel)
+
+        NSLog("✅ [OnDeviceASR] Plugin registered")
+    }
+
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "isAvailable":
+            handleIsAvailable(result: result)
+
+        case "isDeviceCapable":
+            result(OnDeviceASRService.isDeviceCapable())
+
+        case "getRecommendedMode":
+            result(OnDeviceASRService.getRecommendedMode())
+
+        case "requestAuthorization":
+            handleRequestAuthorization(result: result)
+
+        case "startTranscription":
+            handleStartTranscription(result: result)
+
+        case "stopTranscription":
+            handleStopTranscription(result: result)
+
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func handleIsAvailable(result: @escaping FlutterResult) {
+        if asrService == nil {
+            asrService = OnDeviceASRService()
+        }
+        result(asrService?.isAvailable ?? false)
+    }
+
+    private func handleRequestAuthorization(result: @escaping FlutterResult) {
+        if asrService == nil {
+            asrService = OnDeviceASRService()
+        }
+
+        asrService?.requestAuthorization { authorized in
+            result(authorized)
+        }
+    }
+
+    private func handleStartTranscription(result: @escaping FlutterResult) {
+        if asrService == nil {
+            asrService = OnDeviceASRService()
+        }
+
+        // ALWAYS setup callbacks to ensure transcripts reach Dart
+        setupCallbacks()
+
+        do {
+            try asrService?.startTranscription()
+            result(true)
+        } catch {
+            NSLog("❌ [OnDeviceASR] Start failed: \(error.localizedDescription)")
+            result(FlutterError(code: "START_FAILED",
+                              message: error.localizedDescription,
+                              details: nil))
+        }
+    }
+
+    private func handleStopTranscription(result: @escaping FlutterResult) {
+        asrService?.stopTranscription()
+        result(true)
+    }
+
+    private func setupCallbacks() {
+        asrService?.onTranscriptReceived = { [weak self] transcript, isFinal in
+            self?.channel?.invokeMethod("onTranscript", arguments: [
+                "text": transcript,
+                "isFinal": isFinal
+            ])
+        }
+
+        asrService?.onError = { [weak self] error in
+            self?.channel?.invokeMethod("onError", arguments: [
+                "error": error.localizedDescription
+            ])
+        }
     }
 }

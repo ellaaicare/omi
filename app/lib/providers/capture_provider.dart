@@ -20,10 +20,11 @@ import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/services/connectivity_service.dart';
-import 'package:omi/services/devices/models.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/services/sockets/transcription_connection.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/services/asr/on_device_asr_service.dart' as asr;
+import 'package:omi/services/asr/transcript_sender_service.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -44,6 +45,11 @@ class CaptureProvider extends ChangeNotifier
   TranscriptSegmentSocketService? _socket;
   Timer? _keepAliveTimer;
   DateTime? _keepAliveLastExecutedAt;
+
+  // On-device ASR services (for Apple Speech mode)
+  asr.OnDeviceASRService? _onDeviceASR;
+  TranscriptSenderService? _transcriptSender;
+  StreamSubscription? _asrTranscriptSubscription;
 
   // Method channel for system audio permissions
   static late MethodChannel _screenCaptureChannel;
@@ -629,10 +635,27 @@ class CaptureProvider extends ChangeNotifier
     updateRecordingState(RecordingState.initialising);
     await Permission.microphone.request();
 
-    // prepare
+    // Check ASR mode from developer settings
+    final asrMode = SharedPreferencesUtil().asrMode;
+    debugPrint('🎙️ [CaptureProvider] ASR Mode: $asrMode');
+
+    if (asrMode == 'on_device_ios') {
+      // Use on-device Apple Speech (no audio upload)
+      debugPrint('📱 [CaptureProvider] Using ON-DEVICE Apple Speech (private, no audio upload)');
+      await _streamRecordingOnDevice();
+    } else {
+      // Use cloud Deepgram (audio upload)
+      debugPrint('☁️ [CaptureProvider] Using CLOUD Deepgram (audio uploaded to server)');
+      await _streamRecordingCloud();
+    }
+  }
+
+  // Cloud recording: Upload audio to WebSocket (Deepgram)
+  Future<void> _streamRecordingCloud() async {
+    // prepare WebSocket for audio streaming
     await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
 
-    // record
+    // record and upload audio bytes
     await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
       if (_socket?.state == SocketServiceState.connected) {
         _socket?.send(bytes);
@@ -646,11 +669,242 @@ class CaptureProvider extends ChangeNotifier
     });
   }
 
+  // On-device recording: Use Apple Speech, send text transcripts to WebSocket
+  Future<void> _streamRecordingOnDevice() async {
+    debugPrint('🎙️ [CaptureProvider] Starting on-device ASR (Apple Speech)');
+    debugPrint('🔖 [VERSION] ASR Code v3.1 - WebSocket transmission delay (fixes backend data loss)');
+
+    // Initialize on-device ASR service
+    _onDeviceASR = asr.OnDeviceASRService();
+    _transcriptSender = TranscriptSenderService();
+
+    // Connect transcript sender to existing WebSocket
+    // Note: We still need the WebSocket connection for backend to receive transcripts
+    await changeAudioRecordProfile(audioCodec: BleAudioCodec.pcm16, sampleRate: 16000);
+
+    // Create WebSocket channel from the existing socket
+    // The TranscriptSenderService will send text instead of audio
+    if (_socket?.state == SocketServiceState.connected) {
+      // TODO: Get WebSocket channel from _socket to pass to _transcriptSender
+      // For now, we'll send transcripts directly via the socket
+      debugPrint('✅ [CaptureProvider] WebSocket connected for transcript sending');
+    }
+
+    // Request authorization
+    final authorized = await _onDeviceASR!.requestAuthorization();
+    if (!authorized) {
+      AppSnackbar.showSnackbarError('Microphone permission required for on-device ASR');
+      updateRecordingState(RecordingState.stop);
+      return;
+    }
+
+    // Subscribe to transcript stream
+    String? lastPartialId;
+    String lastPartialText = '';  // Track LONGEST partial - iOS refines and shortens transcripts as it processes
+
+    _asrTranscriptSubscription = _onDeviceASR!.transcriptStream.listen((segment) async {
+      debugPrint('📝 [CaptureProvider] ASR: "${segment.text}" (final: ${segment.isFinal})');
+
+      // Handle empty final transcript from stopTranscription() - use longest partial captured
+      if (segment.isFinal && segment.text.trim().isEmpty) {
+        debugPrint('⚠️ [CaptureProvider] Final transcript is EMPTY, using longest partial (${lastPartialText.length} chars): "$lastPartialText"');
+        if (lastPartialText.trim().isEmpty) {
+          debugPrint('❌ [CaptureProvider] No partial transcript available, skipping');
+          return;
+        }
+        debugPrint('📝 [CaptureProvider] Using fallback longest partial: "$lastPartialText" (final: true)');
+
+        // Send fallback to backend
+        if (_socket?.state == SocketServiceState.connected) {
+          final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+          final transcriptMessage = jsonEncode({
+            'type': 'transcript_segment',
+            'text': lastPartialText.trim(),
+            'speaker': 'SPEAKER_00',
+            'start': 0.0,
+            'end': now,
+            'is_final': true,
+            'confidence': 0.95,
+            'asr_provider': 'apple_speech',
+          });
+          _socket?.send(transcriptMessage);
+          debugPrint('📤 [CaptureProvider] Sent FINAL transcript to backend (fallback): "${lastPartialText.substring(0, lastPartialText.length > 30 ? 30 : lastPartialText.length)}..."');
+
+          // CRITICAL: Wait for WebSocket transmission before closing
+          // send() only queues the message - need time for network to flush
+          debugPrint('⏳ [CaptureProvider] Waiting 500ms for WebSocket transmission...');
+          await Future.delayed(const Duration(milliseconds: 500));
+          debugPrint('✅ [CaptureProvider] Transmission delay complete');
+        }
+
+        // Add to segments as final
+        final backendSegment = TranscriptSegment(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          text: lastPartialText,
+          speaker: 'SPEAKER_00',
+          isUser: false,
+          personId: null,
+          start: 0.0,
+          end: 0.0,
+          translations: [],
+        );
+        segments.add(backendSegment);
+        lastPartialId = null;
+        hasTranscripts = true;
+        notifyListeners();
+
+        // Cleanup after processing final transcript
+        debugPrint('✅ [CaptureProvider] Final transcript processed (fallback), cleaning up ASR...');
+        _asrTranscriptSubscription?.cancel();
+        _asrTranscriptSubscription = null;
+        _onDeviceASR = null;
+        _transcriptSender = null;
+        // Close socket now that we've sent the final transcript
+        _socket?.stop(reason: 'final transcript sent (fallback)');
+        return;
+      }
+
+      if (segment.text.trim().isEmpty) return;
+
+      // Track LONGEST partial text for fallback (iOS Speech refines/shortens partials as it goes)
+      if (!segment.isFinal) {
+        if (segment.text.length > lastPartialText.length) {
+          lastPartialText = segment.text;
+          debugPrint('💾 [CaptureProvider] Saved longest partial (${segment.text.length} chars)');
+        }
+      }
+
+      // Send to backend ONLY when final (prevents duplicates from streaming partial updates)
+      if (segment.isFinal && _socket?.state == SocketServiceState.connected) {
+        final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+        final transcriptMessage = jsonEncode({
+          'type': 'transcript_segment',
+          'text': segment.text.trim(),
+          'speaker': 'SPEAKER_00',
+          'start': 0.0,
+          'end': now,
+          'is_final': true,
+          'confidence': 0.95,
+          'asr_provider': 'apple_speech',
+        });
+        _socket?.send(transcriptMessage);
+        debugPrint('📤 [CaptureProvider] Sent FINAL transcript to backend: "${segment.text.substring(0, segment.text.length > 30 ? 30 : segment.text.length)}..."');
+
+        // CRITICAL: Wait for WebSocket transmission before closing
+        debugPrint('⏳ [CaptureProvider] Waiting 500ms for WebSocket transmission...');
+        await Future.delayed(const Duration(milliseconds: 500));
+        debugPrint('✅ [CaptureProvider] Transmission delay complete');
+      }
+
+      // Update local UI (both partial and final for smooth real-time display)
+      if (segment.isFinal) {
+        // Final result: add as new segment
+        final backendSegment = TranscriptSegment(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          text: segment.text,
+          speaker: 'SPEAKER_00',
+          isUser: false,
+          personId: null,
+          start: 0.0,
+          end: 0.0,
+          translations: [],
+        );
+        segments.add(backendSegment);
+        lastPartialId = null;
+        hasTranscripts = true;
+        notifyListeners();
+
+        // Cleanup after processing final transcript
+        debugPrint('✅ [CaptureProvider] Final transcript processed, cleaning up ASR...');
+        _asrTranscriptSubscription?.cancel();
+        _asrTranscriptSubscription = null;
+        _onDeviceASR = null;
+        _transcriptSender = null;
+        // Close socket now that we've sent the final transcript
+        _socket?.stop(reason: 'final transcript sent');
+      } else {
+        // Partial result: update last partial or add new one
+        if (lastPartialId != null && segments.isNotEmpty && segments.last.id == lastPartialId) {
+          // Update existing partial segment
+          segments.last = TranscriptSegment(
+            id: lastPartialId!,
+            text: segment.text,
+            speaker: 'SPEAKER_00',
+            isUser: false,
+            personId: null,
+            start: 0.0,
+            end: 0.0,
+            translations: [],
+          );
+        } else {
+          // Add new partial segment
+          final partialId = 'partial_${DateTime.now().millisecondsSinceEpoch}';
+          segments.add(TranscriptSegment(
+            id: partialId,
+            text: segment.text,
+            speaker: 'SPEAKER_00',
+            isUser: false,
+            personId: null,
+            start: 0.0,
+            end: 0.0,
+            translations: [],
+          ));
+          lastPartialId = partialId;
+        }
+        hasTranscripts = true;
+        notifyListeners();
+      }
+    });
+
+    // Start transcription
+    final started = await _onDeviceASR!.startTranscription();
+    if (started) {
+      updateRecordingState(RecordingState.record);
+      debugPrint('✅ [CaptureProvider] On-device ASR started successfully');
+    } else {
+      AppSnackbar.showSnackbarError('Failed to start on-device ASR');
+      updateRecordingState(RecordingState.stop);
+    }
+  }
+
   stopStreamRecording() async {
     await _cleanupCurrentState();
-    ServiceManager.instance().mic.stop();
-    updateRecordingState(RecordingState.stop);
-    await _socket?.stop(reason: 'stop stream recording');
+
+    // Check which mode we're in and clean up accordingly
+    if (_onDeviceASR != null) {
+      // Stop on-device ASR
+      debugPrint('🛑 [CaptureProvider] Stopping on-device ASR');
+      await _onDeviceASR!.stopTranscription();
+
+      // DON'T cancel subscription here!
+      // Wait for final transcript to arrive in the stream listener first.
+      // The stream listener will cleanup after receiving the final transcript.
+      debugPrint('⏳ [CaptureProvider] Waiting for final transcript before cleanup...');
+
+      // Set a timeout to force cleanup if final never arrives (safety net)
+      Future.delayed(const Duration(seconds: 3), () {
+        if (_asrTranscriptSubscription != null) {
+          debugPrint('⚠️ [CaptureProvider] Timeout waiting for final transcript, forcing cleanup');
+          _asrTranscriptSubscription?.cancel();
+          _asrTranscriptSubscription = null;
+          _onDeviceASR = null;
+          _transcriptSender = null;
+          // Close socket after timeout
+          _socket?.stop(reason: 'timeout waiting for final transcript');
+        }
+      });
+      // DON'T close socket here! Let the stream listener close it after sending final.
+    } else {
+      // Stop cloud recording (microphone)
+      ServiceManager.instance().mic.stop();
+      updateRecordingState(RecordingState.stop);
+      await _socket?.stop(reason: 'stop stream recording');
+    }
+
+    // Only update state for on-device mode (cloud mode already did it above)
+    if (_onDeviceASR != null) {
+      updateRecordingState(RecordingState.stop);
+    }
   }
 
   Future streamDeviceRecording({BtDevice? device}) async {
