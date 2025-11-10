@@ -824,7 +824,35 @@ class OnDeviceASRService: NSObject {
 
             // Clean up when recognition ends (isFinal) or on error
             // Note: isFinal only happens ONCE at end of recognition, not per utterance
-            if error != nil || isFinal {
+
+            // Handle errors
+            if let error = error {
+                let nsError = error as NSError
+
+                // Ignore "No speech detected" errors (code 1110) - these are non-fatal
+                // They occur during periodic restarts when there's brief silence
+                if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
+                    NSLog("⚠️ [OnDeviceASR] Ignoring non-fatal error: \(error.localizedDescription)")
+                    // Don't clean up - let recognition continue
+                    return
+                }
+
+                // For other errors, clean up
+                NSLog("❌ [OnDeviceASR] Recognition error: \(error.localizedDescription)")
+
+                if let engine = self.audioEngine, engine.isRunning {
+                    engine.stop()
+                    engine.inputNode.removeTap(onBus: 0)
+                }
+
+                self.recognitionRequest = nil
+                self.recognitionTask = nil
+                self.onError?(error)
+                return
+            }
+
+            // Clean up when recognition completes naturally (isFinal)
+            if isFinal {
                 // Safely clean up audio engine (may already be stopped by stopTranscription)
                 if let engine = self.audioEngine, engine.isRunning {
                     engine.stop()
@@ -833,11 +861,6 @@ class OnDeviceASRService: NSObject {
 
                 self.recognitionRequest = nil
                 self.recognitionTask = nil
-
-                if let error = error {
-                    NSLog("❌ [OnDeviceASR] Recognition error: \(error.localizedDescription)")
-                    self.onError?(error)
-                }
             }
         }
 
