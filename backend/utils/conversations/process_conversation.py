@@ -498,7 +498,13 @@ def process_conversation(
             print(f"Error creating audio files: {e}")
 
     conversation.status = ConversationStatus.completed
-    conversations_db.upsert_conversation(uid, conversation.dict())
+    conversation_dict = conversation.dict()
+
+    # Build transcript text from segments for iOS app display
+    transcript_text = conversation.get_transcript(False, people=people)
+    conversation_dict['transcript'] = transcript_text
+
+    conversations_db.upsert_conversation(uid, conversation_dict)
 
     if not is_reprocess:
         threading.Thread(
