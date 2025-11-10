@@ -1114,7 +1114,7 @@ async def _listen(
                                     source='edge_asr',  # Mark as edge ASR for analytics
                                     asr_provider=asr_provider  # Track which ASR framework (apple_speech, parakeet, etc.)
                                 )
-                                stream_transcript([segment.dict()])  # Convert to dict for compatibility
+                                stream_transcript([segment.dict(exclude={'speech_profile_processed'})])  # Exclude field that gets added later
                                 provider_info = f" (provider: {asr_provider})" if asr_provider else ""
                                 print(f"📱 Edge ASR segment{provider_info}: {text[:50]}...", uid, session_id)
                         elif json_data.get('type') == 'speaker_assigned':
