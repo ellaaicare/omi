@@ -1,8 +1,8 @@
 # OMI Backend - Developer Guide
 
-**Last Updated**: November 6, 2025
+**Last Updated**: November 10, 2025
 **Branch**: `feature/ios-backend-integration`
-**Status**: ✅ Ella AI integration complete + Production deployment on VPS
+**Status**: ✅ Ella AI integration + Edge ASR integration + Production deployment on VPS
 
 ---
 
@@ -251,6 +251,398 @@ acf4505 - feat(ella): replace memory extraction with Ella agent call
 5043461 - feat(ella): add realtime chunk sending to Ella scanner
 1e53a09 - docs(ella): add comprehensive Ella integration documentation
 ```
+
+---
+
+## 📱 **EDGE ASR INTEGRATION (iOS On-Device Transcription)**
+
+**Date**: November 10, 2025
+**Status**: ✅ Implementation Complete + 3 Critical Bugs Fixed
+**Architecture**: Dual-mode WebSocket (Audio + Pre-transcribed Text)
+
+### **Overview**
+
+Edge ASR enables iOS devices to perform speech-to-text locally using Apple Speech Framework, Parakeet, or other on-device ASR engines, then send pre-transcribed text to the backend instead of raw audio. This provides:
+
+- ✅ **Reduced Latency**: No audio encoding/decoding overhead
+- ✅ **Lower Bandwidth**: Send text instead of Opus frames
+- ✅ **Cost Reduction**: Avoid Deepgram API charges for on-device transcription
+- ✅ **Privacy**: PHI never leaves device for speech-to-text
+- ✅ **ASR Provider Tracking**: Test multiple ASR frameworks (Apple Speech, Parakeet, Whisper.cpp)
+- ✅ **Source Tracking**: Analytics distinguish edge_asr from cloud (Deepgram/Soniox)
+
+### **Data Flow**
+
+**Traditional Audio Flow** (Still Supported):
+```
+iOS Device → Opus Encoding → WebSocket → Backend → Deepgram API → Transcription
+                                            ↓
+                                      Firestore DB
+```
+
+**Edge ASR Flow** (New):
+```
+iOS Device → Apple Speech Framework → Pre-transcribed Text
+                                            ↓
+                                      JSON over WebSocket
+                                            ↓
+                                      Backend (source='edge_asr')
+                                            ↓
+                                      600ms processing loop
+                                            ↓
+                                      Firestore DB
+```
+
+### **WebSocket Message Protocol**
+
+iOS sends JSON messages instead of binary audio:
+
+```json
+{
+  "type": "transcript_segment",
+  "text": "Hello, how are you today?",
+  "speaker": "SPEAKER_00",
+  "start": 0.0,
+  "end": 2.5,
+  "asr_provider": "apple_speech"
+}
+```
+
+**Fields**:
+- `type` (required): Must be `"transcript_segment"`
+- `text` (required): Transcribed text from on-device ASR
+- `speaker` (optional): Speaker ID (default: "SPEAKER_00")
+- `start` (optional): Segment start time in seconds
+- `end` (optional): Segment end time in seconds
+- `asr_provider` (optional): ASR framework identifier
+  - `"apple_speech"` - Apple Speech Framework
+  - `"parakeet"` - NEXA Parakeet
+  - `"whisper"` - Whisper.cpp
+  - Or any other identifier for testing
+
+### **Backend Implementation**
+
+#### **Key Files Modified**
+
+**1. `routers/transcribe.py` (Lines 1100-1119)** - Edge ASR Handler
+
+```python
+elif json_data.get('type') == 'transcript_segment':
+    # ====== EDGE ASR INTEGRATION ======
+    # Handle pre-transcribed text from iOS on-device ASR
+    text = json_data.get('text', '').strip()
+    if text:
+        asr_provider = json_data.get('asr_provider')  # Optional: apple_speech, parakeet, etc.
+        segment = TranscriptSegment(
+            text=text,
+            speaker=json_data.get('speaker', 'SPEAKER_00'),
+            speaker_id=0,
+            is_user=False,
+            start=json_data.get('start', 0),
+            end=json_data.get('end', 0),
+            person_id=None,
+            source='edge_asr',  # Mark as edge ASR for analytics
+            asr_provider=asr_provider  # Track which ASR framework
+        )
+        stream_transcript([segment.dict(exclude={'speech_profile_processed'})])
+        provider_info = f" (provider: {asr_provider})" if asr_provider else ""
+        print(f"📱 Edge ASR segment{provider_info}: {text[:50]}...", uid, session_id)
+```
+
+**2. `utils/conversations/process_conversation.py` (Lines 503-505)** - Transcript Field Fix
+
+```python
+# Build transcript text from segments for iOS app display
+transcript_text = conversation.get_transcript(False, people=people)
+conversation_dict['transcript'] = transcript_text
+```
+
+**3. `models/transcript_segment.py` (Lines 12-27)** - Source/Provider Tracking
+
+```python
+class TranscriptSegment(BaseModel):
+    text: str
+    speaker: Optional[str] = 'SPEAKER_00'
+    speaker_id: Optional[int] = None
+    is_user: bool
+    start: float
+    end: float
+    source: Optional[str] = None  # "deepgram", "edge_asr", "soniox"
+    asr_provider: Optional[str] = None  # "apple_speech", "parakeet", "whisper"
+    # ... other fields ...
+```
+
+### **Three Critical Bugs Fixed**
+
+#### **Bug #1: "TranscriptSegment object is not subscriptable"**
+
+**Symptom**: WebSocket closing with 1001 code immediately after receiving edge ASR segments
+
+**Error Log**:
+```
+📱 Edge ASR segment (provider: apple_speech): To attend the...
+Error during WebSocket operation: 'TranscriptSegment' object is not subscriptable
+Connection Closed
+```
+
+**Root Cause**:
+- Created Pydantic `TranscriptSegment` object (line 1106)
+- Passed directly to `stream_transcript([segment])`
+- Downstream code at lines 880, 884-891 expected dict format
+- Tried to access `segment["start"]` on Pydantic object → TypeError
+
+**Fix**: Convert to dict before buffering
+```python
+# Before (BROKEN):
+stream_transcript([segment])
+
+# After (FIXED):
+stream_transcript([segment.dict()])
+```
+
+**Git Commit**: `e62c323bb` - "fix(edge-asr): convert TranscriptSegment to dict to prevent 'not subscriptable' error"
+
+---
+
+#### **Bug #2: "Multiple values for keyword argument 'speech_profile_processed'"**
+
+**Symptom**: After fixing Bug #1, new error appeared
+
+**Error Log**:
+```
+📱 Edge ASR segment (provider: apple_speech): Great national...
+Error during WebSocket operation: TranscriptSegment() got multiple values for keyword argument 'speech_profile_processed'
+```
+
+**Root Cause**:
+- Used `segment.dict()` which included ALL fields including `speech_profile_processed=True`
+- Line 894: `TranscriptSegment(**dict, speech_profile_processed=speech_profile_processed)`
+- Passed `speech_profile_processed` twice (once from dict, once explicitly)
+
+**Fix**: Exclude field from dict conversion
+```python
+# Before (BROKEN):
+stream_transcript([segment.dict()])
+
+# After (FIXED):
+stream_transcript([segment.dict(exclude={'speech_profile_processed'})])
+```
+
+**Git Commit**: `c2a845665` - "fix(edge-asr): exclude speech_profile_processed from dict to prevent duplicate keyword error"
+
+---
+
+#### **Bug #3: Empty Transcript Field in Firestore**
+
+**Symptom**: Conversations completing successfully but transcript field empty in iOS app
+
+**Firestore Data**:
+```
+Conversation ID: 2001081e-eb71-442b-81f3-734adc8eadfd
+Status: completed
+Transcript: None  ❌
+Segments: [{"text": "...", ...}] ✅
+```
+
+**Root Cause**:
+- Line 108 in `process_conversation.py` builds `transcript_text` for LLM
+- Used for generating structured summary
+- Never assigned back to conversation object before saving
+- iOS app displays `transcript` field, not raw segments → empty conversations
+
+**Fix**: Populate transcript field before saving
+```python
+# Before (BROKEN):
+conversation.status = ConversationStatus.completed
+conversations_db.upsert_conversation(uid, conversation.dict())
+
+# After (FIXED):
+conversation.status = ConversationStatus.completed
+conversation_dict = conversation.dict()
+
+# Build transcript text from segments for iOS app display
+transcript_text = conversation.get_transcript(False, people=people)
+conversation_dict['transcript'] = transcript_text
+
+conversations_db.upsert_conversation(uid, conversation_dict)
+```
+
+**Git Commit**: `e8c197368` - "fix(edge-asr): populate transcript field from segments during conversation processing"
+
+---
+
+### **Backend Protocol & Conversation Lifecycle**
+
+**Questions from iOS Team (Answered)**:
+
+**Q1: How does finalization work?**
+- Backend uses **WebSocket close** as primary finalization trigger
+- Also has **120-second timeout** if WebSocket stays open but idle
+- iOS should send `isFinal` segments only, then close WebSocket when done
+- No need for explicit "finalize" message
+
+**Q2: When does segment accumulation happen?**
+- **600ms processing loop** (see `routers/transcribe.py` line 858-869)
+- Backend buffers incoming segments in `realtime_segment_buffers`
+- Every 600ms, processes buffered segments and adds to conversation
+- Segments accumulate until finalization (WebSocket close or timeout)
+
+**Q3: Should iOS send partial or final segments?**
+- **Send only `isFinal` segments** (recommended)
+- Deepgram sends complete utterances, not partial updates
+- Sending all partial updates causes duplicate text in UI
+- Example issue: "Do you" → "Do you have" → "Do you have a" creates 3 segments
+
+**Q4: How does Deepgram behave?**
+- Deepgram sends streaming partial results during processing
+- Backend accumulates these but only keeps final results
+- Final utterances are complete, non-overlapping segments
+- iOS should mimic this: send complete utterances only
+
+### **Source & Provider Tracking**
+
+**Source Field** (`source`):
+- `"deepgram"` - Cloud transcription via Deepgram API
+- `"edge_asr"` - iOS on-device transcription
+- `"soniox"` - Alternative cloud provider
+- Used for backend analytics and debugging
+
+**ASR Provider Field** (`asr_provider`):
+- `"apple_speech"` - Apple Speech Framework
+- `"parakeet"` - NEXA Parakeet model
+- `"whisper"` - Whisper.cpp
+- Used for iOS A/B testing different ASR frameworks
+- Backend logs: `📱 Edge ASR segment (provider: apple_speech): text...`
+
+### **Testing Edge ASR Integration**
+
+**Test Script** (`scripts/quick_dump_transcripts.py`):
+```bash
+# Quick check recent conversations with source tracking
+python scripts/quick_dump_transcripts.py <uid> [limit]
+
+# Example:
+python scripts/quick_dump_transcripts.py 5aGC5YE9BnhcSoTxxtT4ar6ILQy2 5
+```
+
+**Output Shows**:
+```
+CONVERSATION 1
+ID: 2001081e-eb71-442b-81f3-734adc8eadfd
+Created: 2025-11-10 07:14:32
+Status: completed
+Source: edge_asr
+Segments: 1
+Segment sources: {'edge_asr'}
+ASR providers: {'apple_speech'}
+
+First segment:
+  Text: Hello, this is a test from Apple Speech Framework...
+  Speaker: SPEAKER_00
+  Source: edge_asr
+  ASR Provider: apple_speech
+```
+
+**Verification Checklist**:
+1. ✅ Conversation created with status='completed'
+2. ✅ Transcript field populated (not empty)
+3. ✅ Structured summary generated (title, overview, emoji)
+4. ✅ Source field = 'edge_asr'
+5. ✅ ASR provider field = 'apple_speech' (or other provider)
+6. ✅ Segments have text content
+7. ✅ iOS app displays conversation correctly
+
+### **Backend Logs to Monitor**
+
+```bash
+# Watch edge ASR activity
+journalctl -u omi-backend -f | grep "📱 Edge ASR"
+
+# Example output:
+📱 Edge ASR segment (provider: apple_speech): Hello, this is a test...
+📱 Edge ASR segment (provider: parakeet): User mentioned medication...
+📱 Edge ASR segment: Generic segment without provider tracking...
+```
+
+### **iOS Team Guidance**
+
+**Best Practices**:
+1. **Send only `isFinal` segments** to avoid duplicate text
+2. **Close WebSocket** when conversation ends (don't rely on timeout)
+3. **Include `asr_provider`** for A/B testing tracking
+4. **Test thoroughly** with different ASR frameworks
+5. **Handle WebSocket errors** gracefully (1001 close codes were bugs, now fixed)
+
+**Testing Multiple ASR Frameworks**:
+```swift
+// Example: Switch between providers
+let provider = userSelectedASR // "apple_speech", "parakeet", "whisper"
+
+let message = [
+    "type": "transcript_segment",
+    "text": finalTranscript,
+    "asr_provider": provider
+]
+
+webSocket.send(JSONEncoder().encode(message))
+```
+
+### **Known Issues & Solutions**
+
+**Issue: Duplicate Text in UI**
+- **Cause**: iOS sending all partial updates (49+ segments in 1 second)
+- **Backend Behavior**: Working as designed, accumulates all segments
+- **Solution**: iOS sends only `isFinal` segments
+
+**Issue: Empty Conversations in App**
+- **Cause**: Transcript field not populated (Bug #3)
+- **Status**: ✅ Fixed in commit `e8c197368`
+
+**Issue: WebSocket Closing with 1001**
+- **Cause**: Pydantic object vs dict mismatch (Bug #1 and #2)
+- **Status**: ✅ Fixed in commits `e62c323bb` and `c2a845665`
+
+### **Analytics & Monitoring**
+
+**Firestore Queries**:
+```python
+# Get all edge ASR conversations
+conversations = db.collection('users').document(uid) \
+    .collection('conversations') \
+    .where('source', '==', 'edge_asr') \
+    .order_by('created_at', direction=firestore.Query.DESCENDING) \
+    .limit(10).stream()
+
+# Compare providers (requires client-side filtering of segments)
+# Backend stores asr_provider in segment-level, not conversation-level
+```
+
+**Backend Metrics**:
+- Track edge_asr vs deepgram usage per user
+- Monitor ASR provider distribution (apple_speech, parakeet, etc.)
+- Compare conversation completion rates
+- Analyze transcript length by source
+
+### **Git Commits (Edge ASR)**
+
+```
+e8c197368 - fix(edge-asr): populate transcript field from segments during conversation processing
+c2a845665 - fix(edge-asr): exclude speech_profile_processed from dict to prevent duplicate keyword error
+e62c323bb - fix(edge-asr): convert TranscriptSegment to dict to prevent 'not subscriptable' error
+015bd2f0a - feat(edge-asr): add ASR provider tracking and transcript dump tools
+e88e7ea88 - docs(edge-asr): add iOS quick start guide
+404519ba6 - feat(edge-asr): add source tracking and testing guide
+4a38129f0 - test(edge-asr): add comprehensive test suite for edge ASR integration
+f410475d6 - feat(transcribe): add edge ASR support for iOS on-device transcription
+```
+
+### **Future Enhancements**
+
+1. **Multi-Speaker Support**: Parse speaker IDs from iOS
+2. **Timestamp Validation**: Verify start/end times are sequential
+3. **Quality Metrics**: Track accuracy by ASR provider
+4. **Fallback Logic**: Auto-switch to Deepgram if edge ASR fails
+5. **Compression**: Compress transcript segments before Firestore storage
 
 ---
 
@@ -971,9 +1363,9 @@ The test script shows detailed progress - modify it to add more debugging output
 
 ---
 
-**Last Updated**: October 28, 2025
+**Last Updated**: November 10, 2025
 **Maintained By**: Development Team
-**Status**: ✅ Production-ready backend infrastructure, ready for Letta integration and deployment
+**Status**: ✅ Production-ready backend infrastructure with Edge ASR + Ella AI integration
 
 ---
 
