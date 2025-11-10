@@ -52,6 +52,7 @@ class CaptureProvider extends ChangeNotifier
   StreamSubscription? _asrTranscriptSubscription;
   Timer? _asrSegmentationTimer;  // Periodic timer to force segment finalization (matches Deepgram's utterance behavior)
   String _longestPartialText = '';  // Track longest partial for fallback (iOS empty-final bug)
+  DateTime? _lastSegmentSentTime;  // Track last segment send time (for 120s timeout detection)
 
   // Method channel for system audio permissions
   static late MethodChannel _screenCaptureChannel;
@@ -674,7 +675,7 @@ class CaptureProvider extends ChangeNotifier
   // On-device recording: Use Apple Speech, send text transcripts to WebSocket
   Future<void> _streamRecordingOnDevice() async {
     debugPrint('🎙️ [CaptureProvider] Starting on-device ASR (Apple Speech)');
-    debugPrint('🔖 [VERSION] ASR Code v4.2 - Periodic segmentation with manual segment sending (iOS doesn\'t send isFinal on periodic stops)');
+    debugPrint('🔖 [VERSION] ASR Code v4.3 - Silence detection + keep-alive (matches audio chunk behavior)');
 
     // Initialize on-device ASR service
     _onDeviceASR = asr.OnDeviceASRService();
@@ -703,6 +704,7 @@ class CaptureProvider extends ChangeNotifier
     // Subscribe to transcript stream
     String? lastPartialId;
     _longestPartialText = '';  // Reset longest partial at start of recording
+    _lastSegmentSentTime = DateTime.now();  // Initialize segment timing
 
     _asrTranscriptSubscription = _onDeviceASR!.transcriptStream.listen((segment) async {
       debugPrint('📝 [CaptureProvider] ASR: "${segment.text}" (final: ${segment.isFinal})');
@@ -715,7 +717,7 @@ class CaptureProvider extends ChangeNotifier
         }
       }
 
-      // Handle FINAL segments
+      // Handle FINAL segments (rare - iOS usually doesn't send isFinal during periodic stops)
       if (segment.isFinal) {
         String finalText = segment.text.trim();
 
@@ -725,8 +727,11 @@ class CaptureProvider extends ChangeNotifier
           debugPrint('⚠️ [CaptureProvider] iOS returned empty final - using longest partial fallback (${finalText.length} chars)');
         }
 
-        // Send to backend if we have text
-        if (finalText.isNotEmpty && _socket?.state == SocketServiceState.connected) {
+        // Check minimum word count before sending (matches audio chunk behavior)
+        final wordCount = _countWords(finalText);
+        const minWordCount = 3;
+
+        if (finalText.isNotEmpty && wordCount >= minWordCount && _socket?.state == SocketServiceState.connected) {
           final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
           final transcriptMessage = jsonEncode({
             'type': 'transcript_segment',
@@ -739,7 +744,8 @@ class CaptureProvider extends ChangeNotifier
             'asr_provider': 'apple_speech',
           });
           _socket?.send(transcriptMessage);
-          debugPrint('📤 [CaptureProvider] Sent segment to backend: "${finalText.substring(0, finalText.length > 30 ? 30 : finalText.length)}..." (${finalText.length} chars)');
+          _lastSegmentSentTime = DateTime.now();
+          debugPrint('📤 [CaptureProvider] Sent segment to backend: "${finalText.substring(0, finalText.length > 30 ? 30 : finalText.length)}..." ($wordCount words, ${finalText.length} chars)');
 
           // Reset longest partial after successful send
           _longestPartialText = '';
@@ -748,6 +754,8 @@ class CaptureProvider extends ChangeNotifier
           // Socket closes when user manually stops recording (in stopStreamRecording).
         } else if (finalText.isEmpty) {
           debugPrint('⚠️ [CaptureProvider] Skipping empty final segment (no fallback available)');
+        } else {
+          debugPrint('⏭️ [CaptureProvider] Skipping final segment (only $wordCount words, need $minWordCount minimum)');
         }
 
         // Update local UI
@@ -818,10 +826,17 @@ class CaptureProvider extends ChangeNotifier
     }
   }
 
+  // Helper: Count words in text (simple whitespace split)
+  int _countWords(String text) {
+    return text.trim().split(RegExp(r'\s+')).where((word) => word.isNotEmpty).length;
+  }
+
   // Periodic segmentation: Force Apple Speech to finalize every 30s (matches Deepgram's utterance behavior)
   void _startPeriodicSegmentation() {
     const segmentInterval = Duration(seconds: 30);
-    debugPrint('🔄 [CaptureProvider] Starting periodic segmentation (every ${segmentInterval.inSeconds}s)');
+    const minWordCount = 3;  // Minimum words to send segment (matches backend best practice)
+
+    debugPrint('🔄 [CaptureProvider] Starting periodic segmentation (every ${segmentInterval.inSeconds}s, min $minWordCount words)');
 
     _asrSegmentationTimer = Timer.periodic(segmentInterval, (timer) async {
       debugPrint('⏰ [CaptureProvider] Periodic segmentation trigger - forcing finalization');
@@ -833,12 +848,16 @@ class CaptureProvider extends ChangeNotifier
         // Wait briefly for any final transcript (but iOS often doesn't send isFinal during periodic stops)
         await Future.delayed(const Duration(milliseconds: 500));
 
-        // iOS often doesn't send isFinal:true during periodic stops, so manually send longest partial
-        if (_longestPartialText.trim().isNotEmpty) {
+        // Check if we have meaningful speech (minimum word count)
+        final trimmedText = _longestPartialText.trim();
+        final wordCount = _countWords(trimmedText);
+
+        if (trimmedText.isNotEmpty && wordCount >= minWordCount) {
+          // Sufficient speech - send segment to backend
           final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
           final transcriptMessage = jsonEncode({
             'type': 'transcript_segment',
-            'text': _longestPartialText.trim(),
+            'text': trimmedText,
             'speaker': 'SPEAKER_00',
             'start': 0.0,
             'end': now,
@@ -847,12 +866,25 @@ class CaptureProvider extends ChangeNotifier
             'asr_provider': 'apple_speech',
           });
           _socket?.send(transcriptMessage);
-          debugPrint('📤 [CaptureProvider] Sent periodic segment to backend: "${_longestPartialText.substring(0, _longestPartialText.length > 30 ? 30 : _longestPartialText.length)}..." (${_longestPartialText.length} chars)');
+          _lastSegmentSentTime = DateTime.now();
+
+          debugPrint('📤 [CaptureProvider] Sent periodic segment to backend: "${trimmedText.substring(0, trimmedText.length > 30 ? 30 : trimmedText.length)}..." ($wordCount words, ${trimmedText.length} chars)');
 
           // Reset longest partial after sending
           _longestPartialText = '';
         } else {
-          debugPrint('⚠️ [CaptureProvider] No partial text to send during periodic segmentation');
+          // Insufficient speech - send keep-alive ping to prevent 30s WebSocket disconnect
+          // This allows backend's 120s conversation timeout to trigger naturally (like audio chunks)
+          debugPrint('⏭️ [CaptureProvider] Skipping segment (only $wordCount words) - sending keep-alive ping');
+
+          // Send ping message to keep WebSocket alive
+          final pingMessage = jsonEncode({
+            'type': 'ping',
+            'timestamp': DateTime.now().millisecondsSinceEpoch / 1000.0,
+          });
+          _socket?.send(pingMessage);
+
+          // Don't reset _longestPartialText - keep accumulating for next check
         }
 
         // Immediately restart recognition for next segment
@@ -886,11 +918,15 @@ class CaptureProvider extends ChangeNotifier
       await Future.delayed(const Duration(milliseconds: 1000));
 
       // iOS often doesn't send isFinal:true on manual stop either, so manually send longest partial if we have it
-      if (_longestPartialText.trim().isNotEmpty && _socket?.state == SocketServiceState.connected) {
+      final trimmedText = _longestPartialText.trim();
+      final wordCount = _countWords(trimmedText);
+      const minWordCount = 3;
+
+      if (trimmedText.isNotEmpty && wordCount >= minWordCount && _socket?.state == SocketServiceState.connected) {
         final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
         final transcriptMessage = jsonEncode({
           'type': 'transcript_segment',
-          'text': _longestPartialText.trim(),
+          'text': trimmedText,
           'speaker': 'SPEAKER_00',
           'start': 0.0,
           'end': now,
@@ -899,8 +935,11 @@ class CaptureProvider extends ChangeNotifier
           'asr_provider': 'apple_speech',
         });
         _socket?.send(transcriptMessage);
-        debugPrint('📤 [CaptureProvider] Sent final segment to backend: "${_longestPartialText.substring(0, _longestPartialText.length > 30 ? 30 : _longestPartialText.length)}..." (${_longestPartialText.length} chars)');
+        _lastSegmentSentTime = DateTime.now();
+        debugPrint('📤 [CaptureProvider] Sent final segment to backend: "${trimmedText.substring(0, trimmedText.length > 30 ? 30 : trimmedText.length)}..." ($wordCount words, ${trimmedText.length} chars)');
         _longestPartialText = '';  // Clear after sending
+      } else if (trimmedText.isNotEmpty) {
+        debugPrint('⏭️ [CaptureProvider] Skipping final segment (only $wordCount words, need $minWordCount minimum)');
       }
 
       // Now close WebSocket → triggers backend to create summary from all accumulated segments
