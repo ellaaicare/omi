@@ -902,8 +902,10 @@ class CaptureProvider extends ChangeNotifier
   stopStreamRecording() async {
     await _cleanupCurrentState();
 
-    // Check which mode we're in and clean up accordingly
-    if (_onDeviceASR != null) {
+    // Check which mode we're in BEFORE we start cleanup (important: check before setting to null)
+    final bool wasOnDeviceMode = _onDeviceASR != null;
+
+    if (wasOnDeviceMode) {
       // Stop periodic segmentation timer
       _asrSegmentationTimer?.cancel();
       _asrSegmentationTimer = null;
@@ -951,17 +953,17 @@ class CaptureProvider extends ChangeNotifier
       _asrTranscriptSubscription = null;
       _onDeviceASR = null;
       _transcriptSender = null;
+      _lastSegmentSentTime = null;
+      _longestPartialText = '';
       debugPrint('✅ [CaptureProvider] On-device ASR cleanup complete');
+
+      // Update state for on-device mode
+      updateRecordingState(RecordingState.stop);
     } else {
       // Stop cloud recording (microphone)
       ServiceManager.instance().mic.stop();
       updateRecordingState(RecordingState.stop);
       await _socket?.stop(reason: 'stop stream recording');
-    }
-
-    // Only update state for on-device mode (cloud mode already did it above)
-    if (_onDeviceASR != null) {
-      updateRecordingState(RecordingState.stop);
     }
   }
 
