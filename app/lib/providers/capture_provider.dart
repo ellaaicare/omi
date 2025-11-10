@@ -673,7 +673,7 @@ class CaptureProvider extends ChangeNotifier
   // On-device recording: Use Apple Speech, send text transcripts to WebSocket
   Future<void> _streamRecordingOnDevice() async {
     debugPrint('🎙️ [CaptureProvider] Starting on-device ASR (Apple Speech)');
-    debugPrint('🔖 [VERSION] ASR Code v4.0 - Periodic segmentation (matches Deepgram utterance behavior)');
+    debugPrint('🔖 [VERSION] ASR Code v4.1 - Periodic segmentation + longest-partial fallback (prevents iOS empty-final data loss)');
 
     // Initialize on-device ASR service
     _onDeviceASR = asr.OnDeviceASRService();
@@ -701,52 +701,76 @@ class CaptureProvider extends ChangeNotifier
 
     // Subscribe to transcript stream
     String? lastPartialId;
+    String longestPartialText = '';  // Track longest partial as fallback for iOS empty-final bug
 
     _asrTranscriptSubscription = _onDeviceASR!.transcriptStream.listen((segment) async {
       debugPrint('📝 [CaptureProvider] ASR: "${segment.text}" (final: ${segment.isFinal})');
 
-      if (segment.text.trim().isEmpty) return;
-
-      // Send FINAL segments to backend (matches Deepgram's utterance behavior)
-      if (segment.isFinal && _socket?.state == SocketServiceState.connected) {
-        final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
-        final transcriptMessage = jsonEncode({
-          'type': 'transcript_segment',
-          'text': segment.text.trim(),
-          'speaker': 'SPEAKER_00',
-          'start': 0.0,
-          'end': now,
-          'is_final': true,
-          'confidence': 0.95,
-          'asr_provider': 'apple_speech',
-        });
-        _socket?.send(transcriptMessage);
-        debugPrint('📤 [CaptureProvider] Sent segment to backend: "${segment.text.substring(0, segment.text.length > 30 ? 30 : segment.text.length)}..." (${segment.text.length} chars)');
-
-        // NOTE: Don't close socket here! Backend accumulates all segments until socket closes.
-        // Socket closes when user manually stops recording (in stopStreamRecording).
+      // Track longest partial for fallback (iOS sometimes returns empty final even with valid partials)
+      if (!segment.isFinal && segment.text.trim().isNotEmpty) {
+        if (segment.text.length > longestPartialText.length) {
+          longestPartialText = segment.text;
+          debugPrint('📊 [CaptureProvider] Updated longest partial: ${longestPartialText.length} chars');
+        }
       }
 
-      // Update local UI (both partial and final for smooth real-time display)
+      // Handle FINAL segments
       if (segment.isFinal) {
-        // Final result: add as new segment
-        final backendSegment = TranscriptSegment(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          text: segment.text,
-          speaker: 'SPEAKER_00',
-          isUser: false,
-          personId: null,
-          start: 0.0,
-          end: 0.0,
-          translations: [],
-        );
-        segments.add(backendSegment);
-        lastPartialId = null;
-        hasTranscripts = true;
-        notifyListeners();
-        debugPrint('✅ [CaptureProvider] Added final segment to UI (total segments: ${segments.length})');
+        String finalText = segment.text.trim();
+
+        // iOS bug workaround: If final is empty but we have a longest partial, use it
+        if (finalText.isEmpty && longestPartialText.trim().isNotEmpty) {
+          finalText = longestPartialText.trim();
+          debugPrint('⚠️ [CaptureProvider] iOS returned empty final - using longest partial fallback (${finalText.length} chars)');
+        }
+
+        // Send to backend if we have text
+        if (finalText.isNotEmpty && _socket?.state == SocketServiceState.connected) {
+          final now = DateTime.now().millisecondsSinceEpoch / 1000.0;
+          final transcriptMessage = jsonEncode({
+            'type': 'transcript_segment',
+            'text': finalText,
+            'speaker': 'SPEAKER_00',
+            'start': 0.0,
+            'end': now,
+            'is_final': true,
+            'confidence': 0.95,
+            'asr_provider': 'apple_speech',
+          });
+          _socket?.send(transcriptMessage);
+          debugPrint('📤 [CaptureProvider] Sent segment to backend: "${finalText.substring(0, finalText.length > 30 ? 30 : finalText.length)}..." (${finalText.length} chars)');
+
+          // Reset longest partial after successful send
+          longestPartialText = '';
+
+          // NOTE: Don't close socket here! Backend accumulates all segments until socket closes.
+          // Socket closes when user manually stops recording (in stopStreamRecording).
+        } else if (finalText.isEmpty) {
+          debugPrint('⚠️ [CaptureProvider] Skipping empty final segment (no fallback available)');
+        }
+
+        // Update local UI
+        if (finalText.isNotEmpty) {
+          final backendSegment = TranscriptSegment(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            text: finalText,
+            speaker: 'SPEAKER_00',
+            isUser: false,
+            personId: null,
+            start: 0.0,
+            end: 0.0,
+            translations: [],
+          );
+          segments.add(backendSegment);
+          lastPartialId = null;
+          hasTranscripts = true;
+          notifyListeners();
+          debugPrint('✅ [CaptureProvider] Added final segment to UI (total segments: ${segments.length})');
+        }
       } else {
         // Partial result: update last partial or add new one
+        if (segment.text.trim().isEmpty) return;
+
         if (lastPartialId != null && segments.isNotEmpty && segments.last.id == lastPartialId) {
           // Update existing partial segment
           segments.last = TranscriptSegment(
