@@ -26,6 +26,68 @@
 
 ---
 
+## 📊 **CURRENT STATUS & LATEST WORK**
+
+**Last Session**: November 10, 2025
+**Latest Commit**: `714968cfc` - docs(edge-asr): add comprehensive Edge ASR integration documentation
+
+### **Edge ASR Integration - COMPLETE ✅**
+
+Successfully implemented and debugged iOS on-device transcription support with three critical bug fixes:
+
+1. **Bug #1** (Fixed: `e62c323bb`): "TranscriptSegment not subscriptable"
+   - Root cause: Pydantic object passed where dict expected
+   - Impact: WebSocket closing with 1001 code
+   - Fix: Convert to dict before buffering
+
+2. **Bug #2** (Fixed: `c2a845665`): "Multiple values for keyword argument"
+   - Root cause: Duplicate `speech_profile_processed` field
+   - Impact: Continued crashes after first fix
+   - Fix: Exclude field from dict conversion
+
+3. **Bug #3** (Fixed: `e8c197368`): Empty transcript field in Firestore
+   - Root cause: Transcript built for LLM but not saved
+   - Impact: iOS app showing empty conversations
+   - Fix: Populate transcript field before saving
+
+**Documentation**: Added 396-line Edge ASR section to CLAUDE.md with protocol specs, bug analysis, testing procedures, and iOS team guidance.
+
+### **Latest Production Test (Nov 10, 01:48 UTC)**
+
+**Device**: iOS (uid: 5aGC5YE9BnhcSoTxxtT4ar6ILQy2)
+**Duration**: 71.85 seconds
+**Codec**: PCM16 @ 16kHz
+**STT**: Deepgram Nova-3
+
+**Results**:
+- ✅ WebSocket connection stable
+- ✅ 3 conversations processed and finalized
+- ✅ Transcripts populated correctly
+- ✅ Memories extracted (8 total)
+- ✅ Structured summaries generated
+
+### **Ella AI Integration Status**
+
+**Configuration**: ✅ Implemented (Option B - Synchronous)
+**Current Status**: ⚠️ Failing with JSON parse errors
+**Fallback**: ✅ Working (Local LLM generating summaries)
+
+**Issue**: n8n webhooks returning empty/non-JSON response
+- Error: `Expecting value: line 1 column 1 (char 0)`
+- Endpoints: `https://n8n.ella-ai-care.com/webhook/summary-agent` and `/memory-agent`
+- Impact: Minimal (fallback to local LLM working correctly)
+
+**Summary Generation Currently Using**: Local LLM (OpenAI/Anthropic via LangChain)
+
+### **Next Actions**
+
+1. Investigate Ella webhook configuration (n8n side)
+2. Test Ella endpoints manually to diagnose JSON error
+3. Continue supporting iOS team with Edge ASR testing
+4. Monitor production logs for any new issues
+
+---
+
 ## 📞 **COMMUNICATING WITH THE PM AGENT**
 
 ### **PM Agent Information**
