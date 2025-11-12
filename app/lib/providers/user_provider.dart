@@ -1,6 +1,5 @@
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:omi/backend/http/api/privacy.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/schema/geolocation.dart';

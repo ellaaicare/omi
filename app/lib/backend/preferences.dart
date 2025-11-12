@@ -120,6 +120,14 @@ class SharedPreferencesUtil {
 
   bool get autoCreateSpeakersEnabled => getBool('autoCreateSpeakersEnabled') ?? true;
 
+  set onDeviceASREnabled(bool value) => saveBool('onDeviceASREnabled', value);
+
+  bool get onDeviceASREnabled => getBool('onDeviceASREnabled') ?? false;
+
+  set asrMode(String value) => saveString('asrMode', value);
+
+  String get asrMode => getString('asrMode') ?? 'cloud';
+
   // Custom API Base URL
   String get customApiBaseUrl => getString('customApiBaseUrl') ?? '';
 

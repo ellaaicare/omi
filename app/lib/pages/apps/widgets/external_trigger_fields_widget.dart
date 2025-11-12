@@ -167,7 +167,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                         margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                         padding: const EdgeInsets.symmetric(horizontal: 2.0, vertical: 10.0),
                         decoration: BoxDecoration(
-                          color: Color(0xFF35343B),
+                          color: const Color(0xFF35343B),
                           borderRadius: BorderRadius.circular(10.0),
                         ),
                         width: double.infinity,
@@ -210,7 +210,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                         margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                         decoration: BoxDecoration(
-                          color: Color(0xFF35343B),
+                          color: const Color(0xFF35343B),
                           borderRadius: BorderRadius.circular(10.0),
                         ),
                         width: double.infinity,
@@ -283,7 +283,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                       margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 0, bottom: 6),
                       decoration: BoxDecoration(
-                        color: Color(0xFF35343B),
+                        color: const Color(0xFF35343B),
                         borderRadius: BorderRadius.circular(10.0),
                       ),
                       width: double.infinity,
@@ -330,7 +330,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                           margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                           decoration: BoxDecoration(
-                            color: Color(0xFF35343B),
+                            color: const Color(0xFF35343B),
                             borderRadius: BorderRadius.circular(10.0),
                           ),
                           width: double.infinity,
@@ -370,7 +370,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                           margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                           decoration: BoxDecoration(
-                            color: Color(0xFF35343B),
+                            color: const Color(0xFF35343B),
                             borderRadius: BorderRadius.circular(10.0),
                           ),
                           width: double.infinity,
@@ -395,7 +395,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                           margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                           decoration: BoxDecoration(
-                            color: Color(0xFF35343B),
+                            color: const Color(0xFF35343B),
                             borderRadius: BorderRadius.circular(10.0),
                           ),
                           width: double.infinity,

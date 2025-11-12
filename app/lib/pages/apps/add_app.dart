@@ -172,7 +172,7 @@ class _AddAppPageState extends State<AddAppPage> {
                                             height: height,
                                             margin: const EdgeInsets.only(right: 8),
                                             decoration: BoxDecoration(
-                                              color: Color(0xFF35343B),
+                                              color: const Color(0xFF35343B),
                                               borderRadius: BorderRadius.circular(8),
                                             ),
                                             child: provider.isUploadingThumbnail
@@ -496,9 +496,9 @@ class _AddAppPageState extends State<AddAppPage> {
                                           context: context,
                                           builder: (ctx) => Container(
                                             padding: const EdgeInsets.all(20),
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFF1F1F25),
-                                              borderRadius: const BorderRadius.vertical(
+                                            decoration: const BoxDecoration(
+                                              color: Color(0xFF1F1F25),
+                                              borderRadius: BorderRadius.vertical(
                                                 top: Radius.circular(20),
                                               ),
                                             ),

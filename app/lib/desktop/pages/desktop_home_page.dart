@@ -137,7 +137,7 @@ class _DesktopHomePageState extends State<DesktopHomePage> with WidgetsBindingOb
   late Animation<double> _sidebarSlideAnimation;
   final GlobalKey _profileCardKey = GlobalKey();
 
-  bool _isRecordingMinimized = false;
+  final bool _isRecordingMinimized = false;
 
   void _initiateApps() {
     context.read<AppProvider>().getApps();

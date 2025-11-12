@@ -37,7 +37,7 @@ class ActionFieldsWidget extends StatelessWidget {
                       return Container(
                         margin: const EdgeInsets.only(bottom: 8.0),
                         decoration: BoxDecoration(
-                          color: Color(0xFF35343B),
+                          color: const Color(0xFF35343B),
                           borderRadius: BorderRadius.circular(8.0),
                         ),
                         child: Column(
@@ -137,7 +137,7 @@ class ActionFieldsWidget extends StatelessWidget {
                           ],
                         ),
                       );
-                    }).toList(),
+                    }),
 
                     // Add button for future actions
                     if (provider.getActionTypes().length > 1)

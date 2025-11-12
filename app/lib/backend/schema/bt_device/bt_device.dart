@@ -432,7 +432,7 @@ class BtDevice {
 
   // Check if a scan result is from a supported device
   static bool isSupportedDevice(ScanResult result) {
-    debugPrint("${result.device.name}");
+    debugPrint(result.device.name);
     return isXorDevice(result) || isOmiDevice(result) || isFrameDevice(result);
   }
 

@@ -39,7 +39,6 @@ class McpApiKeyCreatedDialog extends StatelessWidget {
           },
         ),
         ElevatedButton(
-          child: const Text('Copy'),
           style: ElevatedButton.styleFrom(
             foregroundColor: Colors.white,
             backgroundColor: Theme.of(context).colorScheme.secondary,
@@ -48,6 +47,7 @@ class McpApiKeyCreatedDialog extends StatelessWidget {
             Clipboard.setData(ClipboardData(text: apiKey.key));
             AppSnackbar.showSnackbar('Key copied to clipboard.');
           },
+          child: const Text('Copy'),
         ),
       ],
     );

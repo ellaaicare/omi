@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-BACKEND_WS_URL = "ws://localhost:8000/v4/listen"
+BACKEND_WS_URL = os.getenv('BACKEND_WS_URL', "ws://localhost:8000/v4/listen")
 SAMPLE_RATE = 16000  # OMI device uses 16kHz
 FRAME_SIZE = 320  # Opus frame size (20ms at 16kHz)
 CHANNELS = 1

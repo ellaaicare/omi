@@ -6,7 +6,6 @@ import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
-import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:omi/pages/memories/page.dart';

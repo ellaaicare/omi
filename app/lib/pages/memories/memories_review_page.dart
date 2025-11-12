@@ -124,7 +124,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
           approve ? 'Saved $count memories' : 'Discarded $count memories',
           style: const TextStyle(color: Colors.white),
         ),
-        backgroundColor: Color(0xFF35343B),
+        backgroundColor: const Color(0xFF35343B),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
@@ -174,7 +174,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
           approve ? 'Memory saved' : 'Memory discarded',
           style: const TextStyle(color: Colors.white),
         ),
-        backgroundColor: Color(0xFF35343B),
+        backgroundColor: const Color(0xFF35343B),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
@@ -424,7 +424,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                                     decoration: BoxDecoration(
                                       color: _isDragging
                                           ? (_cardOffset > 0 ? const Color(0xFF08A25C) : const Color(0xFFE0582F))
-                                          : Color(0xFF35343B),
+                                          : const Color(0xFF35343B),
                                       borderRadius: BorderRadius.circular(16),
                                       boxShadow: [
                                         BoxShadow(
@@ -487,7 +487,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                 // Discard button
                 Column(
                   children: [
-                    Container(
+                    SizedBox(
                       width: 70,
                       height: 70,
                       child: FloatingActionButton(
@@ -495,7 +495,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                         backgroundColor: const Color(0xFFE0582F),
                         heroTag: "discard",
                         elevation: 4,
-                        child: FaIcon(
+                        child: const FaIcon(
                           FontAwesomeIcons.trashCan,
                           color: Colors.white,
                           size: 24,
@@ -527,7 +527,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                 // Save button
                 Column(
                   children: [
-                    Container(
+                    SizedBox(
                       width: 70,
                       height: 70,
                       child: FloatingActionButton(
@@ -535,7 +535,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                         backgroundColor: const Color(0xFF08A25C),
                         heroTag: "save",
                         elevation: 4,
-                        child: FaIcon(
+                        child: const FaIcon(
                           FontAwesomeIcons.check,
                           color: Colors.white,
                           size: 24,
@@ -595,7 +595,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                       margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: Color(0xFF35343B),
+                        color: const Color(0xFF35343B),
                         borderRadius: BorderRadius.circular(12),
                         boxShadow: [
                           BoxShadow(
@@ -645,9 +645,9 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                                 ),
                                 child: IconButton(
                                   onPressed: _isProcessing ? null : () => _processSingleMemory(memory, false),
-                                  icon: FaIcon(
+                                  icon: const FaIcon(
                                     FontAwesomeIcons.trashCan,
-                                    color: const Color(0xFFE0582F),
+                                    color: Color(0xFFE0582F),
                                     size: 16,
                                   ),
                                   padding: EdgeInsets.zero,
@@ -666,9 +666,9 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                                 ),
                                 child: IconButton(
                                   onPressed: _isProcessing ? null : () => _processSingleMemory(memory, true),
-                                  icon: FaIcon(
+                                  icon: const FaIcon(
                                     FontAwesomeIcons.check,
-                                    color: const Color(0xFF08A25C),
+                                    color: Color(0xFF08A25C),
                                     size: 16,
                                   ),
                                   padding: EdgeInsets.zero,
@@ -712,7 +712,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                             ),
                             elevation: 2,
                           ),
-                          child: Text(
+                          child: const Text(
                             'Discard all',
                             style: TextStyle(
                               fontSize: 16,
@@ -738,7 +738,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                             ),
                             elevation: 2,
                           ),
-                          child: Text(
+                          child: const Text(
                             'Save all',
                             style: TextStyle(
                               fontSize: 16,
@@ -826,7 +826,7 @@ class _MemoriesReviewPageState extends State<MemoriesReviewPage> with TickerProv
                   ),
                 ),
               ],
-              icon: Icon(
+              icon: const Icon(
                 Icons.filter_list,
                 color: Colors.white,
               ),

@@ -46,9 +46,8 @@ def dump_transcripts(
         print(f"Filter by ASR provider: {asr_provider}")
     print(f"{'=' * 80}\n")
 
-    # Get conversations
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    conversations = conversations_db.get_conversations(uid, limit=limit, start_date=since)
+    # Get conversations (skip date filter to avoid index requirement)
+    conversations = conversations_db.get_conversations(uid, limit=limit)
 
     if not conversations:
         print("❌ No conversations found in time window")
@@ -203,8 +202,8 @@ def compare_providers(uid: str, hours: int = 24):
     print(f"Time window: Last {hours} hours")
     print(f"{'=' * 80}\n")
 
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    conversations = conversations_db.get_conversations(uid, limit=1000, start_date=since)
+    # Get conversations (skip date filter to avoid index requirement)
+    conversations = conversations_db.get_conversations(uid, limit=1000)
 
     # Count by provider
     provider_counts = {}

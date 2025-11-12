@@ -32,7 +32,7 @@ class WalListItem extends StatelessWidget {
     if (startedAt == null) return 0.0;
     if (eta == 0) return 0.01;
 
-    final elapsed = DateTime.now().difference(startedAt!).inSeconds;
+    final elapsed = DateTime.now().difference(startedAt).inSeconds;
     final progress = elapsed / eta;
     return progress.clamp(0.0, 1.0);
   }
@@ -266,7 +266,7 @@ class DateTimeListItem extends StatelessWidget {
           Expanded(
             child: Container(
               height: 1,
-              color: Color(0xFF35343B),
+              color: const Color(0xFF35343B),
             ),
           )
         ],
@@ -367,7 +367,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                     context.read<SyncProvider>().refreshWals();
                   }
                 },
-                activeColor: Colors.deepPurpleAccent,
+                activeTrackColor: Colors.deepPurpleAccent,
               ),
             ],
           ),
@@ -441,7 +441,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              const Row(
                 children: [
                   Icon(Icons.filter_list, color: Colors.white70, size: 16),
                   SizedBox(width: 8),
@@ -520,7 +520,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
           return AlertDialog(
             backgroundColor: const Color(0xFF1A1A1A),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Row(
+            title: const Row(
               children: [
                 Icon(Icons.privacy_tip, color: Colors.orange, size: 24),
                 SizedBox(width: 12),
@@ -704,10 +704,6 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
     );
   }
 
-  @override
-  void dispose() {
-    super.dispose();
-  }
 
   Widget _buildSummaryCard(SyncProvider syncProvider) {
     if (syncProvider.syncError != null && syncProvider.failedWal == null) {
@@ -889,8 +885,8 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(Icons.schedule, color: Colors.white70, size: 24),
-                  SizedBox(width: 8),
+                  const Icon(Icons.schedule, color: Colors.white70, size: 24),
+                  const SizedBox(width: 8),
                   Text(
                     secondsToHumanReadable(totalSecondsToProcess),
                     style: const TextStyle(
@@ -1029,7 +1025,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                     _buildStorageControlCard(),
                     _buildSummaryCard(syncProvider),
                     _buildStorageFilterChips(),
-                    SizedBox(height: 16),
+                    const SizedBox(height: 16),
                   ],
                 ),
               ),
@@ -1219,7 +1215,7 @@ class OptimizedWalsListWidget extends StatelessWidget {
                 Expanded(
                   child: Container(
                     height: 1,
-                    color: Color(0xFF35343B),
+                    color: const Color(0xFF35343B),
                   ),
                 )
               ],

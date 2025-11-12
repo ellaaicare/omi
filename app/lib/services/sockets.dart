@@ -48,7 +48,7 @@ class SocketServicePool extends ISocketService {
         return _socket;
       }
 
-      debugPrint("_connect force ${force} state ${_socket?.state}");
+      debugPrint("_connect force $force state ${_socket?.state}");
 
       // new socket
       await _socket?.stop();

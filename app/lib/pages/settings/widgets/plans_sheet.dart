@@ -40,7 +40,7 @@ class _PlansSheetState extends State<PlansSheet> {
   String selectedPlan = 'yearly'; // 'yearly' or 'monthly'
   bool _isCancelling = false;
   bool _isUpgrading = false;
-  bool _showTrainingDataOptIn = false; // Control visibility of training data opt-in
+  final bool _showTrainingDataOptIn = false; // Control visibility of training data opt-in
 
   Future<void> _loadAvailablePlans() async {
     final provider = context.read<UsageProvider>();
@@ -164,8 +164,8 @@ class _PlansSheetState extends State<PlansSheet> {
                               isChecked = value ?? false;
                             });
                           },
-                          fillColor: MaterialStateProperty.resolveWith((states) {
-                            if (states.contains(MaterialState.selected)) {
+                          fillColor: WidgetStateProperty.resolveWith((states) {
+                            if (states.contains(WidgetState.selected)) {
                               return Colors.white;
                             }
                             return Colors.transparent;
@@ -953,7 +953,7 @@ class _PlansSheetState extends State<PlansSheet> {
                           final shouldShowTrainingOption = _showTrainingDataOptIn &&
                               !usageProvider.isLoadingPlans &&
                               usageProvider.availablePlans != null;
-                          debugPrint("xzy ${shouldShowTrainingOption}");
+                          debugPrint("xzy $shouldShowTrainingOption");
 
                           if (!shouldShowTrainingOption) {
                             return const SizedBox.shrink();

@@ -93,11 +93,11 @@ class _WaveformSectionState extends State<WaveformSection> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const CircularProgressIndicator(
+            CircularProgressIndicator(
               color: Colors.white70,
               strokeWidth: 2,
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             Text(
               'Loading your recording...',
               style: TextStyle(
@@ -116,7 +116,7 @@ class _WaveformSectionState extends State<WaveformSection> {
           builder: (context, constraints) {
             return GestureDetector(
               onTapDown: (details) => _handleWaveformTap(details, constraints, syncProvider),
-              child: Container(
+              child: SizedBox(
                 width: double.infinity,
                 height: double.infinity,
                 child: RepaintBoundary(
@@ -175,6 +175,6 @@ class _WaveformSectionState extends State<WaveformSection> {
   String _formatTimeMarker(Duration duration) {
     final minutes = duration.inMinutes.remainder(60);
     final seconds = duration.inSeconds.remainder(60);
-    return '${minutes}:${seconds.toString().padLeft(2, '0')}';
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 }

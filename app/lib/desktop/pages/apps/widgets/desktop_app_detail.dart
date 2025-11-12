@@ -744,7 +744,7 @@ class _DesktopAppDetailState extends State<DesktopAppDetail> with SingleTickerPr
               ),
             ),
           );
-        }).toList(),
+        }),
         SizedBox(height: responsive.spacing(baseSpacing: 24)),
       ],
     );
@@ -1201,7 +1201,7 @@ class _DesktopAppDetailState extends State<DesktopAppDetail> with SingleTickerPr
                                 ],
                               ),
                             ))
-                        .toList(),
+                        ,
                   ],
                 ],
               ),

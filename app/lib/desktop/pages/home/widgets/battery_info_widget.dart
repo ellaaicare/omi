@@ -123,7 +123,7 @@ class DesktopBatteryInfoWidget extends StatelessWidget {
               Container(
                 width: 6,
                 height: 6,
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   color: ResponsiveHelper.successColor,
                   shape: BoxShape.circle,
                 ),

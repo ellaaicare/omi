@@ -10,9 +10,9 @@ class ApiKeysWidget extends StatefulWidget {
   final String appId;
 
   const ApiKeysWidget({
-    Key? key,
+    super.key,
     required this.appId,
-  }) : super(key: key);
+  });
 
   @override
   State<ApiKeysWidget> createState() => _ApiKeysWidgetState();
@@ -250,7 +250,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
         Container(
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: Color(0xFF35343B),
+            color: const Color(0xFF35343B),
             borderRadius: BorderRadius.circular(4),
           ),
           child: Row(
@@ -314,12 +314,12 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       itemCount: provider.apiKeys.length,
-      separatorBuilder: (context, index) => SizedBox(height: 12),
+      separatorBuilder: (context, index) => const SizedBox(height: 12),
       itemBuilder: (context, index) {
         final key = provider.apiKeys[index];
         return Container(
           decoration: BoxDecoration(
-            color: Color(0xFF35343B),
+            color: const Color(0xFF35343B),
             borderRadius: BorderRadius.circular(10.0),
           ),
           child: ListTile(
@@ -329,7 +329,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             subtitle: Text(
-              '${DateFormat('MMM d, yyyy HH:mm').format(key.createdAt)}',
+              DateFormat('MMM d, yyyy HH:mm').format(key.createdAt),
               style: Theme.of(context).textTheme.labelMedium,
             ),
             trailing: SizedBox(

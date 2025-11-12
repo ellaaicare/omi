@@ -31,7 +31,7 @@ class CreateOptionsSheet extends StatelessWidget {
           const SizedBox(height: 24),
           Card(
             elevation: 0,
-            color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+            color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             child: ListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -50,7 +50,7 @@ class CreateOptionsSheet extends StatelessWidget {
           const SizedBox(height: 12),
           Card(
             elevation: 0,
-            color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.5),
+            color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.5),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             child: ListTile(
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

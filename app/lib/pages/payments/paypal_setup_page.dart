@@ -168,7 +168,7 @@ class _PaypalSetupPageState extends State<PaypalSetupPage> {
                               padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                               margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                               decoration: BoxDecoration(
-                                color: Color(0xFF35343B),
+                                color: const Color(0xFF35343B),
                                 borderRadius: BorderRadius.circular(10.0),
                               ),
                               width: double.infinity,
@@ -197,7 +197,7 @@ class _PaypalSetupPageState extends State<PaypalSetupPage> {
                               padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 6.0),
                               margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                               decoration: BoxDecoration(
-                                color: Color(0xFF35343B),
+                                color: const Color(0xFF35343B),
                                 borderRadius: BorderRadius.circular(10.0),
                               ),
                               width: double.infinity,
@@ -225,7 +225,7 @@ class _PaypalSetupPageState extends State<PaypalSetupPage> {
                             color: const Color(0xFF1F1F25),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: Color(0xFF35343B),
+                              color: const Color(0xFF35343B),
                               width: 1,
                             ),
                           ),

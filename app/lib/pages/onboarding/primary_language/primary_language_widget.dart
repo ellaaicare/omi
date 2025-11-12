@@ -23,13 +23,13 @@ class LanguageSelectorWidget extends StatefulWidget {
   final Function(String?, String?) onLanguageSelected;
 
   const LanguageSelectorWidget({
-    Key? key,
+    super.key,
     required this.availableLanguages,
     this.selectedLanguage,
     this.selectedLanguageName,
     required this.languageScrollController,
     required this.onLanguageSelected,
-  }) : super(key: key);
+  });
 
   @override
   State<LanguageSelectorWidget> createState() => _LanguageSelectorWidgetState();
@@ -137,11 +137,11 @@ class _LanguageSelectorWidgetState extends State<LanguageSelectorWidget> {
               fillColor: const Color(0xFF2A2A2A),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: Color(0xFF35343B)),
+                borderSide: const BorderSide(color: Color(0xFF35343B)),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: Color(0xFF35343B)),
+                borderSide: const BorderSide(color: Color(0xFF35343B)),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(8),

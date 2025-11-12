@@ -29,6 +29,10 @@ class DeveloperModeProvider extends BaseProvider {
   bool followUpQuestionEnabled = false;
   bool transcriptionDiagnosticEnabled = false;
   bool autoCreateSpeakersEnabled = false;
+  bool onDeviceASREnabled = false;
+
+  // ASR Mode selection
+  String asrMode = 'cloud'; // cloud, on_device_ios
 
   void onConversationEventsToggled(bool value) {
     conversationEventsToggled = value;
@@ -100,6 +104,13 @@ class DeveloperModeProvider extends BaseProvider {
     followUpQuestionEnabled = SharedPreferencesUtil().devModeJoanFollowUpEnabled;
     transcriptionDiagnosticEnabled = SharedPreferencesUtil().transcriptionDiagnosticEnabled;
     autoCreateSpeakersEnabled = SharedPreferencesUtil().autoCreateSpeakersEnabled;
+    onDeviceASREnabled = SharedPreferencesUtil().onDeviceASREnabled;
+    asrMode = SharedPreferencesUtil().asrMode;
+    // Migrate old Parakeet mode to iOS Speech
+    if (asrMode == 'on_device_parakeet') {
+      asrMode = 'on_device_ios';
+      SharedPreferencesUtil().asrMode = 'on_device_ios';
+    }
     conversationEventsToggled = SharedPreferencesUtil().conversationEventsToggled;
     transcriptsToggled = SharedPreferencesUtil().transcriptsToggled;
     audioBytesToggled = SharedPreferencesUtil().audioBytesToggled;
@@ -200,6 +211,7 @@ class DeveloperModeProvider extends BaseProvider {
     prefs.devModeJoanFollowUpEnabled = followUpQuestionEnabled;
     prefs.transcriptionDiagnosticEnabled = transcriptionDiagnosticEnabled;
     prefs.autoCreateSpeakersEnabled = autoCreateSpeakersEnabled;
+    prefs.onDeviceASREnabled = onDeviceASREnabled;
 
     MixpanelManager().settingsSaved(
       hasWebhookConversationCreated: conversationEventsToggled,
@@ -227,6 +239,24 @@ class DeveloperModeProvider extends BaseProvider {
 
   void onAutoCreateSpeakersChanged(var value) {
     autoCreateSpeakersEnabled = value;
+    notifyListeners();
+  }
+
+  void onOnDeviceASRChanged(var value) {
+    onDeviceASREnabled = value;
+    SharedPreferencesUtil().onDeviceASREnabled = value;
+    notifyListeners();
+  }
+
+  // ASR Mode Management
+  void setAsrMode(String mode) {
+    // Only allow 'cloud' or 'on_device_ios'
+    if (mode != 'cloud' && mode != 'on_device_ios') {
+      debugPrint('⚠️ [Provider] Invalid ASR mode: $mode, defaulting to cloud');
+      mode = 'cloud';
+    }
+    asrMode = mode;
+    SharedPreferencesUtil().asrMode = mode;
     notifyListeners();
   }
 }

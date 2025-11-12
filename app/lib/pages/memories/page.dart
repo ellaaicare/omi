@@ -494,7 +494,7 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
                             delegate: _ReviewPromptHeaderDelegate(
                               height: 56.0,
                               child: Material(
-                                color: Theme.of(context).colorScheme.surfaceVariant,
+                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
                                 elevation: 1,
                                 child: InkWell(
                                   onTap: () => _showReviewSheet(context, provider.unreviewed, provider),

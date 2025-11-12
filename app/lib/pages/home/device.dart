@@ -74,7 +74,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
           border: Border(
             bottom: isLast
                 ? BorderSide.none
-                : BorderSide(
+                : const BorderSide(
                     color: Color(0xFF35343B),
                     width: 0.5,
                   ),
