@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:omi/backend/http/certificate_pinning.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/auth_service.dart';
@@ -15,10 +16,44 @@ class ApiClient {
   static const Duration requestTimeoutRead = Duration(seconds: 30);
   static const Duration requestTimeoutWrite = Duration(seconds: 300);
 
-  static final _client = http.Client();
+  static http.Client? _client;
+  static bool _initialized = false;
+
+  /// Initialize API client with certificate pinning
+  static Future<void> init() async {
+    if (_initialized) return;
+
+    try {
+      // Initialize certificate pinning
+      await CertificatePinningConfig.instance.initializePinning();
+
+      // Create HTTP client with certificate pinning support
+      _client = http.Client();
+
+      _initialized = true;
+      debugPrint('ApiClient initialized with certificate pinning');
+    } catch (e) {
+      Logger.error('Failed to initialize ApiClient: $e');
+      // Create basic client as fallback
+      _client = http.Client();
+      _initialized = true;
+    }
+  }
+
+  /// Get the HTTP client, initializing if needed
+  static http.Client getClient() {
+    if (_client == null) {
+      // Synchronous fallback - create basic client
+      Logger.log('WARNING: ApiClient accessed before initialization');
+      _client = http.Client();
+    }
+    return _client!;
+  }
 
   static void dispose() {
-    _client.close();
+    _client?.close();
+    _client = null;
+    _initialized = false;
   }
 }
 
@@ -77,13 +112,29 @@ Future<http.StreamedResponse> makeRawApiCall({
   required String method,
   Map<String, String> headers = const {},
 }) async {
+  // Validate certificate pinning for this URL
+  if (CertificatePinningConfig.instance.requiresPinning(url)) {
+    final isValid = await CertificatePinningConfig.instance.validateUrl(url);
+    if (!isValid) {
+      throw SecurityException('Certificate validation failed for: $url');
+    }
+  }
+
   var request = http.Request(method, Uri.parse(url));
   final builtHeaders = await buildHeaders(
     requireAuthCheck: _isRequiredAuthCheck(url),
     fromHeaders: headers,
   );
   request.headers.addAll(builtHeaders);
-  return ApiClient._client.send(request);
+  return ApiClient.getClient().send(request);
+}
+
+class SecurityException implements Exception {
+  final String message;
+  SecurityException(this.message);
+
+  @override
+  String toString() => 'SecurityException: $message';
 }
 
 Future<http.Response?> makeApiCall({
@@ -138,7 +189,15 @@ Future<http.Response> _performRequest(
   String body,
   String method,
 ) async {
-  final client = ApiClient._client;
+  // Validate certificate pinning for this URL
+  if (CertificatePinningConfig.instance.requiresPinning(url)) {
+    final isValid = await CertificatePinningConfig.instance.validateUrl(url);
+    if (!isValid) {
+      throw SecurityException('Certificate validation failed for: $url');
+    }
+  }
+
+  final client = ApiClient.getClient();
 
   switch (method) {
     case 'POST':
@@ -184,6 +243,14 @@ Future<http.Response> makeMultipartApiCall({
   String method = 'POST',
 }) async {
   try {
+    // Validate certificate pinning for this URL
+    if (CertificatePinningConfig.instance.requiresPinning(url)) {
+      final isValid = await CertificatePinningConfig.instance.validateUrl(url);
+      if (!isValid) {
+        throw SecurityException('Certificate validation failed for: $url');
+      }
+    }
+
     var request = http.MultipartRequest(method, Uri.parse(url));
 
     final builtHeaders = await buildHeaders(
@@ -205,7 +272,7 @@ Future<http.Response> makeMultipartApiCall({
       request.files.add(multipartFile);
     }
 
-    var streamedResponse = await ApiClient._client.send(request);
+    var streamedResponse = await ApiClient.getClient().send(request);
     return await http.Response.fromStream(streamedResponse);
   } catch (e, stackTrace) {
     debugPrint('Multipart HTTP request failed: $e, $stackTrace');
@@ -221,6 +288,15 @@ Stream<String> makeStreamingApiCall({
   String method = 'POST',
 }) async* {
   try {
+    // Validate certificate pinning for this URL
+    if (CertificatePinningConfig.instance.requiresPinning(url)) {
+      final isValid = await CertificatePinningConfig.instance.validateUrl(url);
+      if (!isValid) {
+        Logger.error('Certificate validation failed for streaming: $url');
+        return;
+      }
+    }
+
     var request = http.Request(method, Uri.parse(url));
 
     final builtHeaders = await buildHeaders(
@@ -234,7 +310,7 @@ Stream<String> makeStreamingApiCall({
       request.body = body;
     }
 
-    var streamedResponse = await ApiClient._client.send(request);
+    var streamedResponse = await ApiClient.getClient().send(request);
 
     if (streamedResponse.statusCode != 200) {
       Logger.error('Streaming request failed: ${streamedResponse.statusCode}');
@@ -279,6 +355,15 @@ Stream<String> makeMultipartStreamingApiCall({
   String fileFieldName = 'files',
 }) async* {
   try {
+    // Validate certificate pinning for this URL
+    if (CertificatePinningConfig.instance.requiresPinning(url)) {
+      final isValid = await CertificatePinningConfig.instance.validateUrl(url);
+      if (!isValid) {
+        Logger.error('Certificate validation failed for multipart streaming: $url');
+        return;
+      }
+    }
+
     var request = http.MultipartRequest('POST', Uri.parse(url));
 
     final builtHeaders = await buildHeaders(
@@ -291,7 +376,7 @@ Stream<String> makeMultipartStreamingApiCall({
       request.files.add(await http.MultipartFile.fromPath(fileFieldName, file.path, filename: basename(file.path)));
     }
 
-    var response = await ApiClient._client.send(request);
+    var response = await ApiClient.getClient().send(request);
 
     if (response.statusCode != 200) {
       Logger.error('Multipart streaming request failed: ${response.statusCode}');

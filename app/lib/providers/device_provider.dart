@@ -16,6 +16,7 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
+import 'package:synchronized/synchronized.dart';
 
 class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption {
   CaptureProvider? captureProvider;
@@ -31,6 +32,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   Timer? _reconnectionTimer;
   DateTime? _reconnectAt;
   final int _connectionCheckSeconds = 15; // 10s periods, 5s for each scan
+
+  // Mutex for protecting Bluetooth connection operations
+  final Lock _connectionLock = Lock();
+  final Lock _batteryListenerLock = Lock();
 
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
@@ -58,10 +63,12 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   void setConnectedDevice(BtDevice? device) async {
-    connectedDevice = device;
-    pairedDevice = device;
-    await getDeviceInfo();
-    Logger.debug('setConnectedDevice: $device');
+    await _connectionLock.synchronized(() async {
+      connectedDevice = device;
+      pairedDevice = device;
+      await getDeviceInfo();
+      Logger.debug('setConnectedDevice: $device');
+    });
     notifyListeners();
   }
 
@@ -123,26 +130,31 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   initiateBleBatteryListener() async {
-    if (connectedDevice == null) {
-      return;
-    }
-    _bleBatteryLevelListener?.cancel();
-    _bleBatteryLevelListener = await _getBleBatteryLevelListener(
-      connectedDevice!.id,
-      onBatteryLevelChange: (int value) {
-        batteryLevel = value;
-        if (batteryLevel < 20 && !_hasLowBatteryAlerted) {
-          _hasLowBatteryAlerted = true;
-          NotificationService.instance.createNotification(
-            title: "Low Battery Alert",
-            body: "Your device is running low on battery. Time for a recharge! 🔋",
-          );
-        } else if (batteryLevel > 20) {
-          _hasLowBatteryAlerted = true;
-        }
-        notifyListeners();
-      },
-    );
+    await _batteryListenerLock.synchronized(() async {
+      if (connectedDevice == null) {
+        return;
+      }
+      // Cancel existing listener before creating new one
+      await _bleBatteryLevelListener?.cancel();
+      _bleBatteryLevelListener = null;
+
+      _bleBatteryLevelListener = await _getBleBatteryLevelListener(
+        connectedDevice!.id,
+        onBatteryLevelChange: (int value) {
+          batteryLevel = value;
+          if (batteryLevel < 20 && !_hasLowBatteryAlerted) {
+            _hasLowBatteryAlerted = true;
+            NotificationService.instance.createNotification(
+              title: "Low Battery Alert",
+              body: "Your device is running low on battery. Time for a recharge! 🔋",
+            );
+          } else if (batteryLevel > 20) {
+            _hasLowBatteryAlerted = true;
+          }
+          notifyListeners();
+        },
+      );
+    });
     notifyListeners();
   }
 
@@ -207,35 +219,39 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   Future scanAndConnectToDevice() async {
-    updateConnectingStatus(true);
-    if (isConnected) {
-      if (connectedDevice == null) {
-        connectedDevice = await _getConnectedDevice();
-        SharedPreferencesUtil().deviceName = connectedDevice!.name;
-        MixpanelManager().deviceConnected();
-      }
+    await _connectionLock.synchronized(() async {
+      updateConnectingStatus(true);
+      if (isConnected) {
+        if (connectedDevice == null) {
+          connectedDevice = await _getConnectedDevice();
+          if (connectedDevice != null) {
+            SharedPreferencesUtil().deviceName = connectedDevice!.name;
+            MixpanelManager().deviceConnected();
+          }
+        }
 
-      setIsConnected(true);
-      updateConnectingStatus(false);
-      notifyListeners();
-      return;
-    }
-
-    // else
-    var device = await _scanConnectDevice();
-    Logger.debug('inside scanAndConnectToDevice $device in device_provider');
-    if (device != null) {
-      var cDevice = await _getConnectedDevice();
-      if (cDevice != null) {
-        setConnectedDevice(cDevice);
-        setisDeviceStorageSupport();
-        SharedPreferencesUtil().deviceName = cDevice.name;
-        MixpanelManager().deviceConnected();
         setIsConnected(true);
+        updateConnectingStatus(false);
+        notifyListeners();
+        return;
       }
-      Logger.debug('device is not null $cDevice');
-    }
-    updateConnectingStatus(false);
+
+      // else
+      var device = await _scanConnectDevice();
+      Logger.debug('inside scanAndConnectToDevice $device in device_provider');
+      if (device != null) {
+        var cDevice = await _getConnectedDevice();
+        if (cDevice != null) {
+          await setConnectedDevice(cDevice);
+          await setisDeviceStorageSupport();
+          SharedPreferencesUtil().deviceName = cDevice.name;
+          MixpanelManager().deviceConnected();
+          setIsConnected(true);
+        }
+        Logger.debug('device is not null $cDevice');
+      }
+      updateConnectingStatus(false);
+    });
 
     notifyListeners();
   }
@@ -255,8 +271,13 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   @override
   void dispose() {
-    _bleBatteryLevelListener?.cancel();
+    // Use mutex to ensure clean shutdown
+    _connectionLock.synchronized(() async {
+      await _bleBatteryLevelListener?.cancel();
+      _bleBatteryLevelListener = null;
+    });
     _reconnectionTimer?.cancel();
+    _reconnectionTimer = null;
     _disconnectDebouncer.cancel();
     _connectDebouncer.cancel();
     ServiceManager.instance().device.unsubscribe(this);
@@ -310,30 +331,32 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   }
 
   void _onDeviceConnected(BtDevice device) async {
-    Logger.debug('_onConnected inside: $connectedDevice');
-    _disconnectNotificationTimer?.cancel();
-    NotificationService.instance.clearNotification(1);
-    setConnectedDevice(device);
+    await _connectionLock.synchronized(() async {
+      Logger.debug('_onConnected inside: $connectedDevice');
+      _disconnectNotificationTimer?.cancel();
+      NotificationService.instance.clearNotification(1);
+      await setConnectedDevice(device);
 
-    if (captureProvider != null) {
-      captureProvider?.updateRecordingDevice(device);
-    }
+      if (captureProvider != null) {
+        captureProvider?.updateRecordingDevice(device);
+      }
 
-    setisDeviceStorageSupport();
-    setIsConnected(true);
+      await setisDeviceStorageSupport();
+      setIsConnected(true);
 
-    await initiateBleBatteryListener();
-    if (batteryLevel != -1 && batteryLevel < 20) {
-      _hasLowBatteryAlerted = false;
-    }
-    updateConnectingStatus(false);
-    await captureProvider?.streamDeviceRecording(device: device);
+      await initiateBleBatteryListener();
+      if (batteryLevel != -1 && batteryLevel < 20) {
+        _hasLowBatteryAlerted = false;
+      }
+      updateConnectingStatus(false);
+      await captureProvider?.streamDeviceRecording(device: device);
 
-    await getDeviceInfo();
-    SharedPreferencesUtil().deviceName = device.name;
+      await getDeviceInfo();
+      SharedPreferencesUtil().deviceName = device.name;
 
-    // Wals
-    ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
+      // Wals
+      ServiceManager.instance().wal.getSyncs().sdcard.setDevice(device);
+    });
 
     notifyListeners();
 

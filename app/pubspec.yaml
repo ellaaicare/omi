@@ -69,6 +69,9 @@ dependencies:
   permission_handler: ^12.0.0+1
   share_plus: 11.0.0
   shared_preferences: 2.5.3
+  flutter_secure_storage: ^9.2.2
+  http_certificate_pinning: ^3.1.2
+  synchronized: ^3.3.0+3
   url_launcher: ^6.3.0
   wav: ^1.4.0
   path: ^1.9.0
