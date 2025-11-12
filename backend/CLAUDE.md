@@ -79,12 +79,23 @@ Successfully implemented and debugged iOS on-device transcription support with t
 
 **Summary Generation Currently Using**: Local LLM (OpenAI/Anthropic via LangChain)
 
+### **Architecture Clarification (Nov 11)**
+
+**Intent Classification**: Handled by Ella/Letta agents, NOT backend
+- Backend sends transcripts to n8n scanner webhook
+- Letta agent cluster performs classification, routing, memory extraction
+- Backend receives processed results via callbacks
+- **Do NOT implement separate intent classification endpoint**
+
+iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - they describe on-device approach that was abandoned.
+
 ### **Next Actions**
 
-1. Investigate Ella webhook configuration (n8n side)
-2. Test Ella endpoints manually to diagnose JSON error
+1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
+2. Test Ella endpoints manually when they're fixed
 3. Continue supporting iOS team with Edge ASR testing
 4. Monitor production logs for any new issues
+5. Ready for next feature work (Ella team handles intent/routing)
 
 ---
 
