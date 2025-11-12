@@ -1,0 +1,18 @@
+{
+  "coverage": {
+    "minimum": 40.0,
+    "target": 60.0,
+    "exclude": [
+      "**/*.g.dart",
+      "**/*.freezed.dart",
+      "**/generated/**",
+      "**/gen/**",
+      "**/test/**",
+      "**/main.dart"
+    ]
+  },
+  "test": {
+    "timeout": "30s",
+    "concurrency": 4
+  }
+}
