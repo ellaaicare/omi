@@ -62,7 +62,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     notifyListeners();
   }
 
-  void setConnectedDevice(BtDevice? device) async {
+  Future<void> setConnectedDevice(BtDevice? device) async {
     await _connectionLock.synchronized(() async {
       connectedDevice = device;
       pairedDevice = device;
