@@ -73,6 +73,45 @@
 
 ---
 
+## ⚠️ IMPORTANT: Bundle Identifier Issue
+
+### Current State
+All 3 test branches currently use production bundle IDs:
+- Production: `com.friend-app-with-wearable.ios12`
+- Development: `com.friend-app-with-wearable.ios12.development`
+- Team: H6S4582TRM (paid Apple Developer account)
+
+### Problem for Local Testing
+The CLI agent (user) cannot build these branches locally because:
+1. ❌ User's Firebase config expects: `com.greg.friendapp`
+2. ❌ User is not a member of team H6S4582TRM
+3. ❌ User has a FREE Apple Developer account (cannot use paid account bundle IDs)
+
+### Proper Bundle Identifier Going Forward
+**Recommendation:** Use `com.greg.friendapp` for all test branches and personal development
+
+**Reasoning:**
+- ✅ Works with FREE Apple Developer accounts
+- ✅ Matches user's Firebase configuration (commit `9972047`)
+- ✅ Established in `feature/ios-backend-integration` branch
+- ✅ Allows local testing without manual changes
+
+**See:** `docs/BUNDLE_ID_STRATEGY.md` for complete details
+
+### Action for Cloud Claude
+Update all 3 test branches to use `com.greg.friendapp`:
+
+```bash
+# For each branch, change bundle ID in ios/Runner.xcodeproj/project.pbxproj:
+sed -i 's/com.friend-app-with-wearable.ios12.development/com.greg.friendapp/g'
+sed -i 's/com.friend-app-with-wearable.ios12/com.greg.friendapp/g'
+
+# Commit and push
+git commit -m "fix(ios): update bundle ID to com.greg.friendapp for local testing"
+```
+
+---
+
 ## 🚀 CLI Agent Action Required
 
 ### ONE-LINER: Apply desktop_filter_chips Fix to All 3 Branches
