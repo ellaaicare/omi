@@ -175,10 +175,10 @@ class SecureHttpClient {
       client.badCertificateCallback = (cert, host, port) {
         // Verify certificate against pinned certificates
         final isValid = CertificatePinningConfig.instance.verifyCertificate(cert, host);
-        if (!isValid) {
+        if (isValid == false) {
           Logger.error('Certificate validation failed for $host:$port');
         }
-        return isValid as bool;
+        return isValid == true;
       };
     }
 

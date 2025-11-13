@@ -27,7 +27,7 @@ class SecureStorage {
       // Platform-specific options for secure storage
       const androidOptions = AndroidOptions(
         encryptedSharedPreferences: true,
-        resetOnError: true,
+        
       );
 
       const iosOptions = IOSOptions(
@@ -35,12 +35,12 @@ class SecureStorage {
         synchronizable: false,
       );
 
-      const linuxOptions = LinuxOptions(
-        resetOnError: true,
+      const linuxOptions = LinuxOptions();
+        
       );
 
-      const windowsOptions = WindowsOptions(
-        resetOnError: true,
+      const windowsOptions = WindowsOptions();
+        
       );
 
       const macOsOptions = MacOsOptions(
