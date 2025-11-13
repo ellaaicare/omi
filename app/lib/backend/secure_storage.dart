@@ -36,12 +36,8 @@ class SecureStorage {
       );
 
       const linuxOptions = LinuxOptions();
-        
-      );
 
       const windowsOptions = WindowsOptions();
-        
-      );
 
       const macOsOptions = MacOsOptions(
         accessibility: KeychainAccessibility.first_unlock,
