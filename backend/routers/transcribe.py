@@ -64,8 +64,10 @@ from utils.subscription import has_transcription_credits
 from utils.translation import TranslationService
 from utils.translation_cache import TranscriptSegmentLanguageCache
 from utils.webhooks import get_audio_bytes_webhook_seconds
+from utils.logging_config import get_logger
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
@@ -83,22 +85,22 @@ async def _listen(
     conversation_timeout: int = 120,
 ):
     session_id = str(uuid.uuid4())
-    print(
-        '_listen',
-        uid,
-        session_id,
-        language,
-        sample_rate,
-        codec,
-        include_speech_profile,
-        stt_service,
-        conversation_timeout,
+    logger.info(
+        'listen_started',
+        uid=uid,
+        session_id=session_id,
+        language=language,
+        sample_rate=sample_rate,
+        codec=codec,
+        include_speech_profile=include_speech_profile,
+        stt_service=stt_service,
+        conversation_timeout=conversation_timeout,
     )
 
     try:
         await websocket.accept()
     except RuntimeError as e:
-        print(e, uid, session_id)
+        logger.error('websocket_accept_failed', uid=uid, session_id=session_id, error=str(e))
         return
 
     if not uid or len(uid) <= 0:
@@ -111,7 +113,7 @@ async def _listen(
         try:
             await send_credit_limit_notification(uid)
         except Exception as e:
-            print(f"Error sending credit limit notification: {e}", uid, session_id)
+            logger.error('credit_limit_notification_failed', uid=uid, session_id=session_id, error=str(e))
 
     # Frame size, codec
     frame_size: int = 160
@@ -181,14 +183,14 @@ async def _listen(
                 try:
                     await send_credit_limit_notification(uid)
                 except Exception as e:
-                    print(f"Error sending credit limit notification: {e}", uid, session_id)
+                    logger.error('credit_limit_notification_failed', uid=uid, session_id=session_id, error=str(e))
 
                 # Lock the in-progress conversation if credit limit is reached
                 if current_conversation_id and current_conversation_id not in locked_conversation_ids:
                     conversation = conversations_db.get_conversation(uid, current_conversation_id)
                     if conversation and conversation['status'] == ConversationStatus.in_progress:
                         conversation_id = conversation['id']
-                        print(f"Locking conversation {conversation_id} due to transcription limit.", uid, session_id)
+                        logger.info('locking_conversation_credit_limit', uid=uid, session_id=session_id, conversation_id=conversation_id)
                         conversations_db.update_conversation(uid, conversation_id, {'is_locked': True})
                         locked_conversation_ids.add(conversation_id)
             else:
@@ -203,25 +205,25 @@ async def _listen(
                     and time_of_last_words
                     and (last_audio_received_time - time_of_last_words) > 15 * 60
                 ):
-                    print(f"User {uid} has been silent for over 15 minutes. Sending notification.", session_id)
+                    logger.info('user_silent_notification_triggered', uid=uid, session_id=session_id, silence_duration=last_audio_received_time - time_of_last_words)
                     try:
                         await send_silent_user_notification(uid)
                     except Exception as e:
-                        print(f"Error sending silent user notification: {e}", uid, session_id)
+                        logger.error('silent_user_notification_failed', uid=uid, session_id=session_id, error=str(e))
 
     async def _asend_message_event(msg: MessageEvent):
         nonlocal websocket_active
-        print(f"Message: type ${msg.event_type}", uid, session_id)
+        logger.debug('sending_message_event', uid=uid, session_id=session_id, event_type=msg.event_type)
         if not websocket_active:
             return False
         try:
             await websocket.send_json(msg.to_json())
             return True
         except WebSocketDisconnect:
-            print("WebSocket disconnected", uid, session_id)
+            logger.warning('websocket_disconnected_during_send', uid=uid, session_id=session_id)
             websocket_active = False
         except Exception as e:
-            print(f"Can not send message event, error: {e}", uid, session_id)
+            logger.error('message_event_send_failed', uid=uid, session_id=session_id, error=str(e))
 
         return False
 
@@ -239,7 +241,7 @@ async def _listen(
     # Send pong every 10s then handle it in the app \
     # since Starlette is not support pong automatically
     async def send_heartbeat():
-        print("send_heartbeat", uid, session_id)
+        logger.debug('heartbeat_started', uid=uid, session_id=session_id)
         nonlocal websocket_active
         nonlocal websocket_close_code
         nonlocal started_at
@@ -255,7 +257,7 @@ async def _listen(
 
                 # Inactivity timeout
                 if last_audio_received_time and time.time() - last_audio_received_time > inactivity_timeout_seconds:
-                    print(f"Session timeout due to inactivity ({inactivity_timeout_seconds}s)", uid, session_id)
+                    logger.info('session_timeout_inactivity', uid=uid, session_id=session_id, timeout_seconds=inactivity_timeout_seconds)
                     websocket_close_code = 1001
                     websocket_active = False
                     break
@@ -263,9 +265,9 @@ async def _listen(
                 # next
                 await asyncio.sleep(10)
         except WebSocketDisconnect:
-            print("WebSocket disconnected", uid, session_id)
+            logger.info('websocket_disconnected_during_heartbeat', uid=uid, session_id=session_id)
         except Exception as e:
-            print(f'Heartbeat error: {e}', uid, session_id)
+            logger.error('heartbeat_error', uid=uid, session_id=session_id, error=str(e), exc_info=True)
             websocket_close_code = 1011
         finally:
             websocket_active = False
@@ -304,7 +306,7 @@ async def _listen(
             conversation = process_conversation(uid, language, conversation)
             messages = trigger_external_integrations(uid, conversation)
         except Exception as e:
-            print(f"Error processing conversation: {e}", uid, session_id)
+            logger.error('conversation_processing_failed', uid=uid, session_id=session_id, conversation_id=conversation.id, error=str(e), exc_info=True)
             conversations_db.set_conversation_as_discarded(uid, conversation.id)
             conversation.discarded = True
             messages = []
@@ -315,7 +317,7 @@ async def _listen(
         # handle edge case of conversation was actually processing? maybe later, doesn't hurt really anyway.
         # also fix from getConversations endpoint?
         processing = conversations_db.get_processing_conversations(uid)
-        print('finalize_processing_conversations len(processing):', len(processing), uid, session_id)
+        logger.info('finalize_processing_conversations', uid=uid, session_id=session_id, count=len(processing) if processing else 0)
         if not processing or len(processing) == 0:
             return
 
@@ -361,17 +363,17 @@ async def _listen(
         seconds_to_trim = None
         seconds_to_add = None
 
-        print(f"Created new stub conversation: {new_conversation_id}", uid, session_id)
+        logger.info('created_new_conversation', uid=uid, session_id=session_id, conversation_id=new_conversation_id)
 
     async def _process_current_conversation(conversation_id: str):
-        print("_process_current_conversation", uid, session_id)
+        logger.info('processing_current_conversation', uid=uid, session_id=session_id, conversation_id=conversation_id)
         conversation = conversations_db.get_conversation(uid, conversation_id)
         if conversation:
             has_content = conversation.get('transcript_segments') or conversation.get('photos')
             if has_content:
                 await _create_conversation(conversation)
             else:
-                print(f'Clean up the conversation {conversation_id}, reason: no content', uid, session_id)
+                logger.info('deleting_empty_conversation', uid=uid, session_id=session_id, conversation_id=conversation_id, reason='no_content')
                 conversations_db.delete_conversation(uid, conversation_id)
 
         await _create_new_in_progress_conversation()
@@ -395,10 +397,12 @@ async def _listen(
             finished_at = datetime.fromisoformat(existing_conversation['finished_at'].isoformat())
             seconds_since_last_segment = (datetime.now(timezone.utc) - finished_at).total_seconds()
             if seconds_since_last_segment >= conversation_creation_timeout:
-                print(
-                    f'Processing existing conversation {existing_conversation["id"]} (timed out: {seconds_since_last_segment:.1f}s)',
-                    uid,
-                    session_id,
+                logger.info(
+                    'existing_conversation_timed_out',
+                    uid=uid,
+                    session_id=session_id,
+                    conversation_id=existing_conversation["id"],
+                    timeout_seconds=seconds_since_last_segment,
                 )
                 asyncio.create_task(_process_current_conversation(existing_conversation["id"]))
                 return
@@ -411,10 +415,13 @@ async def _listen(
                 if existing_conversation['transcript_segments']
                 else None
             )
-            print(
-                f"Resuming conversation {current_conversation_id} with {(seconds_to_add if seconds_to_add else 0):.1f}s offset. Will timeout in {conversation_creation_timeout - seconds_since_last_segment:.1f}s",
-                uid,
-                session_id,
+            logger.info(
+                'resuming_conversation',
+                uid=uid,
+                session_id=session_id,
+                conversation_id=current_conversation_id,
+                offset_seconds=seconds_to_add if seconds_to_add else 0,
+                timeout_in=conversation_creation_timeout - seconds_since_last_segment,
             )
             return
 
@@ -443,7 +450,7 @@ async def _listen(
         """Update the current in-progress conversation with new segments/photos."""
         conversation_data = conversations_db.get_conversation(uid, conversation_id)
         if not conversation_data:
-            print(f"Warning: conversation {conversation_id} not found", uid, session_id)
+            logger.warning('conversation_not_found_for_update', uid=uid, session_id=session_id, conversation_id=conversation_id)
             return None, (0, 0)
 
         conversation = Conversation(**conversation_data)
@@ -477,12 +484,12 @@ async def _listen(
     # STT
     # Validate websocket_active before initiating STT
     if not websocket_active or websocket.client_state != WebSocketState.CONNECTED:
-        print("websocket was closed", uid, session_id)
+        logger.warning('websocket_closed_before_stt', uid=uid, session_id=session_id)
         if websocket.client_state == WebSocketState.CONNECTED:
             try:
                 await websocket.close(code=websocket_close_code)
             except Exception as e:
-                print(f"Error closing WebSocket: {e}", uid, session_id)
+                logger.error('websocket_close_error', uid=uid, session_id=session_id, error=str(e))
         return
 
     # Process STT
@@ -560,8 +567,7 @@ async def _listen(
                 )
 
                 # Create a second socket for initial speech profile if needed
-                print("speech_profile_duration", speech_profile_duration)
-                print("file_path", file_path)
+                logger.debug('speech_profile_info', uid=uid, session_id=session_id, duration=speech_profile_duration, file_path=file_path)
                 if speech_profile_duration and file_path:
                     soniox_socket2 = await process_audio_soniox(
                         stream_transcript,
@@ -572,7 +578,7 @@ async def _listen(
                     )
 
                     safe_create_task(send_initial_file_path(file_path, soniox_socket.send))
-                    print('speech_profile soniox duration', speech_profile_duration, uid, session_id)
+                    logger.info('speech_profile_soniox_loaded', uid=uid, session_id=session_id, duration=speech_profile_duration)
             # SPEECHMATICS
             elif stt_service == STTService.speechmatics:
                 speechmatics_socket = await process_audio_speechmatics(
@@ -580,10 +586,10 @@ async def _listen(
                 )
                 if speech_profile_duration:
                     safe_create_task(send_initial_file_path(file_path, speechmatics_socket.send))
-                    print('speech_profile speechmatics duration', speech_profile_duration, uid, session_id)
+                    logger.info('speech_profile_speechmatics_loaded', uid=uid, session_id=session_id, duration=speech_profile_duration)
 
         except Exception as e:
-            print(f"Initial processing error: {e}", uid, session_id)
+            logger.error('stt_initialization_error', uid=uid, session_id=session_id, error=str(e), exc_info=True)
             websocket_close_code = 1011
             await websocket.close(code=websocket_close_code)
             return
@@ -625,10 +631,10 @@ async def _listen(
                     segment_buffers = []  # reset
                     await pusher_ws.send(data)
                 except ConnectionClosed as e:
-                    print(f"Pusher transcripts Connection closed: {e}", uid, session_id)
+                    logger.warning('pusher_transcripts_connection_closed', uid=uid, session_id=session_id, error=str(e))
                     pusher_connected = False
                 except Exception as e:
-                    print(f"Pusher transcripts failed: {e}", uid, session_id)
+                    logger.error('pusher_transcripts_send_failed', uid=uid, session_id=session_id, error=str(e))
             if auto_reconnect and pusher_connected is False:
                 await connect()
 
@@ -670,10 +676,10 @@ async def _listen(
                     await pusher_ws.send(data)
                     last_synced_conversation_id = current_conversation_id
                 except ConnectionClosed as e:
-                    print(f"Pusher audio_bytes Connection closed: {e}", uid, session_id)
+                    logger.warning('pusher_audio_bytes_connection_closed', uid=uid, session_id=session_id, error=str(e))
                     pusher_connected = False
                 except Exception as e:
-                    print(f"Failed to send conversation_id to pusher: {e}", uid, session_id)
+                    logger.error('pusher_conversation_id_send_failed', uid=uid, session_id=session_id, error=str(e))
 
             # Send audio bytes
             if pusher_connected and pusher_ws and len(audio_buffers) > 0:
@@ -685,10 +691,10 @@ async def _listen(
                     audio_buffers = bytearray()  # reset
                     await pusher_ws.send(data)
                 except ConnectionClosed as e:
-                    print(f"Pusher audio_bytes Connection closed: {e}", uid, session_id)
+                    logger.warning('pusher_audio_bytes_connection_closed', uid=uid, session_id=session_id, error=str(e))
                     pusher_connected = False
                 except Exception as e:
-                    print(f"Pusher audio_bytes failed: {e}", uid, session_id)
+                    logger.error('pusher_audio_bytes_send_failed', uid=uid, session_id=session_id, error=str(e))
             if auto_reconnect and pusher_connected is False:
                 await connect()
 
@@ -719,7 +725,7 @@ async def _listen(
                         await pusher_ws.close()
                         pusher_ws = None
                     except Exception as e:
-                        print(f"Pusher draining failed: {e}", uid, session_id)
+                        logger.error('pusher_drain_failed', uid=uid, session_id=session_id, error=str(e))
                 # connect
                 await _connect()
 
@@ -732,7 +738,7 @@ async def _listen(
                 pusher_ws = await connect_to_trigger_pusher(uid, sample_rate, retries=5)
                 pusher_connected = True
             except Exception as e:
-                print(f"Exception in connect: {e}")
+                logger.error('pusher_connect_failed', uid=uid, session_id=session_id, error=str(e))
 
         async def close(code: int = 1000):
             await _flush()
@@ -823,24 +829,24 @@ async def _listen(
                 _send_message_event(TranslationEvent(segments=[s.dict() for s in translated_segments]))
 
         except Exception as e:
-            print(f"Translation error: {e}", uid, session_id)
+            logger.error('translation_error', uid=uid, session_id=session_id, error=str(e), exc_info=True)
 
     async def conversation_lifecycle_manager():
         """Background task that checks conversation timeout and triggers processing every 5 seconds."""
         nonlocal websocket_active, current_conversation_id, conversation_creation_timeout
 
-        print(f"Starting conversation lifecycle manager (timeout: {conversation_creation_timeout}s)", uid, session_id)
+        logger.info('conversation_lifecycle_manager_started', uid=uid, session_id=session_id, timeout=conversation_creation_timeout)
 
         while websocket_active:
             await asyncio.sleep(5)
 
             if not current_conversation_id:
-                print(f"WARN: the current conversation is not valid", uid, session_id)
+                logger.warning('no_current_conversation_in_lifecycle', uid=uid, session_id=session_id)
                 continue
 
             conversation = conversations_db.get_conversation(uid, current_conversation_id)
             if not conversation:
-                print(f"WARN: the current conversation is not found (id: {current_conversation_id})", uid, session_id)
+                logger.warning('current_conversation_not_found', uid=uid, session_id=session_id, conversation_id=current_conversation_id)
                 await _create_new_in_progress_conversation()
                 continue
 
@@ -848,10 +854,12 @@ async def _listen(
             finished_at = datetime.fromisoformat(conversation['finished_at'].isoformat())
             seconds_since_last_update = (datetime.now(timezone.utc) - finished_at).total_seconds()
             if seconds_since_last_update >= conversation_creation_timeout:
-                print(
-                    f"Conversation {current_conversation_id} timeout reached ({seconds_since_last_update:.1f}s). Processing...",
-                    uid,
-                    session_id,
+                logger.info(
+                    'conversation_timeout_reached',
+                    uid=uid,
+                    session_id=session_id,
+                    conversation_id=current_conversation_id,
+                    timeout_seconds=seconds_since_last_update,
                 )
                 await _process_current_conversation(current_conversation_id)
 
@@ -903,7 +911,7 @@ async def _listen(
                 transcript_segments, _ = TranscriptSegment.combine_segments([], newly_processed_segments)
 
             if not current_conversation_id:
-                print("Warning: No current conversation ID", uid, session_id)
+                logger.warning('no_current_conversation_for_transcript', uid=uid, session_id=session_id)
                 continue
 
             result = _update_in_progress_conversation(
@@ -972,7 +980,7 @@ async def _listen(
             description = await describe_image(image_b64)
             discarded = not description or not description.strip()
         except Exception as e:
-            print(f"Error describing image: {e}", uid, session_id)
+            logger.error('image_description_failed', uid=uid, session_id=session_id, error=str(e))
             description = "Could not generate description."
             discarded = True
 
@@ -989,7 +997,7 @@ async def _listen(
         data = chunk_data.get('data')
 
         if not temp_id or not isinstance(index, int) or not isinstance(total, int) or not data:
-            print(f"Invalid image chunk received: {chunk_data}", uid, session_id)
+            logger.warning('invalid_image_chunk', uid=uid, session_id=session_id, chunk_data=chunk_data)
             return
 
         if temp_id not in image_chunks_cache:
@@ -1031,7 +1039,7 @@ async def _listen(
                         if elapsed_seconds > speech_profile_duration or not soniox_socket2:
                             await soniox_socket.send(data)
                             if soniox_socket2:
-                                print('Killing soniox_socket2', uid, session_id)
+                                logger.debug('closing_soniox_socket2_profile_complete', uid=uid, session_id=session_id)
                                 await soniox_socket2.close()
                                 soniox_socket2 = None
                                 speech_profile_processed = True
@@ -1046,7 +1054,7 @@ async def _listen(
                         if elapsed_seconds > speech_profile_duration or not dg_socket2:
                             dg_socket1.send(data)
                             if dg_socket2:
-                                print('Killing deepgram_socket2', uid, session_id)
+                                logger.debug('closing_deepgram_socket2_profile_complete', uid=uid, session_id=session_id)
                                 dg_socket2.finish()
                                 dg_socket2 = None
                                 speech_profile_processed = True
@@ -1080,22 +1088,28 @@ async def _listen(
                                     speaker_to_person_map[speaker_id] = (person_id, person_name)
                                     for sid in segment_ids:
                                         segment_person_assignment_map[sid] = person_id
-                                    print(
-                                        f"Speaker {speaker_id} assigned to {person_name} ({person_id})", uid, session_id
+                                    logger.info(
+                                        'speaker_assigned',
+                                        uid=uid,
+                                        session_id=session_id,
+                                        speaker_id=speaker_id,
+                                        person_id=person_id,
+                                        person_name=person_name,
                                     )
                             else:
-                                print(
-                                    "Speaker assignment ignored: no segment_ids or no speech-profile-processed segments.",
-                                    uid,
-                                    session_id,
+                                logger.debug(
+                                    'speaker_assignment_ignored',
+                                    uid=uid,
+                                    session_id=session_id,
+                                    reason='no_segment_ids_or_no_speech_profile_processed_segments',
                                 )
                     except json.JSONDecodeError:
-                        print(f"Received non-json text message: {message.get('text')}", uid, session_id)
+                        logger.warning('non_json_text_message', uid=uid, session_id=session_id, message=message.get('text'))
 
         except WebSocketDisconnect:
-            print("WebSocket disconnected", uid, session_id)
+            logger.info('websocket_disconnected', uid=uid, session_id=session_id)
         except Exception as e:
-            print(f'Could not process data: error {e}', uid, session_id)
+            logger.error('data_processing_error', uid=uid, session_id=session_id, error=str(e), exc_info=True)
             websocket_close_code = 1011
         finally:
             websocket_active = False
@@ -1146,7 +1160,7 @@ async def _listen(
         await asyncio.gather(*tasks)
 
     except Exception as e:
-        print(f"Error during WebSocket operation: {e}", uid, session_id)
+        logger.error('websocket_operation_error', uid=uid, session_id=session_id, error=str(e), exc_info=True)
     finally:
         if last_usage_record_timestamp:
             transcription_seconds = int(time.time() - last_usage_record_timestamp)
@@ -1168,21 +1182,21 @@ async def _listen(
             if speechmatics_socket:
                 await speechmatics_socket.close()
         except Exception as e:
-            print(f"Error closing STT sockets: {e}", uid, session_id)
+            logger.error('stt_socket_close_error', uid=uid, session_id=session_id, error=str(e))
 
         # Client sockets
         if websocket.client_state == WebSocketState.CONNECTED:
             try:
                 await websocket.close(code=websocket_close_code)
             except Exception as e:
-                print(f"Error closing Client WebSocket: {e}", uid, session_id)
+                logger.error('client_websocket_close_error', uid=uid, session_id=session_id, error=str(e))
 
         # Pusher sockets
         if pusher_close is not None:
             try:
                 await pusher_close()
             except Exception as e:
-                print(f"Error closing Pusher: {e}", uid, session_id)
+                logger.error('pusher_close_error', uid=uid, session_id=session_id, error=str(e))
 
         # Clean up collections to aid garbage collection
         try:
@@ -1196,9 +1210,9 @@ async def _listen(
             image_chunks.clear()
         except NameError as e:
             # Variables might not be defined if an error occurred early
-            print(f"Cleanup error (safe to ignore): {e}", uid, session_id)
+            logger.debug('cleanup_error', uid=uid, session_id=session_id, error=str(e))
 
-    print("_listen ended", uid, session_id)
+    logger.info('listen_ended', uid=uid, session_id=session_id)
 
 
 @router.websocket("/v4/listen")

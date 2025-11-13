@@ -253,3 +253,5 @@ typesense==0.21.0
 pycountry==24.6.1
 google-cloud-translate==3.20.2
 langdetect==1.0.9
+structlog==24.1.0
+redis-lock==4.0.0
