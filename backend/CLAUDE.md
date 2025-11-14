@@ -89,6 +89,17 @@ Successfully implemented and debugged iOS on-device transcription support with t
 
 iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - they describe on-device approach that was abandoned.
 
+### **ImportError Fix (Nov 14)**
+
+**Problem**: Backend failing to start with `ImportError: cannot import name 'ai' from 'routers'`
+- **Cause**: `main.py` imported non-existent `ai` router (likely from branch merge)
+- **Impact**: Backend startup failure, mistaken for credentials issue
+- **Solution**: Removed `ai` import and `app.include_router(ai.router)` from main.py
+- **Commit**: `cdaf77010` - fix(main): remove non-existent ai router import
+- **Status**: ✅ Backend running successfully, health check verified
+
+**Production Status**: Backend now running on `feature/ios-backend-integration` at `api.ella-ai-care.com`
+
 ### **Next Actions**
 
 1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
