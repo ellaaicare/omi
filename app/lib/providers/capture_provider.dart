@@ -612,13 +612,38 @@ class CaptureProvider extends ChangeNotifier
 
   @override
   void dispose() {
+    // Cancel all stream subscriptions to prevent memory leaks
     _bleBytesStream?.cancel();
+    _bleBytesStream = null;
+
     _blePhotoStream?.cancel();
+    _blePhotoStream = null;
+
+    // SECURITY FIX: Cancel button stream subscription (was missing)
+    _bleButtonStream?.cancel();
+    _bleButtonStream = null;
+
+    // SECURITY FIX: Cancel storage stream subscription (was missing)
+    _storageStream?.cancel();
+    _storageStream = null;
+
     _socket?.unsubscribe(this);
+    _socket = null;
+
     _keepAliveTimer?.cancel();
+    _keepAliveTimer = null;
+
     _connectionStateListener?.cancel();
+    _connectionStateListener = null;
+
     _recordingTimer?.cancel();
-    _metricsTimer?.cancel();
+    _recordingTimer = null;
+
+    _metricsTimer?.cancel();  // YOUR CODE - keep it!
+
+    // SECURITY FIX: Cancel reconnect timer (was missing)
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
 
     // Remove lifecycle observer
     if (PlatformService.isDesktop) {

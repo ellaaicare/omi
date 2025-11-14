@@ -192,6 +192,9 @@ Future _init() async {
 
   await SharedPreferencesUtil.init();
 
+  // Initialize API client with certificate pinning
+  await ApiClient.init();
+
   bool isAuth = (await AuthService.instance.getIdToken()) != null;
   if (isAuth) PlatformManager.instance.mixpanel.identify();
   if (PlatformService.isMobile) initOpus(await opus_flutter.load());

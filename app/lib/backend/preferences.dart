@@ -6,6 +6,7 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
+import 'package:omi/backend/secure_storage.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,11 +23,21 @@ class SharedPreferencesUtil {
 
   static Future<void> init() async {
     _preferences = await SharedPreferences.getInstance();
+    // Initialize secure storage for sensitive data
+    await SecureStorage.instance.init();
   }
 
-  set uid(String value) => saveString('uid', value);
+  set uid(String value) {
+    saveString('uid', value);
+    // Also save to secure storage for enhanced security
+    SecureStorage.instance.saveUid(value);
+  }
 
-  String get uid => getString('uid') ?? '';
+  String get uid {
+    // Try secure storage first, fallback to SharedPreferences
+    final secureUid = SecureStorage.instance.getUid();
+    return secureUid.isNotEmpty ? secureUid : (getString('uid') ?? '');
+  }
 
   //-------------------------------- Device ----------------------------------//
 
@@ -378,26 +389,67 @@ class SharedPreferencesUtil {
   String get calendarType => getString('calendarType2') ?? 'manual';
 
   //--------------------------------- Auth ------------------------------------//
+  // IMPORTANT: Auth-related data is now stored in SecureStorage for enhanced security
 
-  String get authToken => getString('authToken') ?? '';
+  String get authToken {
+    // Read from secure storage only
+    return SecureStorage.instance.getAuthToken();
+  }
 
-  set authToken(String value) => saveString('authToken', value);
+  set authToken(String value) {
+    // Write to secure storage only
+    SecureStorage.instance.saveAuthToken(value);
+    // Remove from SharedPreferences if it exists (cleanup old storage)
+    _preferences?.remove('authToken');
+  }
 
-  int get tokenExpirationTime => getInt('tokenExpirationTime') ?? 0;
+  int get tokenExpirationTime {
+    // Read from secure storage only
+    return SecureStorage.instance.getTokenExpirationTime();
+  }
 
-  set tokenExpirationTime(int value) => saveInt('tokenExpirationTime', value);
+  set tokenExpirationTime(int value) {
+    // Write to secure storage only
+    SecureStorage.instance.saveTokenExpirationTime(value);
+    // Remove from SharedPreferences if it exists (cleanup old storage)
+    _preferences?.remove('tokenExpirationTime');
+  }
 
-  String get email => getString('email') ?? '';
+  String get email {
+    // Read from secure storage only
+    return SecureStorage.instance.getEmail();
+  }
 
-  set email(String value) => saveString('email', value);
+  set email(String value) {
+    // Write to secure storage only
+    SecureStorage.instance.saveEmail(value);
+    // Remove from SharedPreferences if it exists (cleanup old storage)
+    _preferences?.remove('email');
+  }
 
-  String get givenName => getString('givenName') ?? '';
+  String get givenName {
+    // Read from secure storage only
+    return SecureStorage.instance.getGivenName();
+  }
 
-  set givenName(String value) => saveString('givenName', value);
+  set givenName(String value) {
+    // Write to secure storage only
+    SecureStorage.instance.saveGivenName(value);
+    // Remove from SharedPreferences if it exists (cleanup old storage)
+    _preferences?.remove('givenName');
+  }
 
-  String get familyName => getString('familyName') ?? '';
+  String get familyName {
+    // Read from secure storage only
+    return SecureStorage.instance.getFamilyName();
+  }
 
-  set familyName(String value) => saveString('familyName', value);
+  set familyName(String value) {
+    // Write to secure storage only
+    SecureStorage.instance.saveFamilyName(value);
+    // Remove from SharedPreferences if it exists (cleanup old storage)
+    _preferences?.remove('familyName');
+  }
 
   String get fullName => '$givenName $familyName'.trim();
 
