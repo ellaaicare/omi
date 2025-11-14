@@ -111,13 +111,35 @@ iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - t
 - `/v1/health` ✅ `{"status":"ok"}`
 - `/v1/ai/health` ✅ `{"status":"healthy"}`
 
+### **iOS Background Push Notification Fix (Nov 14)**
+
+**Problem**: iOS background push notifications not working (background handler never called)
+- **iOS Team Diagnosis**: Backend missing required APNS headers
+- **Root Cause**: Ella notification endpoint missing `apns-priority` and `apns-push-type` headers
+- **Impact**: iOS not waking app in background, no audio playback
+
+**Fix Applied**:
+- Added missing APNS headers to `routers/ella.py` (lines 368-371)
+- Now includes: `apns-priority: "10"` and `apns-push-type: "background"`
+- Already had: `content_available: True`
+- **Commit**: `25d4d0397` - fix(notifications): add missing APNS headers for iOS background push
+- **Status**: ✅ Deployed to production
+
+**Other Endpoints Checked**:
+- ✅ `/v1/notifications/test-tts-push` - Already had correct headers (working fine)
+- ✅ Action item reminders - Already had correct headers
+- ✅ Foreground notifications - Don't need background headers (correct)
+
+**iOS Team**: Ready for testing with "Request Test Push" button
+
 ### **Next Actions**
 
 1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
-2. Test Ella endpoints manually when they're fixed
-3. Continue supporting iOS team with Edge ASR testing
-4. Monitor production logs for any new issues
-5. Ready for next feature work (Ella team handles intent/routing)
+2. ~~Fix iOS background push notifications~~ → Fixed APNS headers in Ella endpoint ✅
+3. Test Ella endpoints manually when they're fixed
+4. Continue supporting iOS team with Edge ASR testing
+5. Monitor production logs for any new issues
+6. Ready for next feature work (Ella team handles intent/routing)
 
 ---
 
