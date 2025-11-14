@@ -9,6 +9,7 @@ import 'package:omi/services/wals.dart';
 import 'package:opus_dart/opus_dart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:omi/main.dart' show ensureOpusInitialized;
 
 class AudioPlayerUtils extends ChangeNotifier {
   FlutterSoundPlayer? _audioPlayer;
@@ -231,6 +232,9 @@ class AudioPlayerUtils extends ChangeNotifier {
   }
 
   Future<String?> _decodeOpusToWav(Wal wal, String opusFilePath, {bool forSharing = false}) async {
+    // Lazy-load Opus codec if not already initialized
+    await ensureOpusInitialized();
+
     final file = File(opusFilePath);
     if (!file.existsSync()) return null;
 

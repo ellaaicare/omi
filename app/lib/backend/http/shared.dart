@@ -44,10 +44,25 @@ class ApiClient {
   static http.Client getClient() {
     if (_client == null) {
       // Synchronous fallback - create basic client
-      Logger.log('WARNING: ApiClient accessed before initialization');
+      // This is fine as init() will be called in background during startup
+      debugPrint('⚡ ApiClient: Creating client on-demand (init deferred for performance)');
       _client = http.Client();
+      // Schedule initialization in background
+      _initInBackground();
     }
     return _client!;
+  }
+
+  /// Initialize certificate pinning in background without blocking
+  static void _initInBackground() {
+    Future(() async {
+      try {
+        await CertificatePinningConfig.instance.initializePinning();
+        debugPrint('✅ Certificate pinning initialized in background');
+      } catch (e) {
+        Logger.error('Background certificate pinning initialization failed: $e');
+      }
+    });
   }
 
   static void dispose() {

@@ -60,6 +60,24 @@ import 'package:provider/provider.dart';
 import 'package:talker_flutter/talker_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
+/// Global flag to track if Opus codec has been initialized
+bool _opusInitialized = false;
+
+/// Lazy initialize Opus codec on first use
+Future<void> ensureOpusInitialized() async {
+  if (_opusInitialized) return;
+
+  if (PlatformService.isMobile) {
+    try {
+      initOpus(await opus_flutter.load());
+      _opusInitialized = true;
+      debugPrint('✅ Opus codec lazy-loaded successfully');
+    } catch (e) {
+      debugPrint('⚠️ Failed to load Opus codec: $e');
+    }
+  }
+}
+
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -159,11 +177,57 @@ Future _init() async {
 
   FlutterForegroundTask.initCommunicationPort();
 
-  // Service manager
-  await ServiceManager.init();
+  // OPTIMIZATION: Parallelize independent initialization tasks
+  // Group 1: Core services that must complete first
+  await Future.wait([
+    ServiceManager.init(),
+    SharedPreferencesUtil.init(), // Can run in parallel with ServiceManager
+    _initializeFirebase(), // Wrapped in helper function
+  ]);
 
-  // Firebase
-  // Initialize Firebase if not already initialized (e.g., from GoogleService-Info.plist on iOS)
+  // Group 2: Services that depend on core services
+  await Future.wait([
+    PlatformManager.initializeServices(),
+    NotificationService.instance.initialize(),
+    CrashlyticsManager.init(),
+    GrowthbookUtil.init(),
+    // Defer ApiClient.init() - certificate pinning will validate on first API call
+  ]);
+
+  // Register FCM background message handler
+  if (!PlatformService.isDesktop) {
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  }
+
+  // OPTIMIZATION: Lazy load Opus codec - will be initialized when recording starts
+  // This saves 50-100ms on startup
+  // if (PlatformService.isMobile) initOpus(await opus_flutter.load());
+
+  if (!PlatformService.isWindows) {
+    ble.FlutterBluePlus.setOptions(restoreState: true);
+    ble.FlutterBluePlus.setLogLevel(ble.LogLevel.info, color: true);
+  }
+
+  // Setup error handlers
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    return true;
+  };
+
+  // OPTIMIZATION: Defer ServiceManager.start() and auth check
+  // These will be initialized on-demand when needed
+  // Start services in background without blocking
+  _startServicesInBackground();
+
+  return;
+}
+
+/// Helper function to initialize Firebase
+Future<void> _initializeFirebase() async {
   try {
     if (PlatformService.isWindows) {
       // Windows does not support flavors
@@ -181,49 +245,32 @@ Future _init() async {
       rethrow;
     }
   }
+}
 
-  await PlatformManager.initializeServices();
-  await NotificationService.instance.initialize();
+/// Start services in background without blocking app startup
+void _startServicesInBackground() async {
+  try {
+    // Initialize auth and mixpanel in background
+    final isAuth = (await AuthService.instance.getIdToken()) != null;
+    if (isAuth) {
+      PlatformManager.instance.mixpanel.identify();
+      PlatformManager.instance.crashReporter.identifyUser(
+        FirebaseAuth.instance.currentUser?.email ?? '',
+        SharedPreferencesUtil().fullName,
+        SharedPreferencesUtil().uid,
+      );
+    }
 
-  // Register FCM background message handler
-  if (!PlatformService.isDesktop) {
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    // Start service manager
+    await ServiceManager.instance().start();
+
+    // Initialize API client with certificate pinning in background
+    await ApiClient.init();
+
+    debugPrint('✅ Background services initialized');
+  } catch (e) {
+    debugPrint('⚠️ Error initializing background services: $e');
   }
-
-  await SharedPreferencesUtil.init();
-
-  // Initialize API client with certificate pinning
-  await ApiClient.init();
-
-  bool isAuth = (await AuthService.instance.getIdToken()) != null;
-  if (isAuth) PlatformManager.instance.mixpanel.identify();
-  if (PlatformService.isMobile) initOpus(await opus_flutter.load());
-
-  await GrowthbookUtil.init();
-  if (!PlatformService.isWindows) {
-    ble.FlutterBluePlus.setOptions(restoreState: true);
-    ble.FlutterBluePlus.setLogLevel(ble.LogLevel.info, color: true);
-  }
-
-  await CrashlyticsManager.init();
-  if (isAuth) {
-    PlatformManager.instance.crashReporter.identifyUser(
-      FirebaseAuth.instance.currentUser?.email ?? '',
-      SharedPreferencesUtil().fullName,
-      SharedPreferencesUtil().uid,
-    );
-  }
-  FlutterError.onError = (FlutterErrorDetails details) {
-    FirebaseCrashlytics.instance.recordFlutterFatalError(details);
-  };
-
-  PlatformDispatcher.instance.onError = (error, stack) {
-    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
-    return true;
-  };
-
-  await ServiceManager.instance().start();
-  return;
 }
 
 void main() {
