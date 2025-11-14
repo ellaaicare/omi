@@ -207,6 +207,55 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     ],
                   ),
                   const SizedBox(height: 24),
+
+                  // ASR Mode Selection
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Speech Recognition Mode',
+                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.white),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      children: [
+                        RadioListTile<String>(
+                          title: const Text('Cloud ASR (Deepgram)', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Audio sent to server for transcription', style: TextStyle(color: Colors.grey)),
+                          value: 'cloud',
+                          groupValue: SharedPreferencesUtil().asrMode,
+                          onChanged: (value) {
+                            setState(() {
+                              SharedPreferencesUtil().asrMode = value!;
+                            });
+                          },
+                          activeColor: Colors.blue,
+                        ),
+                        Divider(color: Colors.grey.shade800, height: 1),
+                        RadioListTile<String>(
+                          title: const Text('On-Device ASR (Apple Speech)', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Private, no audio upload', style: TextStyle(color: Colors.grey)),
+                          value: 'on_device_ios',
+                          groupValue: SharedPreferencesUtil().asrMode,
+                          onChanged: (value) {
+                            setState(() {
+                              SharedPreferencesUtil().asrMode = value!;
+                            });
+                          },
+                          activeColor: Colors.blue,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
                   //TODO: Model selection commented out because Soniox model is no longer being used
                   // const SizedBox(height: 32),
                   // const Padding(
