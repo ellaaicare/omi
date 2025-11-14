@@ -89,12 +89,23 @@ Successfully implemented and debugged iOS on-device transcription support with t
 
 iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - they describe on-device approach that was abandoned.
 
+### **Logging Issue Fixed (Nov 14)**
+
+**Problem**: Summary generation logs not appearing in journalctl
+- **Cause**: Python `print()` buffering stdout in production
+- **Impact**: Couldn't determine if Ella or local LLM was generating summaries
+- **Solution**: Added `flush=True` to all summary generation print statements
+- **Commit**: `8248fea7e` - fix(logging): add flush=True to summary generation print statements
+- **Status**: ✅ Deployed to production, logs now visible
+
+**Confirmed**: Backend IS generating summaries correctly (titles, emojis, categories) for Edge ASR conversations.
+
 ### **Next Actions**
 
 1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
-2. Test Ella endpoints manually when they're fixed
-3. Continue supporting iOS team with Edge ASR testing
-4. Monitor production logs for any new issues
+2. ~~Fix summary logging~~ → ✅ FIXED (deployed Nov 14)
+3. Test next conversation to confirm Ella vs local LLM logging
+4. Continue supporting iOS team with Edge ASR testing
 5. Ready for next feature work (Ella team handles intent/routing)
 
 ---
