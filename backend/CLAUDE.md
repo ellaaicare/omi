@@ -132,6 +132,34 @@ iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - t
 
 **iOS Team**: Ready for testing with "Request Test Push" button
 
+### **FCM Payload Logging Added (Nov 14)**
+
+**Enhancement**: Added detailed logging to capture exact FCM payloads for debugging
+
+**What's Logged** (with `flush=True` for immediate visibility):
+- FCM token (truncated for security)
+- Data payload (action, text, voice, audio_url, etc.)
+- APNS headers (`apns-priority`, `apns-push-type`)
+- APNS `content_available` flag value
+- APNS sound setting
+- FCM message_id confirmation
+
+**Endpoints Updated**:
+- `/v1/notifications/test-tts-push`
+- `/v1/ella/notification`
+
+**View Logs**:
+```bash
+# Live monitoring
+journalctl -u omi-backend -f | grep -E "(FCM Payload|Push notification)"
+
+# Recent logs
+journalctl -u omi-backend --since "5 minutes ago" | grep -A 10 "FCM Payload"
+```
+
+**Purpose**: Prove exact payload format sent to FCM, verify all APNS fields present
+**Commit**: `07c538620` - feat(logging): add detailed FCM payload logging
+
 ### **Next Actions**
 
 1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
