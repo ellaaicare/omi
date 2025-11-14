@@ -373,7 +373,7 @@ def get_transcript_structure(
         try:
             import requests
 
-            print(f"📤 Calling Ella summary agent for uid={uid}")
+            print(f"📤 Calling Ella summary agent for uid={uid}", flush=True)
 
             response = requests.post(
                 "https://n8n.ella-ai-care.com/webhook/summary-agent",
@@ -389,7 +389,7 @@ def get_transcript_structure(
 
             if response.status_code == 200:
                 result = response.json()
-                print(f"✅ Ella summary agent returned: {result.get('title', 'N/A')}")
+                print(f"✅ Ella summary agent returned: {result.get('title', 'N/A')}", flush=True)
 
                 # Convert Ella's response to Structured object
                 action_items = []
@@ -424,13 +424,13 @@ def get_transcript_structure(
 
                 return structured
             else:
-                print(f"⚠️  Ella summary agent returned status {response.status_code}, falling back to local LLM")
+                print(f"⚠️  Ella summary agent returned status {response.status_code}, falling back to local LLM", flush=True)
 
         except Exception as e:
-            print(f"⚠️  Ella summary agent failed: {e}, falling back to local LLM")
+            print(f"⚠️  Ella summary agent failed: {e}, falling back to local LLM", flush=True)
 
     # ====== FALLBACK: Original hard-coded LLM ======
-    print(f"🔄 Using local LLM for summary generation")
+    print(f"🔄 Using local LLM for summary generation", flush=True)
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.
