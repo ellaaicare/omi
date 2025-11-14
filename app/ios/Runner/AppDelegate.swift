@@ -768,10 +768,26 @@ class OnDeviceASRService: NSObject {
             recognitionTask = nil
         }
 
-        // Configure audio session for recording
+        // Configure audio session for recording with Bluetooth support
         let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+        try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetooth, .defaultToSpeaker])
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+
+        // Log audio route information
+        NSLog("🎙️ [OnDeviceASR] Audio session configured for Bluetooth")
+        let currentRoute = audioSession.currentRoute
+        NSLog("🎧 [AudioRoute] Available inputs: \(audioSession.availableInputs?.count ?? 0)")
+        for input in audioSession.availableInputs ?? [] {
+            NSLog("   - \(input.portName) (\(input.portType.rawValue))")
+        }
+        NSLog("🎧 [AudioRoute] Current route inputs:")
+        for input in currentRoute.inputs {
+            NSLog("   🎤 [ACTIVE INPUT] \(input.portName) (\(input.portType.rawValue))")
+        }
+        NSLog("🎧 [AudioRoute] Current route outputs:")
+        for output in currentRoute.outputs {
+            NSLog("   🔊 [ACTIVE OUTPUT] \(output.portName) (\(output.portType.rawValue))")
+        }
 
         // Create recognition request
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
