@@ -36,6 +36,7 @@ from routers import (
 )
 
 from utils.other.timeout import TimeoutMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 
 if os.environ.get('SERVICE_ACCOUNT_JSON'):
     service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
@@ -45,6 +46,33 @@ else:
     firebase_admin.initialize_app()
 
 app = FastAPI()
+
+# CORS Configuration
+ALLOWED_ORIGINS = [
+    "https://omi.me",
+    "https://app.omi.me",
+    "https://web.omi.me",
+    "https://www.omi.me",
+]
+
+# Add development origins if in development mode
+if os.getenv("ENVIRONMENT", "production") == "development":
+    ALLOWED_ORIGINS.extend([
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+    ])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+    max_age=3600,
+)
 
 app.include_router(transcribe.router)
 app.include_router(conversations.router)
