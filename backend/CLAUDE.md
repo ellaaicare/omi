@@ -92,13 +92,24 @@ iOS handoff docs (`app/docs/BACKEND_INTENT_INTEGRATION.md`) are **outdated** - t
 ### **ImportError Fix (Nov 14)**
 
 **Problem**: Backend failing to start with `ImportError: cannot import name 'ai' from 'routers'`
-- **Cause**: `main.py` imported non-existent `ai` router (likely from branch merge)
-- **Impact**: Backend startup failure, mistaken for credentials issue
-- **Solution**: Removed `ai` import and `app.include_router(ai.router)` from main.py
-- **Commit**: `cdaf77010` - fix(main): remove non-existent ai router import
-- **Status**: ✅ Backend running successfully, health check verified
+- **Root Cause**: `routers/ai.py` was created locally (Nov 3) but never committed to git
+- **Impact**: Backend worked locally but failed on VPS (which pulls from git)
+- **Initial Solution**: Removed ai import thinking file didn't exist
+- **Final Solution**: Committed `ai.py` to git, restored ai import
+- **Commits**:
+  - `416cca585` - feat(ai): add AI processing endpoint for Ella integration
+  - `0578dc00a` - fix(main): restore ai router import now that ai.py is committed
+- **Status**: ✅ Backend running successfully with AI endpoint active
+
+**AI Endpoint Purpose**:
+- `/v1/ai/process-transcript` - Real-time transcript processing for Ella AI app
+- Context-aware AI responses (user profile, conversation history, memories)
+- Pre-generates TTS audio for push notifications
+- Used by `scripts/create_ella_ai_app.py` for OMI app integration
 
 **Production Status**: Backend now running on `feature/ios-backend-integration` at `api.ella-ai-care.com`
+- `/v1/health` ✅ `{"status":"ok"}`
+- `/v1/ai/health` ✅ `{"status":"healthy"}`
 
 ### **Next Actions**
 
