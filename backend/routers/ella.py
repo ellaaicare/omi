@@ -378,8 +378,18 @@ async def ella_notification_callback(request: EllaNotificationCallback):
             )
         )
 
+        # Log the exact FCM payload being sent
+        print(f"  📤 Ella FCM Payload Details:", flush=True)
+        print(f"     Token: {fcm_token[:20]}...", flush=True)
+        print(f"     Data: {message.data}", flush=True)
+        print(f"     APNS Headers: {message.apns.headers if message.apns else 'None'}", flush=True)
+        if message.apns and message.apns.payload and message.apns.payload.aps:
+            print(f"     APNS content_available: {message.apns.payload.aps.content_available}", flush=True)
+            print(f"     APNS sound: {message.apns.payload.aps.sound}", flush=True)
+        print(f"  🚀 Sending to FCM...", flush=True)
+
         message_id = messaging.send(message)
-        print(f"  ✅ Push notification sent: {message_id}")
+        print(f"  ✅ Push notification sent: {message_id}", flush=True)
 
         return {
             "status": "success",
