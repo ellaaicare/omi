@@ -28,8 +28,56 @@
 
 ## 📊 **CURRENT STATUS & LATEST WORK**
 
-**Last Session**: November 10, 2025
-**Latest Commit**: `714968cfc` - docs(edge-asr): add comprehensive Edge ASR integration documentation
+**Last Session**: November 14, 2025
+**Latest Commit**: `5d6051a09` - docs(backend): document FCM payload logging enhancement
+**Production Status**: ✅ All systems operational on VPS (api.ella-ai-care.com)
+
+### **iOS Push Notification Investigation - Nov 14, 2025 ✅**
+
+**Issue Reported**: iOS background push notifications not working (background handler not called)
+
+**Investigation Results**: Backend is sending **100% correct payload** - issue is iOS-side
+
+**Test Results** (14:21:50 UTC):
+```
+📤 FCM Payload sent to iOS:
+   APNS Headers: {'apns-priority': '10', 'apns-push-type': 'background'}
+   APNS content_available: True  ✅
+   APNS sound: None  ✅
+   Data: {'action': 'speak_tts', 'text': '...', 'audio_url': 'https://...', ...}
+✅ FCM accepted: projects/omi-dev-ca005/messages/1763130111246769
+```
+
+**Backend Compliance**: ✅ COMPLETE
+- ✅ Has `apns-priority: "10"`
+- ✅ Has `apns-push-type: "background"`
+- ✅ Has `content_available: True`
+- ✅ Has `sound: None` (silent push)
+- ✅ FCM successfully sent message
+- ✅ TTS audio pre-generated and included
+
+**Root Cause**: NOT backend - issue is in iOS app configuration or handling
+- Backend payload is 100% correct per iOS requirements
+- FCM is accepting and delivering the message
+- Problem is iOS app not responding to background push
+
+**Work Done**:
+1. Fixed Ella endpoint APNS headers (`25d4d0397`)
+2. Added comprehensive FCM payload logging (`07c538620`)
+3. Verified all notification endpoints have correct format
+4. Live-tested and confirmed backend sending correct payload
+
+**Commits**:
+- `416cca585` - feat(ai): add AI processing endpoint for Ella integration
+- `0578dc00a` - fix(main): restore ai router import now that ai.py is committed
+- `dba9613f6` - fix(logging): add flush=True to summary generation print statements
+- `25d4d0397` - fix(notifications): add missing APNS headers for iOS background push
+- `07c538620` - feat(logging): add detailed FCM payload logging for push notification debugging
+- `5d6051a09` - docs(backend): document FCM payload logging enhancement
+
+**Status**: Backend work complete - handed off to iOS team for app-side debugging
+
+---
 
 ### **Edge ASR Integration - COMPLETE ✅**
 
@@ -163,11 +211,14 @@ journalctl -u omi-backend --since "5 minutes ago" | grep -A 10 "FCM Payload"
 ### **Next Actions**
 
 1. ~~Investigate Ella webhook configuration~~ → Posted to Ella team on Discord
-2. ~~Fix iOS background push notifications~~ → Fixed APNS headers in Ella endpoint ✅
-3. Test Ella endpoints manually when they're fixed
-4. Continue supporting iOS team with Edge ASR testing
-5. Monitor production logs for any new issues
-6. Ready for next feature work (Ella team handles intent/routing)
+2. ~~Fix iOS background push notifications~~ → Backend confirmed working ✅ (issue is iOS-side)
+3. ~~Add FCM payload logging~~ → Complete, verified working ✅
+4. Test Ella endpoints manually when they're fixed
+5. Continue supporting iOS team with Edge ASR testing
+6. Monitor production logs for any new issues
+7. Ready for next feature work (Ella team handles intent/routing)
+
+**Backend Status**: All systems operational, no pending backend work for push notifications
 
 ---
 
