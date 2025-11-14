@@ -365,9 +365,13 @@ async def ella_notification_callback(request: EllaNotificationCallback):
                 "urgency": request.urgency,
             },
             apns=messaging.APNSConfig(
+                headers={
+                    "apns-priority": "10",  # High priority for immediate delivery
+                    "apns-push-type": "background",  # Background push notification
+                },
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
-                        content_available=True,
+                        content_available=True,  # Wake app in background
                         sound="default" if request.urgency == "EMERGENCY" else None
                     )
                 )
