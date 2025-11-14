@@ -773,6 +773,17 @@ class OnDeviceASRService: NSObject {
         try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetooth, .defaultToSpeaker])
         try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
 
+        // Prefer Bluetooth input if available
+        if let availableInputs = audioSession.availableInputs {
+            // Look for Bluetooth input
+            if let bluetoothInput = availableInputs.first(where: { input in
+                input.portType == .bluetoothHFP || input.portType == .bluetoothA2DP || input.portType == .bluetoothLE
+            }) {
+                try audioSession.setPreferredInput(bluetoothInput)
+                NSLog("🎧 [OnDeviceASR] Preferred input set to: \(bluetoothInput.portName)")
+            }
+        }
+
         // Log audio route information
         NSLog("🎙️ [OnDeviceASR] Audio session configured for Bluetooth")
         let currentRoute = audioSession.currentRoute
