@@ -33,43 +33,65 @@
 **Branch**: `feature/backend-e2e-agent-testing`
 **Latest Commit**: `0578dc00a` - fix(main): restore ai router import now that ai.py is committed
 
-### **E2E Agent Testing - IN PROGRESS 🔄**
+### **E2E Agent Testing - BLOCKED ⚠️**
 
 **Task**: Implement test endpoints that call REAL production n8n Letta agents
-**Status**: Ready to implement
-**Documentation**: `/tmp/BACKEND_E2E_TESTING_INSTRUCTIONS_REVISED.md` (iOS-provided)
+**Status**: ✅ Implementation Complete | ⚠️ Blocked on n8n Authentication
+**Branch**: `claude/e2e-agent-testing-endpoints-012842HTqxEogXqSw1EfFkGF`
+**Commit**: `bc07b135b`
 
-**Endpoints to Implement (6 total)**:
-1. `POST /v1/test/scanner-agent` - Urgency detection (1h)
-2. `POST /v1/test/memory-agent` - Memory extraction (1h)
-3. `POST /v1/test/summary-agent` - Daily summaries (1h)
-4. `POST /v1/test/chat-sync` - Synchronous chat (1h)
-5. `POST /v1/test/chat-async` - Asynchronous chat (3-4h)
-6. `GET /v1/test/chat-response/{job_id}` - Async polling (included in #5)
+**Endpoints Implemented (6 total)** ✅:
+1. `POST /v1/test/scanner-agent` - Urgency detection ✅
+2. `POST /v1/test/memory-agent` - Memory extraction ✅
+3. `POST /v1/test/summary-agent` - Daily summaries ✅
+4. `POST /v1/test/chat-sync` - Synchronous chat ✅
+5. `POST /v1/test/chat-async` - Asynchronous chat ✅
+6. `GET /v1/test/chat-response/{job_id}` - Async polling ✅
 
-**Key Requirements**:
-- ✅ Call REAL n8n agents (not fake keyword matching)
-- ✅ Use generic endpoint: `https://n8n.ella-ai-care.com/webhook/chat-agent`
-- ✅ Support both audio→STT→agent and text→agent flows
-- ✅ Dual chat pattern: sync (simple) + async (production-ready)
-- ✅ Real performance metrics (STT latency, agent latency, total)
-- ✅ Reuse existing Edge ASR/Deepgram code
+**Implementation Details**:
+- ✅ All 6 endpoints in `backend/routers/testing.py` (458 lines)
+- ✅ Router registered in `main.py`
+- ✅ Deepgram STT integration for audio input
+- ✅ Real n8n webhook calls (scanner, memory, summary, chat)
+- ✅ Comprehensive latency metrics
+- ✅ Sync/async chat patterns
+- ✅ Documentation created (`E2E_TESTING_ENDPOINTS_USAGE.md`)
 
-**n8n Webhooks to Call**:
-- `https://n8n.ella-ai-care.com/webhook/scanner-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/memory-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/summary-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/chat-agent` ✅ (generic, NOT omi-realtime)
+**Current Blocker**: ⚠️ **n8n Webhooks Returning 401 Unauthorized**
 
-**Time Estimate**: 6-8 hours total
-**Priority**: High (enables critical AI agent testing for iOS)
+**Error**: All endpoints get "Access denied" from n8n
+```json
+{
+  "detail": "Agent call failed: 401 Client Error: Unauthorized for url: https://n8n.ella-ai-care.com/webhook/scanner-agent"
+}
+```
+
+**Blocking**: Backend testing, iOS integration
 
 **Next Steps**:
-1. Create feature branch: `git checkout -b feature/backend-e2e-agent-testing`
-2. Create `backend/routers/testing.py` with all 6 endpoints
-3. Register router in `main.py`
-4. Test with curl (scanner, memory, summary, chat-sync, chat-async)
-5. Commit and push for iOS integration
+1. **Ella Team (URGENT)**: Configure n8n webhook authentication
+   - Option A: Make webhooks public (fastest)
+   - Option B: Provide API key and header details
+   - See: `backend/docs/ELLA_TEAM_E2E_ENDPOINT_SPECS.md`
+
+2. **Backend Developer** (after Ella fixes auth):
+   - Test all 6 endpoints with real n8n agents
+   - Create feature branch: `feature/backend-e2e-agent-testing`
+   - Create PR to main
+   - See: `backend/docs/E2E_TESTING_NEXT_STEPS.md`
+
+3. **iOS Team**:
+   - Can start UI work with mock responses
+   - Full testing after backend endpoints verified
+
+**Documentation**:
+- ✅ `docs/BACKEND_E2E_TESTING_INSTRUCTIONS_REVISED.md` - Implementation guide
+- ✅ `docs/BACKEND_E2E_UPDATES_v2.md` - Sync/async patterns
+- ✅ `docs/ELLA_TEAM_E2E_ENDPOINT_SPECS.md` - n8n requirements
+- ✅ `docs/E2E_TESTING_ENDPOINTS_USAGE.md` - Usage guide
+- ✅ `docs/E2E_TESTING_NEXT_STEPS.md` - Current status & next steps
+
+**ETA**: Can complete in 2 hours after n8n auth resolved
 
 ---
 
