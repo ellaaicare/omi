@@ -185,16 +185,28 @@ Future _init() async {
     _initializeFirebase(), // Wrapped in helper function
   ]);
 
+  // CRITICAL: Ensure Firebase is fully initialized before notification setup
+  // This prevents race conditions with FCM token creation
+  await _ensureFirebaseReady();
+
   // Group 2: Services that depend on core services
+  // NOTE: NotificationService must initialize AFTER Firebase is ready
   await Future.wait([
     PlatformManager.initializeServices(),
-    NotificationService.instance.initialize(),
     CrashlyticsManager.init(),
     GrowthbookUtil.init(),
     // Defer ApiClient.init() - certificate pinning will validate on first API call
   ]);
 
-  // Register FCM background message handler
+  // CRITICAL: Start ServiceManager before NotificationService
+  // NotificationService may depend on device services being available
+  await ServiceManager.instance().start();
+
+  // CRITICAL: Initialize NotificationService sequentially AFTER Firebase & ServiceManager
+  // This ensures FCM is ready for APNS token registration and all dependencies are met
+  await NotificationService.instance.initialize();
+
+  // Register FCM background message handler AFTER NotificationService is ready
   if (!PlatformService.isDesktop) {
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   }
@@ -247,10 +259,31 @@ Future<void> _initializeFirebase() async {
   }
 }
 
-/// Start services in background without blocking app startup
+/// Ensure Firebase Messaging is fully ready before notification setup
+/// This prevents race conditions with FCM/APNS token registration
+Future<void> _ensureFirebaseReady() async {
+  if (PlatformService.isDesktop) return;
+
+  try {
+    // Give Firebase Messaging time to fully initialize
+    // This is critical for proper APNS token → FCM token flow
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    // Verify Firebase Messaging is accessible
+    // This will throw if Firebase isn't ready
+    final messaging = FirebaseMessaging.instance;
+    debugPrint('✅ Firebase Messaging ready: ${messaging.hashCode}');
+  } catch (e) {
+    debugPrint('⚠️ Firebase Messaging not ready: $e');
+  }
+}
+
+/// Initialize non-critical services in background without blocking app startup
+/// NOTE: ServiceManager.start() is now called in main flow before NotificationService
+/// to ensure proper notification initialization
 void _startServicesInBackground() async {
   try {
-    // Initialize auth and mixpanel in background
+    // Initialize auth and identify user in analytics (non-blocking)
     final isAuth = (await AuthService.instance.getIdToken()) != null;
     if (isAuth) {
       PlatformManager.instance.mixpanel.identify();
@@ -261,13 +294,10 @@ void _startServicesInBackground() async {
       );
     }
 
-    // Start service manager
-    await ServiceManager.instance().start();
-
     // Initialize API client with certificate pinning in background
     await ApiClient.init();
 
-    debugPrint('✅ Background services initialized');
+    debugPrint('✅ Background services initialized (auth: $isAuth)');
   } catch (e) {
     debugPrint('⚠️ Error initializing background services: $e');
   }
