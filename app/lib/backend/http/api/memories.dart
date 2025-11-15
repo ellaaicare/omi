@@ -33,16 +33,36 @@ Future<bool> updateMemoryVisibilityServer(String memoryId, String visibility) as
 }
 
 Future<List<Memory>> getMemories({int limit = 100, int offset = 0}) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v3/memories?limit=$limit&offset=$offset',
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
-  if (response == null) return [];
-  debugPrint('getMemories response: ${response.body}');
-  List<dynamic> memories = json.decode(response.body);
-  return memories.map((memory) => Memory.fromJson(memory)).toList();
+  try {
+    debugPrint('🔍 Calling getMemories API: ${Env.apiBaseUrl}v3/memories?limit=$limit&offset=$offset');
+
+    var response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v3/memories?limit=$limit&offset=$offset',
+      headers: {},
+      method: 'GET',
+      body: '',
+    );
+
+    if (response == null) {
+      debugPrint('❌ getMemories: Response is null');
+      return [];
+    }
+
+    debugPrint('✅ getMemories: Status ${response.statusCode}');
+    debugPrint('📦 getMemories: Response body: ${response.body}');
+
+    List<dynamic> memoriesJson = json.decode(response.body);
+    debugPrint('📊 getMemories: Parsed ${memoriesJson.length} memories from JSON');
+
+    List<Memory> memories = memoriesJson.map((memory) => Memory.fromJson(memory)).toList();
+    debugPrint('✅ getMemories: Successfully converted ${memories.length} Memory objects');
+
+    return memories;
+  } catch (e, stackTrace) {
+    debugPrint('❌ getMemories ERROR: $e');
+    debugPrint('❌ Stack trace: $stackTrace');
+    return [];
+  }
 }
 
 Future<bool> deleteMemoryServer(String memoryId) async {

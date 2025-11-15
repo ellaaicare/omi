@@ -31,9 +31,9 @@ class HumanMessage extends StatelessWidget {
             alignment: WrapAlignment.end,
             children: [
               Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1f1f25),
-                  borderRadius: const BorderRadius.only(
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1f1f25),
+                  borderRadius: BorderRadius.only(
                     topLeft: Radius.circular(16.0),
                     topRight: Radius.circular(16.0),
                     bottomRight: Radius.circular(4.0),

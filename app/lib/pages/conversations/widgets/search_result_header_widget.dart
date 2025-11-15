@@ -31,7 +31,7 @@ class _SearchResultHeaderWidgetState extends State<SearchResultHeaderWidget> {
                 : provider.totalSearchPages > 0
                     ? const Text(
                         "Search results",
-                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        style: TextStyle(color: Colors.white, fontSize: 14),
                       )
                     : const SizedBox.shrink())
             : const SizedBox.shrink(),

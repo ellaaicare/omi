@@ -460,9 +460,9 @@ class OmiDeviceConnection extends DeviceConnection {
             debugPrint('Accelerometer z direction: ${accelerometerData[2]}');
             debugPrint('Gyroscope z direction: ${accelerometerData[5]}\n');
             //simple threshold fall calcaultor
-            var fall_number =
+            var fallNumber =
                 sqrt(pow(accelerometerData[0], 2) + pow(accelerometerData[1], 2) + pow(accelerometerData[2], 2));
-            if (fall_number > 30.0) {
+            if (fallNumber > 30.0) {
               AwesomeNotifications().createNotification(
                 content: NotificationContent(
                   id: 6,

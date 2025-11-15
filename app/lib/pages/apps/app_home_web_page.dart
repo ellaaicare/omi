@@ -10,9 +10,9 @@ class AppHomeWebPage extends StatefulWidget {
   final App app;
 
   const AppHomeWebPage({
-    Key? key,
+    super.key,
     required this.app,
-  }) : super(key: key);
+  });
 
   @override
   State<AppHomeWebPage> createState() => _AppHomeWebPageState();

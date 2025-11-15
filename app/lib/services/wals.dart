@@ -191,11 +191,11 @@ class Wal {
   static List<Wal> fromJsonList(List<dynamic> jsonList) => jsonList.map((e) => Wal.fromJson(e)).toList();
 
   getFileName() {
-    return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_${timerStart}.bin";
+    return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_$timerStart.bin";
   }
 
   getFileNameByTimeStarts(int timestarts) {
-    return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_${timestarts}.bin";
+    return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_$timestarts.bin";
   }
 
   /// Get the full file path, handling both old full paths and new filename-only storage
@@ -367,7 +367,7 @@ class SDCardWalSync implements IWalSync {
     int timerStart = wal.timerStart;
     await _writeToStorage(deviceId, fileNum, 0, offset);
 
-    debugPrint("_readStorageBytesToFile ${offset}");
+    debugPrint("_readStorageBytesToFile $offset");
 
     // Read
     List<List<int>> bytesData = [];
@@ -763,7 +763,7 @@ class LocalWalSync implements IWalSync {
           break;
         }
       }
-      debugPrint("${low} - ${high} - ${syncedOffset} - ${chunkFrameCount} - ${_framesPerSecond}");
+      debugPrint("$low - $high - $syncedOffset - $chunkFrameCount - $_framesPerSecond");
 
       Wal wal;
       var walIdx =

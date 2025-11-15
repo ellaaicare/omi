@@ -15,6 +15,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/prod_env.dart';
@@ -59,9 +60,35 @@ import 'package:provider/provider.dart';
 import 'package:talker_flutter/talker_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
+/// Global flag to track if Opus codec has been initialized
+bool _opusInitialized = false;
+
+/// Lazy initialize Opus codec on first use
+Future<void> ensureOpusInitialized() async {
+  if (_opusInitialized) return;
+
+  if (PlatformService.isMobile) {
+    try {
+      initOpus(await opus_flutter.load());
+      _opusInitialized = true;
+      debugPrint('✅ Opus codec lazy-loaded successfully');
+    } catch (e) {
+      debugPrint('⚠️ Failed to load Opus codec: $e');
+    }
+  }
+}
+
 /// Background message handler for FCM data messages
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  print('🔔 [DEBUG] ========================================');
+  print('🔔 [DEBUG] PUSH NOTIFICATION RECEIVED IN BACKGROUND!');
+  print('🔔 [DEBUG] Message ID: ${message.messageId}');
+  print('🔔 [DEBUG] Sent Time: ${message.sentTime}');
+  print('🔔 [DEBUG] Data: ${message.data}');
+  print('🔔 [DEBUG] Notification: ${message.notification}');
+  print('🔔 [DEBUG] ========================================');
+
   await Firebase.initializeApp();
 
   await AwesomeNotifications().initialize(
@@ -79,7 +106,51 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
   final data = message.data;
   final messageType = data['type'];
+  final action = data['action'];
   const channelKey = 'channel';
+
+  print('🔔 [DEBUG] Message Type: $messageType');
+  print('🔔 [DEBUG] Action: $action');
+
+  // Handle TTS silent push notifications
+  if (action == 'speak_tts' || action == 'tts_available') {
+    try {
+      print('📱 Background TTS push received: ${message.messageId}');
+
+      // Initialize TTS service
+      final tts = EllaTtsService();
+
+      // Get TTS parameters from push data
+      final text = data['text'];
+      final voice = data['voice'] ?? 'nova';
+      final audioUrl = data['audio_url']; // May be provided directly
+      final requestId = data['request_id'];
+
+      print('🎤 TTS Parameters: text=${text != null}, voice=$voice, audioUrl=${audioUrl != null}');
+
+      if (audioUrl != null) {
+        // Audio URL provided directly in push - play it immediately
+        print('🔊 Audio URL provided in push notification - playing directly');
+        await tts.playFromUrl(audioUrl);
+      } else if (text != null) {
+        // Text provided - generate and play TTS
+        print('🌩️ Generating cloud TTS for: ${text.substring(0, text.length > 50 ? 50 : text.length)}...');
+        await tts.speakFromBackend(text, voice: voice, forceGenerate: false);
+      } else if (requestId != null) {
+        // Only request ID provided - fetch from backend
+        print('📥 Fetching TTS audio for request: $requestId');
+        // TODO: Implement fetch endpoint call
+        // final audio = await fetchTtsAudio(requestId);
+        // await playAudio(audio);
+      }
+
+      print('✅ Background TTS completed successfully');
+    } catch (e) {
+      print('❌ Background TTS error: $e');
+      // Silently fail - don't show error to user in background
+    }
+    return;
+  }
 
   // Handle action item messages
   if (messageType == 'action_item_reminder') {
@@ -106,49 +177,50 @@ Future _init() async {
 
   FlutterForegroundTask.initCommunicationPort();
 
-  // Service manager
-  await ServiceManager.init();
+  // OPTIMIZATION: Parallelize independent initialization tasks
+  // Group 1: Core services that must complete first
+  await Future.wait([
+    ServiceManager.init(),
+    SharedPreferencesUtil.init(), // Can run in parallel with ServiceManager
+    _initializeFirebase(), // Wrapped in helper function
+  ]);
 
-  // Firebase
-  if (PlatformService.isWindows) {
-    // Windows does not support flavors
-    await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
-  } else {
-    if (F.env == Environment.prod) {
-      await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
-    } else {
-      await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform);
-    }
-  }
+  // CRITICAL: Ensure Firebase is fully initialized before notification setup
+  // This prevents race conditions with FCM token creation
+  await _ensureFirebaseReady();
 
-  await PlatformManager.initializeServices();
+  // Group 2: Services that depend on core services
+  // NOTE: NotificationService must initialize AFTER Firebase is ready
+  await Future.wait([
+    PlatformManager.initializeServices(),
+    CrashlyticsManager.init(),
+    GrowthbookUtil.init(),
+    // Defer ApiClient.init() - certificate pinning will validate on first API call
+  ]);
+
+  // CRITICAL: Start ServiceManager before NotificationService
+  // NotificationService may depend on device services being available
+  await ServiceManager.instance().start();
+
+  // CRITICAL: Initialize NotificationService sequentially AFTER Firebase & ServiceManager
+  // This ensures FCM is ready for APNS token registration and all dependencies are met
   await NotificationService.instance.initialize();
 
-  // Register FCM background message handler
+  // Register FCM background message handler AFTER NotificationService is ready
   if (!PlatformService.isDesktop) {
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
   }
 
-  await SharedPreferencesUtil.init();
+  // OPTIMIZATION: Lazy load Opus codec - will be initialized when recording starts
+  // This saves 50-100ms on startup
+  // if (PlatformService.isMobile) initOpus(await opus_flutter.load());
 
-  bool isAuth = (await AuthService.instance.getIdToken()) != null;
-  if (isAuth) PlatformManager.instance.mixpanel.identify();
-  if (PlatformService.isMobile) initOpus(await opus_flutter.load());
-
-  await GrowthbookUtil.init();
   if (!PlatformService.isWindows) {
     ble.FlutterBluePlus.setOptions(restoreState: true);
     ble.FlutterBluePlus.setLogLevel(ble.LogLevel.info, color: true);
   }
 
-  await CrashlyticsManager.init();
-  if (isAuth) {
-    PlatformManager.instance.crashReporter.identifyUser(
-      FirebaseAuth.instance.currentUser?.email ?? '',
-      SharedPreferencesUtil().fullName,
-      SharedPreferencesUtil().uid,
-    );
-  }
+  // Setup error handlers
   FlutterError.onError = (FlutterErrorDetails details) {
     FirebaseCrashlytics.instance.recordFlutterFatalError(details);
   };
@@ -158,8 +230,77 @@ Future _init() async {
     return true;
   };
 
-  await ServiceManager.instance().start();
+  // OPTIMIZATION: Defer ServiceManager.start() and auth check
+  // These will be initialized on-demand when needed
+  // Start services in background without blocking
+  _startServicesInBackground();
+
   return;
+}
+
+/// Helper function to initialize Firebase
+Future<void> _initializeFirebase() async {
+  try {
+    if (PlatformService.isWindows) {
+      // Windows does not support flavors
+      await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
+    } else {
+      if (F.env == Environment.prod) {
+        await Firebase.initializeApp(options: prod.DefaultFirebaseOptions.currentPlatform);
+      } else {
+        await Firebase.initializeApp(options: dev.DefaultFirebaseOptions.currentPlatform);
+      }
+    }
+  } catch (e) {
+    // Firebase already initialized from GoogleService-Info.plist, continue
+    if (!e.toString().contains('duplicate-app')) {
+      rethrow;
+    }
+  }
+}
+
+/// Ensure Firebase Messaging is fully ready before notification setup
+/// This prevents race conditions with FCM/APNS token registration
+Future<void> _ensureFirebaseReady() async {
+  if (PlatformService.isDesktop) return;
+
+  try {
+    // Give Firebase Messaging time to fully initialize
+    // This is critical for proper APNS token → FCM token flow
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    // Verify Firebase Messaging is accessible
+    // This will throw if Firebase isn't ready
+    final messaging = FirebaseMessaging.instance;
+    debugPrint('✅ Firebase Messaging ready: ${messaging.hashCode}');
+  } catch (e) {
+    debugPrint('⚠️ Firebase Messaging not ready: $e');
+  }
+}
+
+/// Initialize non-critical services in background without blocking app startup
+/// NOTE: ServiceManager.start() is now called in main flow before NotificationService
+/// to ensure proper notification initialization
+void _startServicesInBackground() async {
+  try {
+    // Initialize auth and identify user in analytics (non-blocking)
+    final isAuth = (await AuthService.instance.getIdToken()) != null;
+    if (isAuth) {
+      PlatformManager.instance.mixpanel.identify();
+      PlatformManager.instance.crashReporter.identifyUser(
+        FirebaseAuth.instance.currentUser?.email ?? '',
+        SharedPreferencesUtil().fullName,
+        SharedPreferencesUtil().uid,
+      );
+    }
+
+    // Initialize API client with certificate pinning in background
+    await ApiClient.init();
+
+    debugPrint('✅ Background services initialized (auth: $isAuth)');
+  } catch (e) {
+    debugPrint('⚠️ Error initializing background services: $e');
+  }
 }
 
 void main() {

@@ -1,9 +1,13 @@
 import os
 import hashlib
+import uuid
+import time
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Tuple, Optional
+from pydantic import BaseModel, Field
+from firebase_admin import messaging
 
 from database.redis_db import get_enabled_apps, r as redis_client
 from utils.apps import get_available_app_by_id, verify_api_key
@@ -129,3 +133,141 @@ def send_app_notification_to_user(request: Request, data: dict, authorization: O
     token = notification_db.get_token_only(uid)
     send_app_notification(token, app.name, app.id, data['message'])
     return JSONResponse(status_code=200, headers=headers, content={'status': 'Ok'})
+
+
+# ******************************************************
+# *************** TTS PUSH NOTIFICATIONS ***************
+# ******************************************************
+
+class TestTTSPushRequest(BaseModel):
+    """Request model for test TTS push notification"""
+    text: Optional[str] = Field(None, description="Text to speak (if not provided, uses default test message)")
+    voice: Optional[str] = Field("nova", description="TTS voice to use")
+    pregenerate: bool = Field(True, description="Pre-generate TTS audio before sending push")
+
+
+@router.post('/v1/notifications/test-tts-push')
+async def test_tts_push(
+    request: TestTTSPushRequest,
+    uid: str = Depends(auth.get_current_user_uid)
+):
+    """
+    Send test TTS push notification to current user's device
+
+    This endpoint:
+    1. Gets user's FCM token
+    2. Optionally pre-generates TTS audio
+    3. Sends silent push notification
+    4. iOS app receives push in background and plays audio
+
+    Used by iOS developer settings "Request Test Push" button
+    """
+
+    text = request.text or "This is a test notification from the backend. Testing background audio playback."
+    voice = request.voice or "nova"
+    request_id = f"req-{uuid.uuid4().hex[:8]}"
+
+    print(f"🔔 Test push requested by user {uid}")
+    print(f"   Text: {text[:50]}...")
+    print(f"   Voice: {voice}")
+    print(f"   Pregenerate: {request.pregenerate}")
+
+    # 1. Get user's FCM token
+    fcm_token = notification_db.get_token_only(uid)
+    if not fcm_token:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No FCM token found for user {uid}. Please open the app to register your device."
+        )
+
+    print(f"   FCM Token: {fcm_token[:20]}...")
+
+    # 2. Pre-generate TTS audio (if requested)
+    audio_url = ""
+
+    if request.pregenerate:
+        try:
+            # Import here to avoid circular dependencies
+            from routers.tts import get_tts_manager
+            from utils.tts import TTSRequest
+
+            print(f"   🎵 Pre-generating TTS audio...")
+
+            manager = get_tts_manager()
+            tts_request = TTSRequest(
+                text=text,
+                voice=voice,
+                model="hd",
+                cache_key=f"test_push_{uid}_{int(time.time())}",
+                speed=1.0
+            )
+
+            tts_response = await manager.generate(
+                request=tts_request,
+                provider_name=None,
+                uid=uid
+            )
+
+            audio_url = tts_response.audio_url
+            print(f"   ✅ TTS audio pre-generated: {audio_url[:50]}...")
+
+        except Exception as tts_error:
+            print(f"   ❌ TTS generation error: {tts_error}")
+            # Continue without pre-generated audio
+            audio_url = ""
+
+    # 3. Send silent push notification
+    message = messaging.Message(
+        token=fcm_token,
+        data={
+            "action": "speak_tts",
+            "text": text,
+            "voice": voice,
+            "audio_url": audio_url,
+            "request_id": request_id,
+            "timestamp": str(int(time.time())),
+        },
+        apns=messaging.APNSConfig(
+            headers={
+                "apns-priority": "10",  # High priority
+                "apns-push-type": "background",  # Silent push
+            },
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    content_available=True,  # KEY: Silent push (no popup, no sound)
+                    sound=None,  # No notification sound
+                )
+            )
+        )
+    )
+
+    try:
+        message_id = messaging.send(message)
+        print(f"   ✅ Push notification sent: {message_id}")
+
+        return {
+            "status": "sent",
+            "user_id": uid,
+            "message_id": message_id,
+            "text": text,
+            "audio_url": audio_url or None,
+            "request_id": request_id,
+            "pregenerated": bool(audio_url),
+        }
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"   ❌ Push notification failed: {error_message}")
+
+        # Remove invalid token
+        if "Requested entity was not found" in error_message:
+            notification_db.remove_token(fcm_token)
+            raise HTTPException(
+                status_code=404,
+                detail="FCM token is invalid or expired. Please restart the app to re-register."
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send push notification: {error_message}"
+        )

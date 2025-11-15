@@ -174,7 +174,7 @@ class ConversationBottomBar extends StatelessWidget {
           label: null, // Remove the label to show only icon + dropdown
           appImage: isReprocessing
               ? (reprocessingApp != null ? reprocessingApp.getImageUrl() : Assets.images.herologo.path)
-              : (app != null ? app.getImageUrl() : null),
+              : (app?.getImageUrl()),
           isLocalAsset: isReprocessing && reprocessingApp == null,
           showDropdownArrow: true, // Always show dropdown arrow
           isLoading: isReprocessing,

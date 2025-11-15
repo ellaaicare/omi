@@ -66,7 +66,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
 
   // Search result tracking
   List<GlobalKey> _segmentKeys = [];
-  List<GlobalKey> _matchKeys = [];
+  final List<GlobalKey> _matchKeys = [];
   int _previousSearchResultIndex = -1;
 
   // Define distinct muted colors for different speakers
@@ -83,7 +83,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
 
   Color _getSpeakerBubbleColor(bool isUser, int speakerId) {
     if (isUser) {
-      return Color(0xFF8B5CF6).withOpacity(0.8);
+      return const Color(0xFF8B5CF6).withOpacity(0.8);
     }
     // Use speakerId to get consistent color for each speaker
     final colorIndex = speakerId % _speakerColors.length;
@@ -92,7 +92,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
 
   Color _getSpeakerAvatarColor(bool isUser, int speakerId) {
     if (isUser) {
-      return Color(0xFF8B5CF6).withOpacity(0.3);
+      return const Color(0xFF8B5CF6).withOpacity(0.3);
     }
     final colorIndex = speakerId % _speakerColors.length;
     return _speakerColors[colorIndex].withOpacity(0.3);
@@ -196,7 +196,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
     if (_scrollController.hasClients) {
       final maxScroll = _scrollController.position.maxScrollExtent;
       final currentScroll = _scrollController.offset;
-      final threshold = 100.0;
+      const threshold = 100.0;
       final distanceFromBottom = maxScroll - currentScroll;
 
       if (distanceFromBottom > threshold) {
@@ -306,7 +306,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
         return;
       }
 
-      final itemHeight = 80.0;
+      const itemHeight = 80.0;
       final headerHeight = widget.topMargin ? 32.0 : 0.0;
       final targetOffset = headerHeight + (targetSegmentIndex * itemHeight);
 
@@ -562,7 +562,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                           ? 6
                                           : 18),
                                   topRight: Radius.circular(isUser ? 18 : 18),
-                                  bottomLeft: Radius.circular(18),
+                                  bottomLeft: const Radius.circular(18),
                                   bottomRight: Radius.circular(isUser ? 6 : 18),
                                 ),
                                 boxShadow: [
@@ -699,7 +699,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
       },
       child: const Opacity(
         opacity: 0.5,
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(

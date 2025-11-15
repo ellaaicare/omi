@@ -23,6 +23,8 @@ class TranscriptSegment(BaseModel):
     end: float
     translations: Optional[List[Translation]] = []
     speech_profile_processed: bool = True
+    source: Optional[str] = None  # Source: "deepgram", "edge_asr", "soniox", "speechmatics"
+    asr_provider: Optional[str] = None  # ASR provider: "apple_speech", "parakeet", "whisper", etc.
 
     def __init__(self, **data):
         super().__init__(**data)

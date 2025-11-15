@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:flutter/services.dart';
+import 'package:omi/env/env.dart';
 import 'package:omi/pages/settings/widgets/create_mcp_api_key_dialog.dart';
 import 'package:omi/pages/settings/widgets/mcp_api_key_list_item.dart';
 import 'package:omi/pages/settings/widgets/developer_api_keys_section.dart';
@@ -18,6 +20,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
+import 'package:omi/services/notifications.dart';
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -30,13 +34,52 @@ class DeveloperSettingsPage extends StatefulWidget {
 }
 
 class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
+  List<Map<String, String>> _availableVoices = [];
+  String? _selectedVoiceId; // Store unique voice ID instead of name
+  String? _selectedVoiceLocale;
+  bool _loadingVoices = true;
+
+  // Cloud TTS state
+  final TextEditingController _cloudTtsTextController = TextEditingController(
+    text: 'Hello, this is a test of the cloud text to speech system.',
+  );
+  String _selectedCloudVoice = 'nova';
+  bool _forceGenerate = false;
+  bool _genAiEnabled = false;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await Provider.of<DeveloperModeProvider>(context, listen: false).initialize();
       context.read<McpProvider>().fetchKeys();
+      _loadAvailableVoices();
     });
     super.initState();
+  }
+
+  @override
+  void dispose() {
+    _cloudTtsTextController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadAvailableVoices() async {
+    try {
+      final tts = EllaTtsService();
+      final voices = await tts.getVoices();
+      setState(() {
+        _availableVoices = voices.where((v) => v['locale']?.contains('en-') == true).toList();
+        _loadingVoices = false;
+        if (_availableVoices.isNotEmpty) {
+          _selectedVoiceId = _availableVoices[0]['id']; // Use unique ID
+          _selectedVoiceLocale = _availableVoices[0]['locale'];
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _loadingVoices = false;
+      });
+    }
   }
 
   @override
@@ -162,6 +205,55 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                         icon: const Icon(Icons.delete_outline),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 24),
+
+                  // ASR Mode Selection
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 0),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Speech Recognition Mode',
+                        style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.white),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      children: [
+                        RadioListTile<String>(
+                          title: const Text('Cloud ASR (Deepgram)', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Audio sent to server for transcription', style: TextStyle(color: Colors.grey)),
+                          value: 'cloud',
+                          groupValue: SharedPreferencesUtil().asrMode,
+                          onChanged: (value) {
+                            setState(() {
+                              SharedPreferencesUtil().asrMode = value!;
+                            });
+                          },
+                          activeColor: Colors.blue,
+                        ),
+                        Divider(color: Colors.grey.shade800, height: 1),
+                        RadioListTile<String>(
+                          title: const Text('On-Device ASR (Apple Speech)', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Private, no audio upload', style: TextStyle(color: Colors.grey)),
+                          value: 'on_device_ios',
+                          groupValue: SharedPreferencesUtil().asrMode,
+                          onChanged: (value) {
+                            setState(() {
+                              SharedPreferencesUtil().asrMode = value!;
+                            });
+                          },
+                          activeColor: Colors.blue,
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 24),
                   //TODO: Model selection commented out because Soniox model is no longer being used
@@ -325,6 +417,482 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   //     setState(() => provider.loadingImportMemories = false);
                   //   },
                   // ),
+                  const SizedBox(height: 16),
+                  Divider(color: Colors.grey.shade500),
+                  const SizedBox(height: 16),
+                  // Custom API Base URL Section
+                  const Text(
+                    'Infrastructure',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Configure custom backend infrastructure for your own deployment.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: provider.customApiBaseUrl,
+                    obscureText: false,
+                    autocorrect: false,
+                    enabled: true,
+                    enableSuggestions: false,
+                    decoration: _getTextFieldDecoration('Custom API Base URL', hintText: 'e.g., https://api.yourserver.com'),
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Leave empty to use default Ella infrastructure. Restart the app after changing this setting.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // TTS Audio Testing Section
+                  const Text(
+                    '🎧 Audio & TTS Testing',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test text-to-speech audio routing to Bluetooth headsets.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Info card about Bluetooth status
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: Colors.blue, size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Connect AirPods or Bluetooth headset for audio routing test',
+                            style: TextStyle(color: Colors.grey.shade300, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Voice Selector
+                  const Text(
+                    'Select Voice:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_loadingVoices)
+                    const Center(child: CircularProgressIndicator())
+                  else if (_availableVoices.isEmpty)
+                    Text(
+                      'No voices available. Check iOS Settings → Accessibility → Spoken Content → Voices',
+                      style: TextStyle(color: Colors.orange.shade300, fontSize: 13),
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade800,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: DropdownButton<String>(
+                        value: _selectedVoiceId,
+                        isExpanded: true,
+                        dropdownColor: Colors.grey.shade800,
+                        underline: const SizedBox(),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        items: _availableVoices.map((voice) {
+                          final quality = voice['quality'] ?? 'default';
+                          final displayName = quality != 'default'
+                              ? '${voice['name']} ($quality)'
+                              : voice['name'];
+                          return DropdownMenuItem<String>(
+                            value: voice['id'], // Use unique ID as value
+                            child: Text(
+                              '$displayName - ${voice['locale']}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                        onChanged: (newVoiceId) async {
+                          if (newVoiceId != null) {
+                            final selectedVoice = _availableVoices.firstWhere((v) => v['id'] == newVoiceId);
+                            setState(() {
+                              _selectedVoiceId = newVoiceId;
+                              _selectedVoiceLocale = selectedVoice['locale'];
+                            });
+                            final tts = EllaTtsService();
+                            await tts.setVoice(newVoiceId, selectedVoice['locale'] ?? 'en-US');
+                            final quality = selectedVoice['quality'] ?? 'default';
+                            final displayName = quality != 'default'
+                                ? '${selectedVoice['name']} ($quality)'
+                                : selectedVoice['name'];
+                            AppSnackbar.showSnackbar('Voice changed to: $displayName');
+                          }
+                        },
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+
+                  // Quick test buttons
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      _buildTtsTestButton(
+                        context,
+                        label: '🔊 Test Message',
+                        message: EllaTtsService.sampleMessages['welcome']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '💊 Medication',
+                        message: EllaTtsService.sampleMessages['medication']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '📅 Appointment',
+                        message: EllaTtsService.sampleMessages['appointment']!,
+                      ),
+                      _buildTtsTestButton(
+                        context,
+                        label: '🏃 Activity',
+                        message: EllaTtsService.sampleMessages['activity']!,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Tap any button above to hear audio through your connected Bluetooth device or phone speaker.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Cloud TTS Testing Section
+                  const Text(
+                    '☁️ Cloud TTS Testing (OpenAI)',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test high-quality cloud TTS powered by OpenAI. Better quality than native iOS TTS.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Info card about cloud TTS
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.green.withOpacity(0.3)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.cloud, color: Colors.green, size: 20),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Cloud TTS uses OpenAI HD voices with smart caching (25x faster on repeat)',
+                            style: TextStyle(color: Colors.grey.shade300, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Custom text input
+                  const Text(
+                    'Custom Test Sentence:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _cloudTtsTextController,
+                    maxLines: 3,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: 'Enter text to convert to speech...',
+                      hintStyle: TextStyle(color: Colors.grey.shade500),
+                      filled: true,
+                      fillColor: Colors.grey.shade800,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.all(12),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Cloud voice selector
+                  const Text(
+                    'Select Cloud Voice:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: DropdownButton<String>(
+                      value: _selectedCloudVoice,
+                      isExpanded: true,
+                      dropdownColor: Colors.grey.shade800,
+                      underline: const SizedBox(),
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      items: const [
+                        DropdownMenuItem(value: 'nova', child: Text('Nova (recommended - warm, caring)')),
+                        DropdownMenuItem(value: 'shimmer', child: Text('Shimmer (soft, friendly)')),
+                        DropdownMenuItem(value: 'alloy', child: Text('Alloy (neutral, balanced)')),
+                        DropdownMenuItem(value: 'echo', child: Text('Echo (male, authoritative)')),
+                        DropdownMenuItem(value: 'fable', child: Text('Fable (British, warm)')),
+                        DropdownMenuItem(value: 'onyx', child: Text('Onyx (deep, confident)')),
+                      ],
+                      onChanged: (newVoice) {
+                        if (newVoice != null) {
+                          setState(() => _selectedCloudVoice = newVoice);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Force generate checkbox
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Force Generate (bypass cache)',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      'Generate new audio instead of using cached version. Useful for testing.',
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                    ),
+                    value: _forceGenerate,
+                    onChanged: (value) {
+                      setState(() => _forceGenerate = value ?? false);
+                    },
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Gen AI checkbox
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Gen AI Test (Advanced)',
+                      style: TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      'Enable AI-powered responses. Backend routes to OpenAI/Claude/Letta based on your user_id.',
+                      style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                    ),
+                    value: _genAiEnabled,
+                    onChanged: (value) {
+                      setState(() => _genAiEnabled = value ?? false);
+                    },
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Test button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.cloud, size: 20),
+                    label: const Text('🎧 Test Cloud TTS'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.green.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      final text = _cloudTtsTextController.text.trim();
+                      if (text.isEmpty) {
+                        AppSnackbar.showSnackbarError('Please enter some text to test');
+                        return;
+                      }
+
+                      try {
+                        AppSnackbar.showSnackbar(
+                          '☁️ Generating cloud TTS with $_selectedCloudVoice voice...',
+                        );
+
+                        final tts = EllaTtsService();
+                        await tts.speakFromBackend(
+                          text,
+                          voice: _selectedCloudVoice,
+                          forceGenerate: _forceGenerate,
+                          useRealAuth: _genAiEnabled,
+                          genAiEnabled: _genAiEnabled,
+                        );
+
+                        AppSnackbar.showSnackbar('✅ Cloud TTS playback started!');
+                      } catch (e) {
+                        AppSnackbar.showSnackbarError('Cloud TTS Error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _forceGenerate
+                        ? 'Cache disabled: Will generate new audio (~3-5s)'
+                        : 'Cache enabled: Second play will be instant (<500ms)',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // Test Push Notification Section
+                  const Text(
+                    '🔔 Test Push Notifications',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test background audio playback via silent push notifications (app must be backgrounded, not terminated).',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Register FCM Token button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.app_registration, size: 20),
+                    label: const Text('📱 Register Device Token'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.orange.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        print('🔔 [DEBUG] Register Device Token button pressed');
+                        AppSnackbar.showSnackbar('🔐 Checking notification permissions...');
+
+                        // Import notification service
+                        final notificationService = NotificationService.instance;
+
+                        // Check if permissions granted
+                        print('🔔 [DEBUG] Checking hasNotificationPermissions...');
+                        bool hasPermission = await notificationService.hasNotificationPermissions();
+                        print('🔔 [DEBUG] hasNotificationPermissions: $hasPermission');
+
+                        if (!hasPermission) {
+                          AppSnackbar.showSnackbar('📱 Requesting notification permissions...');
+                          print('🔔 [DEBUG] Requesting permissions...');
+                          hasPermission = await notificationService.requestNotificationPermissions();
+                          print('🔔 [DEBUG] Permission request result: $hasPermission');
+
+                          if (!hasPermission) {
+                            print('🔔 [DEBUG] Permissions denied by user');
+                            AppSnackbar.showSnackbarError(
+                              '❌ Notification permissions denied.\n'
+                              'Go to Settings → Omi → Notifications and enable.',
+                            );
+                            return;
+                          }
+                        }
+
+                        print('🔔 [DEBUG] Permissions granted! Getting Firebase Auth token...');
+                        final authToken = SharedPreferencesUtil().authToken;
+                        print('🔔 [DEBUG] Firebase JWT (first 50 chars): ${authToken.substring(0, authToken.length > 50 ? 50 : authToken.length)}...');
+
+                        AppSnackbar.showSnackbar('✅ Permissions granted! Registering FCM token...');
+
+                        print('🔔 [DEBUG] Calling saveNotificationToken()...');
+                        // Register device token
+                        notificationService.saveNotificationToken();
+
+                        // Wait a moment for registration
+                        print('🔔 [DEBUG] Waiting 3 seconds for registration to complete...');
+                        await Future.delayed(const Duration(seconds: 3));
+
+                        print('🔔 [DEBUG] Registration should be complete now');
+                        AppSnackbar.showSnackbar(
+                          '✅ Device token registered!\n'
+                          'Check backend logs and console for details.',
+                        );
+                      } catch (e, stackTrace) {
+                        print('🔔 [DEBUG] Registration error: $e');
+                        print('🔔 [DEBUG] Stack trace: $stackTrace');
+                        AppSnackbar.showSnackbarError('Registration error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Register your device with backend. Required before testing push notifications.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Request test push button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.notifications_active, size: 20),
+                    label: const Text('🔔 Request Test Push from Backend'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.blue.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        debugPrint('🔔 [DEBUG] Test push button pressed');
+                        AppSnackbar.showSnackbar('📤 Requesting test push from backend...');
+
+                        debugPrint('🔔 [DEBUG] Calling backend test-tts-push endpoint...');
+                        debugPrint('🔔 [DEBUG] URL: ${Env.apiBaseUrl}v1/notifications/test-tts-push');
+                        debugPrint('🔔 [DEBUG] Voice: $_selectedCloudVoice');
+                        debugPrint('🔔 [DEBUG] Text: Test push notification from backend...');
+
+                        final response = await http.post(
+                          Uri.parse('${Env.apiBaseUrl}v1/notifications/test-tts-push'),
+                          headers: {
+                            'Authorization': 'Bearer ${SharedPreferencesUtil().authToken}',
+                            'Content-Type': 'application/json',
+                          },
+                          body: jsonEncode({
+                            'text': 'Test push notification from backend. This is your medication reminder.',
+                            'voice': _selectedCloudVoice,
+                            'pregenerate': true,
+                          }),
+                        );
+
+                        debugPrint('🔔 [DEBUG] Response status: ${response.statusCode}');
+                        debugPrint('🔔 [DEBUG] Response body: ${response.body}');
+
+                        if (response.statusCode == 200) {
+                          debugPrint('🔔 [DEBUG] ✅ Push request succeeded!');
+                          debugPrint('🔔 [DEBUG] Waiting for push notification to arrive...');
+                          AppSnackbar.showSnackbar(
+                            '✅ Push sent! Background your app now.\n'
+                            'Audio should play in ~3 seconds.',
+                          );
+                        } else {
+                          debugPrint('🔔 [DEBUG] ❌ Push request failed: ${response.statusCode}');
+                          AppSnackbar.showSnackbarError(
+                            'Push failed: ${response.statusCode}\n${response.body}',
+                          );
+                        }
+                      } catch (e, stackTrace) {
+                        debugPrint('🔔 [DEBUG] ❌ Push error: $e');
+                        debugPrint('🔔 [DEBUG] Stack trace: $stackTrace');
+                        AppSnackbar.showSnackbarError('Push error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'After tapping, quickly background the app (press home button). Audio should play automatically.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
                   const SizedBox(height: 16),
                   Divider(color: Colors.grey.shade500),
                   const SizedBox(height: 16),
@@ -651,6 +1219,27 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
         borderSide: BorderSide(color: Colors.grey),
       ),
       suffixIcon: suffixIcon,
+    );
+  }
+
+  // TTS Test Button Builder
+  Widget _buildTtsTestButton(BuildContext context, {required String label, required String message}) {
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        foregroundColor: Colors.white,
+        backgroundColor: Colors.grey.shade700,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+      onPressed: () async {
+        try {
+          final tts = EllaTtsService();
+          await tts.speak(message);
+          AppSnackbar.showSnackbar('🎧 Playing audio...');
+        } catch (e) {
+          AppSnackbar.showSnackbarError('TTS Error: $e');
+        }
+      },
+      child: Text(label, style: const TextStyle(fontSize: 14)),
     );
   }
 }

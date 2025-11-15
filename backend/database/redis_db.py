@@ -127,7 +127,11 @@ def get_app_usage_count_cache(app_id: str) -> int | None:
     count = r.get(f'apps:{app_id}:usage_count')
     if not count:
         return None
-    return eval(count)
+    try:
+        return int(count) if isinstance(count, (int, float)) else int(count.decode() if isinstance(count, bytes) else count)
+    except (ValueError, AttributeError) as e:
+        print(f"Invalid cache value for app usage count {app_id}: {e}")
+        return None
 
 
 def set_app_money_made_amount_cache(app_id: str, amount: float):
@@ -138,7 +142,11 @@ def get_app_money_made_amount_cache(app_id: str) -> float | None:
     amount = r.get(f'apps:{app_id}:money_made')
     if not amount:
         return None
-    return eval(amount)
+    try:
+        return float(amount) if isinstance(amount, (int, float)) else float(amount.decode() if isinstance(amount, bytes) else amount)
+    except (ValueError, AttributeError) as e:
+        print(f"Invalid cache value for app money made {app_id}: {e}")
+        return None
 
 
 def set_app_usage_history_cache(app_id: str, usage: List[dict]):
@@ -174,16 +182,24 @@ def set_app_review_cache(app_id: str, uid: str, data: dict):
     if not reviews:
         reviews = {}
     else:
-        reviews = eval(reviews)
+        try:
+            reviews = json.loads(reviews.decode() if isinstance(reviews, bytes) else reviews)
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"Invalid reviews cache for app {app_id}: {e}")
+            reviews = {}
     reviews[uid] = data
-    r.set(f'plugins:{app_id}:reviews', str(reviews))
+    r.set(f'plugins:{app_id}:reviews', json.dumps(reviews))
 
 
 def get_specific_user_review(app_id: str, uid: str) -> dict:
     reviews = r.get(f'plugins:{app_id}:reviews')
     if not reviews:
         return {}
-    reviews = eval(reviews)
+    try:
+        reviews = json.loads(reviews.decode() if isinstance(reviews, bytes) else reviews)
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"Invalid reviews cache for app {app_id}: {e}")
+        return {}
     return reviews.get(uid, {})
 
 
@@ -193,11 +209,15 @@ def migrate_user_apps_reviews(prev_uid: str, new_uid: str):
         reviews = r.get(key)
         if not reviews:
             continue
-        reviews = eval(reviews)
+        try:
+            reviews = json.loads(reviews.decode() if isinstance(reviews, bytes) else reviews)
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"Invalid reviews cache during migration for key {key}: {e}")
+            continue
         if prev_uid in reviews:
             reviews[new_uid] = reviews.pop(prev_uid)
             reviews[new_uid]['uid'] = new_uid
-            r.set(f'plugins:{app_id}:reviews', str(reviews))
+            r.set(f'plugins:{app_id}:reviews', json.dumps(reviews))
 
 
 def set_user_paid_app(app_id: str, uid: str, ttl: int):
@@ -243,7 +263,11 @@ def get_app_reviews(app_id: str) -> dict:
     reviews = r.get(f'plugins:{app_id}:reviews')
     if not reviews:
         return {}
-    return eval(reviews)
+    try:
+        return json.loads(reviews.decode() if isinstance(reviews, bytes) else reviews)
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"Invalid reviews cache for app {app_id}: {e}")
+        return {}
 
 
 def get_apps_reviews(app_ids: list) -> dict:
@@ -254,7 +278,18 @@ def get_apps_reviews(app_ids: list) -> dict:
     reviews = r.mget(keys)
     if reviews is None:
         return {}
-    return {app_id: eval(review) if review else {} for app_id, review in zip(app_ids, reviews)}
+
+    result = {}
+    for app_id, review in zip(app_ids, reviews):
+        if review:
+            try:
+                result[app_id] = json.loads(review.decode() if isinstance(review, bytes) else review)
+            except (json.JSONDecodeError, AttributeError) as e:
+                print(f"Invalid reviews cache for app {app_id}: {e}")
+                result[app_id] = {}
+        else:
+            result[app_id] = {}
+    return result
 
 
 def set_app_installs_count(app_id: str, count: int):
@@ -313,7 +348,7 @@ def get_cached_user_name(uid: str) -> str:
 
 # TODO: cache memories if speed improves dramatically
 def cache_memories(uid: str, memories: List[dict]):
-    r.set(f'users:{uid}:facts', str(memories))
+    r.set(f'users:{uid}:facts', json.dumps(memories))
     r.expire(f'users:{uid}:facts', 60 * 60)  # 1 hour, most people chat during a few minutes
 
 
@@ -321,7 +356,11 @@ def get_cached_memories(uid: str) -> List[dict]:
     memories = r.get(f'users:{uid}:facts')
     if not memories:
         return []
-    return eval(memories)
+    try:
+        return json.loads(memories.decode() if isinstance(memories, bytes) else memories)
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"Invalid memories cache for user {uid}: {e}")
+        return []
 
 
 def cache_signed_url(blob_path: str, signed_url: str, ttl: int = 60 * 60):
@@ -337,7 +376,7 @@ def get_cached_signed_url(blob_path: str) -> str:
 
 
 def cache_user_geolocation(uid: str, geolocation: dict):
-    r.set(f'users:{uid}:geolocation', str(geolocation))
+    r.set(f'users:{uid}:geolocation', json.dumps(geolocation))
     r.expire(f'users:{uid}:geolocation', 60 * 30)  # FIXME: too much?
 
 
@@ -345,7 +384,11 @@ def get_cached_user_geolocation(uid: str):
     geolocation = r.get(f'users:{uid}:geolocation')
     if not geolocation:
         return None
-    return eval(geolocation)
+    try:
+        return json.loads(geolocation.decode() if isinstance(geolocation, bytes) else geolocation)
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"Invalid geolocation cache for user {uid}: {e}")
+        return None
 
 
 # VISIIBILTIY OF CONVERSATIONS

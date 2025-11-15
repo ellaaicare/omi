@@ -158,15 +158,9 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
   @override
   void initState() {
     super.initState();
-    // Set default filter based on current date
-    final now = DateTime.now();
-    final cutoffDate = DateTime(2025, 5, 31);
-
-    if (now.isAfter(cutoffDate)) {
-      _currentFilter = FilterOption.interesting;
-    } else {
-      _currentFilter = FilterOption.all;
-    }
+    // Set default filter to show ALL memories (not just interesting)
+    // FIXED: Was filtering to "interesting" only after May 31, 2025, which hid "system" memories
+    _currentFilter = FilterOption.all;
 
     (() async {
       final provider = context.read<MemoriesProvider>();
@@ -500,7 +494,7 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
                             delegate: _ReviewPromptHeaderDelegate(
                               height: 56.0,
                               child: Material(
-                                color: Theme.of(context).colorScheme.surfaceVariant,
+                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
                                 elevation: 1,
                                 child: InkWell(
                                   onTap: () => _showReviewSheet(context, provider.unreviewed, provider),

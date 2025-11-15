@@ -1,0 +1,40 @@
+[run]
+source = .
+omit =
+    */tests/*
+    */testing/*
+    */__pycache__/*
+    */venv/*
+    */env/*
+    */site-packages/*
+    */.venv/*
+    */migrations/*
+    */migration/*
+    */modal/*
+    */_temp/*
+    */_samples/*
+    */_segments/*
+    */_speech_profiles/*
+    */memories-tuner/*
+    */charts/*
+    */scripts/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise AssertionError
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+    @abc.abstractmethod
+    except ImportError
+    except Exception as e:
+        print
+
+precision = 2
+show_missing = True
+
+[html]
+directory = htmlcov

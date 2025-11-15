@@ -102,9 +102,9 @@ class _FirmwareUpdateDialogState extends State<FirmwareUpdateDialog> {
                   Theme(
                     data: Theme.of(context).copyWith(
                       checkboxTheme: CheckboxThemeData(
-                        fillColor: MaterialStateProperty.resolveWith<Color>(
-                          (Set<MaterialState> states) {
-                            if (states.contains(MaterialState.selected)) {
+                        fillColor: WidgetStateProperty.resolveWith<Color>(
+                          (Set<WidgetState> states) {
+                            if (states.contains(WidgetState.selected)) {
                               return Colors.deepPurple;
                             }
                             return Colors.grey.shade700;
@@ -158,7 +158,7 @@ class _FirmwareUpdateDialogState extends State<FirmwareUpdateDialog> {
                     : null,
                 style: TextButton.styleFrom(
                   foregroundColor: Colors.white,
-                  backgroundColor: isConfirmed ? Colors.deepPurple : Color(0xFF35343B),
+                  backgroundColor: isConfirmed ? Colors.deepPurple : const Color(0xFF35343B),
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(8),

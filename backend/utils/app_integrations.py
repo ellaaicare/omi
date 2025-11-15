@@ -7,6 +7,7 @@ import time
 import database.notifications as notification_db
 from database import mem_db
 from database import redis_db
+from database import users as users_db
 from database.apps import record_app_usage
 from database.chat import add_app_message, get_app_messages
 from database.redis_db import get_generic_cache, set_generic_cache
@@ -284,6 +285,71 @@ def _trigger_realtime_audio_bytes(uid: str, sample_rate: int, data: bytearray):
     return results
 
 
+def _build_enhanced_webhook_payload(uid: str, segments: List[dict], conversation_id: str | None) -> dict:
+    """
+    Build enhanced webhook payload with conversation context for AI agents.
+
+    Includes:
+    - Current transcript segments
+    - Conversation history (last 10 conversations)
+    - User profile (name, timezone, preferences)
+    - User memories (last 20 facts)
+    - Request metadata
+    """
+    import uuid
+    from database.auth import get_user_name
+    from database.memories import get_memories
+
+    payload = {
+        "session_id": uid,
+        "segments": segments,
+        "conversation_id": conversation_id,
+        "request_id": str(uuid.uuid4()),
+        "timestamp": time.time(),
+    }
+
+    try:
+        # Get user profile
+        user_name = get_user_name(uid)
+        user_data = users_db.get_user(uid)
+
+        payload["user_profile"] = {
+            "name": user_name,
+            "timezone": user_data.get('timezone') if user_data else None,
+        }
+
+        # Get conversation history (last 10 conversations for context)
+        conversations = conversations_db.get_conversations(uid, limit=10)
+        payload["conversation_history"] = [
+            {
+                "id": conv.get('id'),
+                "created_at": conv.get('created_at').isoformat() if conv.get('created_at') else None,
+                "transcript": conv.get('transcript', ''),
+                "structured": conv.get('structured', {}),
+            }
+            for conv in conversations if conv
+        ]
+
+        # Get user memories (last 20 facts for personalization)
+        memories = get_memories(uid, limit=20)
+        payload["user_memories"] = [
+            {
+                "id": mem.get('id'),
+                "content": mem.get('content', ''),
+                "structured": mem.get('structured', {}),
+                "created_at": mem.get('created_at').isoformat() if mem.get('created_at') else None,
+            }
+            for mem in memories if mem
+        ]
+
+    except Exception as e:
+        print(f"Error building enhanced webhook payload for {uid}: {e}")
+        # Return basic payload if context assembly fails
+        pass
+
+    return payload
+
+
 def _trigger_realtime_integrations(uid: str, token: str, segments: List[dict], conversation_id: str | None) -> dict:
     apps: List[App] = get_available_apps(uid)
     filtered_apps = [app for app in apps if app.triggers_realtime() and app.enabled]
@@ -303,8 +369,11 @@ def _trigger_realtime_integrations(uid: str, token: str, segments: List[dict], c
         else:
             url += '?uid=' + uid
 
+        # Build enhanced payload with conversation context
+        payload = _build_enhanced_webhook_payload(uid, segments, conversation_id)
+
         try:
-            response = requests.post(url, json={"session_id": uid, "segments": segments}, timeout=30)
+            response = requests.post(url, json=payload, timeout=30)
             if response.status_code != 200:
                 print(
                     'trigger_realtime_integrations',

@@ -76,7 +76,7 @@ class BatteryInfoWidget extends StatelessWidget {
                         ),
                         const SizedBox(width: 8.0),
                         // Add device icon
-                        Container(
+                        SizedBox(
                           width: 20,
                           height: 20,
                           child: Image.asset(
@@ -109,7 +109,7 @@ class BatteryInfoWidget extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       // Device icon with slash line
-                      Container(
+                      SizedBox(
                         width: 20,
                         height: 20,
                         child: Stack(

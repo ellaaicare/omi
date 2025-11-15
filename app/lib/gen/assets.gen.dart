@@ -276,6 +276,9 @@ class $AssetsImagesGen {
   /// File path: assets/images/splash.png
   AssetGenImage get splash => const AssetGenImage('assets/images/splash.png');
 
+  /// File path: assets/images/splash.png.backup
+  String get splashPng => 'assets/images/splash.png.backup';
+
   /// File path: assets/images/splash_icon.png
   AssetGenImage get splashIcon =>
       const AssetGenImage('assets/images/splash_icon.png');
@@ -364,6 +367,7 @@ class $AssetsImagesGen {
     speaker0Icon,
     speaker1Icon,
     splash,
+    splashPng,
     splashIcon,
     stars,
     stripeLogo,

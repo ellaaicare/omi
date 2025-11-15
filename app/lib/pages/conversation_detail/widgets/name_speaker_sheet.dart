@@ -372,8 +372,8 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             onTap: () {
               Navigator.of(context).push(MaterialPageRoute(builder: (context) => const UserPeoplePage()));
             },
-            child: Padding(
-              padding: const EdgeInsets.only(right: 8.0),
+            child: const Padding(
+              padding: EdgeInsets.only(right: 8.0),
               child: Text(
                 'Manage People',
                 style: TextStyle(

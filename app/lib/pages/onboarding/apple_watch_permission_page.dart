@@ -8,10 +8,10 @@ class AppleWatchPermissionPage extends StatefulWidget {
   final VoidCallback? onPermissionGranted;
 
   const AppleWatchPermissionPage({
-    Key? key,
+    super.key,
     required this.connection,
     this.onPermissionGranted,
-  }) : super(key: key);
+  });
 
   @override
   State<AppleWatchPermissionPage> createState() => _AppleWatchPermissionPageState();

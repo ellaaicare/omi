@@ -571,8 +571,8 @@ class AppResultDetailWidget extends StatelessWidget {
                             ),
                           ),
                           const SizedBox(
-                            child: Icon(Icons.arrow_forward_ios, color: Colors.white, size: 20),
                             width: 42,
+                            child: Icon(Icons.arrow_forward_ios, color: Colors.white, size: 20),
                           ),
                         ],
                       ),
@@ -739,7 +739,7 @@ class GetGeolocationWidgets extends StatelessWidget {
                         height: 200,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
-                          color: Color(0xFF35343B),
+                          color: const Color(0xFF35343B),
                         ),
                         child: const Center(
                           child: Text(

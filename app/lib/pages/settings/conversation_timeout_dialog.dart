@@ -106,7 +106,7 @@ class ConversationTimeoutDialog {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
                   ],
                 ),
               ),

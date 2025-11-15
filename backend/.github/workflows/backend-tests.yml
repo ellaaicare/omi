@@ -1,0 +1,199 @@
+name: Backend Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'claude/**'
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-tests.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements.txt'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up test environment variables
+        run: |
+          echo "ENCRYPTION_SECRET=test_secret_key_for_encryption_1234567890abcdef" >> $GITHUB_ENV
+          echo "REDIS_DB_HOST=localhost" >> $GITHUB_ENV
+          echo "REDIS_DB_PORT=6379" >> $GITHUB_ENV
+          echo "REDIS_DB_PASSWORD=" >> $GITHUB_ENV
+          echo "GOOGLE_CLIENT_ID=test_google_client_id" >> $GITHUB_ENV
+          echo "GOOGLE_CLIENT_SECRET=test_google_client_secret" >> $GITHUB_ENV
+          echo "APPLE_CLIENT_ID=test_apple_client_id" >> $GITHUB_ENV
+          echo "APPLE_TEAM_ID=test_apple_team_id" >> $GITHUB_ENV
+          echo "APPLE_KEY_ID=test_apple_key_id" >> $GITHUB_ENV
+          echo "BASE_API_URL=http://localhost:8000" >> $GITHUB_ENV
+
+      - name: Run unit tests
+        working-directory: ./backend
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-config=.coveragerc \
+            -m "not integration and not e2e"
+        continue-on-error: false
+
+      - name: Run integration tests
+        working-directory: ./backend
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=. \
+            --cov-append \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
+            -m "integration"
+        continue-on-error: true
+
+      - name: Run e2e tests
+        working-directory: ./backend
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=. \
+            --cov-append \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-report=html \
+            -m "e2e"
+        continue-on-error: true
+
+      - name: Generate coverage report
+        working-directory: ./backend
+        run: |
+          pytest tests/ \
+            --cov=. \
+            --cov-report=term \
+            --cov-report=xml \
+            --cov-report=html
+
+      - name: Check coverage threshold
+        working-directory: ./backend
+        run: |
+          coverage report --fail-under=50
+        continue-on-error: true
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+          fail_ci_if_error: false
+        continue-on-error: true
+
+      - name: Upload coverage HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-${{ matrix.python-version }}
+          path: backend/htmlcov/
+          retention-days: 30
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-results-${{ matrix.python-version }}
+          path: backend/pytest-results.xml
+          retention-days: 30
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          MINIMUM_GREEN: 60
+          MINIMUM_ORANGE: 50
+        continue-on-error: true
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linting dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black isort
+
+      - name: Run flake8
+        working-directory: ./backend
+        run: |
+          flake8 tests/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 tests/ --count --max-complexity=10 --max-line-length=127 --statistics
+        continue-on-error: true
+
+      - name: Check code formatting with black
+        working-directory: ./backend
+        run: |
+          black --check tests/
+        continue-on-error: true
+
+      - name: Check import sorting with isort
+        working-directory: ./backend
+        run: |
+          isort --check-only tests/
+        continue-on-error: true

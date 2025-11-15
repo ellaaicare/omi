@@ -49,9 +49,9 @@ class _MemoryDialogState extends State<MemoryDialog> {
       builder: (context, setState) => Padding(
         padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
         child: Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          decoration: const BoxDecoration(
+            color: Color(0xFF1F1F25),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
           ),
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -82,7 +82,7 @@ class _MemoryDialogState extends State<MemoryDialog> {
               const SizedBox(height: 16),
               Container(
                 decoration: BoxDecoration(
-                  color: Color(0xFF35343B),
+                  color: const Color(0xFF35343B),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -143,7 +143,7 @@ class _MemoryDialogState extends State<MemoryDialog> {
                         ),
                         selected: isSelected,
                         showCheckmark: false,
-                        backgroundColor: Color(0xFF35343B),
+                        backgroundColor: const Color(0xFF35343B),
                         selectedColor: Colors.white,
                         onSelected: (bool selected) {
                           if (selected) {

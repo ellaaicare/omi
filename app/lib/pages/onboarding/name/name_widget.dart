@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:omi/backend/preferences.dart';
-import 'package:gradient_borders/gradient_borders.dart';
-import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:omi/services/auth_service.dart';
-import 'package:omi/utils/platform/platform_service.dart';
 
 class NameWidget extends StatefulWidget {
   final Function goNext;

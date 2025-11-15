@@ -54,11 +54,11 @@ class _PrivateCloudSyncPageState extends State<PrivateCloudSyncPage> {
         backgroundColor: const Color(0xFF1A1A1A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Enable Private Cloud Sync', style: TextStyle(color: Colors.white)),
-        content: Column(
+        content: const Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               'Your real-time recordings will be stored in the private cloud storage as you speak. Audio is captured and saved securely during conversations.',
               style: TextStyle(color: Colors.white70, fontSize: 16, height: 1.4),
             ),
@@ -158,7 +158,7 @@ class _PrivateCloudSyncPageState extends State<PrivateCloudSyncPage> {
                                 CupertinoSwitch(
                                   value: isEnabled,
                                   onChanged: _isSaving ? null : _togglePrivateCloudSync,
-                                  activeColor: Colors.deepPurpleAccent,
+                                  activeTrackColor: Colors.deepPurpleAccent,
                                 ),
                               ],
                             ),

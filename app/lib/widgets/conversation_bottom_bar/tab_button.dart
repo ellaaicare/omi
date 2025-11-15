@@ -15,7 +15,7 @@ class TabButton extends StatelessWidget {
   final VoidCallback? onDropdownPressed;
 
   const TabButton({
-    Key? key,
+    super.key,
     this.icon,
     this.customIcon,
     required this.isSelected,
@@ -26,7 +26,7 @@ class TabButton extends StatelessWidget {
     this.showDropdownArrow = false,
     this.isLoading = false,
     this.onDropdownPressed,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -71,11 +71,11 @@ class TabButton extends StatelessWidget {
                 if (label != null) ...[
                   const SizedBox(width: 2),
                   Flexible(
-                    child: Container(
+                    child: SizedBox(
                       width: 50,
                       child: ShaderMask(
                         shaderCallback: (Rect bounds) {
-                          return LinearGradient(
+                          return const LinearGradient(
                             begin: Alignment.centerLeft,
                             end: Alignment.centerRight,
                             colors: [Colors.white, Colors.transparent],
@@ -100,7 +100,7 @@ class TabButton extends StatelessWidget {
                   const SizedBox(width: 1),
                   GestureDetector(
                     onTap: onDropdownPressed, // Separate tap handler for dropdown
-                    child: Icon(
+                    child: const Icon(
                       Icons.keyboard_arrow_down,
                       color: Colors.white,
                       size: 16,

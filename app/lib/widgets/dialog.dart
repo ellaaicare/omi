@@ -22,7 +22,7 @@ getDialog(
       : [
           TextButton(
             onPressed: () => onCancel(),
-            child: Text(cancelButtonText, style: TextStyle(color: Colors.white)),
+            child: Text(cancelButtonText, style: const TextStyle(color: Colors.white)),
           ),
           TextButton(
               onPressed: () => onConfirm(), child: Text(okButtonText, style: const TextStyle(color: Colors.white))),

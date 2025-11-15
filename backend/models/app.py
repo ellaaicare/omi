@@ -47,7 +47,7 @@ class ExternalIntegration(BaseModel):
     triggers_on: Optional[str] = None
     webhook_url: Optional[str] = None
     setup_completed_url: Optional[str] = None
-    setup_instructions_file_path: Optional[str]
+    setup_instructions_file_path: Optional[str] = None
     is_instructions_url: bool = True
     auth_steps: Optional[List[AuthStep]] = []
     app_home_url: Optional[str] = None

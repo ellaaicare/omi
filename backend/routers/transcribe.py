@@ -920,6 +920,35 @@ async def _listen(
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])
 
+                    # ====== ELLA INTEGRATION: Send chunks to scanner ======
+                    # Fire-and-forget call to Ella's realtime scanner
+                    try:
+                        import requests
+
+                        # Convert transcript segments to format Ella expects
+                        scanner_segments = [
+                            {
+                                "text": s.text,
+                                "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
+                                "start": s.start,
+                                "end": s.end
+                            }
+                            for s in transcript_segments
+                        ]
+
+                        if scanner_segments:  # Only send if there are segments
+                            requests.post(
+                                "https://n8n.ella-ai-care.com/webhook/scanner-agent",
+                                json={
+                                    "uid": uid,
+                                    "segments": scanner_segments
+                                },
+                                timeout=2  # Realtime scanner should be fast (~1s)
+                            )
+                    except Exception as e:
+                        # Silently fail - don't break transcription if Ella is down
+                        pass
+
                 if translation_enabled:
                     await translate(conversation.transcript_segments[starts:ends], conversation.id)
 
@@ -1068,6 +1097,26 @@ async def _listen(
                             await handle_image_chunk(
                                 uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers
                             )
+                        elif json_data.get('type') == 'transcript_segment':
+                            # ====== EDGE ASR INTEGRATION ======
+                            # Handle pre-transcribed text from iOS on-device ASR
+                            text = json_data.get('text', '').strip()
+                            if text:
+                                asr_provider = json_data.get('asr_provider')  # Optional: apple_speech, parakeet, etc.
+                                segment = TranscriptSegment(
+                                    text=text,
+                                    speaker=json_data.get('speaker', 'SPEAKER_00'),
+                                    speaker_id=0,
+                                    is_user=False,
+                                    start=json_data.get('start', 0),
+                                    end=json_data.get('end', 0),
+                                    person_id=None,
+                                    source='edge_asr',  # Mark as edge ASR for analytics
+                                    asr_provider=asr_provider  # Track which ASR framework (apple_speech, parakeet, etc.)
+                                )
+                                stream_transcript([segment.dict(exclude={'speech_profile_processed'})])  # Exclude field that gets added later
+                                provider_info = f" (provider: {asr_provider})" if asr_provider else ""
+                                print(f"📱 Edge ASR segment{provider_info}: {text[:50]}...", uid, session_id)
                         elif json_data.get('type') == 'speaker_assigned':
                             segment_ids = json_data.get('segment_ids', [])
                             can_assign = False

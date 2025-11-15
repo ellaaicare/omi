@@ -40,7 +40,6 @@ class DevApiKeyCreatedDialog extends StatelessWidget {
           },
         ),
         ElevatedButton(
-          child: const Text('Copy'),
           style: ElevatedButton.styleFrom(
             foregroundColor: Colors.white,
             backgroundColor: Theme.of(context).colorScheme.secondary,
@@ -49,6 +48,7 @@ class DevApiKeyCreatedDialog extends StatelessWidget {
             Clipboard.setData(ClipboardData(text: apiKey.key));
             AppSnackbar.showSnackbar('Developer key copied to clipboard.');
           },
+          child: const Text('Copy'),
         ),
       ],
     );

@@ -121,7 +121,7 @@ class _ProfilePageState extends State<ProfilePage> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
-            SizedBox(
+            const SizedBox(
               width: 24,
               height: 24,
               child: FaIcon(FontAwesomeIcons.chartLine, color: Color(0xFF8E8E93), size: 20),

@@ -29,9 +29,14 @@ from routers import (
     action_items,
     other,
     developer,
+    tts,
+    ai,
+    ella,
+    analytics,
 )
 
 from utils.other.timeout import TimeoutMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 
 if os.environ.get('SERVICE_ACCOUNT_JSON'):
     service_account_info = json.loads(os.environ["SERVICE_ACCOUNT_JSON"])
@@ -41,6 +46,33 @@ else:
     firebase_admin.initialize_app()
 
 app = FastAPI()
+
+# CORS Configuration
+ALLOWED_ORIGINS = [
+    "https://omi.me",
+    "https://app.omi.me",
+    "https://web.omi.me",
+    "https://www.omi.me",
+]
+
+# Add development origins if in development mode
+if os.getenv("ENVIRONMENT", "production") == "development":
+    ALLOWED_ORIGINS.extend([
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+    ])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+    max_age=3600,
+)
 
 app.include_router(transcribe.router)
 app.include_router(conversations.router)
@@ -71,6 +103,10 @@ app.include_router(auth.router)  # Added auth router (for the main Omi App, this
 app.include_router(payment.router)
 app.include_router(mcp.router)
 app.include_router(developer.router)
+app.include_router(tts.router)
+app.include_router(ai.router)
+app.include_router(ella.router)
+app.include_router(analytics.router)
 
 
 methods_timeout = {

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
-import 'dart:ui';
 
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -127,23 +126,66 @@ class _FCMNotificationService implements NotificationInterface {
 
   @override
   Future<void> saveFcmToken(String? token) async {
-    if (token == null) return;
+    debugPrint('🔔 [DEBUG] saveFcmToken called with token: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
+    if (token == null) {
+      debugPrint('🔔 [DEBUG] Token is null, returning early');
+      return;
+    }
+    debugPrint('🔔 [DEBUG] Getting timezone...');
     String timeZone = await getTimeZone();
-    if (FirebaseAuth.instance.currentUser != null && token.isNotEmpty) {
+    debugPrint('🔔 [DEBUG] Timezone: $timeZone');
+    debugPrint('🔔 [DEBUG] Checking Firebase current user...');
+    final currentUser = FirebaseAuth.instance.currentUser;
+    debugPrint('🔔 [DEBUG] Firebase current user: ${currentUser != null ? "YES (${currentUser.uid})" : "NULL"}');
+    if (currentUser != null && token.isNotEmpty) {
+      debugPrint('🔔 [DEBUG] Sending token to Intercom...');
       await Intercom.instance.sendTokenToIntercom(token);
+      debugPrint('🔔 [DEBUG] Sending token to backend server...');
       await saveFcmTokenServer(token: token, timeZone: timeZone);
+      debugPrint('🔔 [DEBUG] saveFcmToken completed');
+    } else {
+      debugPrint('🔔 [DEBUG] Cannot save token: currentUser=${currentUser != null}, tokenNotEmpty=${token.isNotEmpty}');
     }
   }
 
   @override
   void saveNotificationToken() async {
+    debugPrint('🔔 [DEBUG] saveNotificationToken called');
     if (Platform.isIOS) {
-      await _firebaseMessaging.getAPNSToken();
+      debugPrint('🔔 [DEBUG] iOS platform: Getting APNS token...');
+
+      // Wait for APNS token to be available (iOS requirement)
+      String? apnsToken;
+      int retries = 0;
+      while (apnsToken == null && retries < 10) {
+        apnsToken = await _firebaseMessaging.getAPNSToken();
+        if (apnsToken == null) {
+          debugPrint('🔔 [DEBUG] APNS token not ready yet, waiting 500ms... (attempt ${retries + 1}/10)');
+          await Future.delayed(const Duration(milliseconds: 500));
+          retries++;
+        }
+      }
+
+      if (apnsToken != null) {
+        debugPrint('🔔 [DEBUG] APNS token received: ${apnsToken.substring(0, apnsToken.length > 20 ? 20 : apnsToken.length)}...');
+        debugPrint('🔔 [FULL_TOKEN] APNS_HEX: $apnsToken');
+      } else {
+        debugPrint('🔔 [DEBUG] ⚠️ Failed to get APNS token after 10 retries (5 seconds)');
+        debugPrint('🔔 [DEBUG] This is normal if device is not registered with APNs yet');
+      }
     }
-    if (Platform.isMacOS) return;
+    if (Platform.isMacOS) {
+      debugPrint('🔔 [DEBUG] macOS platform: Returning early');
+      return;
+    }
+    debugPrint('🔔 [DEBUG] Getting FCM token from Firebase Messaging...');
     String? token = await _firebaseMessaging.getToken();
+    debugPrint('🔔 [DEBUG] FCM token received: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
+    debugPrint('🔔 [DEBUG] Calling saveFcmToken...');
     await saveFcmToken(token);
+    debugPrint('🔔 [DEBUG] Setting up token refresh listener...');
     _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
+    debugPrint('🔔 [DEBUG] saveNotificationToken completed');
   }
 
   @override
@@ -185,6 +227,31 @@ class _FCMNotificationService implements NotificationInterface {
         payload.addAll({
           "navigate_to": data['navigate_to'] ?? "",
         });
+
+        // Handle TTS push notification
+        final action = data['action'];
+        if (action == 'speak_tts') {
+          debugPrint('🔊 [TTS] Received speak_tts notification');
+          final audioUrl = data['audio_url'];
+          final text = data['text'];
+          debugPrint('🔊 [TTS] Audio URL: $audioUrl');
+          debugPrint('🔊 [TTS] Text: $text');
+
+          // Add TTS data to payload so notification tap can access it
+          payload.addAll({
+            "action": "speak_tts",
+            "audio_url": audioUrl ?? "",
+            "text": text ?? "",
+          });
+
+          // NOTE: Audio playback is handled by native iOS AppDelegate
+          // The didReceiveRemoteNotification method plays audio automatically
+          // in both foreground and background, so we don't need to play here
+          debugPrint('🔊 [TTS] Audio will be played by native iOS handler');
+
+          // Continue to show the notification popup (don't return)
+          // Fall through to show foreground notification
+        }
 
         // Handle action item data messages
         final messageType = data['type'];
@@ -231,6 +298,10 @@ class _FCMNotificationService implements NotificationInterface {
     final id = Random().nextInt(10000);
     showNotification(id: id, title: noti.title!, body: noti.body!, layout: layout, payload: payload);
   }
+
+  // NOTE: TTS audio playback is handled by native iOS AppDelegate
+  // See: ios/Runner/AppDelegate.swift - didReceiveRemoteNotification method
+  // This plays audio automatically in both foreground and background
 }
 
 /// Factory function to create the FCM notification service

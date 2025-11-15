@@ -8,6 +8,7 @@ import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:flutter/material.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/home/page.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
 
 export 'package:omi/services/notifications/notification_service.dart';
 
@@ -52,6 +53,28 @@ class NotificationUtil {
     if (receivedAction.payload == null || receivedAction.payload!.isEmpty) {
       return;
     }
+
+    // Handle TTS audio playback when notification is tapped
+    final payload = receivedAction.payload!;
+    final action = payload['action'];
+    final audioUrl = payload['audio_url'];
+
+    if (action == 'speak_tts' && audioUrl != null && audioUrl.isNotEmpty) {
+      try {
+        debugPrint('🔊 [Notification Tap] Playing TTS audio from notification tap');
+        debugPrint('🔊 [Notification Tap] Audio URL: $audioUrl');
+
+        // Play the TTS audio
+        final tts = EllaTtsService();
+        await tts.playFromUrl(audioUrl);
+
+        debugPrint('✅ [Notification Tap] Audio playback started successfully');
+      } catch (e) {
+        debugPrint('❌ [Notification Tap] Audio playback error: $e');
+      }
+    }
+
+    // Continue with normal navigation handling
     _handleAppLinkOrDeepLink(receivedAction.payload!);
   }
 

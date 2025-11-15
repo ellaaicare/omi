@@ -8,12 +8,12 @@ class AppImage extends StatelessWidget {
   final double size;
 
   const AppImage({
-    Key? key,
+    super.key,
     required this.imageUrl,
     this.isLocalAsset = false,
     this.isLoading = false,
     this.size = 24,
-  }) : super(key: key);
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +98,7 @@ class AppImage extends StatelessWidget {
       errorWidget: (context, url, error) => Container(
         width: size,
         height: size,
-        decoration: BoxDecoration(
+        decoration: const BoxDecoration(
           shape: BoxShape.circle,
           color: Color(0xFF35343B),
         ),

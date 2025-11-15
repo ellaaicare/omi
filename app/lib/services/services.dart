@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_sound/flutter_sound.dart';
-import 'package:omi/backend/http/shared.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/sockets.dart';
@@ -336,6 +335,51 @@ class MicRecorderService implements IMicRecorderService {
     _onRecording = onRecording;
     if (_onRecording != null) {
       _onRecording!();
+    }
+
+    // Configure audio session to support Bluetooth audio devices
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.allowBluetooth |
+            AVAudioSessionCategoryOptions.defaultToSpeaker,
+        avAudioSessionMode: AVAudioSessionMode.spokenAudio,
+        avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+        androidAudioAttributes: const AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.voiceCommunication,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: true,
+      ));
+
+      // Log current audio input device
+      await session.setActive(true);
+      debugPrint('🎙️ [AudioSession] Audio session configured and activated');
+      debugPrint('🎙️ [AudioSession] Current config: ${session.configuration}');
+
+      // Wait a moment for route to stabilize
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      // Get current audio route details
+      final devices = await session.getDevices();
+      debugPrint('🎧 [AudioRoute] Available audio devices: ${devices.length}');
+      for (var device in devices) {
+        debugPrint('   - ${device.name} (${device.type}) ${device.isInput ? "[INPUT]" : ""}${device.isOutput ? "[OUTPUT]" : ""}');
+      }
+
+      // Log which input is active
+      final activeInputs = devices.where((d) => d.isInput).toList();
+      if (activeInputs.isNotEmpty) {
+        debugPrint('🎤 [ACTIVE INPUT] Using: ${activeInputs.first.name} (${activeInputs.first.type})');
+      } else {
+        debugPrint('⚠️ [AudioRoute] No active input device detected');
+      }
+    } catch (e) {
+      debugPrint('Error configuring audio session: $e');
+      // Continue anyway - flutter_sound will use default configuration
     }
 
     // new record

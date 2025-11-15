@@ -38,7 +38,7 @@ class _MarkdownViewerState extends State<MarkdownViewer> {
                   color: Colors.black,
                 ),
                 blockquoteDecoration: BoxDecoration(
-                  color: Color(0xFF35343B),
+                  color: const Color(0xFF35343B),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 code: const TextStyle(

@@ -90,7 +90,7 @@ class _DesktopLanguageScreenState extends State<DesktopLanguageScreen> with Tick
       final homeProvider = Provider.of<HomeProvider>(context, listen: false);
       // Only set selected language if user has previously saved one
       final savedLanguage = homeProvider.userPrimaryLanguage;
-      if (savedLanguage != null && savedLanguage.isNotEmpty) {
+      if (savedLanguage.isNotEmpty) {
         setState(() {
           selectedLanguage = savedLanguage;
         });

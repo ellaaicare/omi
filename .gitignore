@@ -196,3 +196,9 @@ omiGlass/.expo
 /backend/logs/
 app/.fvm/
 app/android/.kotlin/
+
+# Test audio files
+backend/test_audio/*.wav
+backend/test_audio/*.mp3
+backend/test_audio/*.opus
+!backend/test_audio/README.md

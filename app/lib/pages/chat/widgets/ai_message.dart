@@ -286,9 +286,9 @@ class NormalMessageWidget extends StatelessWidget {
         showTypingIndicator && messageText.isEmpty
             ? Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1f1f25),
-                  borderRadius: const BorderRadius.only(
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1f1f25),
+                  borderRadius: BorderRadius.only(
                     topLeft: Radius.circular(4.0),
                     topRight: Radius.circular(16.0),
                     bottomRight: Radius.circular(16.0),
@@ -348,9 +348,9 @@ class NormalMessageWidget extends StatelessWidget {
             ? const SizedBox.shrink()
             : Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1f1f25),
-                  borderRadius: const BorderRadius.only(
+                decoration: const BoxDecoration(
+                  color: Color(0xFF1f1f25),
+                  borderRadius: BorderRadius.only(
                     topLeft: Radius.circular(4.0),
                     topRight: Radius.circular(16.0),
                     bottomRight: Radius.circular(16.0),
