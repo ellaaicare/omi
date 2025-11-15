@@ -28,8 +28,53 @@
 
 ## 📊 **CURRENT STATUS & LATEST WORK**
 
-**Last Session**: November 10, 2025
-**Latest Commit**: `714968cfc` - docs(edge-asr): add comprehensive Edge ASR integration documentation
+**Last Session**: November 15, 2025
+**Current Task**: E2E Agent Testing Endpoints (6-8 hours)
+**Branch**: `feature/backend-e2e-agent-testing`
+**Latest Commit**: `0578dc00a` - fix(main): restore ai router import now that ai.py is committed
+
+### **E2E Agent Testing - IN PROGRESS 🔄**
+
+**Task**: Implement test endpoints that call REAL production n8n Letta agents
+**Status**: Ready to implement
+**Documentation**: `/tmp/BACKEND_E2E_TESTING_INSTRUCTIONS_REVISED.md` (iOS-provided)
+
+**Endpoints to Implement (6 total)**:
+1. `POST /v1/test/scanner-agent` - Urgency detection (1h)
+2. `POST /v1/test/memory-agent` - Memory extraction (1h)
+3. `POST /v1/test/summary-agent` - Daily summaries (1h)
+4. `POST /v1/test/chat-sync` - Synchronous chat (1h)
+5. `POST /v1/test/chat-async` - Asynchronous chat (3-4h)
+6. `GET /v1/test/chat-response/{job_id}` - Async polling (included in #5)
+
+**Key Requirements**:
+- ✅ Call REAL n8n agents (not fake keyword matching)
+- ✅ Use generic endpoint: `https://n8n.ella-ai-care.com/webhook/chat-agent`
+- ✅ Support both audio→STT→agent and text→agent flows
+- ✅ Dual chat pattern: sync (simple) + async (production-ready)
+- ✅ Real performance metrics (STT latency, agent latency, total)
+- ✅ Reuse existing Edge ASR/Deepgram code
+
+**n8n Webhooks to Call**:
+- `https://n8n.ella-ai-care.com/webhook/scanner-agent` ✅
+- `https://n8n.ella-ai-care.com/webhook/memory-agent` ✅
+- `https://n8n.ella-ai-care.com/webhook/summary-agent` ✅
+- `https://n8n.ella-ai-care.com/webhook/chat-agent` ✅ (generic, NOT omi-realtime)
+
+**Time Estimate**: 6-8 hours total
+**Priority**: High (enables critical AI agent testing for iOS)
+
+**Next Steps**:
+1. Create feature branch: `git checkout -b feature/backend-e2e-agent-testing`
+2. Create `backend/routers/testing.py` with all 6 endpoints
+3. Register router in `main.py`
+4. Test with curl (scanner, memory, summary, chat-sync, chat-async)
+5. Commit and push for iOS integration
+
+---
+
+**Previous Session**: November 10, 2025
+**Previous Commit**: `714968cfc` - docs(edge-asr): add comprehensive Edge ASR integration documentation
 
 ### **Edge ASR Integration - COMPLETE ✅**
 
