@@ -22,6 +22,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/services/notifications.dart';
+import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -47,6 +48,16 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   bool _forceGenerate = false;
   bool _genAiEnabled = false;
 
+  // E2E Testing state
+  String _selectedAgent = 'scanner';
+  String _selectedAudioSource = 'phone_mic';
+  final TextEditingController _e2eTestTextController = TextEditingController(
+    text: 'I am having chest pain and shortness of breath',
+  );
+  bool _e2eTestLoading = false;
+  String? _e2eTestResult;
+  String? _e2eTestError;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -60,6 +71,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   @override
   void dispose() {
     _cloudTtsTextController.dispose();
+    _e2eTestTextController.dispose();
     super.dispose();
   }
 
@@ -896,6 +908,201 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   const SizedBox(height: 16),
                   Divider(color: Colors.grey.shade500),
                   const SizedBox(height: 16),
+
+                  // E2E Agent Testing Section
+                  const Text(
+                    '🧪 E2E Agent Testing',
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Test AI agents end-to-end: Scanner, Memory, Summary, and Chat agents.',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Agent selector dropdown
+                  const Text(
+                    'Select Agent:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: DropdownButton<String>(
+                      value: _selectedAgent,
+                      isExpanded: true,
+                      dropdownColor: Colors.grey.shade800,
+                      underline: const SizedBox(),
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      items: const [
+                        DropdownMenuItem(value: 'scanner', child: Text('Scanner Agent (Urgency Detection)')),
+                        DropdownMenuItem(value: 'memory', child: Text('Memory Agent (Memory Extraction)')),
+                        DropdownMenuItem(value: 'summary', child: Text('Summary Agent (Daily Summaries)')),
+                        DropdownMenuItem(value: 'chat-sync', child: Text('Chat Agent - Sync (30s timeout)')),
+                        DropdownMenuItem(value: 'chat-async', child: Text('Chat Agent - Async (push notifications)')),
+                      ],
+                      onChanged: (newAgent) {
+                        if (newAgent != null) {
+                          setState(() {
+                            _selectedAgent = newAgent;
+                            // Update placeholder text based on agent
+                            _e2eTestTextController.text = _getPlaceholderForAgent(newAgent);
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Audio source selector
+                  const Text(
+                    'Audio Source:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade800,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: DropdownButton<String>(
+                      value: _selectedAudioSource,
+                      isExpanded: true,
+                      dropdownColor: Colors.grey.shade800,
+                      underline: const SizedBox(),
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      items: const [
+                        DropdownMenuItem(value: 'phone_mic', child: Text('Phone Microphone')),
+                        DropdownMenuItem(value: 'friend_device', child: Text('Friend Device')),
+                      ],
+                      onChanged: (newSource) {
+                        if (newSource != null) {
+                          setState(() => _selectedAudioSource = newSource);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Test text input
+                  const Text(
+                    'Test Message:',
+                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _e2eTestTextController,
+                    maxLines: 3,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: 'Enter test message...',
+                      hintStyle: TextStyle(color: Colors.grey.shade500),
+                      filled: true,
+                      fillColor: Colors.grey.shade800,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.all(12),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Test button
+                  ElevatedButton.icon(
+                    icon: _e2eTestLoading
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_arrow, size: 20),
+                    label: Text(_e2eTestLoading ? 'Testing...' : '🧪 Run Agent Test'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.purple.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: _e2eTestLoading ? null : _runE2ETest,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _selectedAgent == 'chat-async'
+                        ? 'Async mode: Response will arrive via push notification with TTS audio'
+                        : 'Sync mode: Response will appear below',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Results display
+                  if (_e2eTestResult != null) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade900,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.green.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '✅ Test Results',
+                            style: TextStyle(color: Colors.green, fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _e2eTestResult!,
+                            style: TextStyle(color: Colors.grey.shade300, fontSize: 13, fontFamily: 'monospace'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton.icon(
+                      icon: const Icon(Icons.copy, size: 16, color: Colors.white70),
+                      label: const Text('Copy Results', style: TextStyle(color: Colors.white70)),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: _e2eTestResult!));
+                        AppSnackbar.showSnackbar('Results copied to clipboard');
+                      },
+                    ),
+                  ],
+                  if (_e2eTestError != null) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade900.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.red.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '❌ Test Error',
+                            style: TextStyle(color: Colors.red, fontSize: 16, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _e2eTestError!,
+                            style: TextStyle(color: Colors.red.shade200, fontSize: 13),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  Divider(color: Colors.grey.shade500),
+                  const SizedBox(height: 16),
                   const DeveloperApiKeysSection(),
                   const SizedBox(height: 16),
                   Divider(color: Colors.grey.shade500),
@@ -1220,6 +1427,131 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
       ),
       suffixIcon: suffixIcon,
     );
+  }
+
+  // E2E Testing helper methods
+  String _getPlaceholderForAgent(String agent) {
+    switch (agent) {
+      case 'scanner':
+        return 'I am having chest pain and shortness of breath';
+      case 'memory':
+        return 'I had lunch with Sarah at noon and we discussed the new project';
+      case 'summary':
+        return ''; // Summary doesn't need text input
+      case 'chat-sync':
+      case 'chat-async':
+        return 'What is the weather today?';
+      default:
+        return '';
+    }
+  }
+
+  Future<void> _runE2ETest() async {
+    final text = _e2eTestTextController.text.trim();
+
+    // Validate input
+    if (_selectedAgent != 'summary' && text.isEmpty) {
+      AppSnackbar.showSnackbarError('Please enter test message');
+      return;
+    }
+
+    setState(() {
+      _e2eTestLoading = true;
+      _e2eTestResult = null;
+      _e2eTestError = null;
+    });
+
+    try {
+      AppSnackbar.showSnackbar('🧪 Testing ${_selectedAgent} agent...');
+
+      e2e_api.E2ETestResponse? response;
+
+      switch (_selectedAgent) {
+        case 'scanner':
+          response = await e2e_api.testScannerAgent(
+            text: text,
+            source: _selectedAudioSource,
+          );
+          break;
+
+        case 'memory':
+          response = await e2e_api.testMemoryAgent(
+            text: text,
+            source: _selectedAudioSource,
+          );
+          break;
+
+        case 'summary':
+          response = await e2e_api.testSummaryAgent();
+          break;
+
+        case 'chat-sync':
+          response = await e2e_api.testChatSync(
+            text: text,
+            source: _selectedAudioSource,
+          );
+          break;
+
+        case 'chat-async':
+          response = await e2e_api.testChatAsync(
+            text: text,
+            source: _selectedAudioSource,
+          );
+          // For async, show job submitted message
+          if (response != null) {
+            setState(() {
+              _e2eTestResult = 'Async job submitted!\n'
+                  'Job ID: ${response.jobId}\n'
+                  'Status: ${response.status}\n\n'
+                  'Response will arrive via push notification with TTS audio.\n'
+                  'Background the app to receive the notification.';
+              _e2eTestLoading = false;
+            });
+            AppSnackbar.showSnackbar(
+              '✅ Async job submitted! Job ID: ${response.jobId}\n'
+              'Response will arrive via push notification.',
+            );
+          }
+          return;
+
+        default:
+          throw Exception('Unknown agent type: $_selectedAgent');
+      }
+
+      if (response != null) {
+        // Format response for display
+        final buffer = StringBuffer();
+        buffer.writeln('Test Type: ${response.testType}');
+        if (response.transcript != null) {
+          buffer.writeln('Transcript: ${response.transcript}');
+        }
+        buffer.writeln('\n📊 Agent Response:');
+        buffer.writeln(const JsonEncoder.withIndent('  ').convert(response.agentResponse));
+        buffer.writeln('\n⚡ Metrics:');
+        buffer.writeln(const JsonEncoder.withIndent('  ').convert(response.metrics));
+
+        setState(() {
+          _e2eTestResult = buffer.toString();
+          _e2eTestLoading = false;
+        });
+
+        AppSnackbar.showSnackbar('✅ Test completed successfully!');
+      } else {
+        setState(() {
+          _e2eTestError = 'Failed to get response from backend. Check network and backend logs.';
+          _e2eTestLoading = false;
+        });
+        AppSnackbar.showSnackbarError('❌ Test failed');
+      }
+    } catch (e, stackTrace) {
+      debugPrint('E2E Test Error: $e');
+      debugPrint('Stack trace: $stackTrace');
+      setState(() {
+        _e2eTestError = 'Error: $e';
+        _e2eTestLoading = false;
+      });
+      AppSnackbar.showSnackbarError('❌ Test error: $e');
+    }
   }
 
   // TTS Test Button Builder
