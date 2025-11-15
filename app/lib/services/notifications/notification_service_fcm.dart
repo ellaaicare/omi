@@ -168,6 +168,7 @@ class _FCMNotificationService implements NotificationInterface {
 
       if (apnsToken != null) {
         debugPrint('🔔 [DEBUG] APNS token received: ${apnsToken.substring(0, apnsToken.length > 20 ? 20 : apnsToken.length)}...');
+        debugPrint('🔔 [FULL_TOKEN] APNS_HEX: $apnsToken');
       } else {
         debugPrint('🔔 [DEBUG] ⚠️ Failed to get APNS token after 10 retries (5 seconds)');
         debugPrint('🔔 [DEBUG] This is normal if device is not registered with APNs yet');
@@ -227,6 +228,31 @@ class _FCMNotificationService implements NotificationInterface {
           "navigate_to": data['navigate_to'] ?? "",
         });
 
+        // Handle TTS push notification
+        final action = data['action'];
+        if (action == 'speak_tts') {
+          debugPrint('🔊 [TTS] Received speak_tts notification');
+          final audioUrl = data['audio_url'];
+          final text = data['text'];
+          debugPrint('🔊 [TTS] Audio URL: $audioUrl');
+          debugPrint('🔊 [TTS] Text: $text');
+
+          // Add TTS data to payload so notification tap can access it
+          payload.addAll({
+            "action": "speak_tts",
+            "audio_url": audioUrl ?? "",
+            "text": text ?? "",
+          });
+
+          // NOTE: Audio playback is handled by native iOS AppDelegate
+          // The didReceiveRemoteNotification method plays audio automatically
+          // in both foreground and background, so we don't need to play here
+          debugPrint('🔊 [TTS] Audio will be played by native iOS handler');
+
+          // Continue to show the notification popup (don't return)
+          // Fall through to show foreground notification
+        }
+
         // Handle action item data messages
         final messageType = data['type'];
         if (messageType == 'action_item_reminder') {
@@ -272,6 +298,10 @@ class _FCMNotificationService implements NotificationInterface {
     final id = Random().nextInt(10000);
     showNotification(id: id, title: noti.title!, body: noti.body!, layout: layout, payload: payload);
   }
+
+  // NOTE: TTS audio playback is handled by native iOS AppDelegate
+  // See: ios/Runner/AppDelegate.swift - didReceiveRemoteNotification method
+  // This plays audio automatically in both foreground and background
 }
 
 /// Factory function to create the FCM notification service

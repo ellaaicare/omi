@@ -4,6 +4,8 @@ import UserNotifications
 import app_links
 import WatchConnectivity
 import AVFoundation
+import FirebaseCore
+import FirebaseMessaging
 
 
 extension FlutterError: Error {}
@@ -16,6 +18,9 @@ extension FlutterError: Error {}
   private let appleRemindersService = AppleRemindersService()
 
   private var notificationTitleOnKill: String?
+
+  // Audio player for TTS notifications
+  private var audioPlayer: AVPlayer?
   private var notificationBodyOnKill: String?
 
   var session: WCSession?
@@ -77,6 +82,16 @@ extension FlutterError: Error {}
     if #available(iOS 10.0, *) {
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
+
+    // 🔔 Firebase Messaging Delegate Setup
+    // CRITICAL: Required when FirebaseAppDelegateProxyEnabled is false
+    Messaging.messaging().delegate = self
+    NSLog("🔔 [AppDelegate] Firebase Messaging delegate set")
+
+    // 🔔 Explicitly register for remote notifications
+    // CRITICAL: Required to get APNS device token
+    NSLog("🔔 [AppDelegate] Explicitly calling registerForRemoteNotifications()")
+    application.registerForRemoteNotifications()
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -189,6 +204,83 @@ extension FlutterError: Error {}
         audioChunks.removeAll()
         nextExpectedChunkIndex = 0
     }
+
+  // MARK: - Firebase Messaging Delegate Methods
+
+  /// Handle APNS device token registration
+  /// CRITICAL: Required when FirebaseAppDelegateProxyEnabled is false
+  override func application(_ application: UIApplication,
+                            didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+    NSLog("🔔 [AppDelegate] Registered for remote notifications with token: \(deviceToken.map { String(format: "%02x", $0) }.joined())")
+
+    // Pass APNS token to Firebase Messaging
+    Messaging.messaging().apnsToken = deviceToken
+    NSLog("🔔 [AppDelegate] APNS token passed to Firebase Messaging")
+  }
+
+  /// Handle APNS registration failure
+  override func application(_ application: UIApplication,
+                            didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    NSLog("❌ [AppDelegate] Failed to register for remote notifications: \(error.localizedDescription)")
+  }
+
+  /// Handle remote notification in foreground/background
+  override func application(_ application: UIApplication,
+                            didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                            fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+    NSLog("🚨 [AppDelegate] NOTIFICATION RECEIVED via didReceiveRemoteNotification")
+    NSLog("🚨 [AppDelegate] Notification data: \(userInfo)")
+
+    // Log application state
+    let state = application.applicationState
+    let stateString = state == .active ? "FOREGROUND" : (state == .background ? "BACKGROUND" : "INACTIVE")
+    NSLog("🚨 [AppDelegate] App state: \(stateString)")
+
+    // Check for TTS audio notification
+    if let action = userInfo["action"] as? String, action == "speak_tts",
+       let audioUrlString = userInfo["audio_url"] as? String,
+       let audioUrl = URL(string: audioUrlString) {
+
+      NSLog("🔊 [AppDelegate] TTS notification detected - playing audio automatically")
+      NSLog("🔊 [AppDelegate] Audio URL: \(audioUrlString)")
+
+      // Configure audio session for playback (works in background)
+      do {
+        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try AVAudioSession.sharedInstance().setActive(true)
+        NSLog("✅ [AppDelegate] Audio session configured for background playback")
+      } catch {
+        NSLog("❌ [AppDelegate] Audio session configuration failed: \(error)")
+      }
+
+      // Play audio using AVPlayer
+      self.audioPlayer = AVPlayer(url: audioUrl)
+      self.audioPlayer?.play()
+      NSLog("✅ [AppDelegate] Audio playback started AUTOMATICALLY")
+
+      completionHandler(.newData)
+      return
+    }
+
+    // Process notification (Firebase handles routing to Flutter)
+    completionHandler(.newData)
+  }
+}
+
+// MARK: - Firebase Messaging Delegate Extension
+
+extension AppDelegate: MessagingDelegate {
+  /// Handle FCM token refresh
+  func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
+    NSLog("🔔 [AppDelegate] FCM token refreshed: \(fcmToken ?? "nil")")
+
+    if let token = fcmToken {
+      NSLog("🔔 [AppDelegate] New FCM token available: \(String(token.prefix(20)))...")
+
+      // Token will be picked up by Flutter layer via FirebaseMessaging.instance.getToken()
+      // No need to send to Dart here - Flutter plugin handles it
+    }
+  }
 }
 
 func registerPlugins(registry: FlutterPluginRegistry) {
