@@ -243,6 +243,15 @@ async def test_scanner_agent(
                 "confidence": 0.0,
                 "_placeholder": True
             }
+            if debug:
+                agent_result["_debug"] = {
+                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "n8n_endpoint": N8N_SCANNER_AGENT,
+                    "n8n_status_code": response.status_code,
+                    "n8n_response_body": response.text[:200] if response.text else "(empty)",
+                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
+                    "using_placeholder": True
+                }
     except requests.exceptions.RequestException as e:
         # Return detailed error for debugging
         error_details = format_agent_error(e, "scanner", N8N_SCANNER_AGENT, debug)
@@ -331,6 +340,15 @@ async def test_memory_agent(
                 "memory_count": 1,
                 "_placeholder": True
             }
+            if debug:
+                agent_result["_debug"] = {
+                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "n8n_endpoint": N8N_MEMORY_AGENT,
+                    "n8n_status_code": response.status_code,
+                    "n8n_response_body": response.text[:200] if response.text else "(empty)",
+                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
+                    "using_placeholder": True
+                }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "memory", N8N_MEMORY_AGENT, debug)
         raise HTTPException(status_code=500, detail=error_details)
@@ -403,6 +421,15 @@ async def test_summary_agent(
                 "events": [],
                 "_placeholder": True
             }
+            if debug:
+                agent_result["_debug"] = {
+                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "n8n_endpoint": N8N_SUMMARY_AGENT,
+                    "n8n_status_code": response.status_code,
+                    "n8n_response_body": response.text[:200] if response.text else "(empty)",
+                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
+                    "using_placeholder": True
+                }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "summary", N8N_SUMMARY_AGENT, debug)
         raise HTTPException(status_code=500, detail=error_details)
