@@ -90,7 +90,7 @@ packages:
     source: hosted
     version: "2.13.0"
   audio_session:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: audio_session
       sha256: "2b7fff16a552486d078bfc09a8cde19f426dc6d6329262b684182597bec5b1ac"
@@ -434,7 +434,7 @@ packages:
     source: hosted
     version: "2.3.0"
   fake_async:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: fake_async
       sha256: "5368f224a74523e8d2e7399ea1638b37aecfca824a3cc4dfdf77bf1fa905ac44"
@@ -768,6 +768,54 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.0.1"
+  flutter_secure_storage:
+    dependency: "direct main"
+    description:
+      name: flutter_secure_storage
+      sha256: "9cad52d75ebc511adfae3d447d5d13da15a55a92c9410e50f67335b6d21d16ea"
+      url: "https://pub.dev"
+    source: hosted
+    version: "9.2.4"
+  flutter_secure_storage_linux:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_linux
+      sha256: be76c1d24a97d0b98f8b54bce6b481a380a6590df992d0098f868ad54dc8f688
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.3"
+  flutter_secure_storage_macos:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_macos
+      sha256: "6c0a2795a2d1de26ae202a0d78527d163f4acbb11cde4c75c670f3a0fc064247"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.3"
+  flutter_secure_storage_platform_interface:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_platform_interface
+      sha256: cf91ad32ce5adef6fba4d736a542baca9daf3beac4db2d04be350b87f69ac4a8
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.2"
+  flutter_secure_storage_web:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_web
+      sha256: f4ebff989b4f07b2656fb16b47852c0aab9fed9b4ec1c70103368337bc1886a9
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.2.1"
+  flutter_secure_storage_windows:
+    dependency: transitive
+    description:
+      name: flutter_secure_storage_windows
+      sha256: b20b07cb5ed4ed74fc567b78a72936203f587eba460af1df11281c9326cd3709
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.2"
   flutter_sound:
     dependency: "direct main"
     description:
@@ -1031,6 +1079,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.5.0"
+  http_certificate_pinning:
+    dependency: "direct main"
+    description:
+      name: http_certificate_pinning
+      sha256: "12b4848113d50c570af93e94bed64004caba14dde87719310d1e4556686c0afa"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.3"
   http_multi_server:
     dependency: transitive
     description:
@@ -1381,6 +1437,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.4.4"
+  mockito:
+    dependency: "direct dev"
+    description:
+      name: mockito
+      sha256: "4546eac99e8967ea91bae633d2ca7698181d008e95fa4627330cf903d573277a"
+      url: "https://pub.dev"
+    source: hosted
+    version: "5.4.6"
   nested:
     dependency: transitive
     description:
@@ -1389,6 +1453,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.0"
+  network_image_mock:
+    dependency: "direct dev"
+    description:
+      name: network_image_mock
+      sha256: "855cdd01d42440e0cffee0d6c2370909fc31b3bcba308a59829f24f64be42db7"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.1"
   nm:
     dependency: transitive
     description:
@@ -2021,7 +2093,7 @@ packages:
     source: hosted
     version: "0.3.1"
   synchronized:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: synchronized
       sha256: c254ade258ec8282947a0acbbc90b9575b4f19673533ee46f2f6e9b3aeefd7c0

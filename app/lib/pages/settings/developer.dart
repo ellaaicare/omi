@@ -1534,14 +1534,14 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           if (response != null) {
             setState(() {
               _e2eTestResult = 'Async job submitted!\n'
-                  'Job ID: ${response.jobId}\n'
-                  'Status: ${response.status}\n\n'
+                  'Job ID: ${response?.jobId ?? "unknown"}\n'
+                  'Status: ${response?.status ?? "unknown"}\n\n'
                   'Response will arrive via push notification with TTS audio.\n'
                   'Background the app to receive the notification.';
               _e2eTestLoading = false;
             });
             AppSnackbar.showSnackbar(
-              '✅ Async job submitted! Job ID: ${response.jobId}\n'
+              '✅ Async job submitted! Job ID: ${response?.jobId ?? "unknown"}\n'
               'Response will arrive via push notification.',
             );
           }
