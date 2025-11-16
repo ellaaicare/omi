@@ -38,6 +38,84 @@ N8N_CHAT_AGENT = f"{N8N_BASE_URL}/chat-agent"
 chat_jobs: Dict[str, dict] = {}
 
 
+def format_agent_error(
+    error: Exception,
+    agent_name: str,
+    endpoint: str,
+    debug: bool = False
+) -> dict:
+    """
+    Format agent call errors with debug details
+
+    Args:
+        error: Exception from requests
+        agent_name: Name of agent (e.g., "scanner", "memory")
+        endpoint: n8n endpoint URL
+        debug: If True, include technical details
+
+    Returns:
+        Error dict with user/dev friendly messages
+    """
+    import requests
+
+    error_response = {
+        "error": f"{agent_name} agent failed",
+        "agent": agent_name,
+        "endpoint": endpoint if debug else None,
+    }
+
+    # Categorize error type
+    if isinstance(error, requests.exceptions.Timeout):
+        error_response["error_type"] = "timeout"
+        error_response["message"] = f"Agent took too long to respond (>10s)"
+        if debug:
+            error_response["debug_detail"] = str(error)
+
+    elif isinstance(error, requests.exceptions.ConnectionError):
+        error_response["error_type"] = "connection_error"
+        error_response["message"] = "Could not connect to agent service"
+        if debug:
+            error_response["debug_detail"] = str(error)
+
+    elif isinstance(error, requests.exceptions.HTTPError):
+        status_code = error.response.status_code if hasattr(error, 'response') else None
+        error_response["error_type"] = "http_error"
+        error_response["status_code"] = status_code
+
+        if status_code == 401:
+            error_response["message"] = "Agent authentication failed - n8n webhook requires auth"
+            if debug:
+                error_response["debug_detail"] = "n8n webhooks returning 401 Unauthorized. Ella team needs to either: A) Make webhooks public, or B) Provide API key"
+                error_response["debug_response"] = error.response.text if hasattr(error, 'response') else None
+
+        elif status_code == 404:
+            error_response["message"] = "Agent endpoint not found"
+            if debug:
+                error_response["debug_detail"] = f"Endpoint {endpoint} does not exist. Check n8n workflow deployment."
+
+        elif status_code == 500:
+            error_response["message"] = "Agent internal error"
+            if debug:
+                error_response["debug_detail"] = "n8n workflow or Letta agent crashed"
+                error_response["debug_response"] = error.response.text if hasattr(error, 'response') else None
+
+        else:
+            error_response["message"] = f"Agent returned error (HTTP {status_code})"
+            if debug:
+                error_response["debug_response"] = error.response.text if hasattr(error, 'response') else None
+    else:
+        error_response["error_type"] = "unknown"
+        error_response["message"] = "Unexpected error calling agent"
+        if debug:
+            error_response["debug_detail"] = str(error)
+
+    # Always include user-friendly suggestion
+    if not debug:
+        error_response["suggestion"] = "Enable debug mode to see technical details"
+
+    return error_response
+
+
 async def transcribe_audio(audio_base64: str) -> tuple[str, float]:
     """
     Transcribe audio using Deepgram
@@ -92,6 +170,7 @@ async def test_scanner_agent(
     text: Optional[str] = Body(None, description="Text to test (if no audio)"),
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
+    debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
 ):
     """
@@ -99,6 +178,8 @@ async def test_scanner_agent(
     Calls REAL production agent at n8n.ella-ai-care.com
 
     Detects emergencies, wake words, and urgency levels from conversations.
+
+    Set debug=true to see detailed error messages for troubleshooting.
     """
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either audio or text required")
@@ -128,7 +209,9 @@ async def test_scanner_agent(
         response.raise_for_status()
         agent_result = response.json()
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Scanner agent failed: {str(e)}")
+        # Return detailed error for debugging
+        error_details = format_agent_error(e, "scanner", N8N_SCANNER_AGENT, debug)
+        raise HTTPException(status_code=500, detail=error_details)
 
     agent_latency_ms = (time.time() - agent_start) * 1000
     total_latency_ms = (time.time() - start_time) * 1000
@@ -155,6 +238,7 @@ async def test_memory_agent(
     text: Optional[str] = Body(None, description="Text to test (if no audio)"),
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
+    debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
 ):
     """
@@ -162,6 +246,8 @@ async def test_memory_agent(
     Calls REAL production agent at n8n.ella-ai-care.com
 
     Extracts memories from conversations (social events, activities, people, etc.)
+
+    Set debug=true to see detailed error messages for troubleshooting.
     """
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either audio or text required")
@@ -191,7 +277,8 @@ async def test_memory_agent(
         response.raise_for_status()
         agent_result = response.json()
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Memory agent failed: {str(e)}")
+        error_details = format_agent_error(e, "memory", N8N_MEMORY_AGENT, debug)
+        raise HTTPException(status_code=500, detail=error_details)
 
     agent_latency_ms = (time.time() - agent_start) * 1000
     total_latency_ms = (time.time() - start_time) * 1000
@@ -215,6 +302,7 @@ async def test_memory_agent(
 async def test_summary_agent(
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     date: Optional[str] = Body(None, description="YYYY-MM-DD format"),
+    debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
 ):
     """
@@ -222,6 +310,8 @@ async def test_summary_agent(
     Calls REAL production agent at n8n.ella-ai-care.com
 
     Generates daily conversation summaries with key points and sentiment.
+
+    Set debug=true to see detailed error messages for troubleshooting.
     """
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -242,7 +332,8 @@ async def test_summary_agent(
         response.raise_for_status()
         agent_result = response.json()
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Summary agent failed: {str(e)}")
+        error_details = format_agent_error(e, "summary", N8N_SUMMARY_AGENT, debug)
+        raise HTTPException(status_code=500, detail=error_details)
 
     agent_latency_ms = (time.time() - start_time) * 1000
 
@@ -263,6 +354,7 @@ async def test_chat_sync(
     text: Optional[str] = Body(None, description="Text to test (if no audio)"),
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
+    debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
 ):
     """
@@ -270,6 +362,8 @@ async def test_chat_sync(
     Calls REAL production agent at n8n.ella-ai-care.com
 
     Synchronous chat with 30s timeout. Use async endpoint for slower responses.
+
+    Set debug=true to see detailed error messages for troubleshooting.
     """
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either audio or text required")
@@ -299,7 +393,8 @@ async def test_chat_sync(
         response.raise_for_status()
         agent_result = response.json()
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Chat agent failed: {str(e)}")
+        error_details = format_agent_error(e, "chat", N8N_CHAT_AGENT, debug)
+        raise HTTPException(status_code=500, detail=error_details)
 
     agent_latency_ms = (time.time() - agent_start) * 1000
     total_latency_ms = (time.time() - start_time) * 1000
@@ -326,6 +421,7 @@ async def test_chat_async(
     text: Optional[str] = Body(None, description="Text to test (if no audio)"),
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
+    debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
 ):
     """
@@ -334,6 +430,8 @@ async def test_chat_async(
 
     Asynchronous chat with 120s timeout. Returns job_id for polling.
     Use /v1/test/chat-response/{job_id} to poll for result.
+
+    Set debug=true to see detailed error messages for troubleshooting.
     """
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either audio or text required")
@@ -357,6 +455,7 @@ async def test_chat_async(
         "status": "processing",
         "started_at": time.time(),
         "stt_latency_ms": stt_latency_ms,
+        "debug": debug,
     }
 
     # Step 3: Process in background
@@ -365,7 +464,8 @@ async def test_chat_async(
             job_id=job_id,
             text=transcript,
             uid=uid,
-            conversation_id=conversation_id
+            conversation_id=conversation_id,
+            debug=debug
         )
     )
 
@@ -384,7 +484,7 @@ async def test_chat_async(
     }
 
 
-async def _call_chat_agent_async(job_id: str, text: str, uid: str, conversation_id: str):
+async def _call_chat_agent_async(job_id: str, text: str, uid: str, conversation_id: str, debug: bool = False):
     """Background task to call chat agent asynchronously"""
     try:
         agent_start = time.time()
@@ -405,9 +505,11 @@ async def _call_chat_agent_async(job_id: str, text: str, uid: str, conversation_
         chat_jobs[job_id]["response"] = response.json()
         chat_jobs[job_id]["agent_latency_ms"] = agent_latency_ms
 
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
+        # Format detailed error for debugging
+        error_details = format_agent_error(e, "chat", N8N_CHAT_AGENT, debug)
         chat_jobs[job_id]["status"] = "failed"
-        chat_jobs[job_id]["error"] = str(e)
+        chat_jobs[job_id]["error"] = error_details
 
 
 @router.get("/v1/test/chat-response/{job_id}")
