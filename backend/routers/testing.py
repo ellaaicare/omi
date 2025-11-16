@@ -218,23 +218,35 @@ async def test_scanner_agent(
 
     # Step 2: Call REAL Scanner Agent via n8n (using n8n's required format)
     agent_start = time.time()
+
+    # Log what we're sending to n8n
+    n8n_payload = {
+        "uid": uid,
+        "segments": [create_segment(transcript)]
+    }
+    print(f"🔍 [Scanner] iOS UID: {uid}")
+    print(f"🔍 [Scanner] Sending to n8n: {N8N_SCANNER_AGENT}")
+    print(f"🔍 [Scanner] Payload: {n8n_payload}")
+
     try:
         response = requests.post(
             N8N_SCANNER_AGENT,
-            json={
-                "uid": uid,
-                "segments": [create_segment(transcript)]
-            },
+            json=n8n_payload,
             timeout=10  # 10 second timeout
         )
+
+        print(f"🔍 [Scanner] n8n status: {response.status_code}")
+        print(f"🔍 [Scanner] n8n response body: '{response.text[:500]}'")
+
         response.raise_for_status()
 
         # Handle empty n8n responses (Ella team still working on endpoints)
         try:
             agent_result = response.json()
+            print(f"✅ [Scanner] n8n returned valid JSON for uid={uid}")
         except ValueError:
             # n8n returned empty/invalid JSON - use placeholder for iOS testing
-            print(f"⚠️  n8n scanner-agent returned empty response for uid={uid}, using placeholder")
+            print(f"⚠️  [Scanner] n8n returned empty/invalid response for uid={uid}, using placeholder")
             agent_result = {
                 "urgency_level": "low",
                 "detected_event": "none",
@@ -246,11 +258,14 @@ async def test_scanner_agent(
             if debug:
                 agent_result["_debug"] = {
                     "backend_status": "✅ Backend received request and authenticated successfully",
+                    "ios_uid_sent": uid,
                     "n8n_endpoint": N8N_SCANNER_AGENT,
+                    "n8n_payload_sent": n8n_payload,
                     "n8n_status_code": response.status_code,
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
                     "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
-                    "using_placeholder": True
+                    "using_placeholder": True,
+                    "note": "Check backend logs (journalctl -u omi-backend -f) for detailed request/response"
                 }
     except requests.exceptions.RequestException as e:
         # Return detailed error for debugging
