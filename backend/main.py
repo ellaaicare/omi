@@ -33,6 +33,7 @@ from routers import (
     ai,
     ella,
     analytics,
+    testing,
 )
 
 from utils.other.timeout import TimeoutMiddleware
@@ -107,6 +108,9 @@ app.include_router(tts.router)
 app.include_router(ai.router)
 app.include_router(ella.router)
 app.include_router(analytics.router)
+
+# E2E Agent Testing endpoints
+app.include_router(testing.router, tags=['testing'])
 
 
 methods_timeout = {
