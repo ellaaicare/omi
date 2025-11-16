@@ -64,6 +64,7 @@ Future<E2ETestResponse?> testScannerAgent({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  bool debug = false,
 }) async {
   if (audio == null && text == null) {
     throw Exception('Either audio or text must be provided');
@@ -78,6 +79,7 @@ Future<E2ETestResponse?> testScannerAgent({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'debug': debug,
     }),
   );
 
@@ -107,6 +109,7 @@ Future<E2ETestResponse?> testMemoryAgent({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  bool debug = false,
 }) async {
   if (audio == null && text == null) {
     throw Exception('Either audio or text must be provided');
@@ -121,6 +124,7 @@ Future<E2ETestResponse?> testMemoryAgent({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'debug': debug,
     }),
   );
 
@@ -156,6 +160,7 @@ Future<E2ETestResponse?> testMemoryAgent({
 Future<E2ETestResponse?> testSummaryAgent({
   String conversationId = 'test_conv',
   String? date,
+  bool debug = false,
 }) async {
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/test/summary-agent',
@@ -164,6 +169,7 @@ Future<E2ETestResponse?> testSummaryAgent({
     body: jsonEncode({
       'conversation_id': conversationId,
       if (date != null) 'date': date,
+      'debug': debug,
     }),
   );
 
@@ -190,6 +196,7 @@ Future<E2ETestResponse?> testChatSync({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  bool debug = false,
 }) async {
   if (audio == null && text == null) {
     throw Exception('Either audio or text must be provided');
@@ -204,6 +211,7 @@ Future<E2ETestResponse?> testChatSync({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'debug': debug,
     }),
   );
 
@@ -237,6 +245,7 @@ Future<E2ETestResponse?> testChatAsync({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  bool debug = false,
 }) async {
   if (audio == null && text == null) {
     throw Exception('Either audio or text must be provided');
@@ -251,6 +260,7 @@ Future<E2ETestResponse?> testChatAsync({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'debug': debug,
     }),
   );
 

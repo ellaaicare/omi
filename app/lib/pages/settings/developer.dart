@@ -55,6 +55,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
     text: 'I am having chest pain and shortness of breath',
   );
   bool _e2eTestLoading = false;
+  bool _e2eDebugMode = false;  // Debug mode for detailed error messages
   String? _e2eTestResult;
   String? _e2eTestError;
 
@@ -1014,6 +1015,32 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 16),
 
+                  // Debug mode toggle
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Debug Mode:',
+                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                      ),
+                      Switch(
+                        value: _e2eDebugMode,
+                        onChanged: (value) {
+                          setState(() => _e2eDebugMode = value);
+                        },
+                        activeColor: Colors.purple,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _e2eDebugMode
+                        ? 'ON: Shows detailed error messages, endpoint URLs, and stack traces'
+                        : 'OFF: Shows user-friendly error messages only',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 16),
+
                   // Test button
                   ElevatedButton.icon(
                     icon: _e2eTestLoading
@@ -1471,6 +1498,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           response = await e2e_api.testScannerAgent(
             text: text,
             source: _selectedAudioSource,
+            debug: _e2eDebugMode,
           );
           break;
 
@@ -1478,17 +1506,21 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           response = await e2e_api.testMemoryAgent(
             text: text,
             source: _selectedAudioSource,
+            debug: _e2eDebugMode,
           );
           break;
 
         case 'summary':
-          response = await e2e_api.testSummaryAgent();
+          response = await e2e_api.testSummaryAgent(
+            debug: _e2eDebugMode,
+          );
           break;
 
         case 'chat-sync':
           response = await e2e_api.testChatSync(
             text: text,
             source: _selectedAudioSource,
+            debug: _e2eDebugMode,
           );
           break;
 
@@ -1496,6 +1528,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           response = await e2e_api.testChatAsync(
             text: text,
             source: _selectedAudioSource,
+            debug: _e2eDebugMode,
           );
           // For async, show job submitted message
           if (response != null) {
