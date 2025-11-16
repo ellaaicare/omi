@@ -1491,6 +1491,77 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
     try {
       AppSnackbar.showSnackbar('🧪 Testing ${_selectedAgent} agent...');
 
+      // Build request details for debugging
+      final requestBuffer = StringBuffer();
+      String endpoint;
+      Map<String, dynamic> requestBody;
+
+      switch (_selectedAgent) {
+        case 'scanner':
+          endpoint = '${Env.apiBaseUrl}v1/test/scanner-agent';
+          requestBody = {
+            'text': text,
+            'source': _selectedAudioSource,
+            'conversation_id': 'test_conv',
+            'uid': 'test_user_123',
+            'debug': _e2eDebugMode,
+          };
+          break;
+        case 'memory':
+          endpoint = '${Env.apiBaseUrl}v1/test/memory-agent';
+          requestBody = {
+            'text': text,
+            'source': _selectedAudioSource,
+            'conversation_id': 'test_conv',
+            'uid': 'test_user_123',
+            'debug': _e2eDebugMode,
+          };
+          break;
+        case 'summary':
+          endpoint = '${Env.apiBaseUrl}v1/test/summary-agent';
+          requestBody = {
+            'conversation_id': 'test_conv',
+            'uid': 'test_user_123',
+            'debug': _e2eDebugMode,
+          };
+          break;
+        case 'chat-sync':
+          endpoint = '${Env.apiBaseUrl}v1/test/chat-sync';
+          requestBody = {
+            'text': text,
+            'source': _selectedAudioSource,
+            'conversation_id': 'test_conv',
+            'uid': 'test_user_123',
+            'debug': _e2eDebugMode,
+          };
+          break;
+        case 'chat-async':
+          endpoint = '${Env.apiBaseUrl}v1/test/chat-async';
+          requestBody = {
+            'text': text,
+            'source': _selectedAudioSource,
+            'conversation_id': 'test_conv',
+            'uid': 'test_user_123',
+            'debug': _e2eDebugMode,
+          };
+          break;
+        default:
+          throw Exception('Unknown agent type: $_selectedAgent');
+      }
+
+      // Log request details
+      requestBuffer.writeln('📤 REQUEST:');
+      requestBuffer.writeln('URL: $endpoint');
+      requestBuffer.writeln('Method: POST');
+      requestBuffer.writeln('Headers: {');
+      requestBuffer.writeln('  "Content-Type": "application/json"');
+      requestBuffer.writeln('}');
+      requestBuffer.writeln('\nBody:');
+      requestBuffer.writeln(const JsonEncoder.withIndent('  ').convert(requestBody));
+      requestBuffer.writeln('\n${'=' * 50}\n');
+
+      debugPrint(requestBuffer.toString());
+
       e2e_api.E2ETestResponse? response;
 
       switch (_selectedAgent) {
@@ -1530,14 +1601,16 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
             source: _selectedAudioSource,
             debug: _e2eDebugMode,
           );
-          // For async, show job submitted message
+          // For async, show job submitted message with request details
           if (response != null) {
             setState(() {
-              _e2eTestResult = 'Async job submitted!\n'
-                  'Job ID: ${response?.jobId ?? "unknown"}\n'
-                  'Status: ${response?.status ?? "unknown"}\n\n'
-                  'Response will arrive via push notification with TTS audio.\n'
-                  'Background the app to receive the notification.';
+              _e2eTestResult = requestBuffer.toString() +
+                  '📥 RESPONSE:\n'
+                      'Async job submitted!\n'
+                      'Job ID: ${response?.jobId ?? "unknown"}\n'
+                      'Status: ${response?.status ?? "unknown"}\n\n'
+                      'Response will arrive via push notification with TTS audio.\n'
+                      'Background the app to receive the notification.';
               _e2eTestLoading = false;
             });
             AppSnackbar.showSnackbar(
@@ -1554,6 +1627,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
       if (response != null) {
         // Format response for display
         final buffer = StringBuffer();
+        buffer.write(requestBuffer.toString());
+        buffer.writeln('📥 RESPONSE:');
         buffer.writeln('Test Type: ${response.testType}');
         if (response.transcript != null) {
           buffer.writeln('Transcript: ${response.transcript}');
@@ -1571,7 +1646,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
         AppSnackbar.showSnackbar('✅ Test completed successfully!');
       } else {
         setState(() {
-          _e2eTestError = 'Failed to get response from backend. Check network and backend logs.';
+          _e2eTestError = requestBuffer.toString() +
+              '❌ Failed to get response from backend. Check network and backend logs.';
           _e2eTestLoading = false;
         });
         AppSnackbar.showSnackbarError('❌ Test failed');
