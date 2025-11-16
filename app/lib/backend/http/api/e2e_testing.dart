@@ -52,6 +52,7 @@ class E2ETestResponse {
 /// - text: Text to test (optional if audio provided)
 /// - source: Audio source ("phone_mic", "friend_device", etc.)
 /// - conversationId: Conversation ID for context
+/// - uid: User ID for testing (defaults to test_user_123)
 ///
 /// Response:
 /// - urgency_level: "critical", "high", "medium", "low", "none"
@@ -64,6 +65,7 @@ Future<E2ETestResponse?> testScannerAgent({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  String uid = 'test_user_123',
   bool debug = false,
 }) async {
   if (audio == null && text == null) {
@@ -79,6 +81,7 @@ Future<E2ETestResponse?> testScannerAgent({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'uid': uid,
       'debug': debug,
     }),
   );
@@ -109,6 +112,7 @@ Future<E2ETestResponse?> testMemoryAgent({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  String uid = 'test_user_123',
   bool debug = false,
 }) async {
   if (audio == null && text == null) {
@@ -124,6 +128,7 @@ Future<E2ETestResponse?> testMemoryAgent({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'uid': uid,
       'debug': debug,
     }),
   );
@@ -141,6 +146,7 @@ Future<E2ETestResponse?> testMemoryAgent({
 /// Request:
 /// - conversationId: Conversation ID to summarize
 /// - date: Date to summarize (YYYY-MM-DD format, optional, defaults to today)
+/// - uid: User ID for testing (defaults to test_user_123)
 ///
 /// Response:
 /// - title: Summary title
@@ -160,6 +166,7 @@ Future<E2ETestResponse?> testMemoryAgent({
 Future<E2ETestResponse?> testSummaryAgent({
   String conversationId = 'test_conv',
   String? date,
+  String uid = 'test_user_123',
   bool debug = false,
 }) async {
   final response = await makeApiCall(
@@ -169,6 +176,7 @@ Future<E2ETestResponse?> testSummaryAgent({
     body: jsonEncode({
       'conversation_id': conversationId,
       if (date != null) 'date': date,
+      'uid': uid,
       'debug': debug,
     }),
   );
@@ -196,6 +204,7 @@ Future<E2ETestResponse?> testChatSync({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  String uid = 'test_user_123',
   bool debug = false,
 }) async {
   if (audio == null && text == null) {
@@ -211,6 +220,7 @@ Future<E2ETestResponse?> testChatSync({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'uid': uid,
       'debug': debug,
     }),
   );
@@ -245,6 +255,7 @@ Future<E2ETestResponse?> testChatAsync({
   String? text,
   String source = 'phone_mic',
   String conversationId = 'test_conv',
+  String uid = 'test_user_123',
   bool debug = false,
 }) async {
   if (audio == null && text == null) {
@@ -260,6 +271,7 @@ Future<E2ETestResponse?> testChatAsync({
       if (text != null) 'text': text,
       'source': source,
       'conversation_id': conversationId,
+      'uid': uid,
       'debug': debug,
     }),
   );
