@@ -228,7 +228,21 @@ async def test_scanner_agent(
             timeout=10  # 10 second timeout
         )
         response.raise_for_status()
-        agent_result = response.json()
+
+        # Handle empty n8n responses (Ella team still working on endpoints)
+        try:
+            agent_result = response.json()
+        except ValueError:
+            # n8n returned empty/invalid JSON - use placeholder for iOS testing
+            print(f"⚠️  n8n scanner-agent returned empty response for uid={uid}, using placeholder")
+            agent_result = {
+                "urgency_level": "low",
+                "detected_event": "none",
+                "explanation": "n8n webhook returned empty response (placeholder used for testing)",
+                "recommended_action": "None",
+                "confidence": 0.0,
+                "_placeholder": True
+            }
     except requests.exceptions.RequestException as e:
         # Return detailed error for debugging
         error_details = format_agent_error(e, "scanner", N8N_SCANNER_AGENT, debug)
@@ -299,7 +313,24 @@ async def test_memory_agent(
             timeout=10
         )
         response.raise_for_status()
-        agent_result = response.json()
+
+        # Handle empty n8n responses
+        try:
+            agent_result = response.json()
+        except ValueError:
+            print(f"⚠️  n8n memory-agent returned empty response for uid={uid}, using placeholder")
+            agent_result = {
+                "memories": [
+                    {
+                        "content": f"Test memory from: {transcript[:50]}...",
+                        "category": "interesting",
+                        "visibility": "private",
+                        "tags": ["test"]
+                    }
+                ],
+                "memory_count": 1,
+                "_placeholder": True
+            }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "memory", N8N_MEMORY_AGENT, debug)
         raise HTTPException(status_code=500, detail=error_details)
@@ -357,7 +388,21 @@ async def test_summary_agent(
             timeout=15  # Summary may take longer
         )
         response.raise_for_status()
-        agent_result = response.json()
+
+        # Handle empty n8n responses
+        try:
+            agent_result = response.json()
+        except ValueError:
+            print(f"⚠️  n8n summary-agent returned empty response for uid={uid}, using placeholder")
+            agent_result = {
+                "title": "Test Summary",
+                "overview": f"Summary of conversation: {text[:100]}...",
+                "emoji": "📝",
+                "category": "general",
+                "action_items": [],
+                "events": [],
+                "_placeholder": True
+            }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "summary", N8N_SUMMARY_AGENT, debug)
         raise HTTPException(status_code=500, detail=error_details)
