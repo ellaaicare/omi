@@ -38,7 +38,7 @@ N8N_CHAT_AGENT = f"{N8N_BASE_URL}/chat-agent"
 chat_jobs: Dict[str, dict] = {}
 
 
-def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True) -> dict:
+def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True, source: str = "phone_mic") -> dict:
     """
     Create a conversation segment in n8n's required format
 
@@ -46,6 +46,7 @@ def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True)
         text: Transcribed text
         speaker: Speaker ID (default: SPEAKER_00)
         is_user: Is this the user speaking? (default: True)
+        source: Audio source (default: phone_mic) - e.g. "omi", "phone_mic", "headset"
 
     Returns:
         Segment dict matching n8n format
@@ -56,7 +57,8 @@ def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True)
         "speakerId": 0,
         "is_user": is_user,
         "start": 0.0,
-        "end": 0.0  # Test endpoints don't have real timestamps
+        "end": 0.0,  # Test endpoints don't have real timestamps
+        "source": source  # Track origin: omi, phone_mic, headset, etc.
     }
 
 
@@ -222,7 +224,7 @@ async def test_scanner_agent(
     # Log what we're sending to n8n
     n8n_payload = {
         "uid": uid,
-        "segments": [create_segment(transcript)]
+        "segments": [create_segment(transcript, source=source)]
     }
     print(f"🔍 [Scanner] iOS UID: {uid}")
     print(f"🔍 [Scanner] Sending to n8n: {N8N_SCANNER_AGENT}")
@@ -328,7 +330,7 @@ async def test_memory_agent(
             N8N_MEMORY_AGENT,
             json={
                 "uid": uid,
-                "segments": [create_segment(transcript)],
+                "segments": [create_segment(transcript, source=source)],
                 "structured": {
                     "title": f"Test conversation {conversation_id}",
                     "overview": transcript[:100]  # First 100 chars as overview

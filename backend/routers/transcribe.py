@@ -931,7 +931,8 @@ async def _listen(
                                 "text": s.text,
                                 "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
                                 "start": s.start,
-                                "end": s.end
+                                "end": s.end,
+                                "source": s.source  # e.g. "omi", "phone_mic", "deepgram", "edge_asr"
                             }
                             for s in transcript_segments
                         ]
