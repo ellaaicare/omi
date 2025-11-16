@@ -38,6 +38,28 @@ N8N_CHAT_AGENT = f"{N8N_BASE_URL}/chat-agent"
 chat_jobs: Dict[str, dict] = {}
 
 
+def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True) -> dict:
+    """
+    Create a conversation segment in n8n's required format
+
+    Args:
+        text: Transcribed text
+        speaker: Speaker ID (default: SPEAKER_00)
+        is_user: Is this the user speaking? (default: True)
+
+    Returns:
+        Segment dict matching n8n format
+    """
+    return {
+        "text": text,
+        "speaker": speaker,
+        "speakerId": 0,
+        "is_user": is_user,
+        "start": 0.0,
+        "end": 0.0  # Test endpoints don't have real timestamps
+    }
+
+
 def format_agent_error(
     error: Exception,
     agent_name: str,
@@ -194,15 +216,14 @@ async def test_scanner_agent(
     else:
         transcript = text
 
-    # Step 2: Call REAL Scanner Agent via n8n
+    # Step 2: Call REAL Scanner Agent via n8n (using n8n's required format)
     agent_start = time.time()
     try:
         response = requests.post(
             N8N_SCANNER_AGENT,
             json={
-                "text": transcript,
-                "conversation_id": conversation_id,
-                "user_id": uid
+                "uid": uid,
+                "segments": [create_segment(transcript)]
             },
             timeout=10  # 10 second timeout
         )
@@ -262,15 +283,18 @@ async def test_memory_agent(
     else:
         transcript = text
 
-    # Step 2: Call REAL Memory Agent
+    # Step 2: Call REAL Memory Agent (using n8n's required format)
     agent_start = time.time()
     try:
         response = requests.post(
             N8N_MEMORY_AGENT,
             json={
-                "text": transcript,
-                "conversation_id": conversation_id,
-                "user_id": uid
+                "uid": uid,
+                "segments": [create_segment(transcript)],
+                "structured": {
+                    "title": f"Test conversation {conversation_id}",
+                    "overview": transcript[:100]  # First 100 chars as overview
+                }
             },
             timeout=10
         )
@@ -300,7 +324,7 @@ async def test_memory_agent(
 
 @router.post("/v1/test/summary-agent")
 async def test_summary_agent(
-    conversation_id: str = Body("test_conv", description="Conversation ID"),
+    text: str = Body(..., description="Conversation transcript to summarize"),
     date: Optional[str] = Body(None, description="YYYY-MM-DD format"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Depends(auth.get_current_user_uid),
@@ -316,16 +340,19 @@ async def test_summary_agent(
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
 
+    # Convert date to ISO 8601 timestamp (n8n format requirement)
+    started_at = f"{date}T00:00:00Z"
+
     start_time = time.time()
 
-    # Call REAL Summary Agent
+    # Call REAL Summary Agent (using n8n's required format)
     try:
         response = requests.post(
             N8N_SUMMARY_AGENT,
             json={
-                "conversation_id": conversation_id,
-                "user_id": uid,
-                "date": date
+                "uid": uid,
+                "transcript": text,
+                "started_at": started_at
             },
             timeout=15  # Summary may take longer
         )
