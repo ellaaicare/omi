@@ -137,6 +137,60 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                 shrinkWrap: true,
                 children: [
                   const SizedBox(height: 24),
+
+                  // User Info Section
+                  const Text(
+                    'User Info',
+                    style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade700),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Firebase UID',
+                                    style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  SelectableText(
+                                    SharedPreferencesUtil().uid,
+                                    style: const TextStyle(color: Colors.white, fontSize: 14, fontFamily: 'monospace'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.copy, color: Colors.white70),
+                              tooltip: 'Copy UID',
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: SharedPreferencesUtil().uid));
+                                AppSnackbar.showSnackbar('UID copied to clipboard');
+                              },
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Share this UID with n8n team for push notification testing',
+                          style: TextStyle(color: Colors.grey.shade500, fontSize: 11, fontStyle: FontStyle.italic),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Debug logs'),
