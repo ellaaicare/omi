@@ -193,7 +193,7 @@ async def test_scanner_agent(
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
 ):
     """
     Test Scanner Agent (urgency detection)
@@ -298,7 +298,7 @@ async def test_memory_agent(
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
 ):
     """
     Test Memory Agent (memory extraction)
@@ -391,7 +391,7 @@ async def test_summary_agent(
     text: str = Body(..., description="Conversation transcript to summarize"),
     date: Optional[str] = Body(None, description="YYYY-MM-DD format"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
 ):
     """
     Test Summary Agent (daily summaries)
@@ -469,7 +469,7 @@ async def test_chat_sync(
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
 ):
     """
     Test Chat Agent (synchronous mode)
@@ -536,7 +536,7 @@ async def test_chat_async(
     source: str = Body("phone_mic", description="Audio source"),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
 ):
     """
     Test Chat Agent (asynchronous mode)
