@@ -350,8 +350,9 @@ async def ella_notification_callback(request: EllaNotificationCallback):
             )
 
             audio_url = tts_response.audio_url
-            duration_seconds = tts_response.duration_seconds
-            print(f"  ✅ TTS audio: {audio_url}")
+            # Convert duration from ms to seconds (TTSResponse has duration_ms, not duration_seconds)
+            duration_seconds = tts_response.duration_ms / 1000.0 if tts_response.duration_ms else None
+            print(f"  ✅ TTS audio: {audio_url} (duration: {duration_seconds:.1f}s)" if duration_seconds else f"  ✅ TTS audio: {audio_url}")
 
         # Send push notification (reuse existing FCM code)
         from firebase_admin import messaging
