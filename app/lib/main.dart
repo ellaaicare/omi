@@ -292,6 +292,14 @@ void _startServicesInBackground() async {
         SharedPreferencesUtil().fullName,
         SharedPreferencesUtil().uid,
       );
+
+      // CRITICAL: Auto-register FCM token after user authentication
+      // This ensures push notifications work after app reinstalls/new builds
+      // Delay slightly to ensure NotificationService is fully initialized
+      Future.delayed(const Duration(seconds: 2), () {
+        debugPrint('🔔 [AUTO-REGISTER] Starting automatic FCM token registration...');
+        NotificationService.instance.saveNotificationToken();
+      });
     }
 
     // Initialize API client with certificate pinning in background
@@ -367,6 +375,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
     if (state == AppLifecycleState.paused) {
       _onAppPaused();
+    } else if (state == AppLifecycleState.resumed) {
+      _onAppResumed();
     } else if (state == AppLifecycleState.detached) {
       _deinit();
     }
@@ -375,6 +385,16 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void _onAppPaused() {
     imageCache.clear();
     imageCache.clearLiveImages();
+  }
+
+  void _onAppResumed() {
+    // CRITICAL: Re-register FCM token when app resumes
+    // This handles cases where token changed while app was in background
+    // Also ensures new Xcode builds auto-register without manual button press
+    if (FirebaseAuth.instance.currentUser != null) {
+      debugPrint('🔔 [AUTO-REGISTER] App resumed - re-registering FCM token...');
+      NotificationService.instance.saveNotificationToken();
+    }
   }
 
   @override
