@@ -192,7 +192,8 @@ async def transcribe_audio(audio_base64: str) -> tuple[str, float]:
 async def test_scanner_agent(
     audio: Optional[str] = Body(None, description="Base64 encoded audio WAV"),
     text: Optional[str] = Body(None, description="Text to test (if no audio)"),
-    source: str = Body("phone_mic", description="Audio source"),
+    device_type: str = Body("omi", description="Hardware device type: omi, friend, openglass, etc."),
+    source: str = Body("phone_mic", description="STT provider source: edge_asr, deepgram, soniox, etc."),
     conversation_id: str = Body("test_conv", description="Conversation ID"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
