@@ -38,7 +38,7 @@ N8N_CHAT_AGENT = f"{N8N_BASE_URL}/chat-agent"
 chat_jobs: Dict[str, dict] = {}
 
 
-def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True, source: str = "phone_mic") -> dict:
+def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True, stt_source: str = None) -> dict:
     """
     Create a conversation segment in n8n's required format
 
@@ -46,7 +46,7 @@ def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True,
         text: Transcribed text
         speaker: Speaker ID (default: SPEAKER_00)
         is_user: Is this the user speaking? (default: True)
-        source: Audio source (default: phone_mic) - e.g. "omi", "phone_mic", "headset"
+        stt_source: STT provider source (e.g. "edge_asr", "deepgram", "soniox") - optional
 
     Returns:
         Segment dict matching n8n format
@@ -58,7 +58,7 @@ def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True,
         "is_user": is_user,
         "start": 0.0,
         "end": 0.0,  # Test endpoints don't have real timestamps
-        "source": source  # Track origin: omi, phone_mic, headset, etc.
+        "stt_source": stt_source  # STT provider: edge_asr, deepgram, soniox, etc.
     }
 
 
@@ -224,9 +224,12 @@ async def test_scanner_agent(
     # Log what we're sending to n8n
     n8n_payload = {
         "uid": uid,
-        "segments": [create_segment(transcript, source=source)]
+        "device_type": device_type,  # Hardware device: "omi", "friend", "openglass"
+        "segments": [create_segment(transcript, stt_source=source)]  # STT provider source
     }
     print(f"🔍 [Scanner] iOS UID: {uid}")
+    print(f"🔍 [Scanner] Device Type: {device_type}")
+    print(f"🔍 [Scanner] STT Source: {source}")
     print(f"🔍 [Scanner] Sending to n8n: {N8N_SCANNER_AGENT}")
     print(f"🔍 [Scanner] Payload: {n8n_payload}")
 

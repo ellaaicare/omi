@@ -932,7 +932,7 @@ async def _listen(
                                 "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
                                 "start": s.start,
                                 "end": s.end,
-                                "source": s.source  # e.g. "omi", "phone_mic", "deepgram", "edge_asr"
+                                "stt_source": s.source  # STT provider: "edge_asr", "deepgram", "soniox", etc.
                             }
                             for s in transcript_segments
                         ]
@@ -942,6 +942,7 @@ async def _listen(
                                 "https://n8n.ella-ai-care.com/webhook/scanner-agent",
                                 json={
                                     "uid": uid,
+                                    "device_type": conversation.source.value if conversation.source else "omi",  # Device: "omi", "friend", "openglass"
                                     "segments": scanner_segments
                                 },
                                 timeout=2  # Realtime scanner should be fast (~1s)
