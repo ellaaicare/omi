@@ -319,15 +319,8 @@ async def ella_notification_callback(request: EllaNotificationCallback):
     print(f"  Urgency: {request.urgency}")
 
     try:
-        # Get FCM token for user
-        fcm_token = notification_db.get_token_only(request.uid)
-
-        if not fcm_token:
-            print(f"  ⚠️  No FCM token found for user {request.uid}")
-            return {
-                "status": "no_token",
-                "message": "User has no FCM token registered"
-            }
+        # Import multi-device module
+        from database import notifications_multi_device
 
         # Generate TTS audio (if requested)
         audio_url = None
@@ -354,18 +347,17 @@ async def ella_notification_callback(request: EllaNotificationCallback):
             duration_seconds = tts_response.duration_ms / 1000.0 if tts_response.duration_ms else None
             print(f"  ✅ TTS audio: {audio_url} (duration: {duration_seconds:.1f}s)" if duration_seconds else f"  ✅ TTS audio: {audio_url}")
 
-        # Send push notification (reuse existing FCM code)
+        # Send push notification to ALL user devices
         from firebase_admin import messaging
 
-        message = messaging.Message(
-            token=fcm_token,
-            data={
+        notification_data = {
+            'data': {
                 "action": "speak_tts",
                 "audio_url": audio_url or "",
                 "text": request.message,
                 "urgency": request.urgency,
             },
-            apns=messaging.APNSConfig(
+            'apns': messaging.APNSConfig(
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
                         content_available=True,
@@ -373,17 +365,29 @@ async def ella_notification_callback(request: EllaNotificationCallback):
                     )
                 )
             )
-        )
+        }
 
-        message_id = messaging.send(message)
-        print(f"  ✅ Push notification sent: {message_id}")
+        # Send to all devices
+        result = notifications_multi_device.send_to_all_devices(request.uid, notification_data)
+
+        if result['status'] == 'no_tokens':
+            print(f"  ⚠️  No FCM tokens found for user {request.uid}")
+            return {
+                "status": "no_token",
+                "message": "User has no FCM token registered"
+            }
+
+        print(f"  ✅ Push notification sent to {result['sent']}/{result['total_devices']} devices")
 
         return {
-            "status": "success",
-            "message_id": message_id,
+            "status": result['status'],
+            "total_devices": result['total_devices'],
+            "sent": result['sent'],
+            "failed": result['failed'],
             "audio_url": audio_url,
             "duration_seconds": duration_seconds,
-            "urgency": request.urgency
+            "urgency": request.urgency,
+            "details": result['results']
         }
 
     except Exception as e:

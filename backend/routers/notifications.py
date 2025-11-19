@@ -62,7 +62,9 @@ def check_rate_limit(app_id: str, user_id: str) -> Tuple[bool, int, int, int]:
 
 @router.post('/v1/users/fcm-token')
 def save_token(data: SaveFcmTokenRequest, uid: str = Depends(auth.get_current_user_uid)):
-    notification_db.save_token(uid, data.dict())
+    # Use multi-device module (supports both single and multi-device)
+    from database import notifications_multi_device
+    notifications_multi_device.save_device_token(uid, data.dict())
     return {'status': 'Ok'}
 
 
