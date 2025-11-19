@@ -2,7 +2,6 @@ import os
 import hashlib
 import uuid
 import time
-import requests
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -64,24 +63,6 @@ def check_rate_limit(app_id: str, user_id: str) -> Tuple[bool, int, int, int]:
 @router.post('/v1/users/fcm-token')
 def save_token(data: SaveFcmTokenRequest, uid: str = Depends(auth.get_current_user_uid)):
     notification_db.save_token(uid, data.dict())
-
-    # ====== N8N INTEGRATION: Notify Letta of FCM token updates ======
-    # When user re-registers with new UID, n8n needs to know to update their agent records
-    try:
-        n8n_webhook_url = "https://n8n.ella-ai-care.com/webhook/fcm-token-update"
-        payload = {
-            "uid": uid,
-            "fcm_token": data.fcm_token,
-            "device_name": data.device_name,
-            "device_type": data.device_type,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        response = requests.post(n8n_webhook_url, json=payload, timeout=2)
-        print(f"📱 Notified n8n of FCM token update for uid={uid}: {response.status_code}")
-    except Exception as e:
-        # Silent failure - don't block FCM registration if n8n is down
-        print(f"⚠️  Failed to notify n8n of FCM token update: {e}")
-
     return {'status': 'Ok'}
 
 
