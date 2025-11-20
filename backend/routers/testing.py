@@ -42,22 +42,23 @@ def create_segment(text: str, speaker: str = "SPEAKER_00", is_user: bool = True,
     """
     Create a conversation segment in n8n's required format
 
+    Schema from HARDWARE_E2E_TEST_GUIDE.md (lines 36-42):
+    - speaker: Speaker ID (e.g. "User", "SPEAKER_00")
+    - text: Transcribed text
+    - stt_source: STT provider (e.g. "edge_asr", "deepgram", "soniox")
+
     Args:
         text: Transcribed text
         speaker: Speaker ID (default: SPEAKER_00)
-        is_user: Is this the user speaking? (default: True)
+        is_user: DEPRECATED (not used in v5.12 schema)
         stt_source: STT provider source (e.g. "edge_asr", "deepgram", "soniox") - optional
 
     Returns:
-        Segment dict matching n8n format
+        Segment dict matching n8n Scanner v5.12 format
     """
     return {
-        "text": text,
         "speaker": speaker,
-        "speakerId": 0,
-        "is_user": is_user,
-        "start": 0.0,
-        "end": 0.0,  # Test endpoints don't have real timestamps
+        "text": text,
         "stt_source": stt_source  # STT provider: edge_asr, deepgram, soniox, etc.
     }
 

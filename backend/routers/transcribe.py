@@ -926,12 +926,11 @@ async def _listen(
                         import requests
 
                         # Convert transcript segments to format Ella expects
+                        # Match HARDWARE_E2E_TEST_GUIDE.md schema (lines 36-42)
                         scanner_segments = [
                             {
-                                "text": s.text,
                                 "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
-                                "start": s.start,
-                                "end": s.end,
+                                "text": s.text,
                                 "stt_source": s.source  # STT provider: "edge_asr", "deepgram", "soniox", etc.
                             }
                             for s in transcript_segments
