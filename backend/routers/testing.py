@@ -335,7 +335,7 @@ async def test_memory_agent(
             N8N_MEMORY_AGENT,
             json={
                 "uid": uid,
-                "segments": [create_segment(transcript, source=source)],
+                "segments": [create_segment(transcript, stt_source=source)],
                 "structured": {
                     "title": f"Test conversation {conversation_id}",
                     "overview": transcript[:100]  # First 100 chars as overview
