@@ -166,7 +166,7 @@ async def ella_memory_callback(request: EllaMemoryCallback):
                 memory,
                 uid=request.uid,
                 conversation_id=request.conversation_id,
-                is_discarded=False
+                manually_added=False  # Fixed: was is_discarded (wrong parameter)
             )
 
             # Store in Firestore
