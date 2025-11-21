@@ -129,18 +129,32 @@ def _get_structured(
             return Structured(emoji=random.choice(['🧠', '🎉'])), True
 
         # If not discarded, proceed to generate the structured summary from transcript and/or photos.
-        return (
-            get_transcript_structure(
-                transcript_text,
-                conversation.started_at,
-                language_code,
-                tz,
-                photos=conversation.photos,
-                existing_action_items=existing_action_items,
-                uid=uid,
-            ),
-            False,
+        # Get conversation ID if available (for async callback matching)
+        conv_id = getattr(conversation, 'id', None)
+
+        structured = get_transcript_structure(
+            transcript_text,
+            conversation.started_at,
+            language_code,
+            tz,
+            photos=conversation.photos,
+            existing_action_items=existing_action_items,
+            uid=uid,
+            existing_conversation_id=conv_id,
         )
+
+        # Handle async mode: If None returned, n8n will send callback later
+        if structured is None:
+            # Return minimal structured object for async processing
+            print(f"⏳ Summary generation pending (async mode)")
+            structured = Structured(
+                title="Processing...",  # Placeholder title
+                overview="Summary generation in progress",
+                emoji="⏳",
+                category=CategoryEnum.other
+            )
+
+        return (structured, False)
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Error processing conversation, please try again later")
@@ -497,7 +511,13 @@ def process_conversation(
         except Exception as e:
             print(f"Error creating audio files: {e}")
 
-    conversation.status = ConversationStatus.completed
+    # Check if summary is still processing (async mode)
+    if conversation.structured and conversation.structured.title == "Processing...":
+        conversation.status = ConversationStatus.processing
+        print(f"⏳ Conversation {conversation.id} status set to 'processing' (waiting for n8n callback)")
+    else:
+        conversation.status = ConversationStatus.completed
+
     conversation_dict = conversation.dict()
 
     # Build transcript text from segments for iOS app display

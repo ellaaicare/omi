@@ -352,6 +352,7 @@ def get_transcript_structure(
     photos: List[ConversationPhoto] = None,
     existing_action_items: List[dict] = None,
     uid: str = None,
+    existing_conversation_id: str = None,  # For async callback matching
 ) -> Structured:
     context_parts = []
     if transcript and transcript.strip():
@@ -379,6 +380,7 @@ def get_transcript_structure(
                 "https://n8n.ella-ai-care.com/webhook/summary-agent",
                 json={
                     "uid": uid,
+                    "conversation_id": existing_conversation_id,  # For async callback matching
                     "transcript": transcript,
                     "started_at": started_at.isoformat(),
                     "language_code": language_code,
@@ -389,6 +391,13 @@ def get_transcript_structure(
 
             if response.status_code == 200:
                 result = response.json()
+
+                # Check if n8n returned immediate result (sync) or empty (async)
+                if not result or result.get('status') == 'processing':
+                    # ASYNC MODE: n8n will call /v1/ella/conversation callback later
+                    print(f"⏳ Ella summary agent processing asynchronously (conversation_id={existing_conversation_id})", flush=True)
+                    return None  # Signal to caller that summary is pending
+
                 print(f"✅ Ella summary agent returned: {result.get('title', 'N/A')}", flush=True)
 
                 # Convert Ella's response to Structured object
