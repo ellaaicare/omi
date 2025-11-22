@@ -247,10 +247,21 @@ async def test_scanner_agent(
 
         response.raise_for_status()
 
-        # Handle empty n8n responses - return async processing status
+        # Handle n8n responses - pass through status or return processing fallback
         try:
             agent_result = response.json()
-            print(f"✅ [Scanner] n8n returned valid JSON for uid={uid}")
+            print(f"✅ [Scanner] n8n returned valid JSON: {agent_result}")
+
+            # If n8n returns a status field, pass it through to iOS
+            if "status" in agent_result:
+                print(f"📤 [Scanner] n8n status message: {agent_result.get('status')}")
+                if debug:
+                    agent_result["_debug"] = {
+                        "backend_status": "✅ Backend forwarding n8n status to iOS",
+                        "n8n_endpoint": N8N_SCANNER_AGENT,
+                        "n8n_returned_status": agent_result.get("status"),
+                        "source": "n8n webhook response (not backend fallback)"
+                    }
         except ValueError:
             # n8n returned empty/invalid JSON - return processing status
             print(f"⚠️  [Scanner] n8n returned empty/invalid response for uid={uid}, returning processing status")
@@ -270,7 +281,8 @@ async def test_scanner_agent(
                     "n8n_status_code": response.status_code,
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
                     "flow": "Scanner agent processing - typically completes in <5s",
-                    "note": "Check backend logs (journalctl -u omi-backend -f) for detailed request/response"
+                    "note": "n8n returned empty - using backend fallback status",
+                    "source": "backend fallback (n8n returned empty)"
                 }
     except requests.exceptions.RequestException as e:
         # Return detailed error for debugging
@@ -344,9 +356,24 @@ async def test_memory_agent(
         )
         response.raise_for_status()
 
-        # Handle empty n8n responses - return async processing status
+        # Handle n8n responses - pass through status or return processing fallback
         try:
             agent_result = response.json()
+            print(f"✅ [Memory] n8n returned valid JSON: {agent_result}")
+
+            # If n8n returns a status field, pass it through to iOS
+            if "status" in agent_result:
+                print(f"📤 [Memory] n8n status message: {agent_result.get('status')}")
+                # Ensure conversation_id is included for iOS polling
+                if "conversation_id" not in agent_result:
+                    agent_result["conversation_id"] = conversation_id
+                if debug:
+                    agent_result["_debug"] = {
+                        "backend_status": "✅ Backend forwarding n8n status to iOS",
+                        "n8n_endpoint": N8N_MEMORY_AGENT,
+                        "n8n_returned_status": agent_result.get("status"),
+                        "source": "n8n webhook response (not backend fallback)"
+                    }
         except ValueError:
             print(f"⚠️  n8n memory-agent returned empty response for uid={uid}, returning processing status")
             # Return realistic async processing status (matches production flow)
@@ -366,7 +393,8 @@ async def test_memory_agent(
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
                     "flow": "Async processing - n8n will call backend callback when complete",
                     "callback_endpoint": "/v1/ella/memory",
-                    "how_to_get_results": f"Poll GET /v3/memories?conversation_id={conversation_id}"
+                    "how_to_get_results": f"Poll GET /v3/memories?conversation_id={conversation_id}",
+                    "source": "backend fallback (n8n returned empty)"
                 }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "memory", N8N_MEMORY_AGENT, debug)
@@ -428,9 +456,24 @@ async def test_summary_agent(
         )
         response.raise_for_status()
 
-        # Handle empty n8n responses - return async processing status
+        # Handle n8n responses - pass through status or return processing fallback
         try:
             agent_result = response.json()
+            print(f"✅ [Summary] n8n returned valid JSON: {agent_result}")
+
+            # If n8n returns a status field, pass it through to iOS
+            if "status" in agent_result:
+                print(f"📤 [Summary] n8n status message: {agent_result.get('status')}")
+                # Ensure conversation_id is included for iOS polling
+                if "conversation_id" not in agent_result:
+                    agent_result["conversation_id"] = conversation_id
+                if debug:
+                    agent_result["_debug"] = {
+                        "backend_status": "✅ Backend forwarding n8n status to iOS",
+                        "n8n_endpoint": N8N_SUMMARY_AGENT,
+                        "n8n_returned_status": agent_result.get("status"),
+                        "source": "n8n webhook response (not backend fallback)"
+                    }
         except ValueError:
             print(f"⚠️  n8n summary-agent returned empty response for uid={uid}, returning processing status")
             # Return realistic async processing status (matches production flow)
@@ -450,7 +493,8 @@ async def test_summary_agent(
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
                     "flow": "Async processing - n8n will call backend callback when complete",
                     "callback_endpoint": "/v1/ella/conversation",
-                    "how_to_get_results": f"Poll GET /v1/conversations?conversation_id={conversation_id}"
+                    "how_to_get_results": f"Poll GET /v1/conversations?conversation_id={conversation_id}",
+                    "source": "backend fallback (n8n returned empty)"
                 }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "summary", N8N_SUMMARY_AGENT, debug)
