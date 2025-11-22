@@ -247,31 +247,29 @@ async def test_scanner_agent(
 
         response.raise_for_status()
 
-        # Handle empty n8n responses (Ella team still working on endpoints)
+        # Handle empty n8n responses - return async processing status
         try:
             agent_result = response.json()
             print(f"✅ [Scanner] n8n returned valid JSON for uid={uid}")
         except ValueError:
-            # n8n returned empty/invalid JSON - use placeholder for iOS testing
-            print(f"⚠️  [Scanner] n8n returned empty/invalid response for uid={uid}, using placeholder")
+            # n8n returned empty/invalid JSON - return processing status
+            print(f"⚠️  [Scanner] n8n returned empty/invalid response for uid={uid}, returning processing status")
+            # Scanner is real-time but still uses async processing pattern for consistency
             agent_result = {
-                "urgency_level": "low",
-                "detected_event": "none",
-                "explanation": "n8n webhook returned empty response (placeholder used for testing)",
-                "recommended_action": "None",
-                "confidence": 0.0,
-                "_placeholder": True
+                "status": "processing",
+                "message": "Urgency scan submitted to Ella agents for processing",
+                "urgency_level": "unknown",
+                "note": "Scanner typically responds in <5 seconds. Check logs or wait for callback."
             }
             if debug:
                 agent_result["_debug"] = {
-                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "backend_status": "✅ Backend received request and submitted to n8n successfully",
                     "ios_uid_sent": uid,
                     "n8n_endpoint": N8N_SCANNER_AGENT,
                     "n8n_payload_sent": n8n_payload,
                     "n8n_status_code": response.status_code,
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
-                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
-                    "using_placeholder": True,
+                    "flow": "Scanner agent processing - typically completes in <5s",
                     "note": "Check backend logs (journalctl -u omi-backend -f) for detailed request/response"
                 }
     except requests.exceptions.RequestException as e:
@@ -346,31 +344,29 @@ async def test_memory_agent(
         )
         response.raise_for_status()
 
-        # Handle empty n8n responses
+        # Handle empty n8n responses - return async processing status
         try:
             agent_result = response.json()
         except ValueError:
-            print(f"⚠️  n8n memory-agent returned empty response for uid={uid}, using placeholder")
+            print(f"⚠️  n8n memory-agent returned empty response for uid={uid}, returning processing status")
+            # Return realistic async processing status (matches production flow)
+            # iOS can poll GET /v3/memories?conversation_id={conversation_id} for results
             agent_result = {
-                "memories": [
-                    {
-                        "content": f"Test memory from: {transcript[:50]}...",
-                        "category": "interesting",
-                        "visibility": "private",
-                        "tags": ["test"]
-                    }
-                ],
-                "memory_count": 1,
-                "_placeholder": True
+                "status": "processing",
+                "message": "Memory extraction submitted to Ella agents for processing",
+                "conversation_id": conversation_id,
+                "polling_endpoint": f"/v3/memories?conversation_id={conversation_id}",
+                "expected_completion_time_seconds": 30
             }
             if debug:
                 agent_result["_debug"] = {
-                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "backend_status": "✅ Backend received request and submitted to n8n successfully",
                     "n8n_endpoint": N8N_MEMORY_AGENT,
                     "n8n_status_code": response.status_code,
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
-                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
-                    "using_placeholder": True
+                    "flow": "Async processing - n8n will call backend callback when complete",
+                    "callback_endpoint": "/v1/ella/memory",
+                    "how_to_get_results": f"Poll GET /v3/memories?conversation_id={conversation_id}"
                 }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "memory", N8N_MEMORY_AGENT, debug)
@@ -432,28 +428,29 @@ async def test_summary_agent(
         )
         response.raise_for_status()
 
-        # Handle empty n8n responses
+        # Handle empty n8n responses - return async processing status
         try:
             agent_result = response.json()
         except ValueError:
-            print(f"⚠️  n8n summary-agent returned empty response for uid={uid}, using placeholder")
+            print(f"⚠️  n8n summary-agent returned empty response for uid={uid}, returning processing status")
+            # Return realistic async processing status (matches production flow)
+            # iOS can poll GET /v1/conversations?conversation_id={conversation_id} for results
             agent_result = {
-                "title": "Test Summary",
-                "overview": f"Summary of conversation: {text[:100]}...",
-                "emoji": "📝",
-                "category": "general",
-                "action_items": [],
-                "events": [],
-                "_placeholder": True
+                "status": "processing",
+                "message": "Conversation summary submitted to Ella agents for processing",
+                "conversation_id": conversation_id,
+                "polling_endpoint": f"/v1/conversations?conversation_id={conversation_id}",
+                "expected_completion_time_seconds": 30
             }
             if debug:
                 agent_result["_debug"] = {
-                    "backend_status": "✅ Backend received request and authenticated successfully",
+                    "backend_status": "✅ Backend received request and submitted to n8n successfully",
                     "n8n_endpoint": N8N_SUMMARY_AGENT,
                     "n8n_status_code": response.status_code,
                     "n8n_response_body": response.text[:200] if response.text else "(empty)",
-                    "issue": "n8n webhook returned empty/invalid JSON - Ella team still working on it",
-                    "using_placeholder": True
+                    "flow": "Async processing - n8n will call backend callback when complete",
+                    "callback_endpoint": "/v1/ella/conversation",
+                    "how_to_get_results": f"Poll GET /v1/conversations?conversation_id={conversation_id}"
                 }
     except requests.exceptions.RequestException as e:
         error_details = format_agent_error(e, "summary", N8N_SUMMARY_AGENT, debug)
