@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Union
 import hashlib
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from pydantic import BaseModel
 
 from database import (
@@ -643,3 +643,91 @@ def get_user_subscription_endpoint(uid: str = Depends(auth.get_current_user_uid)
         memories_created_limit=memories_created_limit,
         available_plans=available_plans,
     )
+
+
+# **************************************
+# ******** Internal API (n8n) **********
+# **************************************
+
+
+@router.get('/v1/internal/users/{uid}/info', tags=['internal'])
+def get_user_info_for_provisioning(uid: str, x_internal_api_key: str = Header(None)):
+    """
+    Get user information for auto-provisioning Letta agents.
+
+    **Internal API**: Requires internal API key for backend-to-backend authentication.
+    Used by n8n workflows to get user data when auto-creating Letta agent clusters.
+
+    Returns Firebase Auth data + Firestore profile data with sensible fallbacks.
+
+    **Authentication**: X-Internal-API-Key header (backend-to-backend)
+
+    **Response**:
+    - uid: Firebase user ID
+    - email: User email (or fallback)
+    - name: Display name (or fallback)
+    - language: Preferred language
+    - timezone: User timezone
+    - device_type: Device type (ios/android)
+    - created_at: Account creation timestamp
+    - auth_provider: Authentication provider (google.com, apple.com, etc.)
+    - photo_url: Profile photo URL (may be null)
+    - phone_number: Phone number (may be null)
+    - email_verified: Email verification status
+
+    **Errors**:
+    - 401: Invalid or missing API key
+    - 404: User not found in Firebase Auth
+    """
+    # Verify internal API key
+    internal_key = os.getenv('INTERNAL_API_KEY')
+    if not internal_key:
+        print(f"⚠️  INTERNAL_API_KEY not configured in environment")
+        raise HTTPException(status_code=500, detail="Internal API not configured")
+
+    if x_internal_api_key != internal_key:
+        print(f"⚠️  Invalid internal API key attempt for uid={uid}")
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Get Firebase Auth data
+    try:
+        firebase_user = auth.get_user(uid)
+        print(f"✅ [Internal API] Retrieved Firebase Auth data for uid={uid}")
+    except Exception as e:
+        print(f"❌ [Internal API] User {uid} not found in Firebase Auth: {e}")
+        raise HTTPException(status_code=404, detail=f"User {uid} not found in Firebase Auth")
+
+    # Get Firestore profile data (may not exist for new users)
+    firestore_profile = get_user_profile(uid) or {}
+    print(f"✅ [Internal API] Retrieved Firestore profile for uid={uid} (exists: {bool(firestore_profile)})")
+
+    # Combine data with fallbacks for auto-provisioning
+    user_info = {
+        # Core fields (always present)
+        "uid": uid,
+        "email": firebase_user.email or f"{uid[:8]}@omi-app.com",
+        "name": (
+            firebase_user.display_name
+            or firestore_profile.get("name")
+            or f"User-{uid[:8]}"
+        ),
+        "language": firestore_profile.get("language", "en"),
+        "timezone": firestore_profile.get("time_zone", "UTC"),
+        "device_type": firestore_profile.get("device_type", "unknown"),
+        "created_at": firebase_user.user_metadata.creation_timestamp,
+
+        # Provider info
+        "auth_provider": (
+            firebase_user.provider_data[0].provider_id
+            if firebase_user.provider_data
+            else "email"
+        ),
+
+        # Optional fields (may be null)
+        "photo_url": firebase_user.photo_url,
+        "phone_number": firebase_user.phone_number,
+        "email_verified": firebase_user.email_verified,
+    }
+
+    print(f"✅ [Internal API] Returning user info for uid={uid} (email={user_info['email']}, name={user_info['name']})")
+    return user_info
