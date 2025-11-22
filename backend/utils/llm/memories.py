@@ -43,7 +43,11 @@ LEGACY_TO_NEW_CATEGORY = {
 
 
 def new_memories_extractor(
-    uid: str, segments: List[TranscriptSegment], user_name: Optional[str] = None, memories_str: Optional[str] = None
+    uid: str,
+    segments: List[TranscriptSegment],
+    conversation_id: Optional[str] = None,  # Required for n8n/Letta integration
+    user_name: Optional[str] = None,
+    memories_str: Optional[str] = None
 ) -> List[Memory]:
     # print('new_memories_extractor', uid, 'segments', len(segments), user_name, 'len(memories_str)', len(memories_str))
     if user_name is None or memories_str is None:
@@ -75,6 +79,7 @@ def new_memories_extractor(
             "https://n8n.ella-ai-care.com/webhook/memory-agent",
             json={
                 "uid": uid,
+                "conversation_id": conversation_id,  # Required by n8n v5.0
                 "segments": segments_data
             },
             timeout=120  # 120 second timeout (memory extraction not time-critical)
@@ -98,13 +103,21 @@ def new_memories_extractor(
 
             return memories
         else:
-            print(f"⚠️  Ella memory agent returned status {response.status_code}, falling back to local LLM")
+            print(f"❌ Ella memory agent returned status {response.status_code}", flush=True)
+            print(f"❌ Response: {response.text[:500]}", flush=True)
+            print(f"❌ FALLBACK DISABLED - Returning empty to avoid confusion about data source", flush=True)
+            return []
 
     except Exception as e:
-        print(f"⚠️  Ella memory agent failed: {e}, falling back to local LLM")
+        print(f"❌ Ella memory agent failed: {e}", flush=True)
+        print(f"❌ FALLBACK DISABLED - Returning empty to avoid confusion about data source", flush=True)
+        print(f"💡 Check: Is conversation_id being passed? uid={uid}, conversation_id={conversation_id}", flush=True)
+        return []
 
-    # ====== FALLBACK: Original hard-coded LLM ======
-    print(f"🔄 Using local LLM for memory extraction")
+    # ====== FALLBACK DISABLED ======
+    # NOTE: Local LLM fallback intentionally disabled to avoid confusion
+    # If n8n fails, we return empty so it's clear where memories are coming from
+    print(f"⚠️ WARNING: Reached fallback code path (should not happen)", flush=True)
 
     try:
         parser = PydanticOutputParser(pydantic_object=Memories)

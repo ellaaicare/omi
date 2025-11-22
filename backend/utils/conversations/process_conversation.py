@@ -304,7 +304,11 @@ def _extract_memories(uid: str, conversation: Conversation):
             new_memories = extract_memories_from_text(uid, text_content, text_source)
     else:
         # For regular conversations with transcript segments
-        new_memories = new_memories_extractor(uid, conversation.transcript_segments)
+        new_memories = new_memories_extractor(
+            uid,
+            conversation.transcript_segments,
+            conversation_id=conversation.id  # Required for n8n v5.0
+        )
 
     is_locked = conversation.is_locked
     parsed_memories = []

@@ -335,6 +335,7 @@ async def test_memory_agent(
             N8N_MEMORY_AGENT,
             json={
                 "uid": uid,
+                "conversation_id": conversation_id,  # Required by n8n v5.0
                 "segments": [create_segment(transcript, stt_source=source)],
                 "structured": {
                     "title": f"Test conversation {conversation_id}",
@@ -396,6 +397,7 @@ async def test_memory_agent(
 @router.post("/v1/test/summary-agent")
 async def test_summary_agent(
     text: str = Body(..., description="Conversation transcript to summarize"),
+    conversation_id: str = Body("test_conv", description="Conversation ID"),
     date: Optional[str] = Body(None, description="YYYY-MM-DD format"),
     debug: bool = Body(False, description="Enable debug mode for detailed error messages"),
     uid: str = Body("test_user_123", description="User ID for testing - use test_user_123 for E2E tests"),
@@ -422,6 +424,7 @@ async def test_summary_agent(
             N8N_SUMMARY_AGENT,
             json={
                 "uid": uid,
+                "conversation_id": conversation_id,  # Required by n8n v5.0
                 "transcript": text,
                 "started_at": started_at
             },
