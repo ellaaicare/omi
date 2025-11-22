@@ -324,6 +324,8 @@ except Exception as e:
 - `acf4505ac` - Original Ella integration (missing conversation_id)
 - `dcf05f8c4` - Fixed conversation_id + disabled fallback
 - `41db74cf0` - Bumped timeouts to 120s
+- `0e7bf46fa` - Return async processing status instead of placeholder data
+- `bcbcb839c` - Created this merge guide
 
 **Branch**: `feature/e2e-agent-testing-unified`
 
@@ -331,8 +333,47 @@ except Exception as e:
 ```
 backend/utils/llm/memories.py                      | 23 ++++++--
 backend/utils/conversations/process_conversation.py |  6 ++-
-backend/routers/testing.py                         |  3 ++
+backend/routers/testing.py                         | 75 ++++++++++-----------
+backend/docs/CONVERSATION_ID_FIX_MERGE_GUIDE.md    | 339 ++++++++++
+backend/docs/IOS_E2E_TESTING_ASYNC_FLOW.md         | 420 ++++++++++
 ```
+
+---
+
+## 🔄 **Async Flow Pattern (Nov 22, 2025)**
+
+**Additional Change**: Test endpoints now return realistic async processing status instead of placeholder data.
+
+**Why**: iOS tests were "passing" but using fake placeholder data, not real Letta processing. This was confusing for iOS team.
+
+**What Changed** (`routers/testing.py`):
+
+**Before (Placeholder)**:
+```python
+except ValueError:
+    agent_result = {
+        "memories": [{"content": "Test memory...", "_placeholder": True}]
+    }
+```
+
+**After (Async Status)**:
+```python
+except ValueError:
+    agent_result = {
+        "status": "processing",
+        "conversation_id": conversation_id,
+        "polling_endpoint": f"/v3/memories?conversation_id={conversation_id}",
+        "expected_completion_time_seconds": 30
+    }
+```
+
+**iOS Flow**:
+1. iOS submits test request → Backend returns `{"status": "processing", "conversation_id": "..."}`
+2. iOS polls `GET /v3/memories?conversation_id=...` every 5 seconds
+3. After 20-30s, n8n callback completes and memories appear
+4. iOS retrieves results and test passes
+
+**Documentation**: `backend/docs/IOS_E2E_TESTING_ASYNC_FLOW.md`
 
 ---
 
