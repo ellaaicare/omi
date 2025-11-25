@@ -23,6 +23,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
+import 'package:omi/utils/test_suite_manager.dart';
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -58,6 +59,16 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   bool _e2eDebugMode = false;  // Debug mode for detailed error messages
   String? _e2eTestResult;
   String? _e2eTestError;
+
+  // Automated Test Suite state
+  final TestSuiteManager _testManager = TestSuiteManager();
+  bool _healthCheckRunning = false;
+  bool _memoryTestRunning = false;
+  bool _summaryTestRunning = false;
+  bool _fullSuiteRunning = false;
+  HealthCheckResult? _lastHealthCheckResult;
+  TestResult? _lastMemoryTestResult;
+  TestResult? _lastSummaryTestResult;
 
   @override
   void initState() {
@@ -962,11 +973,120 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 16),
                   Divider(color: Colors.grey.shade500),
+                  const SizedBox(height: 24),
+
+                  // ===== AUTOMATED TESTING SECTION =====
+                  const Text(
+                    '🧪 AUTOMATED TESTING',
+                    style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Single-click testing to verify all systems are operational',
+                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // Health Check Card
+                  _buildTestCard(
+                    title: 'Quick Health Check (30s)',
+                    description: 'Tests: Backend API, FCM Token, Recording, Transcription, Scanner, Push',
+                    isRunning: _healthCheckRunning,
+                    lastResult: _lastHealthCheckResult,
+                    onRun: _runHealthCheck,
+                    icon: Icons.health_and_safety,
+                    color: Colors.blue,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Memory Agent Test Card
+                  _buildTestCard(
+                    title: 'Memory Agent Test (10s)',
+                    description: 'Validates memory extraction from conversations',
+                    isRunning: _memoryTestRunning,
+                    lastResult: _lastMemoryTestResult,
+                    onRun: _runMemoryTest,
+                    icon: Icons.psychology,
+                    color: Colors.purple,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Summary Agent Test Card
+                  _buildTestCard(
+                    title: 'Summary Agent Test (10s)',
+                    description: 'Validates daily summary generation',
+                    isRunning: _summaryTestRunning,
+                    lastResult: _lastSummaryTestResult,
+                    onRun: _runSummaryTest,
+                    icon: Icons.summarize,
+                    color: Colors.orange,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Run All Tests Button
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Colors.green.shade700, Colors.green.shade900],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.green.shade600, width: 2),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.play_circle_filled, color: Colors.white, size: 24),
+                            SizedBox(width: 12),
+                            Text(
+                              'Run Full Test Suite (~50s)',
+                              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Runs all tests: Health Check + Memory + Summary',
+                          style: TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            icon: _fullSuiteRunning
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                  )
+                                : const Icon(Icons.play_arrow, color: Colors.white),
+                            label: Text(
+                              _fullSuiteRunning ? 'Running...' : 'Run Full Suite',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            ),
+                            onPressed: _fullSuiteRunning ? null : _runFullSuite,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 32),
+                  Divider(color: Colors.grey.shade500),
                   const SizedBox(height: 16),
 
                   // E2E Agent Testing Section
                   const Text(
-                    '🧪 E2E Agent Testing',
+                    '🧪 E2E Agent Testing (Manual)',
                     style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w500),
                   ),
                   const SizedBox(height: 10),
@@ -1082,7 +1202,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                         onChanged: (value) {
                           setState(() => _e2eDebugMode = value);
                         },
-                        activeColor: Colors.purple,
+                        activeThumbColor: Colors.purple,
                       ),
                     ],
                   ),
@@ -1543,7 +1663,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
     });
 
     try {
-      AppSnackbar.showSnackbar('🧪 Testing ${_selectedAgent} agent...');
+      AppSnackbar.showSnackbar('🧪 Testing $_selectedAgent agent...');
 
       // Build request details for debugging
       final requestBuffer = StringBuffer();
@@ -1658,17 +1778,11 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           // For async, show job submitted message with request details
           if (response != null) {
             setState(() {
-              _e2eTestResult = requestBuffer.toString() +
-                  '📥 RESPONSE:\n'
-                      'Async job submitted!\n'
-                      'Job ID: ${response?.jobId ?? "unknown"}\n'
-                      'Status: ${response?.status ?? "unknown"}\n\n'
-                      'Response will arrive via push notification with TTS audio.\n'
-                      'Background the app to receive the notification.';
+              _e2eTestResult = '$requestBuffer📥 RESPONSE:\nAsync job submitted!\nJob ID: ${response?.jobId ?? "unknown"}\nStatus: ${response?.status ?? "unknown"}\n\nResponse will arrive via push notification with TTS audio.\nBackground the app to receive the notification.';
               _e2eTestLoading = false;
             });
             AppSnackbar.showSnackbar(
-              '✅ Async job submitted! Job ID: ${response?.jobId ?? "unknown"}\n'
+              '✅ Async job submitted! Job ID: ${response.jobId ?? "unknown"}\n'
               'Response will arrive via push notification.',
             );
           }
@@ -1700,8 +1814,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
         AppSnackbar.showSnackbar('✅ Test completed successfully!');
       } else {
         setState(() {
-          _e2eTestError = requestBuffer.toString() +
-              '❌ Failed to get response from backend. Check network and backend logs.';
+          _e2eTestError = '$requestBuffer❌ Failed to get response from backend. Check network and backend logs.';
           _e2eTestLoading = false;
         });
         AppSnackbar.showSnackbarError('❌ Test failed');
@@ -1736,5 +1849,629 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
       },
       child: Text(label, style: const TextStyle(fontSize: 14)),
     );
+  }
+
+  // ========== AUTOMATED TEST HELPER METHODS ==========
+
+  /// Build a test card widget
+  Widget _buildTestCard({
+    required String title,
+    required String description,
+    required bool isRunning,
+    required dynamic lastResult, // Can be HealthCheckResult or TestResult
+    required VoidCallback onRun,
+    required IconData icon,
+    required Color color,
+  }) {
+    // Determine pass/fail status
+    bool? passed;
+    String? statusText;
+    int? latencyMs;
+
+    if (lastResult != null) {
+      if (lastResult is HealthCheckResult) {
+        passed = lastResult.allPassed;
+        if (passed) {
+          statusText = '✅ All systems operational (${lastResult.passedCount}/${lastResult.results.length})';
+        } else {
+          // Show which tests failed
+          final failedTests = lastResult.results.where((r) => !r.passed).toList();
+          final buffer = StringBuffer('❌ ${lastResult.failedCount} test(s) failed:\n');
+          for (final test in failedTests) {
+            buffer.write('\n• ${test.testName}');
+            if (test.error != null) {
+              buffer.write(': ${test.error}');
+            }
+          }
+          statusText = buffer.toString();
+        }
+        latencyMs = lastResult.totalTimeMs;
+      } else if (lastResult is TestResult) {
+        passed = lastResult.passed;
+        if (passed) {
+          statusText = '✅ Test passed';
+        } else {
+          statusText = lastResult.error != null
+            ? '❌ Test failed\n${lastResult.error}'
+            : '❌ Test failed';
+        }
+        latencyMs = lastResult.latencyMs;
+      }
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade900,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: passed == null
+              ? Colors.grey.shade700
+              : passed
+                  ? Colors.green
+                  : Colors.red,
+          width: 2,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: color, size: 24),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            description,
+            style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+          ),
+          if (statusText != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: passed! ? Colors.green.withOpacity(0.1) : Colors.red.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: passed ? Colors.green.shade700 : Colors.red.shade700,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        passed ? Icons.check_circle : Icons.error,
+                        color: passed ? Colors.green : Colors.red,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SelectableText(
+                              statusText,
+                              style: TextStyle(
+                                color: passed ? Colors.green.shade300 : Colors.red.shade300,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                height: 1.4,
+                              ),
+                            ),
+                            if (latencyMs != null)
+                              Text(
+                                'Total time: ${latencyMs}ms',
+                                style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  // Show details for both passed and failed tests
+                  if (lastResult is TestResult && (lastResult).details != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                passed ? 'Result Data:' : 'Debug Info:',
+                                style: TextStyle(
+                                  color: passed ? Colors.green.shade400 : Colors.grey.shade400,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: () {
+                                  final text = _buildSingleTestResultString(lastResult);
+                                  Clipboard.setData(ClipboardData(text: text));
+                                  AppSnackbar.showSnackbar('Copied to clipboard!');
+                                },
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.copy, size: 12, color: Colors.grey.shade500),
+                                    const SizedBox(width: 4),
+                                    Text('Copy', style: TextStyle(color: Colors.grey.shade500, fontSize: 10)),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          ...(lastResult).details!.entries.map((entry) => Padding(
+                                padding: const EdgeInsets.only(bottom: 2),
+                                child: SelectableText(
+                                  '${entry.key}: ${entry.value}',
+                                  style: TextStyle(
+                                    color: passed == true ? Colors.green.shade400 : Colors.grey.shade500,
+                                    fontSize: 10,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              )),
+                        ],
+                      ),
+                    ),
+                  ],
+                  // Show individual test results for HealthCheckResult
+                  if (!passed) ...[
+                    if (lastResult is HealthCheckResult) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.3),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(
+                                  'Test Details:',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade400,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: () {
+                                    final text = _buildTestResultsString(lastResult);
+                                    Clipboard.setData(ClipboardData(text: text));
+                                    AppSnackbar.showSnackbar('Copied to clipboard!');
+                                  },
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.copy, size: 12, color: Colors.grey.shade500),
+                                      const SizedBox(width: 4),
+                                      Text('Copy', style: TextStyle(color: Colors.grey.shade500, fontSize: 10)),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            ...(lastResult).results.map((test) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 4),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Icon(
+                                        test.passed ? Icons.check_circle_outline : Icons.error_outline,
+                                        color: test.passed ? Colors.green.shade600 : Colors.red.shade600,
+                                        size: 14,
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            SelectableText(
+                                              test.testName,
+                                              style: TextStyle(
+                                                color: test.passed ? Colors.grey.shade400 : Colors.red.shade400,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                            if (test.error != null)
+                                              Padding(
+                                                padding: const EdgeInsets.only(top: 2),
+                                                child: SelectableText(
+                                                  test.error!,
+                                                  style: TextStyle(
+                                                    color: Colors.red.shade300,
+                                                    fontSize: 10,
+                                                  ),
+                                                ),
+                                              ),
+                                            if (test.details != null) ...[
+                                              const SizedBox(height: 2),
+                                              ...test.details!.entries.map((e) => SelectableText(
+                                                '${e.key}: ${e.value}',
+                                                style: TextStyle(color: Colors.grey.shade600, fontSize: 9, fontFamily: 'monospace'),
+                                              )),
+                                            ],
+                                            SelectableText(
+                                              '${test.latencyMs}ms',
+                                              style: TextStyle(
+                                                color: Colors.grey.shade600,
+                                                fontSize: 9,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              icon: isRunning
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : Icon(Icons.play_arrow, color: color),
+              label: Text(
+                isRunning ? 'Running...' : 'Run Test',
+                style: const TextStyle(color: Colors.white),
+              ),
+              onPressed: isRunning ? null : onRun,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: color,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ),
+          if (lastResult is HealthCheckResult && !isRunning) ...[
+            const SizedBox(height: 8),
+            TextButton.icon(
+              icon: const Icon(Icons.list, size: 16),
+              label: const Text('View Details', style: TextStyle(fontSize: 12)),
+              onPressed: () => _showHealthCheckDetails(lastResult),
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.blue.shade300,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Build copyable test results string
+  String _buildTestResultsString(HealthCheckResult result) {
+    final buffer = StringBuffer();
+    buffer.writeln('=== Health Check Results ===');
+    buffer.writeln('Total Time: ${result.totalTimeMs}ms');
+    buffer.writeln('Passed: ${result.passedCount}/${result.results.length}');
+    buffer.writeln('');
+
+    for (final test in result.results) {
+      final status = test.passed ? '✅' : '❌';
+      buffer.writeln('$status ${test.testName} (${test.latencyMs}ms)');
+      if (test.error != null) {
+        buffer.writeln('   Error: ${test.error}');
+      }
+      if (test.details != null) {
+        test.details!.forEach((key, value) {
+          buffer.writeln('   $key: $value');
+        });
+      }
+    }
+    return buffer.toString();
+  }
+
+  /// Build copyable string for a single TestResult
+  String _buildSingleTestResultString(TestResult result) {
+    final buffer = StringBuffer();
+    buffer.writeln('=== ${result.testName} ===');
+    buffer.writeln('Status: ${result.passed ? "PASSED" : "FAILED"}');
+    buffer.writeln('Latency: ${result.latencyMs}ms');
+    buffer.writeln('Timestamp: ${result.timestamp.toIso8601String()}');
+    buffer.writeln('');
+
+    if (result.error != null) {
+      buffer.writeln('Error: ${result.error}');
+      buffer.writeln('');
+    }
+
+    if (result.details != null) {
+      buffer.writeln('Details:');
+      result.details!.forEach((key, value) {
+        buffer.writeln('  $key: $value');
+      });
+    }
+    return buffer.toString();
+  }
+
+  /// Show health check details in a dialog
+  void _showHealthCheckDetails(HealthCheckResult result) {
+    final resultsText = _buildTestResultsString(result);
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey.shade900,
+        title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text(
+              'Health Check Results',
+              style: TextStyle(color: Colors.white),
+            ),
+            IconButton(
+              icon: const Icon(Icons.copy, color: Colors.white70, size: 20),
+              tooltip: 'Copy All Results',
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: resultsText));
+                AppSnackbar.showSnackbar('Results copied to clipboard!');
+              },
+            ),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SelectableText(
+                'Total Time: ${result.totalTimeMs}ms',
+                style: TextStyle(color: Colors.grey.shade300, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ...result.results.map((test) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          test.passed ? Icons.check_circle : Icons.error,
+                          color: test.passed ? Colors.green : Colors.red,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SelectableText(
+                                test.testName,
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                              ),
+                              SelectableText(
+                                '${test.latencyMs}ms',
+                                style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                              ),
+                              if (test.error != null)
+                                SelectableText(
+                                  test.error!,
+                                  style: TextStyle(color: Colors.red.shade300, fontSize: 11),
+                                ),
+                              if (test.details != null) ...[
+                                const SizedBox(height: 4),
+                                ...test.details!.entries.map((e) => SelectableText(
+                                  '${e.key}: ${e.value}',
+                                  style: TextStyle(color: Colors.grey.shade500, fontSize: 10, fontFamily: 'monospace'),
+                                )),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  )),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: resultsText));
+              AppSnackbar.showSnackbar('Results copied to clipboard!');
+            },
+            child: const Text('Copy All'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Run health check test
+  Future<void> _runHealthCheck() async {
+    setState(() {
+      _healthCheckRunning = true;
+      _lastHealthCheckResult = null;
+    });
+
+    try {
+      final result = await _testManager.runHealthCheck();
+      setState(() {
+        _lastHealthCheckResult = result;
+        _healthCheckRunning = false;
+      });
+
+      if (result.allPassed) {
+        AppSnackbar.showSnackbar('✅ Health Check passed!');
+      } else {
+        // Show detailed error for first failed test
+        final firstFailure = result.results.firstWhere((r) => !r.passed, orElse: () => result.results.first);
+        final errorMsg = '❌ ${firstFailure.testName} failed${firstFailure.error != null ? ": ${firstFailure.error}" : ""}';
+        AppSnackbar.showSnackbarError(errorMsg);
+
+        // Log full details to console
+        debugPrint('🧪 [TEST] Health Check FAILED:');
+        for (final test in result.results.where((r) => !r.passed)) {
+          debugPrint('🧪 [TEST]   ❌ ${test.testName}: ${test.error ?? "Unknown error"}');
+          if (test.details != null) {
+            debugPrint('🧪 [TEST]      Details: ${test.details}');
+          }
+        }
+      }
+    } catch (e, stackTrace) {
+      setState(() {
+        _healthCheckRunning = false;
+      });
+      debugPrint('🧪 [TEST] Health Check exception: $e');
+      debugPrint('🧪 [TEST] Stack trace: $stackTrace');
+      AppSnackbar.showSnackbarError('Error: ${e.toString().substring(0, e.toString().length > 100 ? 100 : e.toString().length)}');
+    }
+  }
+
+  /// Run memory agent test
+  Future<void> _runMemoryTest() async {
+    setState(() {
+      _memoryTestRunning = true;
+      _lastMemoryTestResult = null;
+    });
+
+    try {
+      final result = await _testManager.testMemoryAgent();
+      setState(() {
+        _lastMemoryTestResult = result;
+        _memoryTestRunning = false;
+      });
+
+      if (result.passed) {
+        AppSnackbar.showSnackbar('✅ Memory Agent test passed!');
+      } else {
+        final errorMsg = '❌ Memory Agent: ${result.error ?? "Unknown error"}';
+        AppSnackbar.showSnackbarError(errorMsg);
+
+        // Log full details to console
+        debugPrint('🧪 [TEST] Memory Agent FAILED: ${result.error}');
+        if (result.details != null) {
+          debugPrint('🧪 [TEST] Details: ${result.details}');
+        }
+      }
+    } catch (e, stackTrace) {
+      setState(() {
+        _memoryTestRunning = false;
+      });
+      debugPrint('🧪 [TEST] Memory Agent exception: $e');
+      debugPrint('🧪 [TEST] Stack trace: $stackTrace');
+      AppSnackbar.showSnackbarError('Error: ${e.toString().substring(0, e.toString().length > 100 ? 100 : e.toString().length)}');
+    }
+  }
+
+  /// Run summary agent test
+  Future<void> _runSummaryTest() async {
+    setState(() {
+      _summaryTestRunning = true;
+      _lastSummaryTestResult = null;
+    });
+
+    try {
+      final result = await _testManager.testSummaryAgent();
+      setState(() {
+        _lastSummaryTestResult = result;
+        _summaryTestRunning = false;
+      });
+
+      if (result.passed) {
+        AppSnackbar.showSnackbar('✅ Summary Agent test passed!');
+      } else {
+        final errorMsg = '❌ Summary Agent: ${result.error ?? "Unknown error"}';
+        AppSnackbar.showSnackbarError(errorMsg);
+
+        // Log full details to console
+        debugPrint('🧪 [TEST] Summary Agent FAILED: ${result.error}');
+        if (result.details != null) {
+          debugPrint('🧪 [TEST] Details: ${result.details}');
+        }
+      }
+    } catch (e, stackTrace) {
+      setState(() {
+        _summaryTestRunning = false;
+      });
+      debugPrint('🧪 [TEST] Summary Agent exception: $e');
+      debugPrint('🧪 [TEST] Stack trace: $stackTrace');
+      AppSnackbar.showSnackbarError('Error: ${e.toString().substring(0, e.toString().length > 100 ? 100 : e.toString().length)}');
+    }
+  }
+
+  /// Run full test suite
+  Future<void> _runFullSuite() async {
+    setState(() {
+      _fullSuiteRunning = true;
+      _lastHealthCheckResult = null;
+      _lastMemoryTestResult = null;
+      _lastSummaryTestResult = null;
+    });
+
+    try {
+      final result = await _testManager.runFullTestSuite();
+
+      // Extract individual test results
+      final healthCheckTests = result.results.take(6).toList();
+      final memoryTest = result.results.length > 6 ? result.results[6] : null;
+      final summaryTest = result.results.length > 7 ? result.results[7] : null;
+
+      setState(() {
+        _lastHealthCheckResult = HealthCheckResult(
+          allPassed: healthCheckTests.every((r) => r.passed),
+          results: healthCheckTests,
+          totalTimeMs: healthCheckTests.fold(0, (sum, r) => sum + r.latencyMs),
+        );
+        _lastMemoryTestResult = memoryTest;
+        _lastSummaryTestResult = summaryTest;
+        _fullSuiteRunning = false;
+      });
+
+      if (result.allPassed) {
+        AppSnackbar.showSnackbar('✅ Full test suite passed! All systems operational.');
+      } else {
+        AppSnackbar.showSnackbarError('❌ Some tests failed - see individual test results');
+      }
+    } catch (e) {
+      setState(() {
+        _fullSuiteRunning = false;
+      });
+      AppSnackbar.showSnackbarError('Error running test suite: $e');
+    }
   }
 }

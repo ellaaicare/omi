@@ -96,7 +96,27 @@ Future<E2ETestResponse?> testScannerAgent({
 
 /// Test Memory Agent (memory extraction)
 ///
-/// Request: Same as Scanner Agent
+/// Request:
+/// - text: Text to extract memories from (required if no audio)
+/// - source: Audio source ("phone_mic", "friend_device", etc.)
+/// - uid: User ID for testing (defaults to test_user_123)
+/// - debug: Enable debug output
+///
+/// Backend expects payload format:
+/// {
+///   "uid": "test_user_123",
+///   "segments": [
+///     {
+///       "speaker": "SPEAKER_00",
+///       "text": "conversation text",
+///       "stt_source": "phone_mic"
+///     }
+///   ],
+///   "structured": {
+///     "title": "Test conversation",
+///     "overview": "conversation text"
+///   }
+/// }
 ///
 /// Response:
 /// - memories: List of extracted memories
@@ -119,23 +139,40 @@ Future<E2ETestResponse?> testMemoryAgent({
     throw Exception('Either audio or text must be provided');
   }
 
+  // Match backend test endpoint signature (testing.py:302-308)
+  final Map<String, dynamic> payload = {
+    'uid': uid,
+    'debug': debug,
+    'source': source,
+    'conversation_id': conversationId,
+  };
+
+  if (audio != null) {
+    payload['audio'] = audio;
+  } else if (text != null) {
+    payload['text'] = text;
+  }
+
+  print('🔍 Memory Agent payload: ${jsonEncode(payload)}');
+
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/test/memory-agent',
     headers: {'Content-Type': 'application/json'},
     method: 'POST',
-    body: jsonEncode({
-      if (audio != null) 'audio': audio,
-      if (text != null) 'text': text,
-      'source': source,
-      'conversation_id': conversationId,
-      'uid': uid,
-      'debug': debug,
-    }),
+    body: jsonEncode(payload),
   );
 
   if (response?.statusCode == 200) {
     final data = jsonDecode(response!.body) as Map<String, dynamic>;
     return E2ETestResponse.fromJson(data);
+  }
+
+  // Log error details for debugging
+  if (response != null) {
+    print('❌ Memory Agent failed: Status ${response.statusCode}');
+    print('Response body: ${response.body}');
+  } else {
+    print('❌ Memory Agent: makeApiCall returned null');
   }
 
   return null;
@@ -144,9 +181,17 @@ Future<E2ETestResponse?> testMemoryAgent({
 /// Test Summary Agent (daily summaries)
 ///
 /// Request:
-/// - conversationId: Conversation ID to summarize
-/// - date: Date to summarize (YYYY-MM-DD format, optional, defaults to today)
+/// - transcript: Text to summarize (optional, uses default test text if not provided)
+/// - conversationId: Conversation ID (defaults to test_conv)
 /// - uid: User ID for testing (defaults to test_user_123)
+/// - debug: Enable debug output
+///
+/// Backend expects payload format:
+/// {
+///   "uid": "test_user_123",
+///   "conversation_id": "test_conv",
+///   "transcript": "Today I had lunch with Sarah..."
+/// }
 ///
 /// Response:
 /// - title: Summary title
@@ -164,26 +209,46 @@ Future<E2ETestResponse?> testMemoryAgent({
 ///   - start: ISO 8601 timestamp
 ///   - duration: Duration in minutes
 Future<E2ETestResponse?> testSummaryAgent({
+  String? transcript,
   String conversationId = 'test_conv',
-  String? date,
   String uid = 'test_user_123',
   bool debug = false,
 }) async {
+  // Default test transcript if none provided
+  final testTranscript = transcript ??
+      "Today I had a productive day. I had lunch with Sarah at noon and we discussed the new project timeline for Q2. "
+          "We agreed to push the deadline back by two weeks. In the afternoon, I reviewed the budget proposal and "
+          "sent feedback to the finance team. I also scheduled a follow-up meeting for next Tuesday at 2 PM.";
+
+  // Match backend test endpoint signature
+  // Backend expects 'text' parameter (NOT 'transcript')
+  final payload = {
+    'uid': uid,
+    'text': testTranscript,
+    'conversation_id': conversationId,
+    'debug': debug,
+  };
+
+  print('🔍 Summary Agent payload: ${jsonEncode(payload)}');
+
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/test/summary-agent',
     headers: {'Content-Type': 'application/json'},
     method: 'POST',
-    body: jsonEncode({
-      'conversation_id': conversationId,
-      if (date != null) 'date': date,
-      'uid': uid,
-      'debug': debug,
-    }),
+    body: jsonEncode(payload),
   );
 
   if (response?.statusCode == 200) {
     final data = jsonDecode(response!.body) as Map<String, dynamic>;
     return E2ETestResponse.fromJson(data);
+  }
+
+  // Log error details for debugging
+  if (response != null) {
+    print('❌ Summary Agent failed: Status ${response.statusCode}');
+    print('Response body: ${response.body}');
+  } else {
+    print('❌ Summary Agent: makeApiCall returned null');
   }
 
   return null;
