@@ -31,6 +31,60 @@ router = APIRouter()
 _tts_manager = None
 
 
+def safe_parse_datetime(date_string: Optional[str]) -> Optional[datetime]:
+    """
+    Safely parse datetime strings from various formats that n8n might send.
+
+    Handles:
+    - ISO 8601 with Z: "2025-11-25T10:00:00Z"
+    - ISO 8601 with offset: "2025-11-25T10:00:00+00:00"
+    - ISO 8601 without timezone: "2025-11-25T10:00:00"
+    - Date only: "2025-11-25"
+    - Truncated or malformed strings: gracefully returns None
+
+    Returns:
+        datetime object or None if parsing fails
+    """
+    if not date_string or not isinstance(date_string, str):
+        return None
+
+    date_string = date_string.strip()
+    if not date_string:
+        return None
+
+    try:
+        # Handle Z timezone suffix
+        if date_string.endswith('Z'):
+            date_string = date_string[:-1] + '+00:00'
+
+        # Try standard ISO parsing
+        return datetime.fromisoformat(date_string)
+    except ValueError:
+        pass
+
+    # Try common formats
+    formats_to_try = [
+        "%Y-%m-%d",                    # Date only
+        "%Y-%m-%dT%H:%M:%S",           # No timezone
+        "%Y-%m-%dT%H:%M:%S.%f",        # With microseconds
+        "%Y-%m-%d %H:%M:%S",           # Space separator
+    ]
+
+    for fmt in formats_to_try:
+        try:
+            dt = datetime.strptime(date_string, fmt)
+            # Add UTC timezone if none present
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+
+    # If all parsing fails, log and return None (don't crash)
+    print(f"  ⚠️  Could not parse date: '{date_string}' - skipping")
+    return None
+
+
 def get_tts_manager() -> TTSManager:
     """Get or create TTS manager singleton (lazy initialization)"""
     global _tts_manager
@@ -223,24 +277,29 @@ async def ella_conversation_callback(request: EllaConversationCallback):
     print(f"  Category: {request.structured.category}")
 
     try:
-        # Convert action items
+        # Convert action items (with safe date parsing)
         action_items = []
         for item in request.structured.action_items:
             action_item = ActionItem(
                 description=item.description,
                 completed=False,
-                due_at=datetime.fromisoformat(item.due_at.replace('Z', '+00:00')) if item.due_at else None,
+                due_at=safe_parse_datetime(item.due_at),  # Safe parser handles malformed dates
                 conversation_id=request.conversation_id
             )
             action_items.append(action_item)
 
-        # Convert events
+        # Convert events (with safe date parsing)
         events = []
         for event in request.structured.events:
+            event_start = safe_parse_datetime(event.start)
+            if event_start is None:
+                # Skip events with invalid start dates
+                print(f"  ⚠️  Skipping event '{event.title}' - invalid start date")
+                continue
             event_obj = Event(
                 title=event.title,
                 description=event.description or "",
-                start=datetime.fromisoformat(event.start.replace('Z', '+00:00')),
+                start=event_start,
                 duration=event.duration or 60
             )
             events.append(event_obj)
