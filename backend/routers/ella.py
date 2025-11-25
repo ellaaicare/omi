@@ -314,22 +314,45 @@ async def ella_conversation_callback(request: EllaConversationCallback):
             events=events
         )
 
-        # Update conversation in Firestore
-        conversations_db.update_conversation(
-            request.uid,
-            request.conversation_id,
-            {
-                "structured": structured.dict(),
-                "status": "completed"
-            }
-        )
+        # Check if conversation exists first
+        existing_conv = conversations_db.get_conversation(request.uid, request.conversation_id)
 
-        print(f"  ✅ Updated conversation {request.conversation_id}")
+        if existing_conv:
+            # Update existing conversation
+            conversations_db.update_conversation(
+                request.uid,
+                request.conversation_id,
+                {
+                    "structured": structured.dict(),
+                    "status": "completed"
+                }
+            )
+            print(f"  ✅ Updated existing conversation {request.conversation_id}")
+        else:
+            # Create new conversation with summary (for E2E testing support)
+            # In production, conversations are created by audio processing first
+            print(f"  ⚠️  Conversation {request.conversation_id} doesn't exist, creating it...")
+            from datetime import timezone
+            new_conv = {
+                "id": request.conversation_id,
+                "created_at": datetime.now(timezone.utc),
+                "started_at": datetime.now(timezone.utc),
+                "finished_at": datetime.now(timezone.utc),
+                "status": "completed",
+                "structured": structured.dict(),
+                "transcript": request.structured.overview,  # Use overview as transcript
+                "transcript_segments": [],
+                "source": "external_integration",
+                "language": "en",
+                "discarded": False,
+            }
+            conversations_db.upsert_conversation(request.uid, new_conv)
+            print(f"  ✅ Created new conversation {request.conversation_id}")
 
         return {
             "status": "success",
             "conversation_id": request.conversation_id,
-            "message": f"Updated conversation summary for {request.uid}"
+            "message": f"Processed conversation summary for {request.uid}"
         }
 
     except Exception as e:
