@@ -1,8 +1,8 @@
 # OMI Backend - Developer Guide
 
-**Last Updated**: November 10, 2025
-**Branch**: `feature/ios-backend-integration`
-**Status**: ✅ Ella AI integration + Edge ASR integration + Production deployment on VPS
+**Last Updated**: November 25, 2025
+**Branch**: `feature/e2e-agent-testing-unified`
+**Status**: ✅ Ella AI integration + Edge ASR + E2E Testing Endpoints + Production VPS
 
 ---
 
@@ -28,48 +28,52 @@
 
 ## 📊 **CURRENT STATUS & LATEST WORK**
 
-**Last Session**: November 15, 2025
-**Current Task**: E2E Agent Testing Endpoints (6-8 hours)
-**Branch**: `feature/backend-e2e-agent-testing`
-**Latest Commit**: `0578dc00a` - fix(main): restore ai router import now that ai.py is committed
+**Last Session**: November 25, 2025
+**Branch**: `feature/e2e-agent-testing-unified`
+**Latest Commits**:
+- `ea3303a9d` - fix(ella): use upsert for summary callback to support E2E testing
+- `5c1da6501` - fix(ella): add safe date parsing to prevent callback crashes
 
-### **E2E Agent Testing - IN PROGRESS 🔄**
+### **E2E Agent Testing - COMPLETE ✅**
 
-**Task**: Implement test endpoints that call REAL production n8n Letta agents
-**Status**: Ready to implement
-**Documentation**: `/tmp/BACKEND_E2E_TESTING_INSTRUCTIONS_REVISED.md` (iOS-provided)
+All 6 E2E testing endpoints implemented and verified working with iOS:
 
-**Endpoints to Implement (6 total)**:
-1. `POST /v1/test/scanner-agent` - Urgency detection (1h)
-2. `POST /v1/test/memory-agent` - Memory extraction (1h)
-3. `POST /v1/test/summary-agent` - Daily summaries (1h)
-4. `POST /v1/test/chat-sync` - Synchronous chat (1h)
-5. `POST /v1/test/chat-async` - Asynchronous chat (3-4h)
-6. `GET /v1/test/chat-response/{job_id}` - Async polling (included in #5)
+| Endpoint | Status | Function |
+|----------|--------|----------|
+| `POST /v1/test/scanner-agent` | ✅ Working | Urgency detection |
+| `POST /v1/test/memory-agent` | ✅ Working | Memory extraction |
+| `POST /v1/test/summary-agent` | ✅ Working | Daily summaries |
+| `POST /v1/test/chat-sync` | ✅ Working | Synchronous chat |
+| `POST /v1/test/chat-async` | ✅ Working | Async chat with polling |
+| `GET /v1/test/chat-response/{job_id}` | ✅ Working | Async polling |
 
-**Key Requirements**:
-- ✅ Call REAL n8n agents (not fake keyword matching)
-- ✅ Use generic endpoint: `https://n8n.ella-ai-care.com/webhook/chat-agent`
-- ✅ Support both audio→STT→agent and text→agent flows
-- ✅ Dual chat pattern: sync (simple) + async (production-ready)
-- ✅ Real performance metrics (STT latency, agent latency, total)
-- ✅ Reuse existing Edge ASR/Deepgram code
+### **Bugs Fixed This Session**
 
-**n8n Webhooks to Call**:
-- `https://n8n.ella-ai-care.com/webhook/scanner-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/memory-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/summary-agent` ✅
-- `https://n8n.ella-ai-care.com/webhook/chat-agent` ✅ (generic, NOT omi-realtime)
+1. **Date Parsing Crash** (commit `5c1da6501`):
+   - Issue: n8n sending dates in unexpected format caused 500 errors
+   - Fix: Added `safe_parse_datetime()` helper in `routers/ella.py`
+   - Handles: ISO 8601, date-only, with/without timezone
 
-**Time Estimate**: 6-8 hours total
-**Priority**: High (enables critical AI agent testing for iOS)
+2. **Silent Callback Failure** (commit `ea3303a9d`):
+   - Issue: `update_conversation()` silently returned if doc didn't exist
+   - Fix: Callback now uses upsert - creates conversation if not exists
+   - Enables E2E testing without pre-creating conversations
 
-**Next Steps**:
-1. Create feature branch: `git checkout -b feature/backend-e2e-agent-testing`
-2. Create `backend/routers/testing.py` with all 6 endpoints
-3. Register router in `main.py`
-4. Test with curl (scanner, memory, summary, chat-sync, chat-async)
-5. Commit and push for iOS integration
+### **iOS E2E Test Results (Verified)**
+
+```
+Summary Agent: ✅ PASSED (22s latency)
+  - Title: "Lunch with Sarah — Q2 timeline & budget follow-up"
+  - Real Letta-generated content stored in Firestore
+
+Memory Agent: ✅ PASSED
+  - Memories stored with conversation_id
+  - Deduplication working (same conv_id = no duplicate memories)
+```
+
+### **Documentation Created**
+
+- `docs/ORIGINAL_PROMPTS_REFERENCE.md` - Reference for comparing Letta output with original OMI prompts
 
 ---
 
