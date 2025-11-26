@@ -33,12 +33,31 @@ class E2ETestResponse {
   });
 
   factory E2ETestResponse.fromJson(Map<String, dynamic> json) {
+    // Handle agent_response which could be null, a Map, or other types
+    Map<String, dynamic> agentResponse = {};
+    final rawAgentResponse = json['agent_response'];
+    if (rawAgentResponse != null && rawAgentResponse is Map<String, dynamic>) {
+      agentResponse = rawAgentResponse;
+    } else if (rawAgentResponse != null && rawAgentResponse is Map) {
+      // Handle Map<dynamic, dynamic> case
+      agentResponse = Map<String, dynamic>.from(rawAgentResponse);
+    }
+
+    // Handle metrics which could be null or a Map
+    Map<String, dynamic> metrics = {};
+    final rawMetrics = json['metrics'];
+    if (rawMetrics != null && rawMetrics is Map<String, dynamic>) {
+      metrics = rawMetrics;
+    } else if (rawMetrics != null && rawMetrics is Map) {
+      metrics = Map<String, dynamic>.from(rawMetrics);
+    }
+
     return E2ETestResponse(
-      testType: json['test_type'] as String,
+      testType: json['test_type'] as String? ?? 'unknown',
       source: json['source'] as String?,
       transcript: json['transcript'] as String?,
-      agentResponse: json['agent_response'] as Map<String, dynamic>? ?? {},
-      metrics: json['metrics'] as Map<String, dynamic>? ?? {},
+      agentResponse: agentResponse,
+      metrics: metrics,
       jobId: json['job_id'] as String?,
       status: json['status'] as String?,
     );
