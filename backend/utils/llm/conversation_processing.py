@@ -516,7 +516,12 @@ def get_reprocess_transcript_structure(
     title: str,
     photos: List[ConversationPhoto] = None,
     existing_action_items: List[dict] = None,
+    uid: str = None,
+    existing_conversation_id: str = None,  # For async callback matching
 ) -> Structured:
+    # DEBUG: Trace entry into this function
+    print(f"🔍 [DEBUG] get_reprocess_transcript_structure called - uid={uid}, conv_id={existing_conversation_id}", flush=True)
+
     context_parts = []
     if transcript and transcript.strip():
         context_parts.append(f"Transcript: ```{transcript.strip()}```")
@@ -530,6 +535,80 @@ def get_reprocess_transcript_structure(
         return Structured()
 
     full_context = "\n\n".join(context_parts)
+
+    # ====== ELLA INTEGRATION ======
+    # Try calling Ella's summary agent first (if uid provided)
+    if uid:
+        try:
+            import requests
+
+            print(f"📤 Calling Ella summary agent (reprocess) for uid={uid}", flush=True)
+
+            response = requests.post(
+                "https://n8n.ella-ai-care.com/webhook/summary-agent",
+                json={
+                    "uid": uid,
+                    "conversation_id": existing_conversation_id,  # For async callback matching
+                    "transcript": transcript,
+                    "started_at": started_at.isoformat(),
+                    "language_code": language_code,
+                    "timezone": tz,
+                    "existing_title": title,  # Pass existing title for context
+                },
+                timeout=120  # 120 second timeout (summaries not time-critical)
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+
+                # Check if n8n returned immediate result (sync) or empty (async)
+                if not result or result.get('status') == 'processing':
+                    # ASYNC MODE: n8n will call /v1/ella/conversation callback later
+                    print(f"⏳ Ella summary agent processing asynchronously (conversation_id={existing_conversation_id})", flush=True)
+                    return None  # Signal to caller that summary is pending
+
+                print(f"✅ Ella summary agent (reprocess) returned: {result.get('title', 'N/A')}", flush=True)
+
+                # Convert Ella's response to Structured object
+                action_items = []
+                for item in result.get('action_items', []):
+                    action_item = ActionItem(
+                        description=item['description'],
+                        completed=False,
+                        due_at=datetime.fromisoformat(item['due_at'].replace('Z', '+00:00')) if item.get('due_at') else None
+                    )
+                    action_items.append(action_item)
+
+                events = []
+                for event in result.get('events', []):
+                    event_obj = Event(
+                        title=event['title'],
+                        description=event.get('description', ''),
+                        start=datetime.fromisoformat(event['start'].replace('Z', '+00:00')),
+                        duration=event.get('duration', 60)
+                    )
+                    if event_obj.duration > 180:
+                        event_obj.duration = 180
+                    events.append(event_obj)
+
+                structured = Structured(
+                    title=result.get('title', title),  # Use Ella's title or keep existing
+                    overview=result.get('overview', ''),
+                    emoji=result.get('emoji', '🧠'),
+                    category=CategoryEnum(result.get('category', 'other')),
+                    action_items=action_items,
+                    events=events
+                )
+
+                return structured
+            else:
+                print(f"⚠️  Ella summary agent (reprocess) returned status {response.status_code}, falling back to local LLM", flush=True)
+
+        except Exception as e:
+            print(f"⚠️  Ella summary agent (reprocess) failed: {e}, falling back to local LLM", flush=True)
+
+    # ====== FALLBACK: Original hard-coded LLM ======
+    print(f"🔄 Using local LLM for summary generation (reprocess)", flush=True)
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.

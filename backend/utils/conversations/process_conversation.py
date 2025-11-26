@@ -109,19 +109,32 @@ def _get_structured(
 
         # For re-processing, we don't discard, just re-structure.
         if force_process:
-            # reprocess endpoint
-            return (
-                get_reprocess_transcript_structure(
-                    transcript_text,
-                    conversation.started_at,
-                    language_code,
-                    tz,
-                    conversation.structured.title,
-                    photos=conversation.photos,
-                    existing_action_items=existing_action_items,
-                ),
-                False,
+            # Get conversation ID for async callback matching
+            conv_id = getattr(conversation, 'id', None)
+            # reprocess endpoint - now with Ella integration
+            structured = get_reprocess_transcript_structure(
+                transcript_text,
+                conversation.started_at,
+                language_code,
+                tz,
+                conversation.structured.title,
+                photos=conversation.photos,
+                existing_action_items=existing_action_items,
+                uid=uid,
+                existing_conversation_id=conv_id,
             )
+
+            # Handle async mode: If None returned, n8n will send callback later
+            if structured is None:
+                print(f"⏳ Summary generation pending (async mode) for reprocess")
+                structured = Structured(
+                    title="Processing...",
+                    overview="Summary generation in progress",
+                    emoji="⏳",
+                    category=CategoryEnum.other
+                )
+
+            return (structured, False)
 
         # Determine whether to discard the conversation based on its content (transcript and/or photos).
         discarded = should_discard_conversation(transcript_text, conversation.photos)
