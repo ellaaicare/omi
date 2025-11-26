@@ -354,6 +354,9 @@ def get_transcript_structure(
     uid: str = None,
     existing_conversation_id: str = None,  # For async callback matching
 ) -> Structured:
+    # DEBUG: Trace entry into this function
+    print(f"🔍 [DEBUG] get_transcript_structure called - uid={uid}, conv_id={existing_conversation_id}", flush=True)
+
     context_parts = []
     if transcript and transcript.strip():
         context_parts.append(f"Transcript: ```{transcript.strip()}```")

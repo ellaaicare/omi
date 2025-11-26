@@ -132,6 +132,9 @@ def _get_structured(
         # Get conversation ID if available (for async callback matching)
         conv_id = getattr(conversation, 'id', None)
 
+        # DEBUG: Trace before calling get_transcript_structure
+        print(f"🔍 [DEBUG] About to call get_transcript_structure - uid={uid}, conv_id={conv_id}, source={conversation.source}", flush=True)
+
         structured = get_transcript_structure(
             transcript_text,
             conversation.started_at,
