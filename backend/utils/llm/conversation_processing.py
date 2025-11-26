@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -6,8 +7,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from models.app import App
-from models.conversation import Structured, Conversation, ActionItem, Event, ConversationPhoto, ActionItemsExtraction
+from models.conversation import Structured, Conversation, ActionItem, Event, ConversationPhoto, ActionItemsExtraction, CategoryEnum
 from .clients import llm_mini, parser, llm_high, llm_medium_experiment
+
+# ====== ELLA CONFIGURATION ======
+# When ELLA_ONLY_MODE=true, disable the hardcoded OpenAI fallback.
+# This ensures all summary generation goes through Ella/Letta agents.
+# Set to "false" or remove to restore original fallback behavior (for upstream compatibility).
+ELLA_ONLY_MODE = os.getenv('ELLA_ONLY_MODE', 'true').lower() == 'true'
 
 
 class DiscardConversation(BaseModel):
@@ -439,10 +446,30 @@ def get_transcript_structure(
                 print(f"⚠️  Ella summary agent returned status {response.status_code}, falling back to local LLM", flush=True)
 
         except Exception as e:
-            print(f"⚠️  Ella summary agent failed: {e}, falling back to local LLM", flush=True)
+            print(f"⚠️  Ella summary agent failed: {e}", flush=True)
+            if ELLA_ONLY_MODE:
+                print(f"❌ ELLA_ONLY_MODE enabled - NOT falling back to OpenAI. Returning placeholder.", flush=True)
+                return Structured(
+                    title="Summary Generation Failed",
+                    overview=f"Ella agent unavailable: {str(e)[:100]}",
+                    emoji="⚠️",
+                    category=CategoryEnum.other
+                )
+            print(f"🔄 Falling back to local LLM", flush=True)
 
     # ====== FALLBACK: Original hard-coded LLM ======
-    print(f"🔄 Using local LLM for summary generation", flush=True)
+    # NOTE: This fallback bypasses Ella/Letta and calls OpenAI directly.
+    # Set ELLA_ONLY_MODE=true to disable this fallback.
+    if ELLA_ONLY_MODE:
+        print(f"❌ ELLA_ONLY_MODE enabled - skipping OpenAI fallback. Returning placeholder.", flush=True)
+        return Structured(
+            title="Summary Pending",
+            overview="Waiting for Ella agent response",
+            emoji="⏳",
+            category=CategoryEnum.other
+        )
+
+    print(f"🔄 Using local LLM for summary generation (ELLA_ONLY_MODE=false)", flush=True)
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.
@@ -458,21 +485,21 @@ def get_transcript_structure(
     • **User involvement**: The user is expected to attend, participate, or take action
     • **Specific timing**: Has concrete date/time, not vague references like "sometime" or "soon"
     • **Important/actionable**: Missing it would have real consequences or impact
-    
+
     INCLUDE these event types:
     • Meetings & appointments (business meetings, doctor visits, interviews)
     • Hard deadlines (project due dates, payment deadlines, submission dates)
     • Personal commitments (family events, social gatherings user committed to)
     • Travel & transportation (flights, trains, scheduled pickups)
     • Recurring obligations (classes, regular meetings, scheduled calls)
-    
+
     EXCLUDE these:
     • Casual mentions ("we should meet sometime", "maybe next week")
     • Historical references (past events being discussed)
     • Other people's events (events user isn't involved in)
     • Vague suggestions ("let's grab coffee soon")
     • Hypothetical scenarios ("if we meet Tuesday...")
-    
+
     For date context, this content was captured on {started_at}. {tz} is the user's timezone; convert all event times to UTC and respond in UTC.
 
 
@@ -605,10 +632,30 @@ def get_reprocess_transcript_structure(
                 print(f"⚠️  Ella summary agent (reprocess) returned status {response.status_code}, falling back to local LLM", flush=True)
 
         except Exception as e:
-            print(f"⚠️  Ella summary agent (reprocess) failed: {e}, falling back to local LLM", flush=True)
+            print(f"⚠️  Ella summary agent (reprocess) failed: {e}", flush=True)
+            if ELLA_ONLY_MODE:
+                print(f"❌ ELLA_ONLY_MODE enabled - NOT falling back to OpenAI. Returning placeholder.", flush=True)
+                return Structured(
+                    title="Summary Generation Failed",
+                    overview=f"Ella agent unavailable: {str(e)[:100]}",
+                    emoji="⚠️",
+                    category=CategoryEnum.other
+                )
+            print(f"🔄 Falling back to local LLM", flush=True)
 
     # ====== FALLBACK: Original hard-coded LLM ======
-    print(f"🔄 Using local LLM for summary generation (reprocess)", flush=True)
+    # NOTE: This fallback bypasses Ella/Letta and calls OpenAI directly.
+    # Set ELLA_ONLY_MODE=true to disable this fallback.
+    if ELLA_ONLY_MODE:
+        print(f"❌ ELLA_ONLY_MODE enabled - skipping OpenAI fallback (reprocess). Returning placeholder.", flush=True)
+        return Structured(
+            title=title or "Summary Pending",
+            overview="Waiting for Ella agent response",
+            emoji="⏳",
+            category=CategoryEnum.other
+        )
+
+    print(f"🔄 Using local LLM for summary generation (reprocess, ELLA_ONLY_MODE=false)", flush=True)
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.
@@ -624,21 +671,21 @@ def get_reprocess_transcript_structure(
     • **User involvement**: The user is expected to attend, participate, or take action
     • **Specific timing**: Has concrete date/time, not vague references like "sometime" or "soon"
     • **Important/actionable**: Missing it would have real consequences or impact
-    
+
     INCLUDE these event types:
     • Meetings & appointments (business meetings, doctor visits, interviews)
     • Hard deadlines (project due dates, payment deadlines, submission dates)
     • Personal commitments (family events, social gatherings user committed to)
     • Travel & transportation (flights, trains, scheduled pickups)
     • Recurring obligations (classes, regular meetings, scheduled calls)
-    
+
     EXCLUDE these:
     • Casual mentions ("we should meet sometime", "maybe next week")
     • Historical references (past events being discussed)
     • Other people's events (events user isn't involved in)
     • Vague suggestions ("let's grab coffee soon")
     • Hypothetical scenarios ("if we meet Tuesday...")
-    
+
     For date context, this content was captured on {started_at}. {tz} is the user's timezone; convert all event times to UTC and respond in UTC.
 
     Content:
