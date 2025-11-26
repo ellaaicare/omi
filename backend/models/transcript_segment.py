@@ -17,10 +17,10 @@ class TranscriptSegment(BaseModel):
     text: str
     speaker: Optional[str] = 'SPEAKER_00'
     speaker_id: Optional[int] = None
-    is_user: bool
+    is_user: bool = False  # Default to False for backwards compatibility with old Firestore data
     person_id: Optional[str] = None
-    start: float
-    end: float
+    start: float = 0.0  # Default for E2E testing scenarios
+    end: float = 0.0  # Default for E2E testing scenarios
     translations: Optional[List[Translation]] = []
     speech_profile_processed: bool = True
     source: Optional[str] = None  # Source: "deepgram", "edge_asr", "soniox", "speechmatics"

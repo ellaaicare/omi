@@ -262,7 +262,7 @@ class Conversation(BaseModel):
     source: Optional[ConversationSource] = ConversationSource.omi
     language: Optional[str] = None  # applies only to Friend # TODO: once released migrate db to default 'en'
 
-    structured: Structured
+    structured: Optional[Structured] = None  # Optional for backwards compatibility with old Firestore data
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None
