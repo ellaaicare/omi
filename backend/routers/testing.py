@@ -227,7 +227,8 @@ async def test_scanner_agent(
     n8n_payload = {
         "uid": uid,
         "device_type": device_type,  # Hardware device: "omi", "friend", "openglass"
-        "segments": [create_segment(transcript, stt_source=source)]  # STT provider source
+        "segments": [create_segment(transcript, stt_source=source)],  # STT provider source
+        "debug": debug  # Forward debug flag to n8n for E2E testing flow
     }
     print(f"🔍 [Scanner] iOS UID: {uid}")
     print(f"🔍 [Scanner] Device Type: {device_type}")
@@ -350,7 +351,8 @@ async def test_memory_agent(
                 "structured": {
                     "title": f"Test conversation {conversation_id}",
                     "overview": transcript[:100]  # First 100 chars as overview
-                }
+                },
+                "debug": debug  # Forward debug flag to n8n for E2E testing flow
             },
             timeout=10
         )
@@ -450,7 +452,8 @@ async def test_summary_agent(
                 "uid": uid,
                 "conversation_id": conversation_id,  # Required by n8n v5.0
                 "transcript": text,
-                "started_at": started_at
+                "started_at": started_at,
+                "debug": debug  # Forward debug flag to n8n for E2E testing flow
             },
             timeout=15  # Summary may take longer
         )
