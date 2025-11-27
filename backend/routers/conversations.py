@@ -59,7 +59,6 @@ def get_in_progress_conversation_endpoint(uid: str = Depends(auth.get_current_us
 
     Returns None (204) if no conversation is in progress.
     """
-    print(f"🔍 get_in_progress_conversation_endpoint called with uid={uid}, type={type(uid)}", flush=True)
     conversation = retrieve_in_progress_conversation(uid)
     if not conversation:
         return None
