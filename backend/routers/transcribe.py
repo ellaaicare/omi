@@ -917,38 +917,38 @@ async def _listen(
                 updates_segments = [segment.dict() for segment in conversation.transcript_segments[starts:ends]]
                 await websocket.send_json(updates_segments)
 
+                # ====== ELLA INTEGRATION: Send chunks to scanner ======
+                # Fire-and-forget call to Ella's realtime scanner (ALWAYS runs, not gated by PUSHER)
+                try:
+                    import requests
+
+                    # Convert transcript segments to format Ella expects
+                    scanner_segments = [
+                        {
+                            "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
+                            "text": s.text,
+                            "stt_source": s.source  # STT provider: "edge_asr", "deepgram", "soniox", etc.
+                        }
+                        for s in transcript_segments
+                    ]
+
+                    if scanner_segments:
+                        resp = requests.post(
+                            "https://n8n.ella-ai-care.com/webhook/scanner-agent",
+                            json={
+                                "uid": uid,
+                                "device_type": conversation.source.value if conversation.source else "omi",
+                                "segments": scanner_segments
+                            },
+                            timeout=2
+                        )
+                        print(f"📡 Scanner: {len(scanner_segments)} segments → {resp.status_code}", flush=True)
+                except Exception as e:
+                    print(f"📡 Scanner error: {e}", flush=True)
+
+                # Pusher webhook (optional, requires HOSTED_PUSHER_API_URL)
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])
-
-                    # ====== ELLA INTEGRATION: Send chunks to scanner ======
-                    # Fire-and-forget call to Ella's realtime scanner
-                    try:
-                        import requests
-
-                        # Convert transcript segments to format Ella expects
-                        # Match HARDWARE_E2E_TEST_GUIDE.md schema (lines 36-42)
-                        scanner_segments = [
-                            {
-                                "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
-                                "text": s.text,
-                                "stt_source": s.source  # STT provider: "edge_asr", "deepgram", "soniox", etc.
-                            }
-                            for s in transcript_segments
-                        ]
-
-                        if scanner_segments:  # Only send if there are segments
-                            requests.post(
-                                "https://n8n.ella-ai-care.com/webhook/scanner-agent",
-                                json={
-                                    "uid": uid,
-                                    "device_type": conversation.source.value if conversation.source else "omi",  # Device: "omi", "friend", "openglass"
-                                    "segments": scanner_segments
-                                },
-                                timeout=2  # Realtime scanner should be fast (~1s)
-                            )
-                    except Exception as e:
-                        # Silently fail - don't break transcription if Ella is down
-                        pass
 
                 if translation_enabled:
                     await translate(conversation.transcript_segments[starts:ends], conversation.id)
