@@ -21,6 +21,7 @@ extension FlutterError: Error {}
 
   // Audio player for TTS notifications
   private var audioPlayer: AVPlayer?
+  private var audioPlayerObserver: NSKeyValueObservation?  // Observer for playback completion
   private var notificationBodyOnKill: String?
 
   var session: WCSession?
@@ -245,18 +246,39 @@ extension FlutterError: Error {}
       NSLog("🔊 [AppDelegate] Audio URL: \(audioUrlString)")
 
       // Configure audio session for playback (works in background)
+      // Use .playAndRecord so ASR can resume after TTS finishes
       do {
-        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetooth, .defaultToSpeaker, .mixWithOthers])
         try AVAudioSession.sharedInstance().setActive(true)
-        NSLog("✅ [AppDelegate] Audio session configured for background playback")
+        NSLog("✅ [AppDelegate] Audio session configured for TTS playback (playAndRecord mode for ASR compatibility)")
       } catch {
         NSLog("❌ [AppDelegate] Audio session configuration failed: \(error)")
       }
 
+      // Clean up previous observer
+      self.audioPlayerObserver?.invalidate()
+      self.audioPlayerObserver = nil
+
       // Play audio using AVPlayer
       self.audioPlayer = AVPlayer(url: audioUrl)
+
+      // Add observer to restore audio session for ASR after playback completes
+      self.audioPlayerObserver = self.audioPlayer?.observe(\.timeControlStatus, options: [.new]) { [weak self] player, change in
+        if player.timeControlStatus == .paused {
+          // Check if playback actually finished (not just paused)
+          if let duration = player.currentItem?.duration,
+             let currentTime = player.currentItem?.currentTime(),
+             CMTimeCompare(currentTime, duration) >= 0 || duration == .indefinite {
+            NSLog("🔊 [AppDelegate] TTS playback completed - audio session ready for ASR")
+            // Audio session is already in .playAndRecord mode, so ASR should work immediately
+            self?.audioPlayerObserver?.invalidate()
+            self?.audioPlayerObserver = nil
+          }
+        }
+      }
+
       self.audioPlayer?.play()
-      NSLog("✅ [AppDelegate] Audio playback started AUTOMATICALLY")
+      NSLog("✅ [AppDelegate] Audio playback started AUTOMATICALLY (ASR-compatible mode)")
 
       completionHandler(.newData)
       return
@@ -530,13 +552,13 @@ public class NativeTtsPlugin: NSObject, FlutterPlugin, AVSpeechSynthesizerDelega
         synthesizer = AVSpeechSynthesizer()
         synthesizer?.delegate = self
 
-        // Try to configure audio session for Bluetooth routing, but don't fail if it doesn't work
-        // (The watch app may already have the audio session configured)
+        // Configure audio session for TTS with ASR compatibility
+        // Use .playAndRecord so ASR can continue working after TTS
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+            try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker, .mixWithOthers])
             try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-            NSLog("✅ Native TTS audio session configured successfully")
+            NSLog("✅ Native TTS audio session configured (playAndRecord mode for ASR compatibility)")
         } catch {
             NSLog("⚠️ Native TTS couldn't configure audio session (OSStatus \(error)), but continuing anyway")
             // Don't fail initialization - TTS will still work, just might not auto-route to Bluetooth
@@ -678,12 +700,13 @@ public class BackgroundAudioPlayerPlugin: NSObject, FlutterPlugin, AVAudioPlayer
         NSLog("🕐 [BackgroundAudio] Background task started: \(backgroundTaskID)")
 
         // Configure audio session for background playback
+        // Use .playAndRecord so ASR can continue working after TTS finishes
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            // Set category and activate for background playback
-            try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
+            // Set category with ASR compatibility - playAndRecord allows ASR to resume after TTS
+            try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.allowBluetooth, .defaultToSpeaker, .mixWithOthers])
             try audioSession.setActive(true, options: [])
-            NSLog("✅ [BackgroundAudio] Audio session activated successfully")
+            NSLog("✅ [BackgroundAudio] Audio session activated (playAndRecord mode for ASR compatibility)")
         } catch {
             NSLog("⚠️ [BackgroundAudio] Audio session error (error: \(error)), continuing anyway")
         }
