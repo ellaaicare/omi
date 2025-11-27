@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import opuslib  # type: ignore
 import webrtcvad  # type: ignore
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 from pydub import AudioSegment  # type: ignore
 from starlette.websockets import WebSocketState
@@ -1260,6 +1260,7 @@ async def _listen(
 async def listen_handler(
     websocket: WebSocket,
     uid: str = Depends(auth.get_current_user_uid),
+    uid_param: Optional[str] = Query(None, alias="uid"),  # Also accept uid from query param
     language: str = 'en',
     sample_rate: int = 8000,
     codec: str = 'pcm8',
@@ -1268,9 +1269,15 @@ async def listen_handler(
     stt_service: Optional[STTService] = None,
     conversation_timeout: int = 120,
 ):
+    # Use query param uid if auth returned fallback "123" (LOCAL_DEVELOPMENT mode)
+    effective_uid = uid
+    if uid == '123' and uid_param and uid_param != '123':
+        effective_uid = uid_param
+        print(f"🔄 Using query param uid instead of auth fallback: {effective_uid}", flush=True)
+
     await _listen(
         websocket,
-        uid,
+        effective_uid,
         language,
         sample_rate,
         codec,
