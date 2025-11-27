@@ -45,6 +45,26 @@ def process_in_progress_conversation(uid: str = Depends(auth.get_current_user_ui
     return CreateConversationResponse(conversation=conversation, messages=messages)
 
 
+@router.get("/v1/conversations/in-progress", response_model=Optional[Conversation], tags=['conversations'])
+def get_in_progress_conversation(uid: str = Depends(auth.get_current_user_uid)):
+    """
+    Get the current in-progress conversation without processing it.
+
+    USE CASE: Scanner needs accumulated transcript context to distinguish real emergencies
+    from book reading/TV. Scanner gets small chunks (3-10 sec) and can't tell if
+    "the hero clutched his chest and fell" is fiction or a real emergency.
+
+    This endpoint returns the full in-progress conversation with transcript_segments
+    to provide context. Only called when scanner detects a potential issue.
+
+    Returns None (204) if no conversation is in progress.
+    """
+    conversation = retrieve_in_progress_conversation(uid)
+    if not conversation:
+        return None
+    return Conversation(**conversation)
+
+
 @router.post('/v1/conversations/{conversation_id}/reprocess', response_model=Conversation, tags=['conversations'])
 def reprocess_conversation(
     conversation_id: str,
