@@ -46,7 +46,7 @@ def process_in_progress_conversation(uid: str = Depends(auth.get_current_user_ui
 
 
 @router.get("/v1/conversations/in-progress", response_model=Optional[Conversation], tags=['conversations'])
-def get_in_progress_conversation(uid: str = Depends(auth.get_current_user_uid)):
+def get_in_progress_conversation_endpoint(uid: str = Depends(auth.get_current_user_uid)):
     """
     Get the current in-progress conversation without processing it.
 
@@ -59,6 +59,7 @@ def get_in_progress_conversation(uid: str = Depends(auth.get_current_user_uid)):
 
     Returns None (204) if no conversation is in progress.
     """
+    print(f"🔍 get_in_progress_conversation_endpoint called with uid={uid}, type={type(uid)}", flush=True)
     conversation = retrieve_in_progress_conversation(uid)
     if not conversation:
         return None
