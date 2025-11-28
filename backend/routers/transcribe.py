@@ -937,6 +937,7 @@ async def _listen(
                             "https://n8n.ella-ai-care.com/webhook/scanner-agent",
                             json={
                                 "uid": uid,
+                                "conversation_id": str(current_conversation_id),  # For n8n first-escalation tracking
                                 "device_type": conversation.source.value if conversation.source else "omi",
                                 "segments": scanner_segments
                             },
