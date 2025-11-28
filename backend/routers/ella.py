@@ -12,6 +12,7 @@ Architecture:
 """
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends
@@ -20,8 +21,10 @@ from pydantic import BaseModel, Field
 import database.memories as memories_db
 import database.conversations as conversations_db
 import database.notifications as notification_db
+import database.redis_db as redis_db
 from models.memories import MemoryDB, Memory, MemoryCategory
 from models.conversation import Structured, ActionItem, Event, CategoryEnum
+from models.transcript_segment import TranscriptSegment
 from utils.other import endpoints as auth
 from utils.tts import TTSManager, TTSRequest, TTSResponse, TTSVoice, TTSModel
 
@@ -460,6 +463,43 @@ async def ella_notification_callback(request: EllaNotificationCallback):
             }
 
         print(f"  ✅ Push notification sent to {result['sent']}/{result['total_devices']} devices")
+
+        # ====== STORE ASSISTANT MESSAGE IN TRANSCRIPT ======
+        # This enables proper context formatting for subsequent turns
+        try:
+            # Get in-progress conversation for this user
+            conversation_id = redis_db.get_in_progress_conversation_id(request.uid)
+            if conversation_id:
+                # Get existing conversation
+                existing_conv = conversations_db.get_conversation(request.uid, conversation_id)
+                if existing_conv and existing_conv.get('status') == 'in_progress':
+                    # Create assistant segment
+                    current_time = time.time()
+                    assistant_segment = TranscriptSegment(
+                        text=request.message,
+                        speaker="ELLA_ASSISTANT",
+                        speaker_id=99,  # Special ID for assistant
+                        is_user=False,
+                        role="assistant",  # Key field for context formatting
+                        start=current_time,
+                        end=current_time,
+                        source="ella_agent"
+                    )
+
+                    # Append to transcript_segments
+                    segments = existing_conv.get('transcript_segments', [])
+                    segments.append(assistant_segment.dict())
+
+                    # Update conversation
+                    conversations_db.update_conversation(
+                        request.uid,
+                        conversation_id,
+                        {'transcript_segments': segments}
+                    )
+                    print(f"  📝 Stored assistant message in conversation {conversation_id}")
+        except Exception as e:
+            # Don't fail the notification if storage fails
+            print(f"  ⚠️ Could not store assistant message: {e}")
 
         return {
             "status": result['status'],

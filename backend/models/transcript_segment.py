@@ -25,6 +25,7 @@ class TranscriptSegment(BaseModel):
     speech_profile_processed: bool = True
     source: Optional[str] = None  # Source: "deepgram", "edge_asr", "soniox", "speechmatics"
     asr_provider: Optional[str] = None  # ASR provider: "apple_speech", "parakeet", "whisper", etc.
+    role: Optional[str] = None  # Role: "user", "assistant", None (legacy/unknown). Used for context formatting.
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -47,12 +48,20 @@ class TranscriptSegment(BaseModel):
         for segment in segments:
             segment_text = segment.text.strip()
             timestamp_str = f'[{segment.get_timestamp_string()}] ' if include_timestamps else ''
-            speaker_name = user_name
-            if not segment.is_user:
+
+            # Determine speaker name based on role field (new) or is_user (legacy)
+            role = getattr(segment, 'role', None)
+            if role == 'assistant':
+                speaker_name = 'Assistant'
+            elif role == 'user' or segment.is_user:
+                speaker_name = user_name
+            else:
+                # Other speakers (not user, not assistant)
                 if segment.person_id and segment.person_id in people_map:
                     speaker_name = people_map[segment.person_id]
                 else:
                     speaker_name = f'Speaker {segment.speaker_id}'
+
             transcript += f'{timestamp_str}{speaker_name}: {segment_text}\n\n'
 
         return transcript.strip()
@@ -111,6 +120,14 @@ class TranscriptSegment(BaseModel):
         def _merge(a, b: TranscriptSegment):
             if not a or not b:
                 return a, b
+
+            # Never merge assistant segments with other segments
+            # This preserves Ella's responses as distinct from user speech
+            a_role = getattr(a, 'role', None)
+            b_role = getattr(b, 'role', None)
+            if a_role == 'assistant' or b_role == 'assistant':
+                return a, b
+
             if (
                 (a.speaker == b.speaker or (a.is_user and b.is_user))
                 and (b.start - a.end < 30)
