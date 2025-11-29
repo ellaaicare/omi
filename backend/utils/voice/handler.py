@@ -128,7 +128,10 @@ class VoiceModeHandler:
             "turn_count": summary.get("turn_count", 0)
         })
 
-        # Callback for transcript storage
+        # Store voice conversation with proper role tags
+        await self._store_voice_conversation(summary)
+
+        # Callback for additional processing
         if self.on_session_end:
             await self.on_session_end(summary)
 
@@ -194,6 +197,118 @@ class VoiceModeHandler:
             "code": code,
             "message": message
         })
+
+    # === Storage & Agent Calls ===
+
+    async def _store_voice_conversation(self, summary: dict) -> None:
+        """
+        Store voice conversation with proper role tags.
+
+        Creates transcript_segments with role field for user/assistant distinction.
+        Calls summary and memory agents via existing Ella integration.
+        """
+        try:
+            import time
+            from datetime import datetime
+
+            conversation_history = summary.get("conversation_history", [])
+            if not conversation_history:
+                print("⚠️ No conversation history to store", flush=True)
+                return
+
+            # Build transcript_segments with role tags (critical for context!)
+            transcript_segments = []
+            for i, turn in enumerate(conversation_history):
+                segment = {
+                    "text": turn.get("content", ""),
+                    "speaker": "ELLA_ASSISTANT" if turn.get("role") == "assistant" else "USER",
+                    "speaker_id": 99 if turn.get("role") == "assistant" else 0,
+                    "is_user": turn.get("role") == "user",
+                    "role": turn.get("role"),  # "user" or "assistant" - KEY FIELD!
+                    "start": turn.get("timestamp", time.time()),
+                    "end": turn.get("timestamp", time.time()),
+                    "source": "voice_mode",
+                }
+                transcript_segments.append(segment)
+
+            # Build transcript text with role labels
+            transcript_text = summary.get("transcript", "")
+
+            print(f"📝 Storing voice conversation: {len(transcript_segments)} segments, "
+                  f"{len(transcript_text)} chars", flush=True)
+
+            # Store in Firestore via existing conversation system
+            try:
+                import database.conversations as conversations_db
+                from models.conversation import Conversation, ConversationStatus
+
+                # Create conversation record
+                conversation_data = {
+                    "id": summary.get("session_id"),
+                    "uid": self.uid,
+                    "created_at": datetime.utcnow(),
+                    "finished_at": datetime.utcnow(),
+                    "status": ConversationStatus.completed.value,
+                    "source": "voice_mode",
+                    "transcript": transcript_text,
+                    "transcript_segments": transcript_segments,
+                }
+
+                conversations_db.upsert_conversation(self.uid, conversation_data)
+                print(f"✅ Voice conversation stored: {summary.get('session_id', '')[:8]}...", flush=True)
+
+            except Exception as e:
+                print(f"⚠️ Failed to store voice conversation: {e}", flush=True)
+
+            # Call summary and memory agents (async, don't block)
+            await self._call_agents(summary)
+
+        except Exception as e:
+            print(f"⚠️ Error in _store_voice_conversation: {e}", flush=True)
+
+    async def _call_agents(self, summary: dict) -> None:
+        """Call summary and memory agents for voice conversation."""
+        try:
+            from utils.ella import call_summary_agent, call_memory_agent
+
+            transcript = summary.get("transcript", "")
+            session_id = summary.get("session_id", "")
+
+            if not transcript:
+                return
+
+            # Call summary agent (fire-and-forget style)
+            print(f"📤 Calling summary agent for voice session...", flush=True)
+            success, result, error = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: call_summary_agent(
+                    self.uid,
+                    session_id,
+                    transcript
+                )
+            )
+            if success:
+                print(f"✅ Summary agent called", flush=True)
+            else:
+                print(f"⚠️ Summary agent error: {error}", flush=True)
+
+            # Call memory agent
+            print(f"📤 Calling memory agent for voice session...", flush=True)
+            success, memories, error = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: call_memory_agent(
+                    self.uid,
+                    session_id,
+                    transcript
+                )
+            )
+            if success:
+                print(f"✅ Memory agent called, extracted {len(memories or [])} memories", flush=True)
+            else:
+                print(f"⚠️ Memory agent error: {error}", flush=True)
+
+        except Exception as e:
+            print(f"⚠️ Error calling agents: {e}", flush=True)
 
     # === Helpers ===
 
