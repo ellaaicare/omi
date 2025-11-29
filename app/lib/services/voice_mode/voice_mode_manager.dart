@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Voice Mode States
 enum VoiceModeState {
@@ -61,7 +63,7 @@ class VoiceModeManager extends ChangeNotifier {
 
   // Audio playback for streaming response
   final AudioPlayer _audioPlayer = AudioPlayer();
-  final List<String> _audioQueue = [];
+  final List<_AudioChunk> _audioQueue = [];
   bool _isPlayingQueue = false;
   int _audioSequence = 0;
 
@@ -304,13 +306,20 @@ class VoiceModeManager extends ChangeNotifier {
   void handleVoiceResponseAudio(Map<String, dynamic> data) {
     final audioData = data['data'] as String?;
     final sequence = data['sequence'] as int? ?? 0;
+    final format = data['format'] as String? ?? 'mp3';
+    final sampleRate = data['sample_rate'] as int? ?? 24000;
 
     if (audioData == null || audioData.isEmpty) return;
 
-    debugPrint('VoiceModeManager: Received audio chunk $sequence');
+    debugPrint('VoiceModeManager: Received audio chunk $sequence (format: $format, rate: $sampleRate)');
 
     // Queue audio for playback
-    _audioQueue.add(audioData);
+    _audioQueue.add(_AudioChunk(
+      data: audioData,
+      sequence: sequence,
+      format: format,
+      sampleRate: sampleRate,
+    ));
 
     // Start playing if not already
     if (!_isPlayingQueue) {
@@ -359,22 +368,10 @@ class VoiceModeManager extends ChangeNotifier {
     _isPlayingQueue = true;
 
     while (_audioQueue.isNotEmpty) {
-      final audioData = _audioQueue.removeAt(0);
+      final chunk = _audioQueue.removeAt(0);
 
       try {
-        // Decode base64 and play
-        final bytes = base64Decode(audioData);
-
-        // For PCM16, we need to convert or use a different player
-        // AudioPlayer expects encoded formats (mp3, wav with header, etc.)
-        // TODO: Use AVAudioEngine on iOS for raw PCM playback
-
-        // Temporary: Skip raw PCM, wait for proper implementation
-        debugPrint('VoiceModeManager: Would play ${bytes.length} bytes of audio');
-
-        // Simulate playback time
-        await Future.delayed(const Duration(milliseconds: 100));
-
+        await _playChunk(chunk);
       } catch (e) {
         debugPrint('VoiceModeManager: Audio playback error: $e');
       }
@@ -387,6 +384,132 @@ class VoiceModeManager extends ChangeNotifier {
       _state = VoiceModeState.listening;
       notifyListeners();
       _resetSilenceTimer();
+    }
+  }
+
+  /// Play a single audio chunk based on its format
+  Future<void> _playChunk(_AudioChunk chunk) async {
+    // Check if data is a URL
+    if (chunk.data.startsWith('http://') || chunk.data.startsWith('https://')) {
+      debugPrint('VoiceModeManager: Playing audio from URL');
+      await _audioPlayer.setUrl(chunk.data);
+      await _audioPlayer.play();
+      // Wait for playback to complete
+      await _audioPlayer.processingStateStream.firstWhere(
+        (state) => state == ProcessingState.completed,
+      );
+      return;
+    }
+
+    // Decode base64 data
+    final Uint8List bytes;
+    try {
+      bytes = base64Decode(chunk.data);
+    } catch (e) {
+      debugPrint('VoiceModeManager: Failed to decode base64 audio: $e');
+      return;
+    }
+
+    debugPrint('VoiceModeManager: Playing ${bytes.length} bytes of ${chunk.format} audio');
+
+    // Get temp directory for audio file
+    final tempDir = await getTemporaryDirectory();
+    final tempFile = File('${tempDir.path}/voice_chunk_${chunk.sequence}.${_getFileExtension(chunk.format)}');
+
+    // Prepare audio data based on format
+    Uint8List audioBytes;
+    if (chunk.format == 'pcm16' || chunk.format == 'pcm') {
+      // Wrap PCM16 data with WAV header so just_audio can play it
+      audioBytes = _createWavFromPcm16(bytes, chunk.sampleRate);
+    } else {
+      // MP3, WAV, etc. - use as-is
+      audioBytes = bytes;
+    }
+
+    // Write to temp file
+    await tempFile.writeAsBytes(audioBytes);
+
+    // Play the audio
+    await _audioPlayer.setFilePath(tempFile.path);
+    await _audioPlayer.play();
+
+    // Wait for playback to complete
+    await _audioPlayer.processingStateStream.firstWhere(
+      (state) => state == ProcessingState.completed,
+    );
+
+    // Clean up temp file
+    try {
+      await tempFile.delete();
+    } catch (_) {}
+  }
+
+  /// Create WAV file from raw PCM16 mono data
+  Uint8List _createWavFromPcm16(Uint8List pcmData, int sampleRate) {
+    const int channels = 1;
+    const int bitsPerSample = 16;
+    final int byteRate = sampleRate * channels * bitsPerSample ~/ 8;
+    const int blockAlign = channels * bitsPerSample ~/ 8;
+    final int dataSize = pcmData.length;
+    final int fileSize = 36 + dataSize;
+
+    final ByteData header = ByteData(44);
+
+    // RIFF header
+    header.setUint8(0, 0x52); // 'R'
+    header.setUint8(1, 0x49); // 'I'
+    header.setUint8(2, 0x46); // 'F'
+    header.setUint8(3, 0x46); // 'F'
+    header.setUint32(4, fileSize, Endian.little);
+    header.setUint8(8, 0x57);  // 'W'
+    header.setUint8(9, 0x41);  // 'A'
+    header.setUint8(10, 0x56); // 'V'
+    header.setUint8(11, 0x45); // 'E'
+
+    // fmt subchunk
+    header.setUint8(12, 0x66); // 'f'
+    header.setUint8(13, 0x6D); // 'm'
+    header.setUint8(14, 0x74); // 't'
+    header.setUint8(15, 0x20); // ' '
+    header.setUint32(16, 16, Endian.little); // Subchunk1Size (16 for PCM)
+    header.setUint16(20, 1, Endian.little);  // AudioFormat (1 = PCM)
+    header.setUint16(22, channels, Endian.little);
+    header.setUint32(24, sampleRate, Endian.little);
+    header.setUint32(28, byteRate, Endian.little);
+    header.setUint16(32, blockAlign, Endian.little);
+    header.setUint16(34, bitsPerSample, Endian.little);
+
+    // data subchunk
+    header.setUint8(36, 0x64); // 'd'
+    header.setUint8(37, 0x61); // 'a'
+    header.setUint8(38, 0x74); // 't'
+    header.setUint8(39, 0x61); // 'a'
+    header.setUint32(40, dataSize, Endian.little);
+
+    // Combine header and PCM data
+    final result = Uint8List(44 + dataSize);
+    result.setRange(0, 44, header.buffer.asUint8List());
+    result.setRange(44, 44 + dataSize, pcmData);
+
+    return result;
+  }
+
+  /// Get file extension for audio format
+  String _getFileExtension(String format) {
+    switch (format.toLowerCase()) {
+      case 'mp3':
+        return 'mp3';
+      case 'wav':
+        return 'wav';
+      case 'pcm16':
+      case 'pcm':
+        return 'wav'; // We'll wrap it with WAV header
+      case 'aac':
+        return 'aac';
+      case 'ogg':
+        return 'ogg';
+      default:
+        return 'mp3';
     }
   }
 
@@ -455,4 +578,19 @@ class VoiceModeManager extends ChangeNotifier {
     _wakeWordSoundPlayer.dispose();
     super.dispose();
   }
+}
+
+/// Helper class for audio chunks with metadata
+class _AudioChunk {
+  final String data;
+  final int sequence;
+  final String format;
+  final int sampleRate;
+
+  _AudioChunk({
+    required this.data,
+    required this.sequence,
+    required this.format,
+    required this.sampleRate,
+  });
 }
