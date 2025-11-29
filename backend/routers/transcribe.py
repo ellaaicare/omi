@@ -918,34 +918,14 @@ async def _listen(
                 await websocket.send_json(updates_segments)
 
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
-                # Fire-and-forget call to Ella's realtime scanner (ALWAYS runs, not gated by PUSHER)
-                try:
-                    import requests
-
-                    # Convert transcript segments to format Ella expects
-                    scanner_segments = [
-                        {
-                            "speaker": s.speaker or f"SPEAKER_{s.speaker_id}",
-                            "text": s.text,
-                            "stt_source": s.source  # STT provider: "edge_asr", "deepgram", "soniox", etc.
-                        }
-                        for s in transcript_segments
-                    ]
-
-                    if scanner_segments:
-                        resp = requests.post(
-                            "https://n8n.ella-ai-care.com/webhook/scanner-agent",
-                            json={
-                                "uid": uid,
-                                "conversation_id": str(current_conversation_id),  # For n8n first-escalation tracking
-                                "device_type": conversation.source.value if conversation.source else "omi",
-                                "segments": scanner_segments
-                            },
-                            timeout=2
-                        )
-                        print(f"📡 Scanner: {len(scanner_segments)} segments → {resp.status_code}", flush=True)
-                except Exception as e:
-                    print(f"📡 Scanner error: {e}", flush=True)
+                # Fire-and-forget call to Ella's realtime scanner (modularized in utils/ella/)
+                from utils.ella import send_to_scanner
+                send_to_scanner(
+                    uid=uid,
+                    conversation_id=str(current_conversation_id),
+                    segments=[s.dict() for s in transcript_segments],
+                    device_type=conversation.source.value if conversation.source else "omi"
+                )
 
                 # Pusher webhook (optional, requires HOSTED_PUSHER_API_URL)
                 if transcript_send is not None and user_has_credits:
