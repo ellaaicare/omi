@@ -595,8 +595,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                 // Central Record Button - Only show when no OMI device is connected
                                 if (!isOmiDeviceConnected)
                                   Positioned(
-                                    left: MediaQuery.of(context).size.width / 2 - 90, // Shifted left to make room for voice button
-                                    bottom: 40, // Position it to protrude above the taller navbar (90px height)
+                                    left: MediaQuery.of(context).size.width / 2 - 75, // Shifted left to make room for voice button
+                                    bottom: 60, // Position it to protrude above the taller navbar (90px height)
                                     child: Consumer<CaptureProvider>(
                                       builder: (context, captureProvider, child) {
                                         bool isRecording = captureProvider.recordingState == RecordingState.record;
@@ -609,8 +609,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                             await _handleRecordButtonPress(context, captureProvider);
                                           },
                                           child: Container(
-                                            width: 80,
-                                            height: 80,
+                                            width: 66,
+                                            height: 66,
                                             decoration: BoxDecoration(
                                               shape: BoxShape.circle,
                                               color: isRecording ? Colors.red : Colors.deepPurple,
@@ -637,9 +637,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                 // Voice Mode Button - "Talk to Ella" - next to the mic button
                                 if (!isOmiDeviceConnected)
                                   Positioned(
-                                    left: MediaQuery.of(context).size.width / 2 + 10, // Position right of mic button
-                                    bottom: 40,
-                                    child: const VoiceModeButton(size: 80, showLabel: false),
+                                    left: MediaQuery.of(context).size.width / 2 + 5, // Position right of mic button
+                                    bottom: 60,
+                                    child: const VoiceModeButton(size: 66, showLabel: false),
                                   ),
                                 // Remove the floating chat button - moving it to app bar
                               ],
