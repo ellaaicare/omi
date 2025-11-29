@@ -279,16 +279,19 @@ class VoiceResponseCompleteEvent extends MessageEvent {
 class VoiceModeEndedEvent extends MessageEvent {
   final String reason;
   final int sessionDurationSeconds;
+  final int turnCount;
 
   VoiceModeEndedEvent({
     required this.reason,
     required this.sessionDurationSeconds,
+    required this.turnCount,
   }) : super(eventType: 'voice_mode_ended');
 
   factory VoiceModeEndedEvent.fromJson(Map<String, dynamic> json) {
     return VoiceModeEndedEvent(
       reason: json['reason'] ?? 'unknown',
       sessionDurationSeconds: json['session_duration_seconds'] ?? 0,
+      turnCount: json['turn_count'] ?? 0,
     );
   }
 }

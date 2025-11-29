@@ -65,7 +65,6 @@ class VoiceModeManager extends ChangeNotifier {
   final AudioPlayer _audioPlayer = AudioPlayer();
   final List<_AudioChunk> _audioQueue = [];
   bool _isPlayingQueue = false;
-  int _audioSequence = 0;
 
   // Wake word sound
   final AudioPlayer _wakeWordSoundPlayer = AudioPlayer();
@@ -110,7 +109,6 @@ class VoiceModeManager extends ChangeNotifier {
     _state = VoiceModeState.listening;
     _currentTranscript = '';
     _responseText = '';
-    _audioSequence = 0;
     _audioQueue.clear();
     notifyListeners();
 
@@ -206,14 +204,24 @@ class VoiceModeManager extends ChangeNotifier {
   }
 
   /// Handle user speech final (end of utterance)
+  /// This sends the transcribed text to the backend for Ella to respond
   void onUserSpeechFinal(String transcript) {
     if (_state != VoiceModeState.listening) return;
+    if (transcript.trim().isEmpty) return;
 
     _currentTranscript = transcript;
-    _state = VoiceModeState.transcribing;
+    _state = VoiceModeState.thinking;  // Move to thinking state while waiting for Ella
     notifyListeners();
 
-    // Reset silence timer
+    // Send utterance to backend
+    _sendEvent({
+      'event': 'voice_utterance',
+      'text': transcript,
+    });
+
+    debugPrint('VoiceModeManager: Sent user utterance: "$transcript"');
+
+    // Cancel silence timer since we're done listening for this turn
     _silenceTimer?.cancel();
   }
 
@@ -232,17 +240,10 @@ class VoiceModeManager extends ChangeNotifier {
   void _resetSilenceTimer() {
     _silenceTimer?.cancel();
     _silenceTimer = Timer(silenceTimeout, () {
-      debugPrint('VoiceModeManager: Silence timeout - ending utterance');
+      debugPrint('VoiceModeManager: Silence timeout - sending utterance');
       if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
-        // Signal end of user speech
-        _sendEvent({
-          'event': 'voice_audio',
-          'data': '',  // Empty = end marker
-          'sequence': _audioSequence++,
-          'is_final': true,
-        });
-        _state = VoiceModeState.transcribing;
-        notifyListeners();
+        // Send the accumulated transcript as an utterance
+        onUserSpeechFinal(_currentTranscript);
       }
     });
   }
