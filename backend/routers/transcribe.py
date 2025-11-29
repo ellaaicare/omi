@@ -154,6 +154,11 @@ async def _listen(
     seconds_to_add = None
     current_conversation_id = None
 
+    # ====== VOICE MODE (Ella Integration) ======
+    # Modular voice handler - all Ella-specific code in utils/voice/
+    from utils.voice import VoiceModeHandler, VOICE_CONFIG
+    voice_handler = VoiceModeHandler(websocket, uid) if VOICE_CONFIG.voice_mode_enabled else None
+
     async def _record_usage_periodically():
         nonlocal websocket_active, last_usage_record_timestamp, words_transcribed_since_last_record
         nonlocal last_audio_received_time, last_transcript_time, user_has_credits
@@ -1075,6 +1080,13 @@ async def _listen(
                 elif message.get("text") is not None:
                     try:
                         json_data = json.loads(message.get("text"))
+
+                        # ====== VOICE MODE (Ella Integration) ======
+                        # Handle voice events via modular handler
+                        if voice_handler and json_data.get('event', '').startswith('voice_'):
+                            await voice_handler.handle_event(json_data)
+                            continue  # Skip normal processing for voice events
+
                         if json_data.get('type') == 'image_chunk':
                             await handle_image_chunk(
                                 uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers

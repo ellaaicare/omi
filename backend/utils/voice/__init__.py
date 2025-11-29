@@ -8,11 +8,13 @@
 #   - session.py: Voice session state machine
 #   - llm.py: Groq streaming client
 #   - tts.py: TTS streaming (OpenAI, modular for ElevenLabs)
+#   - handler.py: WebSocket handler for integration
 
 from .config import VOICE_CONFIG
 from .session import VoiceSession, VoiceState
 from .llm import stream_llm_response, get_voice_config
 from .tts import stream_tts
+from .handler import VoiceModeHandler
 
 __all__ = [
     'VOICE_CONFIG',
@@ -21,4 +23,5 @@ __all__ = [
     'stream_llm_response',
     'get_voice_config',
     'stream_tts',
+    'VoiceModeHandler',
 ]
