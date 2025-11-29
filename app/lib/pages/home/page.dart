@@ -31,6 +31,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
+import 'package:omi/widgets/voice_mode_button.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -594,7 +595,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                 // Central Record Button - Only show when no OMI device is connected
                                 if (!isOmiDeviceConnected)
                                   Positioned(
-                                    left: MediaQuery.of(context).size.width / 2 - 40,
+                                    left: MediaQuery.of(context).size.width / 2 - 90, // Shifted left to make room for voice button
                                     bottom: 40, // Position it to protrude above the taller navbar (90px height)
                                     child: Consumer<CaptureProvider>(
                                       builder: (context, captureProvider, child) {
@@ -632,6 +633,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                         );
                                       },
                                     ),
+                                  ),
+                                // Voice Mode Button - "Talk to Ella" - next to the mic button
+                                if (!isOmiDeviceConnected)
+                                  Positioned(
+                                    left: MediaQuery.of(context).size.width / 2 + 10, // Position right of mic button
+                                    bottom: 40,
+                                    child: const VoiceModeButton(size: 80, showLabel: false),
                                   ),
                                 // Remove the floating chat button - moving it to app bar
                               ],

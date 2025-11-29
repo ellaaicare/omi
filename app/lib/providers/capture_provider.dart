@@ -25,6 +25,7 @@ import 'package:omi/services/sockets/transcription_connection.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/services/asr/on_device_asr_service.dart' as asr;
 import 'package:omi/services/asr/transcript_sender_service.dart';
+import 'package:omi/services/voice_mode/voice_mode_manager.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -275,6 +276,16 @@ class CaptureProvider extends ChangeNotifier
     }
     _socket?.subscribe(this, this);
     _transcriptServiceReady = true;
+
+    // Connect VoiceModeManager to WebSocket for sending voice events
+    VoiceModeManager().onSendWebSocketEvent = (event) {
+      if (_socket?.state == SocketServiceState.connected) {
+        _socket?.send(jsonEncode(event));
+        debugPrint('📤 [CaptureProvider] Sent voice mode event: ${event['event']}');
+      } else {
+        debugPrint('⚠️ [CaptureProvider] WebSocket not connected, voice event not sent');
+      }
+    };
 
     _loadInProgressConversation();
 
@@ -733,6 +744,14 @@ class CaptureProvider extends ChangeNotifier
 
     _asrTranscriptSubscription = _onDeviceASR!.transcriptStream.listen((segment) async {
       debugPrint('📝 [CaptureProvider] ASR: "${segment.text}" (final: ${segment.isFinal})');
+
+      // Check for wake word to activate voice mode
+      // This runs heuristic detection on every transcript segment
+      if (VoiceModeManager().checkForWakeWord(segment.text)) {
+        debugPrint('🎤 [CaptureProvider] Wake word detected! Voice mode will activate.');
+        // Wake word detected - voice mode manager will handle activation
+        // Continue normal processing in case wake word is part of longer phrase
+      }
 
       // Track longest partial for fallback (iOS sometimes returns empty final even with valid partials)
       if (!segment.isFinal && segment.text.trim().isNotEmpty) {
@@ -1380,6 +1399,64 @@ class CaptureProvider extends ChangeNotifier
         photos[photoIndex].discarded = discarded;
         notifyListeners();
       }
+      return;
+    }
+
+    // Voice Mode Events - route to VoiceModeManager
+    if (event is VoiceModeActiveEvent) {
+      VoiceModeManager().handleVoiceModeActive({
+        'session_id': event.sessionId,
+        'timeout_seconds': event.timeoutSeconds,
+      });
+      return;
+    }
+
+    if (event is VoiceTranscriptionEvent) {
+      VoiceModeManager().handleVoiceTranscription({
+        'text': event.text,
+        'is_final': event.isFinal,
+      });
+      return;
+    }
+
+    if (event is VoiceStatusEvent) {
+      VoiceModeManager().handleVoiceStatus({
+        'status': event.status,
+      });
+      return;
+    }
+
+    if (event is VoiceResponseAudioEvent) {
+      VoiceModeManager().handleVoiceResponseAudio({
+        'data': event.data,
+        'sequence': event.sequence,
+        'format': event.format,
+        'sample_rate': event.sampleRate,
+      });
+      return;
+    }
+
+    if (event is VoiceResponseCompleteEvent) {
+      VoiceModeManager().handleVoiceResponseComplete({
+        'text': event.text,
+        'duration_ms': event.durationMs,
+      });
+      return;
+    }
+
+    if (event is VoiceModeEndedEvent) {
+      VoiceModeManager().handleVoiceModeEnded({
+        'reason': event.reason,
+        'session_duration_seconds': event.sessionDurationSeconds,
+      });
+      return;
+    }
+
+    if (event is VoiceErrorEvent) {
+      VoiceModeManager().handleVoiceError({
+        'code': event.code,
+        'message': event.message,
+      });
       return;
     }
   }

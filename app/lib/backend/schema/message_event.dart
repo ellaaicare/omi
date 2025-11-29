@@ -24,6 +24,21 @@ abstract class MessageEvent {
         return PhotoDescribedEvent.fromJson(json);
       case 'speaker_label_suggestion':
         return SpeakerLabelSuggestionEvent.fromJson(json);
+      // Voice Mode Events
+      case 'voice_mode_active':
+        return VoiceModeActiveEvent.fromJson(json);
+      case 'voice_transcription':
+        return VoiceTranscriptionEvent.fromJson(json);
+      case 'voice_status':
+        return VoiceStatusEvent.fromJson(json);
+      case 'voice_response_audio':
+        return VoiceResponseAudioEvent.fromJson(json);
+      case 'voice_response_complete':
+        return VoiceResponseCompleteEvent.fromJson(json);
+      case 'voice_mode_ended':
+        return VoiceModeEndedEvent.fromJson(json);
+      case 'voice_error':
+        return VoiceErrorEvent.fromJson(json);
       default:
         // Return a generic event or throw an error if the type is unknown
         return UnknownEvent(eventType: json['type'] ?? 'unknown');
@@ -161,6 +176,137 @@ class SpeakerLabelSuggestionEvent extends MessageEvent {
       personId: '',
       personName: '',
       segmentId: '',
+    );
+  }
+}
+
+// ============================================
+// Voice Mode Events
+// ============================================
+
+/// Voice mode session activated by backend
+class VoiceModeActiveEvent extends MessageEvent {
+  final String sessionId;
+  final int timeoutSeconds;
+
+  VoiceModeActiveEvent({
+    required this.sessionId,
+    required this.timeoutSeconds,
+  }) : super(eventType: 'voice_mode_active');
+
+  factory VoiceModeActiveEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceModeActiveEvent(
+      sessionId: json['session_id'] ?? '',
+      timeoutSeconds: json['timeout_seconds'] ?? 120,
+    );
+  }
+}
+
+/// Transcription update during voice mode
+class VoiceTranscriptionEvent extends MessageEvent {
+  final String text;
+  final bool isFinal;
+
+  VoiceTranscriptionEvent({
+    required this.text,
+    required this.isFinal,
+  }) : super(eventType: 'voice_transcription');
+
+  factory VoiceTranscriptionEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceTranscriptionEvent(
+      text: json['text'] ?? '',
+      isFinal: json['is_final'] ?? false,
+    );
+  }
+}
+
+/// Voice mode status update (listening, thinking, speaking)
+class VoiceStatusEvent extends MessageEvent {
+  final String status;
+
+  VoiceStatusEvent({required this.status}) : super(eventType: 'voice_status');
+
+  factory VoiceStatusEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceStatusEvent(
+      status: json['status'] ?? '',
+    );
+  }
+}
+
+/// Streaming audio response chunk from backend
+class VoiceResponseAudioEvent extends MessageEvent {
+  final String data;  // Base64-encoded audio
+  final int sequence;
+  final String format;
+  final int sampleRate;
+
+  VoiceResponseAudioEvent({
+    required this.data,
+    required this.sequence,
+    required this.format,
+    required this.sampleRate,
+  }) : super(eventType: 'voice_response_audio');
+
+  factory VoiceResponseAudioEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceResponseAudioEvent(
+      data: json['data'] ?? '',
+      sequence: json['sequence'] ?? 0,
+      format: json['format'] ?? 'pcm16',
+      sampleRate: json['sample_rate'] ?? 24000,
+    );
+  }
+}
+
+/// Voice response complete (full text available)
+class VoiceResponseCompleteEvent extends MessageEvent {
+  final String text;
+  final int durationMs;
+
+  VoiceResponseCompleteEvent({
+    required this.text,
+    required this.durationMs,
+  }) : super(eventType: 'voice_response_complete');
+
+  factory VoiceResponseCompleteEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceResponseCompleteEvent(
+      text: json['text'] ?? '',
+      durationMs: json['duration_ms'] ?? 0,
+    );
+  }
+}
+
+/// Voice mode session ended
+class VoiceModeEndedEvent extends MessageEvent {
+  final String reason;
+  final int sessionDurationSeconds;
+
+  VoiceModeEndedEvent({
+    required this.reason,
+    required this.sessionDurationSeconds,
+  }) : super(eventType: 'voice_mode_ended');
+
+  factory VoiceModeEndedEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceModeEndedEvent(
+      reason: json['reason'] ?? 'unknown',
+      sessionDurationSeconds: json['session_duration_seconds'] ?? 0,
+    );
+  }
+}
+
+/// Voice mode error
+class VoiceErrorEvent extends MessageEvent {
+  final String code;
+  final String message;
+
+  VoiceErrorEvent({
+    required this.code,
+    required this.message,
+  }) : super(eventType: 'voice_error');
+
+  factory VoiceErrorEvent.fromJson(Map<String, dynamic> json) {
+    return VoiceErrorEvent(
+      code: json['code'] ?? 'unknown',
+      message: json['message'] ?? 'Unknown error',
     );
   }
 }
