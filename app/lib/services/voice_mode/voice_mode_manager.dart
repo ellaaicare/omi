@@ -82,9 +82,14 @@ class VoiceModeManager extends ChangeNotifier {
 
   // Timeout handling
   Timer? _silenceTimer;
-  static const Duration silenceTimeout = Duration(seconds: 3);
+  static const Duration silenceTimeout = Duration(milliseconds: 1500); // 1.5s of silence = end of utterance
   static const Duration sessionTimeout = Duration(seconds: 120);
   Timer? _sessionTimer;
+
+  // Max utterance timer - force send after 15s of continuous speech
+  Timer? _maxUtteranceTimer;
+  static const Duration maxUtteranceDuration = Duration(seconds: 15);
+  DateTime? _utteranceStartTime;
 
   /// Initialize voice mode manager
   Future<void> initialize() async {
@@ -154,6 +159,8 @@ class VoiceModeManager extends ChangeNotifier {
   Future<void> _cleanup() async {
     _silenceTimer?.cancel();
     _sessionTimer?.cancel();
+    _maxUtteranceTimer?.cancel();
+    _utteranceStartTime = null;
     _audioQueue.clear();
     _isPlayingQueue = false;
     _deferredSessionEnd = false;
@@ -231,8 +238,10 @@ class VoiceModeManager extends ChangeNotifier {
 
     debugPrint('VoiceModeManager: Sent user utterance: "$transcript"');
 
-    // Cancel silence timer since we're done listening for this turn
+    // Cancel timers since we're done listening for this turn
     _silenceTimer?.cancel();
+    _maxUtteranceTimer?.cancel();
+    _utteranceStartTime = null;
   }
 
   /// Handle interim transcript update
@@ -252,13 +261,32 @@ class VoiceModeManager extends ChangeNotifier {
       debugPrint('🎤 VoiceModeManager: Speech detected, resetting silence timer');
       _lastTranscriptText = transcript;
       _resetSilenceTimer();
+
+      // Start max utterance timer on first speech
+      if (_utteranceStartTime == null) {
+        _utteranceStartTime = DateTime.now();
+        _startMaxUtteranceTimer();
+      }
     }
+  }
+
+  /// Start max utterance timer - force send after continuous speech
+  void _startMaxUtteranceTimer() {
+    _maxUtteranceTimer?.cancel();
+    debugPrint('⏱️ VoiceModeManager: Starting ${maxUtteranceDuration.inSeconds}s max utterance timer');
+    _maxUtteranceTimer = Timer(maxUtteranceDuration, () {
+      debugPrint('⏱️ VoiceModeManager: Max utterance timer fired! Forcing send after ${maxUtteranceDuration.inSeconds}s');
+      if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
+        debugPrint('📤 VoiceModeManager: Force sending utterance (max duration reached)');
+        onUserSpeechFinal(_currentTranscript);
+      }
+    });
   }
 
   /// Reset silence timer
   void _resetSilenceTimer() {
     _silenceTimer?.cancel();
-    debugPrint('⏱️ VoiceModeManager: Starting ${silenceTimeout.inSeconds}s silence timer');
+    debugPrint('⏱️ VoiceModeManager: Starting ${silenceTimeout.inMilliseconds}ms silence timer');
     _silenceTimer = Timer(silenceTimeout, () {
       debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? _currentTranscript.substring(0, 50) + "..." : _currentTranscript}"');
       if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
