@@ -45,6 +45,10 @@ class PureSocket implements IPureSocket {
   bool _isConnected = ConnectivityService().isConnected;
   Timer? _internetLostDelayTimer;
 
+  /// OPTIMIZATION: Message queue to prevent data loss during reconnection
+  final List<dynamic> _messageQueue = [];
+  static const int _maxQueueSize = 100;
+
   WebSocketChannel? _channel;
   WebSocketChannel get channel {
     if (_channel == null) {
@@ -187,11 +191,39 @@ class PureSocket implements IPureSocket {
   @override
   void onConnected() {
     _listener?.onConnected();
+    // OPTIMIZATION: Flush any queued messages after reconnection
+    _flushMessageQueue();
   }
 
   @override
   void send(message) {
+    // OPTIMIZATION: Queue messages when not connected to prevent data loss
+    if (_status != PureSocketStatus.connected || _channel == null) {
+      if (_messageQueue.length < _maxQueueSize) {
+        _messageQueue.add(message);
+        debugPrint('[Socket] Message queued (queue size: ${_messageQueue.length})');
+      } else {
+        debugPrint('[Socket] Message queue full, dropping oldest message');
+        _messageQueue.removeAt(0);
+        _messageQueue.add(message);
+      }
+      return;
+    }
     _channel?.sink.add(message);
+  }
+
+  /// Flush queued messages after reconnection
+  void _flushMessageQueue() {
+    if (_messageQueue.isEmpty) return;
+    if (_status != PureSocketStatus.connected || _channel == null) return;
+
+    debugPrint('[Socket] Flushing ${_messageQueue.length} queued messages');
+    final messages = List<dynamic>.from(_messageQueue);
+    _messageQueue.clear();
+
+    for (final message in messages) {
+      _channel?.sink.add(message);
+    }
   }
 
   void _reconnect() async {

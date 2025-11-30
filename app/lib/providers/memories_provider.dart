@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/backend/http/api/memories.dart';
+import 'package:omi/backend/http/cache/response_cache.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/memory.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -8,6 +9,7 @@ import 'package:tuple/tuple.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 class MemoriesProvider extends ChangeNotifier {
   List<Memory> _memories = [];
@@ -18,6 +20,10 @@ class MemoriesProvider extends ChangeNotifier {
   bool _excludeInteresting = false;
   List<Tuple2<MemoryCategory, int>> categories = [];
   MemoryCategory? selectedCategory;
+
+  /// OPTIMIZATION: Cache key for memories
+  static const String _memoriesCacheKey = 'memories_list';
+  static const Duration _memoriesCacheTtl = Duration(minutes: 10);
 
   List<Memory> get memories => _memories;
   List<Memory> get unreviewed => _unreviewed;
@@ -80,18 +86,61 @@ class MemoriesProvider extends ChangeNotifier {
   }
 
   Future<void> init() async {
-    await loadMemories();
+    // OPTIMIZATION: Cache-first loading - show cached data instantly
+    final cachedMemories = await ResponseCache.instance.get<List<Memory>>(
+      _memoriesCacheKey,
+      decoder: (data) {
+        if (data is List) {
+          return data.map((e) => Memory.fromJson(e as Map<String, dynamic>)).toList();
+        }
+        return <Memory>[];
+      },
+    );
+
+    if (cachedMemories != null && cachedMemories.isNotEmpty) {
+      _memories = cachedMemories;
+      _loading = false;
+      _setCategories();
+      debugPrint('✅ [MemoriesProvider] Loaded ${_memories.length} memories from cache');
+    }
+
+    // OPTIMIZATION: Defer API call to after UI is ready
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      loadMemories();
+    });
   }
 
   Future<void> loadMemories() async {
-    _loading = true;
-    notifyListeners();
+    // Only show loading indicator if no cached data
+    if (_memories.isEmpty) {
+      _loading = true;
+      notifyListeners();
+    }
 
-    _memories = await getMemories();
-    _unreviewed = _memories
-        .where(
-            (memory) => !memory.reviewed && memory.createdAt.isAfter(DateTime.now().subtract(const Duration(days: 1))))
-        .toList();
+    try {
+      final freshMemories = await RequestDeduplicator.instance.deduplicate(
+        'getMemories',
+        () => getMemories(),
+      );
+
+      _memories = freshMemories;
+      _unreviewed = _memories
+          .where(
+              (memory) => !memory.reviewed && memory.createdAt.isAfter(DateTime.now().subtract(const Duration(days: 1))))
+          .toList();
+
+      // OPTIMIZATION: Cache the fresh data
+      await ResponseCache.instance.set<List<Memory>>(
+        _memoriesCacheKey,
+        _memories,
+        ttl: _memoriesCacheTtl,
+        encoder: (memories) => memories.map((m) => m.toJson()).toList(),
+      );
+
+      debugPrint('✅ [MemoriesProvider] Loaded ${_memories.length} memories from API and cached');
+    } catch (e) {
+      debugPrint('❌ [MemoriesProvider] Failed to load memories: $e');
+    }
 
     _loading = false;
     _setCategories();

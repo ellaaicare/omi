@@ -63,6 +63,12 @@ import 'package:window_manager/window_manager.dart';
 /// Global flag to track if Opus codec has been initialized
 bool _opusInitialized = false;
 
+/// Performance optimization flags to prevent duplicate operations
+bool _notificationTokenRegistered = false;
+DateTime? _lastResumeRegistration;
+DateTime? _startupTime;
+const Duration _resumeRegistrationCooldown = Duration(minutes: 5);
+
 /// Lazy initialize Opus codec on first use
 Future<void> ensureOpusInitialized() async {
   if (_opusInitialized) return;
@@ -265,9 +271,9 @@ Future<void> _ensureFirebaseReady() async {
   if (PlatformService.isDesktop) return;
 
   try {
-    // Give Firebase Messaging time to fully initialize
-    // This is critical for proper APNS token → FCM token flow
-    await Future.delayed(const Duration(milliseconds: 100));
+    // OPTIMIZATION: Removed artificial 100ms delay
+    // Firebase readiness is ensured by the initialization flow
+    // The delay was causing unnecessary startup latency
 
     // Verify Firebase Messaging is accessible
     // This will throw if Firebase isn't ready
@@ -282,6 +288,9 @@ Future<void> _ensureFirebaseReady() async {
 /// NOTE: ServiceManager.start() is now called in main flow before NotificationService
 /// to ensure proper notification initialization
 void _startServicesInBackground() async {
+  _startupTime = DateTime.now();
+  debugPrint('⏱️ [STARTUP] Background services initialization started');
+
   try {
     // Initialize auth and identify user in analytics (non-blocking)
     final isAuth = (await AuthService.instance.getIdToken()) != null;
@@ -295,17 +304,23 @@ void _startServicesInBackground() async {
 
       // CRITICAL: Auto-register FCM token after user authentication
       // This ensures push notifications work after app reinstalls/new builds
-      // Delay slightly to ensure NotificationService is fully initialized
-      Future.delayed(const Duration(seconds: 2), () {
-        debugPrint('🔔 [AUTO-REGISTER] Starting automatic FCM token registration...');
-        NotificationService.instance.saveNotificationToken();
-      });
+      // OPTIMIZATION: Use flag to prevent duplicate registrations
+      if (!_notificationTokenRegistered) {
+        Future.delayed(const Duration(seconds: 2), () {
+          if (!_notificationTokenRegistered) {
+            _notificationTokenRegistered = true;
+            debugPrint('🔔 [AUTO-REGISTER] Starting automatic FCM token registration...');
+            NotificationService.instance.saveNotificationToken();
+          }
+        });
+      }
     }
 
     // Initialize API client with certificate pinning in background
     await ApiClient.init();
 
-    debugPrint('✅ Background services initialized (auth: $isAuth)');
+    final elapsed = DateTime.now().difference(_startupTime!).inMilliseconds;
+    debugPrint('✅ Background services initialized (auth: $isAuth) in ${elapsed}ms');
   } catch (e) {
     debugPrint('⚠️ Error initializing background services: $e');
   }
@@ -391,9 +406,21 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // CRITICAL: Re-register FCM token when app resumes
     // This handles cases where token changed while app was in background
     // Also ensures new Xcode builds auto-register without manual button press
+    //
+    // OPTIMIZATION: Rate-limit to prevent excessive re-registrations
+    // Only re-register if more than 5 minutes have passed since last registration
     if (FirebaseAuth.instance.currentUser != null) {
-      debugPrint('🔔 [AUTO-REGISTER] App resumed - re-registering FCM token...');
-      NotificationService.instance.saveNotificationToken();
+      final now = DateTime.now();
+      final canRegister = _lastResumeRegistration == null ||
+          now.difference(_lastResumeRegistration!) > _resumeRegistrationCooldown;
+
+      if (canRegister) {
+        _lastResumeRegistration = now;
+        debugPrint('🔔 [AUTO-REGISTER] App resumed - re-registering FCM token...');
+        NotificationService.instance.saveNotificationToken();
+      } else {
+        debugPrint('🔔 [AUTO-REGISTER] App resumed - skipping (cooldown active)');
+      }
     }
   }
 
