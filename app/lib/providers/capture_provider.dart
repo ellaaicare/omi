@@ -753,6 +753,22 @@ class CaptureProvider extends ChangeNotifier
         // Continue normal processing in case wake word is part of longer phrase
       }
 
+      // ===== VOICE MODE TRANSCRIPT ROUTING =====
+      // When voice mode is active, route transcripts to VoiceModeManager
+      if (VoiceModeManager().isActive) {
+        if (!segment.isFinal && segment.text.trim().isNotEmpty) {
+          // Update live transcript in VoiceModeManager for UI
+          VoiceModeManager().onTranscriptUpdate(segment.text);
+        } else if (segment.isFinal && segment.text.trim().isNotEmpty) {
+          // Final transcript - send to backend via VoiceModeManager
+          debugPrint('🎤 [CaptureProvider] Voice mode final transcript: "${segment.text}"');
+          VoiceModeManager().onUserSpeechFinal(segment.text);
+        }
+        // During voice mode, don't process for regular memories
+        // The voice mode will handle the conversation flow
+        return;
+      }
+
       // Track longest partial for fallback (iOS sometimes returns empty final even with valid partials)
       if (!segment.isFinal && segment.text.trim().isNotEmpty) {
         if (segment.text.length > _longestPartialText.length) {

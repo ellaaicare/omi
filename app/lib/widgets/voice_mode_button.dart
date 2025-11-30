@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:provider/provider.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/voice_mode/voice_mode_manager.dart';
+import 'package:omi/utils/enums.dart';
 
 /// Voice Mode Button Widget
 ///
 /// A circular button to start/stop voice conversations with Ella AI.
 /// Shows different states: inactive, listening, thinking, speaking.
+///
+/// When pressed:
+/// - Starts phone mic recording via CaptureProvider
+/// - Routes transcripts to VoiceModeManager for voice conversation
+/// - Connects to WebSocket for backend voice events
 class VoiceModeButton extends StatelessWidget {
   final double size;
   final bool showLabel;
@@ -32,7 +40,7 @@ class VoiceModeButton extends StatelessWidget {
             GestureDetector(
               onTap: () async {
                 HapticFeedback.mediumImpact();
-                await voiceMode.toggle();
+                await _handleVoiceModeToggle(context, voiceMode);
               },
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
@@ -147,6 +155,36 @@ class VoiceModeButton extends StatelessWidget {
         return 'Thinking...';
       case VoiceModeState.speaking:
         return 'Speaking...';
+    }
+  }
+
+  /// Handle voice mode toggle - starts/stops recording and voice mode
+  Future<void> _handleVoiceModeToggle(BuildContext context, VoiceModeManager voiceMode) async {
+    final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+    final recordingState = captureProvider.recordingState;
+
+    if (voiceMode.isActive) {
+      // Stop voice mode
+      debugPrint('🎙️ [VoiceModeButton] Stopping voice mode');
+      await voiceMode.stop();
+
+      // Stop recording if it was started for voice mode
+      if (recordingState == RecordingState.record) {
+        await captureProvider.stopStreamRecording();
+      }
+    } else {
+      // Start voice mode
+      debugPrint('🎙️ [VoiceModeButton] Starting voice mode');
+
+      // If not already recording, start recording
+      // This will connect WebSocket and set up the callback
+      if (recordingState != RecordingState.record && recordingState != RecordingState.initialising) {
+        debugPrint('🎙️ [VoiceModeButton] Starting mic recording for voice mode');
+        await captureProvider.streamRecording();
+      }
+
+      // Start voice mode (this will send voice_mode_start to backend)
+      await voiceMode.startFromButton();
     }
   }
 }
