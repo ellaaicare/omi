@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:omi/services/asr/on_device_asr_service.dart' as asr;
 
 /// Voice Mode States
 enum VoiceModeState {
@@ -376,6 +377,18 @@ class VoiceModeManager extends ChangeNotifier {
   Future<void> _playAudioQueue() async {
     _isPlayingQueue = true;
 
+    // CRITICAL: Stop ASR before playing audio to avoid iOS audio session conflict
+    // The error "'!pri'" occurs when trying to play while ASR is recording
+    debugPrint('🔊 VoiceModeManager: Stopping ASR before audio playback...');
+    try {
+      await asr.OnDeviceASRService().stopTranscription();
+      // Give iOS time to release audio session
+      await Future.delayed(const Duration(milliseconds: 100));
+      debugPrint('🔊 VoiceModeManager: ASR stopped, audio session should be available');
+    } catch (e) {
+      debugPrint('🔊 VoiceModeManager: Failed to stop ASR: $e');
+    }
+
     while (_audioQueue.isNotEmpty) {
       final chunk = _audioQueue.removeAt(0);
 
@@ -392,6 +405,16 @@ class VoiceModeManager extends ChangeNotifier {
     if (_state == VoiceModeState.speaking) {
       _state = VoiceModeState.listening;
       notifyListeners();
+
+      // CRITICAL: Resume ASR for next user utterance
+      debugPrint('🔊 VoiceModeManager: Restarting ASR after audio playback...');
+      try {
+        await asr.OnDeviceASRService().startTranscription();
+        debugPrint('🔊 VoiceModeManager: ASR restarted, ready for next utterance');
+      } catch (e) {
+        debugPrint('🔊 VoiceModeManager: Failed to restart ASR: $e');
+      }
+
       _resetSilenceTimer();
     }
   }
