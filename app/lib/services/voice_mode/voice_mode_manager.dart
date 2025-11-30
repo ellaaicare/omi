@@ -70,6 +70,10 @@ class VoiceModeManager extends ChangeNotifier {
   // Deferred session end - wait for audio to finish before cleanup
   bool _deferredSessionEnd = false;
 
+  // Track last transcript text to detect actual speech changes
+  // (on-device ASR keeps sending keep-alive transcripts even during silence)
+  String _lastTranscriptText = '';
+
   // Wake word sound
   final AudioPlayer _wakeWordSoundPlayer = AudioPlayer();
 
@@ -153,6 +157,7 @@ class VoiceModeManager extends ChangeNotifier {
     _audioQueue.clear();
     _isPlayingQueue = false;
     _deferredSessionEnd = false;
+    _lastTranscriptText = '';
 
     await _audioPlayer.stop();
 
@@ -237,18 +242,31 @@ class VoiceModeManager extends ChangeNotifier {
     _currentTranscript = transcript;
     notifyListeners();
 
-    // Reset silence timer on activity
-    _resetSilenceTimer();
+    // Only reset silence timer if the transcript TEXT actually changed
+    // On-device ASR sends keep-alive transcripts even during silence,
+    // so we need to detect when speech actually stops (text unchanged)
+    final normalizedNew = transcript.trim().toLowerCase();
+    final normalizedOld = _lastTranscriptText.trim().toLowerCase();
+
+    if (normalizedNew != normalizedOld && normalizedNew.isNotEmpty) {
+      debugPrint('🎤 VoiceModeManager: Speech detected, resetting silence timer');
+      _lastTranscriptText = transcript;
+      _resetSilenceTimer();
+    }
   }
 
   /// Reset silence timer
   void _resetSilenceTimer() {
     _silenceTimer?.cancel();
+    debugPrint('⏱️ VoiceModeManager: Starting ${silenceTimeout.inSeconds}s silence timer');
     _silenceTimer = Timer(silenceTimeout, () {
-      debugPrint('VoiceModeManager: Silence timeout - sending utterance');
+      debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? _currentTranscript.substring(0, 50) + "..." : _currentTranscript}"');
       if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
         // Send the accumulated transcript as an utterance
+        debugPrint('📤 VoiceModeManager: Sending utterance to backend');
         onUserSpeechFinal(_currentTranscript);
+      } else {
+        debugPrint('⏱️ VoiceModeManager: Silence timeout - not sending (state: $_state, empty: ${_currentTranscript.isEmpty})');
       }
     });
   }
