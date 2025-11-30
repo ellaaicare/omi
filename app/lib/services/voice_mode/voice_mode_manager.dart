@@ -67,6 +67,9 @@ class VoiceModeManager extends ChangeNotifier {
   final List<_AudioChunk> _audioQueue = [];
   bool _isPlayingQueue = false;
 
+  // Deferred session end - wait for audio to finish before cleanup
+  bool _deferredSessionEnd = false;
+
   // Wake word sound
   final AudioPlayer _wakeWordSoundPlayer = AudioPlayer();
 
@@ -149,6 +152,7 @@ class VoiceModeManager extends ChangeNotifier {
     _sessionTimer?.cancel();
     _audioQueue.clear();
     _isPlayingQueue = false;
+    _deferredSessionEnd = false;
 
     await _audioPlayer.stop();
 
@@ -354,6 +358,15 @@ class VoiceModeManager extends ChangeNotifier {
   void handleVoiceModeEnded(Map<String, dynamic> data) {
     final reason = data['reason'] as String? ?? 'unknown';
     debugPrint('VoiceModeManager: Backend ended session: $reason');
+
+    // CRITICAL: Don't cleanup while audio is still playing!
+    // This prevents the audio player from being interrupted mid-playback
+    if (_isPlayingQueue || _audioQueue.isNotEmpty) {
+      debugPrint('🔊 VoiceModeManager: Audio still playing, deferring session end until playback completes');
+      _deferredSessionEnd = true;
+      return;
+    }
+
     _cleanup();
   }
 
@@ -400,6 +413,14 @@ class VoiceModeManager extends ChangeNotifier {
     }
 
     _isPlayingQueue = false;
+
+    // Check if session end was deferred while audio was playing
+    if (_deferredSessionEnd) {
+      debugPrint('🔊 VoiceModeManager: Audio playback complete, now ending deferred session');
+      _deferredSessionEnd = false;
+      _cleanup();
+      return;
+    }
 
     // After all audio played, go back to listening (multi-turn) or end
     if (_state == VoiceModeState.speaking) {
