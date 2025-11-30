@@ -18,11 +18,13 @@ import 'package:omi/utils/enums.dart';
 class VoiceModeButton extends StatelessWidget {
   final double size;
   final bool showLabel;
+  final bool disabled;
 
   const VoiceModeButton({
     super.key,
     this.size = 64,
     this.showLabel = false,
+    this.disabled = false,
   });
 
   @override
@@ -34,44 +36,54 @@ class VoiceModeButton extends StatelessWidget {
         final state = voiceMode.state;
         final isActive = voiceMode.isActive;
 
+        // Use disabled state for visual styling
+        final isDisabled = disabled && !isActive; // Don't grey out if already active
+
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             GestureDetector(
               onTap: () async {
+                if (isDisabled) {
+                  debugPrint('🎙️ [VoiceModeButton] Button disabled - ambient recording active');
+                  return;
+                }
                 HapticFeedback.mediumImpact();
                 await _handleVoiceModeToggle(context, voiceMode);
               },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: size,
-                height: size,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _getBackgroundColor(state),
-                  border: Border.all(
-                    color: Colors.black,
-                    width: 4,
+              child: Opacity(
+                opacity: isDisabled ? 0.5 : 1.0,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: size,
+                  height: size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isDisabled ? Colors.grey.shade600 : _getBackgroundColor(state),
+                    border: Border.all(
+                      color: Colors.black,
+                      width: 4,
+                    ),
+                    boxShadow: isActive && !isDisabled
+                        ? [
+                            BoxShadow(
+                              color: _getGlowColor(state).withValues(alpha: 0.5),
+                              spreadRadius: 2,
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : null,
                   ),
-                  boxShadow: isActive
-                      ? [
-                          BoxShadow(
-                            color: _getGlowColor(state).withValues(alpha: 0.5),
-                            spreadRadius: 2,
-                            blurRadius: 8,
-                          ),
-                        ]
-                      : null,
+                  child: _buildIcon(state, isDisabled: isDisabled),
                 ),
-                child: _buildIcon(state),
               ),
             ),
             if (showLabel) ...[
               const SizedBox(height: 4),
               Text(
-                _getLabel(state),
+                isDisabled ? 'Recording...' : _getLabel(state),
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.8),
+                  color: Colors.white.withValues(alpha: isDisabled ? 0.5 : 0.8),
                   fontSize: 11,
                   fontWeight: FontWeight.w500,
                 ),
@@ -83,26 +95,28 @@ class VoiceModeButton extends StatelessWidget {
     );
   }
 
-  Widget _buildIcon(VoiceModeState state) {
+  Widget _buildIcon(VoiceModeState state, {bool isDisabled = false}) {
+    final iconColor = isDisabled ? Colors.white54 : Colors.white;
+
     switch (state) {
       case VoiceModeState.inactive:
         return Icon(
           FontAwesomeIcons.phone,
-          color: Colors.white,
+          color: iconColor,
           size: size * 0.35,
         );
       case VoiceModeState.listening:
         return _PulsingIcon(
           icon: FontAwesomeIcons.microphone,
-          color: Colors.white,
+          color: iconColor,
           size: size * 0.35,
         );
       case VoiceModeState.transcribing:
         return SizedBox(
           width: size * 0.4,
           height: size * 0.4,
-          child: const CircularProgressIndicator(
-            color: Colors.white,
+          child: CircularProgressIndicator(
+            color: iconColor,
             strokeWidth: 2,
           ),
         );
@@ -176,11 +190,15 @@ class VoiceModeButton extends StatelessWidget {
       // Start voice mode
       debugPrint('🎙️ [VoiceModeButton] Starting voice mode');
 
-      // If not already recording, start recording
+      // If not already recording, start recording and wait for WebSocket to connect
       // This will connect WebSocket and set up the callback
       if (recordingState != RecordingState.record && recordingState != RecordingState.initialising) {
         debugPrint('🎙️ [VoiceModeButton] Starting mic recording for voice mode');
         await captureProvider.streamRecording();
+
+        // Wait a moment for WebSocket callback to be set up
+        await Future.delayed(const Duration(milliseconds: 500));
+        debugPrint('🎙️ [VoiceModeButton] WebSocket callback should now be set');
       }
 
       // Start voice mode (this will send voice_mode_start to backend)

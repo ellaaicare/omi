@@ -7,7 +7,9 @@ abstract class MessageEvent {
   MessageEvent({required this.eventType});
 
   factory MessageEvent.fromJson(Map<String, dynamic> json) {
-    switch (json['type']) {
+    // Support both 'type' (legacy) and 'event' (voice mode) keys
+    final eventType = json['type'] ?? json['event'];
+    switch (eventType) {
       case 'service_status':
         return MessageServiceStatusEvent.fromJson(json);
       case 'memory_processing_started':
@@ -41,7 +43,7 @@ abstract class MessageEvent {
         return VoiceErrorEvent.fromJson(json);
       default:
         // Return a generic event or throw an error if the type is unknown
-        return UnknownEvent(eventType: json['type'] ?? 'unknown');
+        return UnknownEvent(eventType: eventType ?? 'unknown');
     }
   }
 }
@@ -288,9 +290,13 @@ class VoiceModeEndedEvent extends MessageEvent {
   }) : super(eventType: 'voice_mode_ended');
 
   factory VoiceModeEndedEvent.fromJson(Map<String, dynamic> json) {
+    // Convert to int since backend may send double
+    final duration = json['session_duration_seconds'];
+    final durationInt = duration is double ? duration.toInt() : (duration ?? 0);
+
     return VoiceModeEndedEvent(
       reason: json['reason'] ?? 'unknown',
-      sessionDurationSeconds: json['session_duration_seconds'] ?? 0,
+      sessionDurationSeconds: durationInt,
       turnCount: json['turn_count'] ?? 0,
     );
   }

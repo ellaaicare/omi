@@ -305,14 +305,19 @@ class VoiceModeManager extends ChangeNotifier {
 
   /// Handle voice_response_audio event from backend
   void handleVoiceResponseAudio(Map<String, dynamic> data) {
+    debugPrint('🔊 VoiceModeManager: handleVoiceResponseAudio called with keys: ${data.keys}');
+
     final audioData = data['data'] as String?;
     final sequence = data['sequence'] as int? ?? 0;
-    final format = data['format'] as String? ?? 'mp3';
+    final format = data['format'] as String? ?? 'pcm16';  // Default to pcm16 for Groq
     final sampleRate = data['sample_rate'] as int? ?? 24000;
 
-    if (audioData == null || audioData.isEmpty) return;
+    if (audioData == null || audioData.isEmpty) {
+      debugPrint('🔊 VoiceModeManager: No audio data in event');
+      return;
+    }
 
-    debugPrint('VoiceModeManager: Received audio chunk $sequence (format: $format, rate: $sampleRate)');
+    debugPrint('🔊 VoiceModeManager: Received audio chunk $sequence (format: $format, rate: $sampleRate, data length: ${audioData.length})');
 
     // Queue audio for playback
     _audioQueue.add(_AudioChunk(
@@ -324,9 +329,12 @@ class VoiceModeManager extends ChangeNotifier {
 
     // Start playing if not already
     if (!_isPlayingQueue) {
+      debugPrint('🔊 VoiceModeManager: Starting audio queue playback');
       _state = VoiceModeState.speaking;
       notifyListeners();
       _playAudioQueue();
+    } else {
+      debugPrint('🔊 VoiceModeManager: Audio queued (already playing)');
     }
   }
 
@@ -390,9 +398,11 @@ class VoiceModeManager extends ChangeNotifier {
 
   /// Play a single audio chunk based on its format
   Future<void> _playChunk(_AudioChunk chunk) async {
+    debugPrint('🔊 VoiceModeManager: _playChunk called, format: ${chunk.format}');
+
     // Check if data is a URL
     if (chunk.data.startsWith('http://') || chunk.data.startsWith('https://')) {
-      debugPrint('VoiceModeManager: Playing audio from URL');
+      debugPrint('🔊 VoiceModeManager: Playing audio from URL');
       await _audioPlayer.setUrl(chunk.data);
       await _audioPlayer.play();
       // Wait for playback to complete
@@ -406,12 +416,13 @@ class VoiceModeManager extends ChangeNotifier {
     final Uint8List bytes;
     try {
       bytes = base64Decode(chunk.data);
+      debugPrint('🔊 VoiceModeManager: Decoded ${bytes.length} bytes from base64');
     } catch (e) {
-      debugPrint('VoiceModeManager: Failed to decode base64 audio: $e');
+      debugPrint('🔊 VoiceModeManager: Failed to decode base64 audio: $e');
       return;
     }
 
-    debugPrint('VoiceModeManager: Playing ${bytes.length} bytes of ${chunk.format} audio');
+    debugPrint('🔊 VoiceModeManager: Playing ${bytes.length} bytes of ${chunk.format} audio at ${chunk.sampleRate}Hz');
 
     // Get temp directory for audio file
     final tempDir = await getTemporaryDirectory();
@@ -429,15 +440,23 @@ class VoiceModeManager extends ChangeNotifier {
 
     // Write to temp file
     await tempFile.writeAsBytes(audioBytes);
+    debugPrint('🔊 VoiceModeManager: Wrote ${audioBytes.length} bytes to ${tempFile.path}');
 
     // Play the audio
-    await _audioPlayer.setFilePath(tempFile.path);
-    await _audioPlayer.play();
+    try {
+      await _audioPlayer.setFilePath(tempFile.path);
+      debugPrint('🔊 VoiceModeManager: Set file path, starting playback...');
+      await _audioPlayer.play();
+      debugPrint('🔊 VoiceModeManager: Playing audio...');
 
-    // Wait for playback to complete
-    await _audioPlayer.processingStateStream.firstWhere(
-      (state) => state == ProcessingState.completed,
-    );
+      // Wait for playback to complete
+      await _audioPlayer.processingStateStream.firstWhere(
+        (state) => state == ProcessingState.completed,
+      );
+      debugPrint('🔊 VoiceModeManager: Audio playback completed');
+    } catch (e) {
+      debugPrint('🔊 VoiceModeManager: Playback error: $e');
+    }
 
     // Clean up temp file
     try {

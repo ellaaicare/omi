@@ -32,6 +32,7 @@ import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/voice_mode_button.dart';
+import 'package:omi/services/voice_mode/voice_mode_manager.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -593,6 +594,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                   ),
                                 ),
                                 // Central Record Button - Only show when no OMI device is connected
+                                // Disabled when voice mode is active (can't do ambient recording during voice call)
                                 if (!isOmiDeviceConnected)
                                   Positioned(
                                     left: MediaQuery.of(context).size.width / 2 - 75, // Shifted left to make room for voice button
@@ -602,44 +604,94 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                         bool isRecording = captureProvider.recordingState == RecordingState.record;
                                         bool isInitializing =
                                             captureProvider.recordingState == RecordingState.initialising;
-                                        return GestureDetector(
-                                          onTap: () async {
-                                            HapticFeedback.heavyImpact();
-                                            if (isInitializing) return;
-                                            await _handleRecordButtonPress(context, captureProvider);
-                                          },
-                                          child: Container(
-                                            width: 66,
-                                            height: 66,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              color: isRecording ? Colors.red : Colors.deepPurple,
-                                              border: Border.all(
-                                                color: Colors.black,
-                                                width: 5,
-                                              ),
-                                            ),
-                                            child: isInitializing
-                                                ? const CircularProgressIndicator(
-                                                    color: Colors.white,
-                                                    strokeWidth: 2,
-                                                  )
-                                                : Icon(
-                                                    isRecording ? FontAwesomeIcons.stop : FontAwesomeIcons.microphone,
-                                                    color: Colors.white,
-                                                    size: 24,
+
+                                        return ListenableBuilder(
+                                          listenable: VoiceModeManager(),
+                                          builder: (context, _) {
+                                            final isVoiceModeActive = VoiceModeManager().isActive;
+
+                                            // When voice mode is active, show greyed out mic button
+                                            // (can't start ambient recording during voice call)
+                                            final isDisabled = isVoiceModeActive;
+
+                                            // Show recording state:
+                                            // - Red: recording (ambient or voice mode using mic)
+                                            // - Grey: disabled (voice mode active, can't use ambient)
+                                            // - Purple: idle (ready to start ambient recording)
+                                            Color buttonColor;
+                                            if (isDisabled) {
+                                              buttonColor = Colors.grey.shade600;
+                                            } else if (isRecording) {
+                                              buttonColor = Colors.red;
+                                            } else {
+                                              buttonColor = Colors.deepPurple;
+                                            }
+
+                                            return GestureDetector(
+                                              onTap: () async {
+                                                // Disabled when voice mode active or initializing
+                                                if (isDisabled || isInitializing) {
+                                                  if (isVoiceModeActive) {
+                                                    debugPrint('🎙️ [HomePage] Mic button disabled - voice mode active');
+                                                  }
+                                                  return;
+                                                }
+                                                HapticFeedback.heavyImpact();
+                                                await _handleRecordButtonPress(context, captureProvider);
+                                              },
+                                              child: Opacity(
+                                                opacity: isDisabled ? 0.5 : 1.0,
+                                                child: Container(
+                                                  width: 66,
+                                                  height: 66,
+                                                  decoration: BoxDecoration(
+                                                    shape: BoxShape.circle,
+                                                    color: buttonColor,
+                                                    border: Border.all(
+                                                      color: Colors.black,
+                                                      width: 5,
+                                                    ),
                                                   ),
-                                          ),
+                                                  child: isInitializing
+                                                      ? const CircularProgressIndicator(
+                                                          color: Colors.white,
+                                                          strokeWidth: 2,
+                                                        )
+                                                      : Icon(
+                                                          isRecording && !isVoiceModeActive
+                                                              ? FontAwesomeIcons.stop
+                                                              : FontAwesomeIcons.microphone,
+                                                          color: isDisabled ? Colors.white54 : Colors.white,
+                                                          size: 24,
+                                                        ),
+                                                ),
+                                              ),
+                                            );
+                                          },
                                         );
                                       },
                                     ),
                                   ),
                                 // Voice Mode Button - "Talk to Ella" - next to the mic button
+                                // Disabled when ambient recording is active (not voice mode recording)
                                 if (!isOmiDeviceConnected)
                                   Positioned(
                                     left: MediaQuery.of(context).size.width / 2 + 5, // Position right of mic button
                                     bottom: 60,
-                                    child: const VoiceModeButton(size: 66, showLabel: false),
+                                    child: Consumer<CaptureProvider>(
+                                      builder: (context, captureProvider, _) {
+                                        final isRecording = captureProvider.recordingState == RecordingState.record;
+                                        final isVoiceModeActive = VoiceModeManager().isActive;
+                                        // Disable voice mode button if ambient recording is in progress
+                                        // (not voice mode - can't start voice call during ambient recording)
+                                        final isAmbientRecording = isRecording && !isVoiceModeActive;
+                                        return VoiceModeButton(
+                                          size: 66,
+                                          showLabel: false,
+                                          disabled: isAmbientRecording,
+                                        );
+                                      },
+                                    ),
                                   ),
                                 // Remove the floating chat button - moving it to app bar
                               ],
