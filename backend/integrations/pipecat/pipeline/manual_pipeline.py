@@ -148,6 +148,11 @@ class ManualVoicePipeline:
                         timeout=60.0  # 1 minute timeout
                     )
 
+                    # Check for disconnect
+                    if data.get("type") == "websocket.disconnect":
+                        print(f"🔌 Client disconnected: {self.session_id[:8]}", flush=True)
+                        break
+
                     if "bytes" in data:
                         # Binary audio data
                         await self._process_audio(data["bytes"])
@@ -157,14 +162,20 @@ class ManualVoicePipeline:
                         await self._process_control(data["text"])
 
                 except asyncio.TimeoutError:
-                    print(f"⏰ Session timeout: {self.session_id[:8]}")
+                    print(f"⏰ Session timeout: {self.session_id[:8]}", flush=True)
                     break
 
         except Exception as e:
-            print(f"❌ Pipeline error: {e}")
-            raise
+            # Ignore disconnect errors during cleanup
+            if "disconnect" not in str(e).lower():
+                print(f"❌ Pipeline error: {e}", flush=True)
+                raise
 
         finally:
+            # Process any remaining audio in buffer before cleanup
+            if len(self.speaking_audio) > 0:
+                print(f"🔄 Processing remaining audio buffer ({len(self.speaking_audio)} bytes)", flush=True)
+                await self._process_utterance(bytes(self.speaking_audio))
             await self.cleanup()
 
     async def _process_audio(self, audio_bytes: bytes):
@@ -214,9 +225,16 @@ class ManualVoicePipeline:
         # Calculate RMS volume
         rms = (sum(s * s for s in audio_float) / len(audio_float)) ** 0.5
 
+        # Log RMS for debugging (every 20th chunk)
+        if not hasattr(self, '_vad_chunk_count'):
+            self._vad_chunk_count = 0
+        self._vad_chunk_count += 1
+        if self._vad_chunk_count % 20 == 1:
+            print(f"📊 VAD RMS: {rms:.6f} (threshold: 0.001)", flush=True)
+
         # Simple VAD based on volume threshold
-        # TODO: Use Silero VAD properly (needs torch tensor input)
-        if rms > 0.01:  # Threshold for speech
+        # Lowered threshold from 0.01 to 0.001 for test audio
+        if rms > 0.001:  # Threshold for speech (lowered for test audio)
             if self.vad_state != VADState.SPEAKING:
                 print(f"🗣️ Speech started (RMS: {rms:.4f})", flush=True)
             self.vad_state = VADState.SPEAKING
