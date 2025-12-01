@@ -298,6 +298,10 @@ class ManualVoicePipeline:
 
     async def _transcribe_deepgram(self, audio_bytes: bytes) -> str:
         """Transcribe audio using Deepgram REST API."""
+        # Debug: Log audio size and duration
+        duration_secs = len(audio_bytes) / (16000 * 2)  # 16kHz, 16-bit
+        print(f"📊 Deepgram input: {len(audio_bytes)} bytes ({duration_secs:.2f}s)", flush=True)
+
         url = "https://api.deepgram.com/v1/listen"
         params = {
             "model": self.config.stt.model,
@@ -319,16 +323,24 @@ class ManualVoicePipeline:
         )
 
         if response.status_code != 200:
-            print(f"❌ Deepgram error: {response.status_code} - {response.text}")
+            print(f"❌ Deepgram error: {response.status_code} - {response.text}", flush=True)
             return ""
 
         result = response.json()
 
+        # Debug: Log full Deepgram response
+        import json
+        print(f"📋 Deepgram response: {json.dumps(result, indent=2)[:500]}...", flush=True)
+
         # Extract transcript
         try:
-            transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+            alt = result["results"]["channels"][0]["alternatives"][0]
+            transcript = alt.get("transcript", "")
+            confidence = alt.get("confidence", 0)
+            print(f"📝 Deepgram result: '{transcript}' (confidence: {confidence:.2f})", flush=True)
             return transcript
-        except (KeyError, IndexError):
+        except (KeyError, IndexError) as e:
+            print(f"⚠️ Deepgram parse error: {e}, result keys: {result.keys()}", flush=True)
             return ""
 
     async def _generate_response_groq(self, user_message: str) -> str:
