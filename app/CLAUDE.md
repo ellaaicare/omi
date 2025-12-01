@@ -7,6 +7,24 @@
 
 ---
 
+## 🚨 **CRITICAL: THIS IS A FORK**
+
+**Repository**: `ellaaicare/omi` (NOT BasedHardware/omi!)
+**GitHub Issues**: https://github.com/ellaaicare/omi/issues
+
+⚠️ **NEVER create issues on BasedHardware/omi** - that is the upstream repo we forked from.
+⚠️ **ALWAYS use `ellaaicare/omi`** for issues, PRs, and all GitHub operations.
+
+```bash
+# Correct repo for issues:
+gh issue create --repo ellaaicare/omi --title "..." --body "..."
+
+# WRONG - DO NOT USE:
+# gh issue create --repo BasedHardware/omi ...
+```
+
+---
+
 ## 🎭 **YOUR ROLE & IDENTITY**
 
 **You are**: Claude-iOS-Developer
