@@ -615,24 +615,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                             final isDisabled = isVoiceModeActive;
 
                                             // Show recording state:
-                                            // - Green: voice mode active (using mic for voice call)
-                                            // - Red: ambient recording active (user started)
-                                            // - Purple: idle (ready to start)
-                                            // - Grey+spinner: initializing
+                                            // - Red: recording (ambient or voice mode using mic)
+                                            // - Grey: disabled (voice mode active, can't use ambient)
+                                            // - Purple: idle (ready to start ambient recording)
                                             Color buttonColor;
-                                            IconData buttonIcon;
-                                            if (isVoiceModeActive) {
-                                              // Voice mode active - show green with phone icon
-                                              buttonColor = Colors.green.shade600;
-                                              buttonIcon = FontAwesomeIcons.phone;
+                                            if (isDisabled) {
+                                              buttonColor = Colors.grey.shade600;
                                             } else if (isRecording) {
-                                              // Ambient recording - show red with stop
                                               buttonColor = Colors.red;
-                                              buttonIcon = FontAwesomeIcons.stop;
                                             } else {
-                                              // Idle - show purple with mic
                                               buttonColor = Colors.deepPurple;
-                                              buttonIcon = FontAwesomeIcons.microphone;
                                             }
 
                                             return GestureDetector(
@@ -647,7 +639,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                                 HapticFeedback.heavyImpact();
                                                 await _handleRecordButtonPress(context, captureProvider);
                                               },
-                                              child: Container(
+                                              child: Opacity(
+                                                opacity: isDisabled ? 0.5 : 1.0,
+                                                child: Container(
                                                   width: 66,
                                                   height: 66,
                                                   decoration: BoxDecoration(
@@ -664,11 +658,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                                           strokeWidth: 2,
                                                         )
                                                       : Icon(
-                                                          buttonIcon,
-                                                          color: Colors.white,
+                                                          isRecording && !isVoiceModeActive
+                                                              ? FontAwesomeIcons.stop
+                                                              : FontAwesomeIcons.microphone,
+                                                          color: isDisabled ? Colors.white54 : Colors.white,
                                                           size: 24,
                                                         ),
                                                 ),
+                                              ),
                                             );
                                           },
                                         );

@@ -288,7 +288,7 @@ class VoiceModeManager extends ChangeNotifier {
     _silenceTimer?.cancel();
     debugPrint('⏱️ VoiceModeManager: Starting ${silenceTimeout.inMilliseconds}ms silence timer');
     _silenceTimer = Timer(silenceTimeout, () {
-      debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? "${_currentTranscript.substring(0, 50)}..." : _currentTranscript}"');
+      debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? _currentTranscript.substring(0, 50) + "..." : _currentTranscript}"');
       if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
         // Send the accumulated transcript as an utterance
         debugPrint('📤 VoiceModeManager: Sending utterance to backend');
@@ -405,18 +405,6 @@ class VoiceModeManager extends ChangeNotifier {
     final reason = data['reason'] as String? ?? 'unknown';
     debugPrint('VoiceModeManager: Backend ended session: $reason');
 
-    // IMPORTANT: For multi-turn conversations, ignore session_timeout
-    // Only end on explicit user request or critical errors
-    if (reason == 'session_timeout') {
-      debugPrint('VoiceModeManager: Ignoring session_timeout for multi-turn conversation');
-      // If we're currently playing audio, mark deferred so we continue after
-      if (_isPlayingQueue || _audioQueue.isNotEmpty) {
-        _deferredSessionEnd = true;
-      }
-      // Don't cleanup - keep conversation alive
-      return;
-    }
-
     // CRITICAL: Don't cleanup while audio is still playing!
     // This prevents the audio player from being interrupted mid-playback
     if (_isPlayingQueue || _audioQueue.isNotEmpty) {
@@ -472,17 +460,16 @@ class VoiceModeManager extends ChangeNotifier {
 
     _isPlayingQueue = false;
 
-    // IMPORTANT: Always continue conversation after audio playback (multi-turn)
-    // Don't honor session_timeout from backend - keep conversation going
-    // User can explicitly stop with the button
+    // Check if session end was deferred while audio was playing
     if (_deferredSessionEnd) {
-      debugPrint('🔊 VoiceModeManager: Backend requested session end, but continuing for multi-turn conversation');
+      debugPrint('🔊 VoiceModeManager: Audio playback complete, now ending deferred session');
       _deferredSessionEnd = false;
-      // Don't cleanup - fall through to continue listening
+      _cleanup();
+      return;
     }
 
-    // After all audio played, go back to listening for multi-turn conversation
-    if (_state == VoiceModeState.speaking || _state == VoiceModeState.thinking) {
+    // After all audio played, go back to listening (multi-turn) or end
+    if (_state == VoiceModeState.speaking) {
       _state = VoiceModeState.listening;
       notifyListeners();
 

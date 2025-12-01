@@ -321,19 +321,19 @@ class VoiceModeButton extends StatelessWidget {
       // Start voice mode
       debugPrint('🎙️ [VoiceModeButton] Starting voice mode');
 
-      // IMPORTANT: Start voice mode FIRST so isVoiceModeActive is true
-      // This prevents the mic button from showing wrong state during initialization
-      await voiceMode.startFromButton();
-
-      // Then start recording to capture audio
+      // If not already recording, start recording and wait for WebSocket to connect
+      // This will connect WebSocket and set up the callback
       if (recordingState != RecordingState.record && recordingState != RecordingState.initialising) {
         debugPrint('🎙️ [VoiceModeButton] Starting mic recording for voice mode');
         await captureProvider.streamRecording();
 
         // Wait a moment for WebSocket callback to be set up
-        await Future.delayed(const Duration(milliseconds: 300));
+        await Future.delayed(const Duration(milliseconds: 500));
         debugPrint('🎙️ [VoiceModeButton] WebSocket callback should now be set');
       }
+
+      // Start voice mode (this will send voice_mode_start to backend)
+      await voiceMode.startFromButton();
     }
   }
 }
