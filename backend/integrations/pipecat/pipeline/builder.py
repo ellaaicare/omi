@@ -29,6 +29,7 @@ from .config import PipelineConfig, DEFAULT_CONFIG
 from ..processors.ella_config import EllaConfigProcessor
 from ..processors.conversation_logger import ConversationLogger
 from ..services.n8n_client import N8NClient
+from ..serializers.raw_pcm import RawPCMSerializer
 
 
 async def create_voice_pipeline(
@@ -63,12 +64,15 @@ async def create_voice_pipeline(
 
     print(f"🎙️ Creating voice pipeline for uid={uid}, session={session_id[:8]}...")
 
-    # 1. Configure transport with VAD
+    # 1. Configure transport with VAD and raw PCM serializer
+    # iOS sends raw PCM16 16kHz mono audio - use RawPCMSerializer to handle it
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
+            audio_in_sample_rate=16000,
+            audio_out_sample_rate=16000,
             vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
@@ -77,6 +81,7 @@ async def create_voice_pipeline(
                 )
             ),
             vad_audio_passthrough=True,
+            serializer=RawPCMSerializer(sample_rate=16000, num_channels=1),
         ),
     )
 
