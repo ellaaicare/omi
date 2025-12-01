@@ -264,7 +264,7 @@ class ManualVoicePipeline:
                 print("⚠️ Empty transcript, skipping")
                 return
 
-            print(f"👤 User: {transcript}")
+            print(f"👤 User: {transcript}", flush=True)
 
             # Record user turn
             self.turns.append(ConversationTurn(
@@ -274,13 +274,13 @@ class ManualVoicePipeline:
             ))
 
             # 2. LLM - Groq
-            print("🤖 Generating response with Groq...")
+            print("🤖 Generating response with Groq...", flush=True)
             response = await self._generate_response_groq(transcript)
 
             if not response:
                 response = "I'm sorry, I couldn't process that. Could you repeat?"
 
-            print(f"🤖 Assistant: {response}")
+            print(f"🤖 Assistant: {response}", flush=True)
 
             # Record assistant turn
             self.turns.append(ConversationTurn(
@@ -290,7 +290,7 @@ class ManualVoicePipeline:
             ))
 
             # 3. TTS - OpenAI
-            print("🔊 Generating speech with OpenAI TTS...")
+            print("🔊 Generating speech with OpenAI TTS...", flush=True)
             await self._speak_response(response)
 
         except Exception as e:
