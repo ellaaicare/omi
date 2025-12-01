@@ -1,8 +1,32 @@
 # OMI Backend - Developer Guide
 
-**Last Updated**: November 25, 2025
-**Branch**: `feature/e2e-agent-testing-unified`
-**Status**: ✅ Ella AI integration + Edge ASR + E2E Testing Endpoints + Production VPS
+**Last Updated**: December 1, 2025
+**Branch**: `feature/voice-mode`
+**Status**: ✅ Ella AI integration + Edge ASR + E2E Testing + Voice Mode v2 (Manual Pipeline)
+
+---
+
+## 🚨 **CRITICAL: DOWNSTREAM FORK - NEVER POST TO UPSTREAM**
+
+**This is a DOWNSTREAM FORK of BasedHardware/omi**
+
+```
+UPSTREAM (DO NOT USE): github.com/BasedHardware/omi
+DOWNSTREAM (USE THIS): github.com/ellaaicare/omi
+```
+
+**ALWAYS use `--repo ellaaicare/omi` when using `gh` commands:**
+```bash
+# CORRECT - always specify the downstream repo
+gh issue comment 8 --repo ellaaicare/omi --body "..."
+gh issue create --repo ellaaicare/omi --title "..."
+gh pr create --repo ellaaicare/omi --title "..."
+
+# WRONG - defaults to upstream, NEVER do this
+gh issue comment 8 --body "..."  # ❌ POSTS TO UPSTREAM!
+```
+
+**Why this matters**: Comments/issues on upstream repo are visible to external maintainers and cannot be easily removed. Always double-check the repo before posting.
 
 ---
 

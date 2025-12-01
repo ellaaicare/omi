@@ -12,7 +12,8 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from integrations.pipecat import run_voice_session, PipelineConfig
+from integrations.pipecat import PipelineConfig
+from integrations.pipecat.pipeline.manual_pipeline import run_manual_voice_session
 
 
 router = APIRouter()
@@ -55,8 +56,9 @@ async def voice_v2_endpoint(
     print(f"🎤 Voice v2 connection: uid={uid}, session={session_id[:8]}")
 
     try:
-        # All logic delegated to integration module
-        await run_voice_session(
+        # Use manual pipeline (Option B - industry standard approach)
+        # Uses Pipecat services but bypasses broken transport layer
+        await run_manual_voice_session(
             websocket=websocket,
             uid=uid,
             session_id=session_id,

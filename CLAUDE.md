@@ -4,6 +4,28 @@
 
 ---
 
+## 🚨 **CRITICAL: DOWNSTREAM FORK - NEVER POST TO UPSTREAM**
+
+**This is a DOWNSTREAM FORK of BasedHardware/omi**
+
+```
+UPSTREAM (DO NOT USE): github.com/BasedHardware/omi
+DOWNSTREAM (USE THIS): github.com/ellaaicare/omi
+```
+
+**ALWAYS use `--repo ellaaicare/omi` when using `gh` commands:**
+```bash
+# CORRECT - always specify the downstream repo
+gh issue comment 8 --repo ellaaicare/omi --body "..."
+gh issue create --repo ellaaicare/omi --title "..."
+gh pr create --repo ellaaicare/omi --title "..."
+
+# WRONG - defaults to upstream, NEVER do this
+gh issue comment 8 --body "..."  # ❌ POSTS TO UPSTREAM!
+```
+
+---
+
 ## 🎯 **DETECT YOUR ROLE**
 
 Check your current working directory:
@@ -283,3 +305,4 @@ git commit -m "feat(tts): implement modular TTS API with provider abstraction"
 - Create new branches as needed for firmware work
 
 ---
+- NEW FLOW: Daily (5min) → Comment GitHub 'Weekly Status - Week 47': 'Completed: X. Next: Y. Blockers: Z'. Blockers → gh issue create --title 'Blocked: X' --label blocker. GitHub=PM tracking (auto to Ella PM), Discord=chat only (#general) + phase updates (#ella-e2e-prod).
