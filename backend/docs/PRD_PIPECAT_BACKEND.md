@@ -37,8 +37,15 @@ Implement `/v2/voice` WebSocket endpoint using Pipecat framework for real-time v
 ### Dependencies
 
 ```txt
-# Add to requirements.txt
-pipecat-ai[silero,groq,openai,deepgram,websocket]>=0.0.54
+# Add to requirements.txt (always use latest - Pipecat is actively developed)
+pipecat-ai[silero,groq,openai,deepgram,websocket]
+```
+
+**Note**: Pipecat is under active development with frequent improvements. We intentionally don't pin a version to benefit from latest features and bug fixes. Monitor their [releases](https://github.com/pipecat-ai/pipecat/releases) and [changelog](https://github.com/pipecat-ai/pipecat/blob/main/CHANGELOG.md).
+
+```bash
+# Keep up to date
+pip install --upgrade pipecat-ai[silero,groq,openai,deepgram,websocket]
 ```
 
 ### File Structure (Modular Design)
