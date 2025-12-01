@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 /// Voice Mode V2 States (simplified - server handles turn detection)
@@ -37,10 +40,17 @@ class VoiceModeV2Service extends ChangeNotifier {
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
 
-  // Audio playback
+  // Audio playback - TTS comes as 24kHz PCM16 mono
+  static const int _ttsOutputSampleRate = 24000;
+  static const int _ttsBitsPerSample = 16;
+  static const int _ttsChannels = 1;
+
   final AudioPlayer _audioPlayer = AudioPlayer();
-  final List<Uint8List> _audioQueue = [];
-  bool _isPlayingQueue = false;
+
+  // Accumulate TTS chunks with debounce for complete playback
+  final BytesBuilder _ttsBuffer = BytesBuilder();
+  Timer? _ttsPlaybackDebounce;
+  int _ttsChunksReceived = 0;
 
   // Callbacks for UI
   VoidCallback? onSessionStarted;
@@ -105,8 +115,12 @@ class VoiceModeV2Service extends ChangeNotifier {
     _channel = null;
 
     await _audioPlayer.stop();
-    _audioQueue.clear();
-    _isPlayingQueue = false;
+
+    // Clear TTS buffer
+    _ttsPlaybackDebounce?.cancel();
+    _ttsPlaybackDebounce = null;
+    _ttsBuffer.clear();
+    _ttsChunksReceived = 0;
 
     _state = VoiceModeV2State.inactive;
     notifyListeners();
@@ -122,7 +136,7 @@ class VoiceModeV2Service extends ChangeNotifier {
   /// Call this continuously with PCM16 16kHz audio chunks
   void sendAudio(Uint8List audioData) {
     if (_state != VoiceModeV2State.active && _state != VoiceModeV2State.speaking) {
-      debugPrint('VoiceModeV2: sendAudio skipped - state is $_state');
+      // Don't spam logs when inactive - this is expected
       return;
     }
 
@@ -167,35 +181,52 @@ class VoiceModeV2Service extends ChangeNotifier {
     // - error: Error occurred
   }
 
-  /// Queue audio for playback
+  /// Queue audio for playback - accumulates TTS chunks with debounce
   void _queueAudio(Uint8List audioData) {
-    _audioQueue.add(audioData);
+    // Accumulate TTS chunks
+    _ttsBuffer.add(audioData);
+    _ttsChunksReceived++;
 
     if (_state != VoiceModeV2State.speaking) {
       _state = VoiceModeV2State.speaking;
       notifyListeners();
     }
 
-    if (!_isPlayingQueue) {
-      _playAudioQueue();
-    }
+    // Debounce: wait 200ms after last chunk before playing
+    // This allows all TTS chunks to arrive before playback
+    _ttsPlaybackDebounce?.cancel();
+    _ttsPlaybackDebounce = Timer(const Duration(milliseconds: 200), () {
+      _playAccumulatedTTS();
+    });
   }
 
-  /// Play queued audio chunks
-  Future<void> _playAudioQueue() async {
-    _isPlayingQueue = true;
+  /// Play accumulated TTS audio
+  Future<void> _playAccumulatedTTS() async {
+    if (_ttsBuffer.isEmpty) return;
 
-    while (_audioQueue.isNotEmpty) {
-      final chunk = _audioQueue.removeAt(0);
+    final pcmData = _ttsBuffer.toBytes();
+    _ttsBuffer.clear();
 
-      try {
-        await _playChunk(chunk);
-      } catch (e) {
-        debugPrint('VoiceModeV2: Playback error: $e');
-      }
+    final chunksPlayed = _ttsChunksReceived;
+    _ttsChunksReceived = 0;
+
+    debugPrint('VoiceModeV2: Playing TTS - $chunksPlayed chunks, ${pcmData.length} bytes (${(pcmData.length / (_ttsOutputSampleRate * 2)).toStringAsFixed(2)}s)');
+
+    try {
+      // Create WAV file from PCM data and play
+      final wavFile = await _createWavFile(pcmData);
+      await _audioPlayer.setFilePath(wavFile.path);
+      await _audioPlayer.play();
+
+      // Wait for playback to complete
+      await _audioPlayer.playerStateStream.firstWhere(
+        (state) => state.processingState == ProcessingState.completed,
+      );
+
+      debugPrint('VoiceModeV2: TTS playback completed');
+    } catch (e) {
+      debugPrint('VoiceModeV2: Playback error: $e');
     }
-
-    _isPlayingQueue = false;
 
     // Return to active state after playback
     if (_state == VoiceModeV2State.speaking) {
@@ -204,18 +235,63 @@ class VoiceModeV2Service extends ChangeNotifier {
     }
   }
 
-  /// Play a single audio chunk
-  Future<void> _playChunk(Uint8List chunk) async {
-    // TODO: Determine audio format from server (PCM16 or MP3?)
-    // For now, assume same format as v1 (may need adjustment)
+  /// Create WAV file from raw PCM16 data
+  Future<File> _createWavFile(Uint8List pcmData) async {
+    final tempDir = await getTemporaryDirectory();
+    final wavPath = '${tempDir.path}/v2_tts_${DateTime.now().millisecondsSinceEpoch}.wav';
+    final wavFile = File(wavPath);
 
-    // Write to temp file and play
-    // This is a simplified version - may need to buffer more
-    debugPrint('VoiceModeV2: Playing chunk (${chunk.length} bytes)');
+    // Build WAV header
+    final wavHeader = _buildWavHeader(pcmData.length);
 
-    // Placeholder - actual implementation depends on audio format from server
-    // await _audioPlayer.setAudioSource(...)
-    // await _audioPlayer.play()
+    // Combine header + PCM data
+    final wavData = BytesBuilder();
+    wavData.add(wavHeader);
+    wavData.add(pcmData);
+
+    await wavFile.writeAsBytes(wavData.toBytes());
+
+    debugPrint('VoiceModeV2: Created WAV file: $wavPath (${wavData.length} bytes)');
+
+    return wavFile;
+  }
+
+  /// Build WAV header for PCM16 audio
+  Uint8List _buildWavHeader(int pcmDataLength) {
+    final header = ByteData(44);
+
+    // RIFF header
+    header.setUint8(0, 0x52); // 'R'
+    header.setUint8(1, 0x49); // 'I'
+    header.setUint8(2, 0x46); // 'F'
+    header.setUint8(3, 0x46); // 'F'
+    header.setUint32(4, 36 + pcmDataLength, Endian.little); // File size - 8
+    header.setUint8(8, 0x57);  // 'W'
+    header.setUint8(9, 0x41);  // 'A'
+    header.setUint8(10, 0x56); // 'V'
+    header.setUint8(11, 0x45); // 'E'
+
+    // fmt chunk
+    header.setUint8(12, 0x66); // 'f'
+    header.setUint8(13, 0x6D); // 'm'
+    header.setUint8(14, 0x74); // 't'
+    header.setUint8(15, 0x20); // ' '
+    header.setUint32(16, 16, Endian.little); // Subchunk1Size (16 for PCM)
+    header.setUint16(20, 1, Endian.little);  // AudioFormat (1 = PCM)
+    header.setUint16(22, _ttsChannels, Endian.little); // NumChannels
+    header.setUint32(24, _ttsOutputSampleRate, Endian.little); // SampleRate (24kHz)
+    header.setUint32(28, _ttsOutputSampleRate * _ttsChannels * (_ttsBitsPerSample ~/ 8), Endian.little); // ByteRate
+    header.setUint16(32, _ttsChannels * (_ttsBitsPerSample ~/ 8), Endian.little); // BlockAlign
+    header.setUint16(34, _ttsBitsPerSample, Endian.little); // BitsPerSample
+
+    // data chunk
+    header.setUint8(36, 0x64); // 'd'
+    header.setUint8(37, 0x61); // 'a'
+    header.setUint8(38, 0x74); // 't'
+    header.setUint8(39, 0x61); // 'a'
+    header.setUint32(40, pcmDataLength, Endian.little); // Subchunk2Size
+
+    return header.buffer.asUint8List();
   }
 
   /// Handle WebSocket error
@@ -236,6 +312,7 @@ class VoiceModeV2Service extends ChangeNotifier {
   /// Dispose resources
   @override
   void dispose() {
+    _ttsPlaybackDebounce?.cancel();
     stop();
     _audioPlayer.dispose();
     super.dispose();
