@@ -31,8 +31,8 @@ class VoiceModeButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Check if V2 mode enabled in developer settings
     final useV2 = SharedPreferencesUtil().voiceModeV2Enabled;
-
     if (useV2) {
       return _buildV2Button(context);
     }

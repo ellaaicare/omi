@@ -405,6 +405,13 @@ class VoiceModeManager extends ChangeNotifier {
     final reason = data['reason'] as String? ?? 'unknown';
     debugPrint('VoiceModeManager: Backend ended session: $reason');
 
+    // IMPORTANT: Ignore session_timeout for multi-turn conversations
+    // Let user explicitly stop with button
+    if (reason == 'session_timeout') {
+      debugPrint('VoiceModeManager: Ignoring session_timeout - continuing conversation');
+      return;
+    }
+
     // CRITICAL: Don't cleanup while audio is still playing!
     // This prevents the audio player from being interrupted mid-playback
     if (_isPlayingQueue || _audioQueue.isNotEmpty) {
