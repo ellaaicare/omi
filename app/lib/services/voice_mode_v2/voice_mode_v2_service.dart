@@ -78,6 +78,9 @@ class VoiceModeV2Service extends ChangeNotifier {
       );
 
       _state = VoiceModeV2State.active;
+      _audioBytesSent = 0;
+      _audioChunksSent = 0;
+      _lastAudioLogTime = null;
       notifyListeners();
       onSessionStarted?.call();
 
@@ -93,7 +96,7 @@ class VoiceModeV2Service extends ChangeNotifier {
 
   /// Stop voice mode session
   Future<void> stop() async {
-    debugPrint('VoiceModeV2: Stopping session');
+    debugPrint('VoiceModeV2: Stopping session - sent $_audioChunksSent chunks, $_audioBytesSent bytes');
 
     _subscription?.cancel();
     _subscription = null;
@@ -110,14 +113,34 @@ class VoiceModeV2Service extends ChangeNotifier {
     onSessionEnded?.call();
   }
 
+  // Audio stats tracking
+  int _audioBytesSent = 0;
+  int _audioChunksSent = 0;
+  DateTime? _lastAudioLogTime;
+
   /// Send audio data to server
   /// Call this continuously with PCM16 16kHz audio chunks
   void sendAudio(Uint8List audioData) {
     if (_state != VoiceModeV2State.active && _state != VoiceModeV2State.speaking) {
+      debugPrint('VoiceModeV2: sendAudio skipped - state is $_state');
       return;
     }
 
-    _channel?.sink.add(audioData);
+    if (_channel == null) {
+      debugPrint('VoiceModeV2: sendAudio skipped - channel is null');
+      return;
+    }
+
+    _channel!.sink.add(audioData);
+    _audioBytesSent += audioData.length;
+    _audioChunksSent++;
+
+    // Log every second to avoid spam
+    final now = DateTime.now();
+    if (_lastAudioLogTime == null || now.difference(_lastAudioLogTime!).inSeconds >= 1) {
+      debugPrint('VoiceModeV2: Sent $_audioChunksSent chunks, $_audioBytesSent bytes total');
+      _lastAudioLogTime = now;
+    }
   }
 
   /// Handle incoming WebSocket message
