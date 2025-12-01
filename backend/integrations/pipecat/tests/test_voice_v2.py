@@ -316,6 +316,82 @@ async def test_audio_streaming(config: TestConfig, results: TestResult):
         results.add_fail("Audio streaming", str(e))
 
 
+async def test_real_audio_e2e(config: TestConfig, results: TestResult):
+    """End-to-end test with real audio from WAV file."""
+    print("\n🎤 Testing Real Audio End-to-End...")
+
+    # Try to load real audio file
+    audio_file = "test_audio/pyannote_sample.wav"
+    try:
+        import wave
+        with wave.open(audio_file, 'rb') as w:
+            if w.getframerate() != 16000 or w.getnchannels() != 1:
+                results.add_skip("Real audio test", f"Audio format mismatch: {w.getframerate()}Hz, {w.getnchannels()}ch")
+                return
+            audio_data = w.readframes(w.getnframes())
+            duration = w.getnframes() / w.getframerate()
+    except FileNotFoundError:
+        results.add_skip("Real audio test", f"Audio file not found: {audio_file}")
+        return
+    except Exception as e:
+        results.add_skip("Real audio test", f"Failed to load audio: {e}")
+        return
+
+    results.add_pass(f"Loaded {duration:.1f}s of real audio")
+
+    url = f"{config.ws_url}/v2/voice?uid={config.uid}&session_id=real-audio-test"
+    ssl_context = get_ssl_context() if config.ssl else None
+
+    try:
+        async with websockets.connect(url, close_timeout=30, ssl=ssl_context) as ws:
+            results.add_pass("Connected for real audio test")
+
+            # Send first 5 seconds of audio (enough for a sentence)
+            chunk_size = 3200  # 100ms at 16kHz, 16-bit
+            max_chunks = 50  # 5 seconds
+            chunks_sent = 0
+            bytes_sent = 0
+
+            for i in range(0, min(len(audio_data), chunk_size * max_chunks), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                await ws.send(chunk)
+                chunks_sent += 1
+                bytes_sent += len(chunk)
+                await asyncio.sleep(0.1)  # Simulate real-time streaming
+
+            results.add_pass(f"Sent {chunks_sent} chunks ({bytes_sent/1024:.1f}KB)")
+
+            # Wait for VAD to detect silence and trigger processing
+            print("    Waiting for response (VAD + STT + LLM + TTS)...")
+
+            responses_received = 0
+            audio_bytes_received = 0
+            try:
+                async with asyncio.timeout(15):  # Longer timeout for real processing
+                    while True:
+                        response = await ws.recv()
+                        responses_received += 1
+                        if isinstance(response, bytes):
+                            audio_bytes_received += len(response)
+                            if config.verbose:
+                                print(f"    Received TTS audio: {len(response)} bytes")
+                        else:
+                            if config.verbose:
+                                print(f"    Received: {response[:100]}...")
+            except asyncio.TimeoutError:
+                pass  # Expected - timeout after waiting
+
+            if responses_received > 0:
+                results.add_pass(f"Received {responses_received} responses ({audio_bytes_received/1024:.1f}KB audio)")
+            else:
+                results.add_fail("E2E response", "No response received (check VAD/STT/LLM/TTS)")
+
+            await ws.close()
+
+    except Exception as e:
+        results.add_fail("Real audio E2E", str(e))
+
+
 async def test_n8n_config_integration(config: TestConfig, results: TestResult):
     """Test n8n configuration fetching."""
     print("\n🔧 Testing n8n Config Integration...")
@@ -407,6 +483,7 @@ async def run_all_tests(config: TestConfig) -> TestResult:
     await test_n8n_config_integration(config, results)
     await test_websocket_connection(config, results)
     await test_audio_streaming(config, results)
+    await test_real_audio_e2e(config, results)
 
     print("\n" + "=" * 60)
     print(results.summary())
@@ -423,6 +500,7 @@ async def run_single_test(config: TestConfig, test_name: str) -> TestResult:
         "health": test_health_check,
         "websocket": test_websocket_connection,
         "audio": test_audio_streaming,
+        "e2e": test_real_audio_e2e,
         "n8n": test_n8n_config_integration,
         "pipeline": test_pipeline_creation,
     }

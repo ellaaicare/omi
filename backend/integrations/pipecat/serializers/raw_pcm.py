@@ -68,6 +68,13 @@ class RawPCMSerializer(FrameSerializer):
             if len(data) == 0:
                 return None
 
+            # Debug: log every 10th chunk to avoid spam
+            if not hasattr(self, '_chunk_count'):
+                self._chunk_count = 0
+            self._chunk_count += 1
+            if self._chunk_count % 10 == 1:
+                print(f"🔊 Audio chunk #{self._chunk_count}: {len(data)} bytes")
+
             return InputAudioRawFrame(
                 audio=data,
                 sample_rate=self.sample_rate,

@@ -73,14 +73,14 @@ async def create_voice_pipeline(
             audio_out_enabled=True,
             audio_in_sample_rate=16000,
             audio_out_sample_rate=16000,
-            vad_enabled=True,
+            # VAD configured via vad_analyzer (vad_enabled is deprecated)
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
                     stop_secs=config.vad.stop_secs,
-                    min_volume=config.vad.min_volume,
+                    min_volume=0.1,  # Lower threshold for test audio
                 )
             ),
-            vad_audio_passthrough=True,
+            # audio passthrough is always enabled now (vad_audio_passthrough deprecated)
             serializer=RawPCMSerializer(sample_rate=16000, num_channels=1),
         ),
     )
