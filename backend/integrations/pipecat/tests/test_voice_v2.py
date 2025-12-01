@@ -37,16 +37,24 @@ import sys
 import time
 import struct
 import math
+import ssl
 from typing import Optional
 from dataclasses import dataclass
 
 try:
     import websockets
     import httpx
+    import certifi
 except ImportError:
     print("Missing dependencies. Install with:")
-    print("  pip install websockets httpx")
+    print("  pip install websockets httpx certifi")
     sys.exit(1)
+
+
+def get_ssl_context() -> ssl.SSLContext:
+    """Create SSL context with proper certificate verification."""
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    return ssl_context
 
 
 @dataclass
@@ -222,8 +230,11 @@ async def test_websocket_connection(config: TestConfig, results: TestResult):
 
     url = f"{config.ws_url}/v2/voice?uid={config.uid}"
 
+    # Use SSL context for secure connections
+    ssl_context = get_ssl_context() if config.ssl else None
+
     try:
-        async with websockets.connect(url, close_timeout=5) as ws:
+        async with websockets.connect(url, close_timeout=5, ssl=ssl_context) as ws:
             results.add_pass("WebSocket connection established")
 
             # Connection should stay open
@@ -258,8 +269,11 @@ async def test_audio_streaming(config: TestConfig, results: TestResult):
 
     url = f"{config.ws_url}/v2/voice?uid={config.uid}"
 
+    # Use SSL context for secure connections
+    ssl_context = get_ssl_context() if config.ssl else None
+
     try:
-        async with websockets.connect(url, close_timeout=10) as ws:
+        async with websockets.connect(url, close_timeout=10, ssl=ssl_context) as ws:
             results.add_pass("Connected for audio test")
 
             # Generate test audio (2 seconds of speech-like audio)
