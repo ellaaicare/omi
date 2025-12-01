@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/services/voice_mode/voice_mode_manager.dart';
+import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
 import 'package:omi/utils/enums.dart';
 
 /// Voice Mode Button Widget
@@ -29,6 +31,12 @@ class VoiceModeButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final useV2 = SharedPreferencesUtil().voiceModeV2Enabled;
+
+    if (useV2) {
+      return _buildV2Button(context);
+    }
+
     return ListenableBuilder(
       listenable: VoiceModeManager(),
       builder: (context, _) {
@@ -169,6 +177,129 @@ class VoiceModeButton extends StatelessWidget {
         return 'Thinking...';
       case VoiceModeState.speaking:
         return 'Speaking...';
+    }
+  }
+
+  /// Build V2 voice mode button (Pipecat)
+  Widget _buildV2Button(BuildContext context) {
+    return ListenableBuilder(
+      listenable: VoiceModeV2Service(),
+      builder: (context, _) {
+        final v2Service = VoiceModeV2Service();
+        final v2State = v2Service.state;
+        final isActive = v2Service.isActive;
+
+        // Map V2 state to V1 state for UI consistency
+        final displayState = _mapV2StateToV1(v2State);
+
+        // Use disabled state for visual styling
+        final isDisabled = disabled && !isActive;
+
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () async {
+                if (isDisabled) {
+                  debugPrint('🎙️ [VoiceModeButton] V2 Button disabled');
+                  return;
+                }
+                HapticFeedback.mediumImpact();
+                await _handleVoiceModeV2Toggle(context, v2Service);
+              },
+              child: Opacity(
+                opacity: isDisabled ? 0.5 : 1.0,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: size,
+                  height: size,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isDisabled ? Colors.grey.shade600 : _getBackgroundColor(displayState),
+                    border: Border.all(
+                      color: Colors.black,
+                      width: 4,
+                    ),
+                    boxShadow: isActive && !isDisabled
+                        ? [
+                            BoxShadow(
+                              color: _getGlowColor(displayState).withValues(alpha: 0.5),
+                              spreadRadius: 2,
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      _buildIcon(displayState, isDisabled: isDisabled),
+                      // V2 indicator badge
+                      Positioned(
+                        top: 2,
+                        right: 2,
+                        child: Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: isActive ? Colors.green : Colors.blue,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.black, width: 1),
+                          ),
+                          child: const Center(
+                            child: Text('2', style: TextStyle(fontSize: 7, color: Colors.white, fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (showLabel) ...[
+              const SizedBox(height: 4),
+              Text(
+                isDisabled ? 'Recording...' : _getLabel(displayState),
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: isDisabled ? 0.5 : 0.8),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  /// Map V2 state to V1 state for UI consistency
+  VoiceModeState _mapV2StateToV1(VoiceModeV2State v2State) {
+    switch (v2State) {
+      case VoiceModeV2State.inactive:
+        return VoiceModeState.inactive;
+      case VoiceModeV2State.connecting:
+        return VoiceModeState.transcribing; // Show spinner
+      case VoiceModeV2State.active:
+        return VoiceModeState.listening;
+      case VoiceModeV2State.speaking:
+        return VoiceModeState.speaking;
+    }
+  }
+
+  /// Handle V2 voice mode toggle
+  Future<void> _handleVoiceModeV2Toggle(BuildContext context, VoiceModeV2Service v2Service) async {
+    if (v2Service.isActive) {
+      // Stop V2 voice mode
+      debugPrint('🎙️ [VoiceModeButton] Stopping V2 voice mode');
+      await v2Service.stop();
+    } else {
+      // Start V2 voice mode
+      debugPrint('🎙️ [VoiceModeButton] Starting V2 voice mode');
+      final success = await v2Service.start();
+      if (!success) {
+        debugPrint('🎙️ [VoiceModeButton] V2 voice mode failed to start');
+      }
     }
   }
 

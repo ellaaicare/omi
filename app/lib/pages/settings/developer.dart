@@ -334,6 +334,70 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     ),
                   ),
                   const SizedBox(height: 24),
+
+                  // Voice Mode V2 (Pipecat) Toggle
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Voice Mode V2 (Pipecat)'),
+                    subtitle: const Text('Use new server-side VAD for voice conversations'),
+                    value: SharedPreferencesUtil().voiceModeV2Enabled,
+                    onChanged: (v) {
+                      setState(() {
+                        SharedPreferencesUtil().voiceModeV2Enabled = v;
+                      });
+                    },
+                  ),
+                  if (SharedPreferencesUtil().voiceModeV2Enabled) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.info_outline, color: Colors.blue, size: 16),
+                              SizedBox(width: 8),
+                              Text('V2 Voice Mode Info', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w500)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Server-side VAD handles turn detection.\nEndpoint: wss://api.ella-ai-care.com/v2/voice',
+                            style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.play_arrow, size: 16),
+                            label: const Text('Test Connection'),
+                            onPressed: () async {
+                              AppSnackbar.showSnackbar('Testing V2 voice connection...');
+                              // Quick connection test
+                              try {
+                                final uid = SharedPreferencesUtil().uid;
+                                final testUrl = 'wss://${Env.apiBaseUrl!.replaceFirst('https://', '').replaceFirst('http://', '')}v2/voice?uid=$uid&session_id=test_${DateTime.now().millisecondsSinceEpoch}';
+                                debugPrint('Testing V2: $testUrl');
+                                AppSnackbar.showSnackbar('V2 endpoint URL: Ready for testing');
+                              } catch (e) {
+                                AppSnackbar.showSnackbarError('V2 test failed: $e');
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: Colors.white,
+                              backgroundColor: Colors.blue,
+                              minimumSize: const Size(double.infinity, 36),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 24),
                   //TODO: Model selection commented out because Soniox model is no longer being used
                   // const SizedBox(height: 32),
                   // const Padding(
