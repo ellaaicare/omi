@@ -407,19 +407,26 @@ class ManualVoicePipeline:
                 response_format="pcm",  # Raw PCM16
             )
 
-            # Stream audio chunks back to client
+            # Get the full audio content (response is a streaming response)
+            # Use aiter_bytes() for async iteration, or read() for full content
+            audio_content = response.content
+
+            # Send audio in chunks to client
             chunk_size = 4096  # ~128ms at 16kHz
-            async for chunk in response.iter_bytes(chunk_size):
+            bytes_sent = 0
+            for i in range(0, len(audio_content), chunk_size):
+                chunk = audio_content[i:i+chunk_size]
                 try:
                     await self.websocket.send_bytes(chunk)
+                    bytes_sent += len(chunk)
                 except Exception as e:
-                    print(f"⚠️ Failed to send audio chunk: {e}")
+                    print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
                     break
 
-            print(f"✅ Sent TTS response ({len(text)} chars)")
+            print(f"✅ Sent TTS response: {bytes_sent} bytes ({len(text)} chars)", flush=True)
 
         except Exception as e:
-            print(f"❌ TTS error: {e}")
+            print(f"❌ TTS error: {e}", flush=True)
 
     async def _process_control(self, message: str):
         """Process JSON control messages from client."""
