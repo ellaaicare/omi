@@ -605,9 +605,24 @@ If Pipecat v2 has issues:
 
 ---
 
+## Licensing
+
+Pipecat is licensed under **BSD 2-Clause License** (very permissive).
+
+| Our Usage | Requirement | Status |
+|-----------|-------------|--------|
+| pip install dependency | None | ✅ Compliant |
+| Copy code to repo | Keep license | N/A (not doing) |
+| Fork/modify | Keep license | N/A (not doing) |
+
+We've added attribution in `integrations/THIRD_PARTY_LICENSES.md` for good open-source citizenship.
+
+---
+
 ## References
 
 - [Pipecat Docs](https://docs.pipecat.ai/)
+- [Pipecat License (BSD 2-Clause)](https://github.com/pipecat-ai/pipecat/blob/main/LICENSE)
 - [FastAPI WebSocket Transport](https://docs.pipecat.ai/server/services/transport/fastapi-websocket)
 - [Silero VAD](https://docs.pipecat.ai/server/services/vad/silero)
 - [GitHub Discussion #4](https://github.com/ellaaicare/omi/discussions/4)
