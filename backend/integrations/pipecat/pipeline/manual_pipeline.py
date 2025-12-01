@@ -206,10 +206,15 @@ class ManualVoicePipeline:
                 self.speaking_audio.extend(chunk)
                 self.last_speech_time = time.time()
 
+            elif vad_result == "quiet" and self.vad_state == VADState.SPEAKING:
+                # Still in speaking mode but this chunk is quiet (pause between words)
+                # Keep accumulating audio to capture complete utterance
+                self.speaking_audio.extend(chunk)
+
             elif vad_result == "stopped":
                 # User stopped speaking - process the utterance
                 if len(self.speaking_audio) > 0:
-                    print(f"🎤 End of speech detected, processing {len(self.speaking_audio)} bytes")
+                    print(f"🎤 End of speech detected, processing {len(self.speaking_audio)} bytes", flush=True)
                     await self._process_utterance(bytes(self.speaking_audio))
                     self.speaking_audio.clear()
 
