@@ -138,11 +138,9 @@ async def create_voice_pipeline(
         ),
     )
 
-    # Register cleanup on task completion
-    @task.on_task_completed.register
-    async def on_completed(task):
-        print(f"✅ Voice session completed: {session_id[:8]}")
-        await conversation_logger.finalize_session()
+    # Store logger reference for cleanup (called in run_voice_session)
+    task._conversation_logger = conversation_logger
+    task._session_id = session_id
 
     return pipeline, task
 
@@ -168,6 +166,7 @@ async def run_voice_session(
 
     print(f"🎤 Starting voice session for uid={uid}, session={session_id[:8]}")
 
+    task = None
     try:
         pipeline, task = await create_voice_pipeline(
             websocket=websocket,
@@ -179,11 +178,21 @@ async def run_voice_session(
         runner = PipelineRunner()
         await runner.run(task)
 
+        # Session completed successfully
+        print(f"✅ Voice session completed: {session_id[:8]}")
+
     except Exception as e:
         print(f"❌ Voice session error: {e}")
         raise
 
     finally:
+        # Finalize conversation logging
+        if task and hasattr(task, '_conversation_logger'):
+            try:
+                await task._conversation_logger.finalize_session()
+            except Exception as e:
+                print(f"⚠️ Failed to finalize session: {e}")
+
         print(f"🔚 Voice session ended: {session_id[:8]}")
 
 

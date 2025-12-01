@@ -10,10 +10,9 @@ Endpoint: wss://api.ella-ai-care.com/v2/voice
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from integrations.pipecat import run_voice_session, PipelineConfig
-from utils.other.endpoints import get_current_user_uid_ws
 
 
 router = APIRouter()
