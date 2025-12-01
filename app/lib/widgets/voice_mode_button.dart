@@ -4,6 +4,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/services/services.dart';
 import 'package:omi/services/voice_mode/voice_mode_manager.dart';
 import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
 import 'package:omi/utils/enums.dart';
@@ -292,14 +293,36 @@ class VoiceModeButton extends StatelessWidget {
     if (v2Service.isActive) {
       // Stop V2 voice mode
       debugPrint('🎙️ [VoiceModeButton] Stopping V2 voice mode');
+      ServiceManager.instance().mic.stop();
       await v2Service.stop();
     } else {
       // Start V2 voice mode
       debugPrint('🎙️ [VoiceModeButton] Starting V2 voice mode');
+
+      // 1. Connect WebSocket first
       final success = await v2Service.start();
       if (!success) {
         debugPrint('🎙️ [VoiceModeButton] V2 voice mode failed to start');
+        return;
       }
+
+      // 2. Start mic and route audio to V2 WebSocket (same as cloud ASR mode)
+      debugPrint('🎙️ [VoiceModeButton] Starting mic capture for V2');
+      ServiceManager.instance().mic.start(
+        onByteReceived: (bytes) {
+          // Send raw PCM16 audio directly to V2 WebSocket
+          v2Service.sendAudio(bytes);
+        },
+        onRecording: () {
+          debugPrint('🎙️ [VoiceModeButton] V2 mic recording started');
+        },
+        onStop: () {
+          debugPrint('🎙️ [VoiceModeButton] V2 mic recording stopped');
+        },
+        onInitializing: () {
+          debugPrint('🎙️ [VoiceModeButton] V2 mic initializing');
+        },
+      );
     }
   }
 
