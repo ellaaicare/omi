@@ -75,6 +75,8 @@ class ConversationLogger(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames and log conversation turns."""
+        # Call parent first to handle internal state (StartFrame tracking, etc.)
+        await super().process_frame(frame, direction)
 
         if isinstance(frame, StartFrame):
             self.start_time = time.time()
@@ -106,9 +108,6 @@ class ConversationLogger(FrameProcessor):
         elif isinstance(frame, EndFrame):
             # Session ended
             print(f"📝 Conversation logging ended: {self.session_id[:8]}")
-
-        # Always pass frame through
-        await self.push_frame(frame, direction)
 
     def _log_user_turn(self, text: str):
         """Log a user utterance."""

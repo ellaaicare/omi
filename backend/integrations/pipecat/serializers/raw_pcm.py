@@ -52,11 +52,11 @@ class RawPCMSerializer(FrameSerializer):
         """Return serializer type - we handle binary audio data."""
         return FrameSerializerType.BINARY
 
-    def setup(self, frame: StartFrame):
+    async def setup(self, frame: StartFrame):
         """Called when the pipeline starts."""
         pass  # No setup needed
 
-    def deserialize(self, data: Union[str, bytes]) -> Optional[Frame]:
+    async def deserialize(self, data: Union[str, bytes]) -> Optional[Frame]:
         """
         Convert incoming data to Pipecat frames.
 
@@ -99,7 +99,7 @@ class RawPCMSerializer(FrameSerializer):
 
         return None
 
-    def serialize(self, frame: Frame) -> Optional[Union[str, bytes]]:
+    async def serialize(self, frame: Frame) -> Optional[Union[str, bytes]]:
         """
         Convert Pipecat frames to output data.
 
