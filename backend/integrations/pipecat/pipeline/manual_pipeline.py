@@ -135,7 +135,7 @@ class ManualVoicePipeline:
         self.start_time = time.time()
         self.is_running = True
 
-        print(f"🎙️ Manual pipeline initialized: session={self.session_id[:8]}")
+        print(f"🎙️ Manual pipeline initialized: session={self.session_id[:8]}", flush=True)
 
     async def run(self):
         """Main loop - receive audio, process, respond."""
@@ -172,9 +172,9 @@ class ManualVoicePipeline:
         self.chunks_received += 1
         self.bytes_received += len(audio_bytes)
 
-        # Log every 50th chunk
-        if self.chunks_received % 50 == 1:
-            print(f"🔊 Chunk #{self.chunks_received}: {len(audio_bytes)} bytes (total: {self.bytes_received / 1024:.1f}KB)")
+        # Log every 10th chunk for debugging
+        if self.chunks_received % 10 == 1:
+            print(f"🔊 Chunk #{self.chunks_received}: {len(audio_bytes)} bytes (total: {self.bytes_received / 1024:.1f}KB)", flush=True)
 
         # Add to buffer
         self.audio_buffer.extend(audio_bytes)
@@ -218,14 +218,14 @@ class ManualVoicePipeline:
         # TODO: Use Silero VAD properly (needs torch tensor input)
         if rms > 0.01:  # Threshold for speech
             if self.vad_state != VADState.SPEAKING:
-                print(f"🗣️ Speech started (RMS: {rms:.4f})")
+                print(f"🗣️ Speech started (RMS: {rms:.4f})", flush=True)
             self.vad_state = VADState.SPEAKING
             return "speaking"
         else:
             # Check if we've been quiet long enough
             if self.vad_state == VADState.SPEAKING:
                 if self.last_speech_time and (time.time() - self.last_speech_time) > self.config.vad.stop_secs:
-                    print(f"🤫 Speech stopped after {self.config.vad.stop_secs}s silence")
+                    print(f"🤫 Speech stopped after {self.config.vad.stop_secs}s silence", flush=True)
                     self.vad_state = VADState.QUIET
                     return "stopped"
             return "quiet"
