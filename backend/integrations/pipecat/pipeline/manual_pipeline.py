@@ -33,6 +33,13 @@ from pipecat.audio.vad.vad_analyzer import VADParams, VADState
 import httpx
 from openai import AsyncOpenAI
 
+# ElevenLabs for true streaming TTS
+try:
+    from elevenlabs import AsyncElevenLabs
+    ELEVENLABS_AVAILABLE = True
+except ImportError:
+    ELEVENLABS_AVAILABLE = False
+
 from .config import PipelineConfig, DEFAULT_CONFIG
 from ..services.n8n_client import N8NClient
 from ..services.firestore_client import FirestoreClient
@@ -75,6 +82,7 @@ class ManualVoicePipeline:
 
         # Services
         self.openai_client: Optional[AsyncOpenAI] = None
+        self.elevenlabs_client = None  # Optional[AsyncElevenLabs]
         self.http_client: Optional[httpx.AsyncClient] = None
         self.n8n_client: Optional[N8NClient] = None
         self.firestore_client: Optional[FirestoreClient] = None
@@ -107,6 +115,13 @@ class ManualVoicePipeline:
 
         # Initialize OpenAI client for TTS
         self.openai_client = AsyncOpenAI(api_key=self.config.tts.api_key)
+
+        # Initialize ElevenLabs client if available and configured
+        if ELEVENLABS_AVAILABLE and self.config.tts.elevenlabs_api_key:
+            self.elevenlabs_client = AsyncElevenLabs(api_key=self.config.tts.elevenlabs_api_key)
+            print(f"✅ ElevenLabs TTS initialized (voice_id: {self.config.tts.elevenlabs_voice_id})", flush=True)
+        elif self.config.tts.provider == "elevenlabs":
+            print(f"⚠️ ElevenLabs requested but not available (installed={ELEVENLABS_AVAILABLE}, key_set={bool(self.config.tts.elevenlabs_api_key)})", flush=True)
 
         # Initialize HTTP client for Deepgram and Groq
         self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -503,9 +518,14 @@ class ManualVoicePipeline:
         await self._speak_response_timed(text, None, None, None)
 
     async def _speak_response_timed(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
-        """Generate TTS audio with timing metrics. Uses streaming if enabled."""
-        # Route to streaming or non-streaming based on config
-        if self.config.tts.streaming:
+        """Generate TTS audio with timing metrics. Routes to appropriate provider."""
+        provider = self.config.tts.provider.lower()
+
+        # Route to ElevenLabs if configured and available
+        if provider == "elevenlabs" and self.elevenlabs_client:
+            await self._speak_response_elevenlabs(text, t_tts_start, timings, t_total_start)
+        # Route to OpenAI streaming or blocking based on config
+        elif self.config.tts.streaming:
             await self._speak_response_streaming(text, t_tts_start, timings, t_total_start)
         else:
             await self._speak_response_blocking(text, t_tts_start, timings, t_total_start)
@@ -689,6 +709,96 @@ class ManualVoicePipeline:
             print(f"❌ [BLOCKING] TTS error: {e}", flush=True)
         finally:
             self.is_speaking_tts = False  # AI done speaking
+
+    async def _speak_response_elevenlabs(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
+        """
+        ELEVENLABS STREAMING TTS - True streaming with low TTFB.
+
+        ElevenLabs generates and streams audio simultaneously, giving us
+        much lower Time To First Byte compared to OpenAI.
+
+        Expected TTFB: ~200-400ms (vs ~1100ms for OpenAI)
+        """
+        try:
+            self.is_speaking_tts = True
+            self.barge_in_detected = False
+
+            t_gen_start = time.time()
+            t_first_chunk = None
+            bytes_sent = 0
+
+            voice_id = self.config.tts.elevenlabs_voice_id
+            print(f"🔊 [ELEVENLABS] Generating TTS (voice: {voice_id})...", flush=True)
+
+            # Use ElevenLabs streaming API - generates and streams simultaneously
+            # pcm_16000 format = 16-bit PCM at 16kHz (matches our audio pipeline)
+            audio_stream = self.elevenlabs_client.text_to_speech.convert_as_stream(
+                voice_id=voice_id,
+                text=text,
+                model_id="eleven_turbo_v2_5",  # Fastest model
+                output_format="pcm_16000",  # 16kHz PCM16 for iOS
+            )
+
+            # Stream chunks directly to WebSocket as they arrive
+            async for chunk in audio_stream:
+                # Track time to first byte
+                if t_first_chunk is None:
+                    t_first_chunk = time.time()
+                    ttfb_ms = (t_first_chunk - t_gen_start) * 1000
+                    print(f"⚡ [ELEVENLABS] First chunk: {ttfb_ms:.0f}ms TTFB", flush=True)
+
+                # Check for barge-in
+                if self.barge_in_detected:
+                    print(f"🛑 Barge-in detected! Stopping TTS at {bytes_sent} bytes", flush=True)
+                    break
+
+                # Send chunk to client
+                try:
+                    await self.websocket.send_bytes(chunk)
+                    bytes_sent += len(chunk)
+                    # Small yield to allow barge-in detection
+                    await asyncio.sleep(0.005)  # 5ms
+                except Exception as e:
+                    print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
+                    break
+
+            t_end = time.time()
+            tts_total_ms = (t_end - t_gen_start) * 1000
+            ttfb_ms = (t_first_chunk - t_gen_start) * 1000 if t_first_chunk else tts_total_ms
+
+            # Log timing
+            if timings is not None:
+                timings['tts_gen'] = ttfb_ms
+                timings['tts_send'] = tts_total_ms - ttfb_ms
+                timings['tts_total'] = tts_total_ms
+                timings['tts_provider'] = 'elevenlabs'
+
+            print(f"✅ [ELEVENLABS] Sent {bytes_sent} bytes, TTFB={ttfb_ms:.0f}ms, total={tts_total_ms:.0f}ms", flush=True)
+
+            # ====== LATENCY SUMMARY ======
+            if timings is not None and t_total_start is not None:
+                total_ms = (time.time() - t_total_start) * 1000
+                actual_ttfb = timings.get('stt', 0) + timings.get('pause', 0) + timings.get('llm', 0) + ttfb_ms
+                print(f"\n{'='*50}", flush=True)
+                print(f"📊 LATENCY BREAKDOWN [ELEVENLABS] (Turn #{len(self.turns)//2})", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   STT (Deepgram):    {timings.get('stt', 0):>6.0f}ms", flush=True)
+                print(f"   Thinking pause:    {timings.get('pause', 0):>6.0f}ms", flush=True)
+                print(f"   LLM (Groq):        {timings.get('llm', 0):>6.0f}ms", flush=True)
+                print(f"   TTS TTFB:          {ttfb_ms:>6.0f}ms ⚡ ElevenLabs", flush=True)
+                print(f"   TTS streaming:     {timings.get('tts_send', 0):>6.0f}ms", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   TOTAL:             {total_ms:>6.0f}ms", flush=True)
+                print(f"   TIME TO FIRST BYTE:{actual_ttfb:>6.0f}ms ⚡", flush=True)
+                print(f"{'='*50}\n", flush=True)
+
+        except Exception as e:
+            print(f"❌ [ELEVENLABS] TTS error: {e}", flush=True)
+            # Fallback to OpenAI
+            print(f"🔄 Falling back to OpenAI TTS...", flush=True)
+            await self._speak_response_streaming(text, t_tts_start, timings, t_total_start)
+        finally:
+            self.is_speaking_tts = False
 
     async def _process_control(self, message: str):
         """Process JSON control messages from client."""
