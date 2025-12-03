@@ -2,11 +2,15 @@
 Firestore client for Pipecat integration.
 
 Handles storing voice conversations and session analytics.
+Uses the standard upsert_conversation() for consistency with iOS app.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from google.cloud import firestore
+
+# Import the standard conversation storage function
+from database.conversations import upsert_conversation
 
 
 class FirestoreClient:
@@ -14,7 +18,8 @@ class FirestoreClient:
     Client for Firestore database operations.
 
     Stores voice conversations and session analytics.
-    Uses the same Firestore instance as the main OMI backend.
+    Uses the standard upsert_conversation() function for consistency
+    with the main OMI backend and iOS app.
     """
 
     def __init__(self, db: Optional[firestore.Client] = None):
@@ -41,12 +46,15 @@ class FirestoreClient:
         segments: list[dict],
         duration_seconds: float,
         source: str = "voice_mode_v2",
+        started_at: Optional[datetime] = None,
+        language: str = "en",
     ) -> str:
         """
         Store a voice conversation in Firestore.
 
-        Stores in the same structure as regular conversations for
-        consistency with the iOS app.
+        Uses the standard upsert_conversation() function to ensure
+        consistent field structure, encryption, and indexing with
+        the iOS app and other conversation sources.
 
         Args:
             uid: Firebase user ID
@@ -55,36 +63,65 @@ class FirestoreClient:
             segments: List of conversation turns with role, text, timestamp
             duration_seconds: Total session duration
             source: Source identifier for analytics
+            started_at: When the conversation started (defaults to now - duration)
+            language: Conversation language code (default: "en")
 
         Returns:
             Document ID of stored conversation
         """
+        now = datetime.now(timezone.utc)
+
+        # Calculate started_at if not provided
+        if started_at is None:
+            from datetime import timedelta
+            started_at = now - timedelta(seconds=duration_seconds)
+
+        # Build conversation data with all required fields
+        # This matches the Conversation model structure expected by iOS
         conversation_data = {
             "id": session_id,
-            "uid": uid,
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-            "finished_at": datetime.utcnow(),
+            "created_at": now,
+            "started_at": started_at,
+            "finished_at": now,
+
+            # Required fields for iOS app
+            "source": source,
+            "language": language,
+            "status": "completed",
+            "discarded": False,
+
+            # Transcript data
             "transcript": transcript,
             "transcript_segments": segments,
-            "source": source,
-            "status": "completed",
-            "duration_seconds": duration_seconds,
-            "discarded": False,
+
+            # Structured summary - empty placeholder, will be populated by Ella callback
+            "structured": {
+                "title": "",
+                "overview": "",
+                "emoji": "🎤",
+                "category": "other",
+                "action_items": [],
+                "events": [],
+            },
+
             # Voice-specific metadata
             "is_voice_conversation": True,
             "turn_count": len(segments),
+
+            # Empty defaults for other expected fields
+            "plugins_results": [],
+            "apps_results": [],
+            "geolocation": None,
+            "photos": [],
+            "audio_files": [],
+            "external_data": None,
+            "app_id": None,
+            "visibility": "private",
         }
 
-        # Store in user's conversations collection
-        doc_ref = (
-            self.db.collection("users")
-            .document(uid)
-            .collection("conversations")
-            .document(session_id)
-        )
-
-        doc_ref.set(conversation_data)
+        # Use the standard upsert_conversation function
+        # This handles encryption, data protection, and proper indexing
+        upsert_conversation(uid, conversation_data)
         print(f"💾 Stored conversation {session_id[:8]} for uid={uid[:8]}")
 
         return session_id
@@ -112,10 +149,12 @@ class FirestoreClient:
         Returns:
             Document ID of stored analytics
         """
+        now = datetime.now(timezone.utc)
+
         analytics_data = {
             "session_id": session_id,
             "uid": uid,
-            "created_at": datetime.utcnow(),
+            "created_at": now,
             "duration_seconds": duration_seconds,
             "turn_count": turn_count,
             "interruption_count": interruption_count,

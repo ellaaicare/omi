@@ -855,17 +855,38 @@ class ManualVoicePipeline:
         if self.turns:
             try:
                 transcript = self._build_transcript()
+
+                # Build properly formatted segments with speaker tags
+                # Voice mode knows exactly who is speaking (user vs assistant)
+                segments = []
+                for i, t in enumerate(self.turns):
+                    is_user = t.role == "user"
+                    speaker = "SPEAKER_00" if is_user else "SPEAKER_01"
+
+                    segments.append({
+                        "text": t.text,
+                        "speaker": speaker,
+                        "speaker_id": 0 if is_user else 1,
+                        "is_user": is_user,
+                        "role": t.role,  # "user" or "assistant"
+                        "start": t.timestamp,
+                        "end": t.timestamp + 1.0,  # Approximate
+                        "source": "voice_mode_v2",
+                    })
+
+                # Calculate started_at from session start time
+                from datetime import datetime, timezone
+                started_at = datetime.fromtimestamp(self.start_time, tz=timezone.utc) if self.start_time else None
+
                 await self.firestore_client.store_voice_conversation(
                     uid=self.uid,
                     session_id=self.session_id,
                     transcript=transcript,
-                    segments=[{
-                        "role": t.role,
-                        "text": t.text,
-                        "timestamp": t.timestamp
-                    } for t in self.turns],
+                    segments=segments,
                     duration_seconds=duration,
                     source="voice_mode_v2_manual",
+                    started_at=started_at,
+                    language="en",
                 )
                 print(f"💾 Conversation saved")
 
