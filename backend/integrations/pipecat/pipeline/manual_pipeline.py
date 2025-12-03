@@ -92,6 +92,9 @@ class ManualVoicePipeline:
         self.system_prompt: str = ""
         self.is_running = False
         self.last_speech_time: float = 0
+        self.is_speaking_tts = False  # Track when AI is speaking for barge-in
+        self.barge_in_detected = False  # User interrupted AI
+        self.tts_task: Optional[asyncio.Task] = None  # Background TTS task for cancellation
 
         # Stats
         self.chunks_received = 0
@@ -280,6 +283,13 @@ class ManualVoicePipeline:
                     print(f"🗣️ Speech confirmed (confidence: {confidence:.2f})", flush=True)
                     self.vad_state = VADState.SPEAKING
                     self.is_speech_confirmed = True
+                    # Barge-in: User started speaking while AI is talking
+                    if self.is_speaking_tts:
+                        print(f"🎤 User interrupting AI (barge-in)", flush=True)
+                        self.barge_in_detected = True
+                        # Cancel TTS task
+                        if self.tts_task and not self.tts_task.done():
+                            self.tts_task.cancel()
                     return "speaking"
                 return "quiet"  # Still confirming
 
@@ -342,6 +352,10 @@ class ManualVoicePipeline:
                 timestamp=time.time()
             ))
 
+            # Add thinking pause (200-300ms) for natural conversation feel
+            # This prevents the "too fast = unnatural" problem
+            await asyncio.sleep(0.25)  # 250ms thinking pause
+
             # 2. LLM - Groq
             print("🤖 Generating response with Groq...", flush=True)
             response = await self._generate_response_groq(transcript)
@@ -358,9 +372,14 @@ class ManualVoicePipeline:
                 timestamp=time.time()
             ))
 
-            # 3. TTS - OpenAI
+            # 3. TTS - OpenAI (run in background for barge-in support)
             print("🔊 Generating speech with OpenAI TTS...", flush=True)
-            await self._speak_response(response)
+            # Cancel any existing TTS task
+            if self.tts_task and not self.tts_task.done():
+                self.tts_task.cancel()
+            # Spawn TTS as background task - DON'T await it!
+            # This allows main loop to continue receiving audio for barge-in detection
+            self.tts_task = asyncio.create_task(self._speak_response(response))
 
         except Exception as e:
             print(f"❌ Utterance processing error: {e}")
@@ -466,8 +485,11 @@ class ManualVoicePipeline:
             return ""
 
     async def _speak_response(self, text: str):
-        """Generate TTS audio and send to client."""
+        """Generate TTS audio and send to client with barge-in support."""
         try:
+            self.is_speaking_tts = True  # Mark AI as speaking
+            self.barge_in_detected = False
+
             # Generate speech with OpenAI TTS
             response = await self.openai_client.audio.speech.create(
                 model="tts-1",
@@ -480,14 +502,21 @@ class ManualVoicePipeline:
             # Use aiter_bytes() for async iteration, or read() for full content
             audio_content = response.content
 
-            # Send audio in chunks to client
+            # Send audio in chunks to client with barge-in check
             chunk_size = 4096  # ~128ms at 16kHz
             bytes_sent = 0
             for i in range(0, len(audio_content), chunk_size):
+                # Check for barge-in (user started speaking)
+                if self.barge_in_detected:
+                    print(f"🛑 Barge-in detected! Stopping TTS at {bytes_sent} bytes", flush=True)
+                    break
+
                 chunk = audio_content[i:i+chunk_size]
                 try:
                     await self.websocket.send_bytes(chunk)
                     bytes_sent += len(chunk)
+                    # Small delay to allow barge-in detection
+                    await asyncio.sleep(0.01)  # 10ms
                 except Exception as e:
                     print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
                     break
@@ -496,6 +525,8 @@ class ManualVoicePipeline:
 
         except Exception as e:
             print(f"❌ TTS error: {e}", flush=True)
+        finally:
+            self.is_speaking_tts = False  # AI done speaking
 
     async def _process_control(self, message: str):
         """Process JSON control messages from client."""
@@ -620,13 +651,14 @@ class ManualVoicePipeline:
 ## Recent Conversations
 {rolling_summaries}
 
-## Voice Conversation Guidelines
-- Be warm, concise, and helpful
-- Keep responses SHORT (1-3 sentences) - this is voice, not text
-- Reference the user's memories naturally when relevant
-- Ask follow-up questions to maintain conversation flow
-- If you don't know something, say so briefly
-- Use natural speech patterns, not formal writing
+## Voice Conversation Guidelines (CRITICAL)
+- MAXIMUM 2-3 sentences per response (under 30 words ideal)
+- This is a VOICE conversation - long responses feel like lectures
+- Be conversational, not comprehensive
+- One idea per turn, then wait for user
+- Ask short follow-up questions to maintain dialogue
+- Never list multiple points - pick the most important one
+- Respond like you're chatting, not writing an essay
 """.strip()
 
     def _default_system_prompt(self) -> str:
@@ -634,12 +666,14 @@ class ManualVoicePipeline:
         return """
 You are Ella, a warm and caring AI companion.
 
-## Voice Conversation Guidelines
-- Be warm, concise, and helpful
-- Keep responses SHORT (1-3 sentences) - this is voice, not text
-- Ask follow-up questions to maintain conversation flow
-- If you don't know something, say so briefly
-- Use natural speech patterns, not formal writing
+## Voice Conversation Guidelines (CRITICAL)
+- MAXIMUM 2-3 sentences per response (under 30 words ideal)
+- This is a VOICE conversation - long responses feel like lectures
+- Be conversational, not comprehensive
+- One idea per turn, then wait for user
+- Ask short follow-up questions to maintain dialogue
+- Never list multiple points - pick the most important one
+- Respond like you're chatting, not writing an essay
 """.strip()
 
 
