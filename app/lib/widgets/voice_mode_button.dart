@@ -293,7 +293,36 @@ class VoiceModeButton extends StatelessWidget {
     if (v2Service.isActive) {
       // Stop V2 voice mode
       debugPrint('🎙️ [VoiceModeButton] Stopping V2 voice mode');
+
+      // Stop mic first
       ServiceManager.instance().mic.stop();
+
+      // Send 3 seconds of explicit silence to trigger VAD
+      // This tells the backend "user stopped speaking"
+      debugPrint('🎙️ [VoiceModeButton] Sending 3s silence to trigger VAD...');
+      final silence = Uint8List(3200); // 100ms of zeros at 16kHz PCM16
+      for (int i = 0; i < 30; i++) {
+        v2Service.sendAudio(silence);
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      debugPrint('🎙️ [VoiceModeButton] Silence sent, waiting for TTS response...');
+
+      // Wait up to 15 seconds for TTS response
+      // The service will handle playback automatically
+      int waitCount = 0;
+      while (v2Service.state == VoiceModeV2State.active && waitCount < 150) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        waitCount++;
+        if (waitCount % 10 == 0) {
+          debugPrint('🎙️ [VoiceModeButton] Waiting for response... ${waitCount / 10}s');
+        }
+      }
+
+      // If speaking, wait for playback to complete
+      while (v2Service.state == VoiceModeV2State.speaking) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
       await v2Service.stop();
     } else {
       // Start V2 voice mode
