@@ -33,10 +33,13 @@ class STTConfig:
 class TTSConfig:
     """Text-to-Speech configuration."""
 
-    provider: str = "openai"
+    provider: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "openai"))  # openai, elevenlabs, deepgram
     voice: str = "nova"
     speed: float = 1.0
+    streaming: bool = field(default_factory=lambda: os.getenv("TTS_STREAMING", "true").lower() == "true")  # Enable streaming TTS
     api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    elevenlabs_api_key: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
+    elevenlabs_voice_id: str = field(default_factory=lambda: os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"))  # Rachel
 
 
 @dataclass

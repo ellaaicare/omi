@@ -90,7 +90,7 @@ async def voice_v2_health():
 
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": "2.1.0",  # Updated for streaming TTS
         "endpoint": "/v2/voice",
         "config": {
             "vad_provider": config.vad.provider,
@@ -99,6 +99,7 @@ async def voice_v2_health():
             "stt_model": config.stt.model,
             "tts_provider": config.tts.provider,
             "tts_voice": config.tts.voice,
+            "tts_streaming": config.tts.streaming,  # NEW: streaming TTS enabled
             "llm_provider": config.llm.provider,
             "llm_model": config.llm.model,
         },
@@ -106,5 +107,9 @@ async def voice_v2_health():
             "deepgram_key_set": bool(config.stt.api_key),
             "openai_key_set": bool(config.tts.api_key),
             "groq_key_set": bool(config.llm.api_key),
+        },
+        "rollback": {
+            "tts_streaming": "Set TTS_STREAMING=false to disable streaming",
+            "tts_provider": "Set TTS_PROVIDER=openai|elevenlabs|deepgram to change provider",
         },
     }

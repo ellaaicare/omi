@@ -503,7 +503,109 @@ class ManualVoicePipeline:
         await self._speak_response_timed(text, None, None, None)
 
     async def _speak_response_timed(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
-        """Generate TTS audio with timing metrics."""
+        """Generate TTS audio with timing metrics. Uses streaming if enabled."""
+        # Route to streaming or non-streaming based on config
+        if self.config.tts.streaming:
+            await self._speak_response_streaming(text, t_tts_start, timings, t_total_start)
+        else:
+            await self._speak_response_blocking(text, t_tts_start, timings, t_total_start)
+
+    async def _speak_response_streaming(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
+        """
+        STREAMING TTS - Send audio chunks as they're generated.
+
+        This dramatically reduces Time To First Byte (TTFB) because we start
+        sending audio immediately instead of waiting for full generation.
+
+        Expected improvement: TTFB from ~2800ms to ~1500ms
+        """
+        try:
+            self.is_speaking_tts = True
+            self.barge_in_detected = False
+
+            t_gen_start = time.time()
+            t_first_chunk = None
+            bytes_sent = 0
+            total_bytes = 0
+
+            print(f"🔊 [STREAMING] Generating TTS with OpenAI...", flush=True)
+
+            # Use streaming response - iter_bytes() yields chunks as they arrive
+            async with self.openai_client.audio.speech.with_streaming_response.create(
+                model="tts-1",
+                voice=self.config.tts.voice,
+                input=text,
+                response_format="pcm",
+            ) as response:
+                # Stream chunks directly to WebSocket as they arrive
+                async for chunk in response.iter_bytes(chunk_size=4096):
+                    # Track time to first byte
+                    if t_first_chunk is None:
+                        t_first_chunk = time.time()
+                        ttfb_ms = (t_first_chunk - t_gen_start) * 1000
+                        print(f"⚡ [STREAMING] First chunk: {ttfb_ms:.0f}ms TTFB", flush=True)
+
+                    # Check for barge-in
+                    if self.barge_in_detected:
+                        print(f"🛑 Barge-in detected! Stopping TTS at {bytes_sent} bytes", flush=True)
+                        break
+
+                    # Send chunk to client
+                    try:
+                        await self.websocket.send_bytes(chunk)
+                        bytes_sent += len(chunk)
+                        total_bytes += len(chunk)
+                        # Small yield to allow barge-in detection
+                        await asyncio.sleep(0.005)  # 5ms
+                    except Exception as e:
+                        print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
+                        break
+
+            t_end = time.time()
+            tts_total_ms = (t_end - t_gen_start) * 1000
+            ttfb_ms = (t_first_chunk - t_gen_start) * 1000 if t_first_chunk else tts_total_ms
+
+            # Log timing
+            if timings is not None:
+                timings['tts_gen'] = ttfb_ms  # TTFB is what matters for streaming
+                timings['tts_send'] = tts_total_ms - ttfb_ms
+                timings['tts_total'] = tts_total_ms
+                timings['streaming'] = True
+
+            print(f"✅ [STREAMING] Sent {bytes_sent} bytes, TTFB={ttfb_ms:.0f}ms, total={tts_total_ms:.0f}ms", flush=True)
+
+            # ====== LATENCY SUMMARY ======
+            if timings is not None and t_total_start is not None:
+                total_ms = (time.time() - t_total_start) * 1000
+                actual_ttfb = timings.get('stt', 0) + timings.get('pause', 0) + timings.get('llm', 0) + ttfb_ms
+                print(f"\n{'='*50}", flush=True)
+                print(f"📊 LATENCY BREAKDOWN [STREAMING] (Turn #{len(self.turns)//2})", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   STT (Deepgram):    {timings.get('stt', 0):>6.0f}ms", flush=True)
+                print(f"   Thinking pause:    {timings.get('pause', 0):>6.0f}ms", flush=True)
+                print(f"   LLM (Groq):        {timings.get('llm', 0):>6.0f}ms", flush=True)
+                print(f"   TTS TTFB:          {ttfb_ms:>6.0f}ms ⚡", flush=True)
+                print(f"   TTS streaming:     {timings.get('tts_send', 0):>6.0f}ms", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   TOTAL:             {total_ms:>6.0f}ms", flush=True)
+                print(f"   TIME TO FIRST BYTE:{actual_ttfb:>6.0f}ms ⚡", flush=True)
+                print(f"{'='*50}\n", flush=True)
+
+        except Exception as e:
+            print(f"❌ [STREAMING] TTS error: {e}", flush=True)
+            # Fallback to blocking mode
+            print(f"🔄 Falling back to blocking TTS...", flush=True)
+            await self._speak_response_blocking(text, t_tts_start, timings, t_total_start)
+        finally:
+            self.is_speaking_tts = False
+
+    async def _speak_response_blocking(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
+        """
+        BLOCKING TTS - Wait for full audio before sending (original behavior).
+
+        Use this as fallback or when streaming causes issues.
+        Set TTS_STREAMING=false to use this mode.
+        """
         try:
             self.is_speaking_tts = True  # Mark AI as speaking
             self.barge_in_detected = False
@@ -511,7 +613,9 @@ class ManualVoicePipeline:
             # Track TTS generation time
             t_gen_start = time.time()
 
-            # Generate speech with OpenAI TTS
+            print(f"🔊 [BLOCKING] Generating TTS with OpenAI...", flush=True)
+
+            # Generate speech with OpenAI TTS (waits for full response)
             response = await self.openai_client.audio.speech.create(
                 model="tts-1",
                 voice=self.config.tts.voice,
@@ -526,7 +630,7 @@ class ManualVoicePipeline:
             audio_content = response.content
             audio_duration_ms = len(audio_content) / 32  # 32 bytes per ms at 16kHz, 16-bit
 
-            print(f"⏱️ TTS generation: {tts_gen_ms:.0f}ms ({len(audio_content)} bytes = {audio_duration_ms:.0f}ms audio)", flush=True)
+            print(f"⏱️ [BLOCKING] TTS generation: {tts_gen_ms:.0f}ms ({len(audio_content)} bytes = {audio_duration_ms:.0f}ms audio)", flush=True)
 
             # Track time to first byte (TTFB)
             t_send_start = time.time()
@@ -561,14 +665,15 @@ class ManualVoicePipeline:
                 timings['tts_gen'] = tts_gen_ms
                 timings['tts_send'] = (t_send_end - t_send_start) * 1000
                 timings['tts_total'] = (t_send_end - t_tts_start) * 1000
+                timings['streaming'] = False
 
-            print(f"✅ Sent TTS response: {bytes_sent} bytes ({len(text)} chars)", flush=True)
+            print(f"✅ [BLOCKING] Sent TTS response: {bytes_sent} bytes ({len(text)} chars)", flush=True)
 
             # ====== LATENCY SUMMARY ======
             if timings is not None and t_total_start is not None:
                 total_ms = (time.time() - t_total_start) * 1000
                 print(f"\n{'='*50}", flush=True)
-                print(f"📊 LATENCY BREAKDOWN (Turn #{len(self.turns)//2})", flush=True)
+                print(f"📊 LATENCY BREAKDOWN [BLOCKING] (Turn #{len(self.turns)//2})", flush=True)
                 print(f"{'='*50}", flush=True)
                 print(f"   STT (Deepgram):    {timings.get('stt', 0):>6.0f}ms", flush=True)
                 print(f"   Thinking pause:    {timings.get('pause', 0):>6.0f}ms", flush=True)
@@ -581,7 +686,7 @@ class ManualVoicePipeline:
                 print(f"{'='*50}\n", flush=True)
 
         except Exception as e:
-            print(f"❌ TTS error: {e}", flush=True)
+            print(f"❌ [BLOCKING] TTS error: {e}", flush=True)
         finally:
             self.is_speaking_tts = False  # AI done speaking
 
