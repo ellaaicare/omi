@@ -374,20 +374,19 @@ def run_all_tests(verbose: bool = False) -> List[TestResult]:
         expected_speech=True
     ))
 
-    # Test 10: Real audio file (if available)
+    # Test 10: Real audio file (silero_test.wav has clear speech)
     print("\n[10/10] Testing real audio file...")
     try:
         audio_file = os.path.join(
             os.path.dirname(__file__),
             "..", "..", "..",
-            "test_audio", "pyannote_sample.wav"
+            "test_audio", "silero_test.wav"
         )
         audio = gen.load_wav_file(audio_file)
-        # Skip first 7 seconds (silence in sample - speech starts at second 7)
-        audio = audio[7 * 32000:]  # Skip 7s at 16kHz, 16-bit
+        # Use first 10 seconds which has strong speech (avg 0.93 confidence)
         results.append(tester.run_test(
-            "Real Speech (pyannote_sample.wav)",
-            audio[:64000],  # First 2s of speech (seconds 7-9)
+            "Real Speech (silero_test.wav)",
+            audio[:320000],  # First 10s at 16kHz, 16-bit = 320KB
             expected_speech=True
         ))
     except FileNotFoundError:
