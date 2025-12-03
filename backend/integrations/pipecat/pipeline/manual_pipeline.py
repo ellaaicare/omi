@@ -104,6 +104,11 @@ class ManualVoicePipeline:
         self.barge_in_detected = False  # User interrupted AI
         self.tts_task: Optional[asyncio.Task] = None  # Background TTS task for cancellation
 
+        # User audio preferences (from Ella config, with defaults)
+        self.audio_preferences: dict = {
+            "tts_sample_rate": 24000,  # Default: 24kHz to match OpenAI TTS
+        }
+
         # Stats
         self.chunks_received = 0
         self.bytes_received = 0
@@ -159,6 +164,13 @@ class ManualVoicePipeline:
         try:
             ella_config = await self.n8n_client.fetch_voice_config(self.uid)
             self.system_prompt = self._build_system_prompt(ella_config)
+
+            # Load user audio preferences (gracefully fallback to defaults)
+            user_audio = ella_config.get("audio_preferences", {})
+            if user_audio:
+                self.audio_preferences.update(user_audio)
+                print(f"🔊 Loaded audio preferences: sample_rate={self.audio_preferences.get('tts_sample_rate')}Hz")
+
             print(f"✅ Loaded Ella config for uid={self.uid}")
         except Exception as e:
             print(f"⚠️ Failed to fetch Ella config: {e}, using default")
@@ -728,16 +740,20 @@ class ManualVoicePipeline:
             bytes_sent = 0
 
             voice_id = self.config.tts.elevenlabs_voice_id
-            print(f"🔊 [ELEVENLABS] Generating TTS (voice: {voice_id})...", flush=True)
+
+            # Get sample rate from user preferences (default 24kHz to match OpenAI TTS)
+            sample_rate = self.audio_preferences.get('tts_sample_rate', 24000)
+            output_format = f"pcm_{sample_rate}"  # e.g., "pcm_24000" or "pcm_16000"
+
+            print(f"🔊 [ELEVENLABS] Generating TTS (voice: {voice_id}, rate: {sample_rate}Hz)...", flush=True)
 
             # Use ElevenLabs streaming API - generates and streams simultaneously
-            # pcm_24000 format = 16-bit PCM at 24kHz (matches OpenAI TTS output)
             # Note: stream() returns an async generator, don't await it
             audio_stream = self.elevenlabs_client.text_to_speech.stream(
                 voice_id=voice_id,
                 text=text,
                 model_id="eleven_turbo_v2_5",  # Fastest model
-                output_format="pcm_24000",  # 24kHz PCM16 to match OpenAI TTS
+                output_format=output_format,  # Dynamic sample rate from user prefs
             )
 
             # Stream chunks directly to WebSocket as they arrive
