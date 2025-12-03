@@ -335,15 +335,23 @@ class ManualVoicePipeline:
     async def _process_utterance(self, audio_bytes: bytes):
         """Process a complete user utterance through the pipeline."""
         try:
+            # ====== LATENCY TRACKING ======
+            t_start = time.time()
+            timings = {}
+
             # 1. STT - Deepgram
-            print("📝 Transcribing with Deepgram...")
+            t_stt_start = time.time()
+            print("📝 Transcribing with Deepgram...", flush=True)
             transcript = await self._transcribe_deepgram(audio_bytes)
+            t_stt_end = time.time()
+            timings['stt'] = (t_stt_end - t_stt_start) * 1000  # ms
 
             if not transcript or not transcript.strip():
-                print("⚠️ Empty transcript, skipping")
+                print("⚠️ Empty transcript, skipping", flush=True)
                 return
 
             print(f"👤 User: {transcript}", flush=True)
+            print(f"⏱️ STT latency: {timings['stt']:.0f}ms", flush=True)
 
             # Record user turn
             self.turns.append(ConversationTurn(
@@ -353,17 +361,22 @@ class ManualVoicePipeline:
             ))
 
             # Add thinking pause (200-300ms) for natural conversation feel
-            # This prevents the "too fast = unnatural" problem
+            t_pause_start = time.time()
             await asyncio.sleep(0.25)  # 250ms thinking pause
+            timings['pause'] = (time.time() - t_pause_start) * 1000
 
             # 2. LLM - Groq
+            t_llm_start = time.time()
             print("🤖 Generating response with Groq...", flush=True)
             response = await self._generate_response_groq(transcript)
+            t_llm_end = time.time()
+            timings['llm'] = (t_llm_end - t_llm_start) * 1000  # ms
 
             if not response:
                 response = "I'm sorry, I couldn't process that. Could you repeat?"
 
             print(f"🤖 Assistant: {response}", flush=True)
+            print(f"⏱️ LLM latency: {timings['llm']:.0f}ms ({len(response)} chars)", flush=True)
 
             # Record assistant turn
             self.turns.append(ConversationTurn(
@@ -373,13 +386,14 @@ class ManualVoicePipeline:
             ))
 
             # 3. TTS - OpenAI (run in background for barge-in support)
+            t_tts_start = time.time()
             print("🔊 Generating speech with OpenAI TTS...", flush=True)
             # Cancel any existing TTS task
             if self.tts_task and not self.tts_task.done():
                 self.tts_task.cancel()
             # Spawn TTS as background task - DON'T await it!
             # This allows main loop to continue receiving audio for barge-in detection
-            self.tts_task = asyncio.create_task(self._speak_response(response))
+            self.tts_task = asyncio.create_task(self._speak_response_timed(response, t_tts_start, timings, t_start))
 
         except Exception as e:
             print(f"❌ Utterance processing error: {e}")
@@ -486,9 +500,16 @@ class ManualVoicePipeline:
 
     async def _speak_response(self, text: str):
         """Generate TTS audio and send to client with barge-in support."""
+        await self._speak_response_timed(text, None, None, None)
+
+    async def _speak_response_timed(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
+        """Generate TTS audio with timing metrics."""
         try:
             self.is_speaking_tts = True  # Mark AI as speaking
             self.barge_in_detected = False
+
+            # Track TTS generation time
+            t_gen_start = time.time()
 
             # Generate speech with OpenAI TTS
             response = await self.openai_client.audio.speech.create(
@@ -498,13 +519,22 @@ class ManualVoicePipeline:
                 response_format="pcm",  # Raw PCM16
             )
 
-            # Get the full audio content (response is a streaming response)
-            # Use aiter_bytes() for async iteration, or read() for full content
+            t_gen_end = time.time()
+            tts_gen_ms = (t_gen_end - t_gen_start) * 1000
+
+            # Get the full audio content
             audio_content = response.content
+            audio_duration_ms = len(audio_content) / 32  # 32 bytes per ms at 16kHz, 16-bit
+
+            print(f"⏱️ TTS generation: {tts_gen_ms:.0f}ms ({len(audio_content)} bytes = {audio_duration_ms:.0f}ms audio)", flush=True)
+
+            # Track time to first byte (TTFB)
+            t_send_start = time.time()
 
             # Send audio in chunks to client with barge-in check
             chunk_size = 4096  # ~128ms at 16kHz
             bytes_sent = 0
+            first_byte_sent = False
             for i in range(0, len(audio_content), chunk_size):
                 # Check for barge-in (user started speaking)
                 if self.barge_in_detected:
@@ -515,13 +545,40 @@ class ManualVoicePipeline:
                 try:
                     await self.websocket.send_bytes(chunk)
                     bytes_sent += len(chunk)
+                    if not first_byte_sent:
+                        ttfb = (time.time() - t_send_start) * 1000
+                        first_byte_sent = True
                     # Small delay to allow barge-in detection
                     await asyncio.sleep(0.01)  # 10ms
                 except Exception as e:
                     print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
                     break
 
+            t_send_end = time.time()
+
+            # Log TTS timing
+            if timings is not None and t_tts_start is not None:
+                timings['tts_gen'] = tts_gen_ms
+                timings['tts_send'] = (t_send_end - t_send_start) * 1000
+                timings['tts_total'] = (t_send_end - t_tts_start) * 1000
+
             print(f"✅ Sent TTS response: {bytes_sent} bytes ({len(text)} chars)", flush=True)
+
+            # ====== LATENCY SUMMARY ======
+            if timings is not None and t_total_start is not None:
+                total_ms = (time.time() - t_total_start) * 1000
+                print(f"\n{'='*50}", flush=True)
+                print(f"📊 LATENCY BREAKDOWN (Turn #{len(self.turns)//2})", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   STT (Deepgram):    {timings.get('stt', 0):>6.0f}ms", flush=True)
+                print(f"   Thinking pause:    {timings.get('pause', 0):>6.0f}ms", flush=True)
+                print(f"   LLM (Groq):        {timings.get('llm', 0):>6.0f}ms", flush=True)
+                print(f"   TTS gen (OpenAI):  {timings.get('tts_gen', 0):>6.0f}ms", flush=True)
+                print(f"   TTS send:          {timings.get('tts_send', 0):>6.0f}ms", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   TOTAL:             {total_ms:>6.0f}ms", flush=True)
+                print(f"   Time to first byte:{timings.get('stt', 0) + timings.get('pause', 0) + timings.get('llm', 0) + timings.get('tts_gen', 0):>6.0f}ms", flush=True)
+                print(f"{'='*50}\n", flush=True)
 
         except Exception as e:
             print(f"❌ TTS error: {e}", flush=True)
