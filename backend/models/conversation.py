@@ -256,8 +256,8 @@ class ConversationPostProcessing(BaseModel):
 class Conversation(BaseModel):
     id: str
     created_at: datetime
-    started_at: Optional[datetime]
-    finished_at: Optional[datetime]
+    started_at: Optional[datetime] = None  # Default to None for backwards compatibility
+    finished_at: Optional[datetime] = None  # Default to None for backwards compatibility
 
     source: Optional[ConversationSource] = ConversationSource.omi
     language: Optional[str] = None  # applies only to Friend # TODO: once released migrate db to default 'en'
