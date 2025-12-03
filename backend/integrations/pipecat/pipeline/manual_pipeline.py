@@ -731,13 +731,13 @@ class ManualVoicePipeline:
             print(f"🔊 [ELEVENLABS] Generating TTS (voice: {voice_id})...", flush=True)
 
             # Use ElevenLabs streaming API - generates and streams simultaneously
-            # pcm_16000 format = 16-bit PCM at 16kHz (matches our audio pipeline)
+            # pcm_24000 format = 16-bit PCM at 24kHz (matches OpenAI TTS output)
             # Note: stream() returns an async generator, don't await it
             audio_stream = self.elevenlabs_client.text_to_speech.stream(
                 voice_id=voice_id,
                 text=text,
                 model_id="eleven_turbo_v2_5",  # Fastest model
-                output_format="pcm_16000",  # 16kHz PCM16 for iOS
+                output_format="pcm_24000",  # 24kHz PCM16 to match OpenAI TTS
             )
 
             # Stream chunks directly to WebSocket as they arrive
