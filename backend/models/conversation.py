@@ -220,6 +220,8 @@ class ConversationSource(str, Enum):
     workflow = 'workflow'
     sdcard = 'sdcard'
     external_integration = 'external_integration'
+    voice_mode_v2 = 'voice_mode_v2'  # Pipecat voice mode
+    voice_mode_v2_manual = 'voice_mode_v2_manual'  # Manual voice pipeline
 
 
 class ConversationVisibility(str, Enum):
