@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle, ByteData;
 import 'package:just_audio/just_audio.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
@@ -306,6 +307,80 @@ class VoiceModeV2Service extends ChangeNotifier {
     debugPrint('VoiceModeV2: WebSocket closed');
     if (_state != VoiceModeV2State.inactive) {
       stop();
+    }
+  }
+
+  /// Test V2 voice mode with bundled audio file
+  /// This sends a pre-recorded speech sample to test the full pipeline
+  Future<bool> runTest() async {
+    debugPrint('VoiceModeV2: Starting test with bundled audio...');
+
+    // Start session if not already active
+    if (_state == VoiceModeV2State.inactive) {
+      final success = await start();
+      if (!success) {
+        debugPrint('VoiceModeV2: Test failed - could not connect');
+        return false;
+      }
+    }
+
+    try {
+      // Load bundled test audio
+      final ByteData audioData = await rootBundle.load('assets/audio/test_voice_mode.pcm');
+      final Uint8List audioBytes = audioData.buffer.asUint8List();
+      debugPrint('VoiceModeV2: Loaded test audio: ${audioBytes.length} bytes');
+
+      // Send audio at real-time pace (100ms chunks)
+      const chunkSize = 3200; // 100ms at 16kHz PCM16
+      int chunksSent = 0;
+
+      debugPrint('VoiceModeV2: Sending test audio at real-time pace...');
+      for (int i = 0; i < audioBytes.length; i += chunkSize) {
+        final end = (i + chunkSize < audioBytes.length) ? i + chunkSize : audioBytes.length;
+        final chunk = audioBytes.sublist(i, end);
+        sendAudio(Uint8List.fromList(chunk));
+        chunksSent++;
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      // Send 3 seconds of silence to trigger VAD
+      debugPrint('VoiceModeV2: Sending 3s silence to trigger VAD...');
+      final silence = Uint8List(chunkSize);
+      for (int i = 0; i < 30; i++) {
+        sendAudio(silence);
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      debugPrint('VoiceModeV2: Test audio sent ($chunksSent chunks + 3s silence)');
+      debugPrint('VoiceModeV2: Waiting for TTS response...');
+
+      // Wait up to 15 seconds for response
+      final startTime = DateTime.now();
+      while (_state == VoiceModeV2State.active &&
+             DateTime.now().difference(startTime).inSeconds < 15) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      // Check if we got a response
+      if (_state == VoiceModeV2State.speaking) {
+        debugPrint('VoiceModeV2: Test SUCCESS - received TTS response!');
+
+        // Wait for playback to complete
+        while (_state == VoiceModeV2State.speaking) {
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+
+        debugPrint('VoiceModeV2: Test complete - TTS playback finished');
+        return true;
+      } else {
+        debugPrint('VoiceModeV2: Test FAILED - no TTS response received');
+        return false;
+      }
+    } catch (e) {
+      debugPrint('VoiceModeV2: Test error: $e');
+      return false;
+    } finally {
+      await stop();
     }
   }
 

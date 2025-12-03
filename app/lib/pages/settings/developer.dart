@@ -22,6 +22,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/services/notifications.dart';
+import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
 import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
 import 'package:omi/utils/test_suite_manager.dart';
 
@@ -390,6 +391,30 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             style: ElevatedButton.styleFrom(
                               foregroundColor: Colors.white,
                               backgroundColor: Colors.blue,
+                              minimumSize: const Size(double.infinity, 36),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.mic, size: 16),
+                            label: const Text('Test Full Pipeline (Bundled Audio)'),
+                            onPressed: () async {
+                              AppSnackbar.showSnackbar('Starting V2 full pipeline test...');
+                              try {
+                                final v2Service = VoiceModeV2Service();
+                                final success = await v2Service.runTest();
+                                if (success) {
+                                  AppSnackbar.showSnackbar('✅ V2 test SUCCESS - TTS played!');
+                                } else {
+                                  AppSnackbar.showSnackbarError('❌ V2 test FAILED - no TTS response');
+                                }
+                              } catch (e) {
+                                AppSnackbar.showSnackbarError('V2 test error: $e');
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: Colors.white,
+                              backgroundColor: Colors.green,
                               minimumSize: const Size(double.infinity, 36),
                             ),
                           ),
