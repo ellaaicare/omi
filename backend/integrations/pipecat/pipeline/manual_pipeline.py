@@ -21,8 +21,7 @@ Architecture:
 import asyncio
 import time
 import uuid
-import struct
-from typing import Optional, AsyncIterator
+from typing import Optional
 from dataclasses import dataclass
 from fastapi import WebSocket
 
@@ -115,13 +114,28 @@ class ManualVoicePipeline:
         # Initialize Firestore client
         self.firestore_client = FirestoreClient()
 
-        # Initialize VAD
+        # Initialize Silero VAD with proper parameters
+        # Silero uses neural network for speech detection - handles background noise properly
         self.vad = SileroVADAnalyzer(
+            sample_rate=16000,  # MUST set sample rate for Silero
             params=VADParams(
-                stop_secs=self.config.vad.stop_secs,
-                min_volume=0.1,  # Lower threshold for test audio
+                confidence=0.6,  # 60% confidence threshold (default 0.7)
+                start_secs=0.2,  # 200ms to confirm speech start
+                stop_secs=self.config.vad.stop_secs,  # 1.5s silence to stop
+                min_volume=0.4,  # 40% min volume (handles quiet speech)
             )
         )
+        # Explicitly set sample rate (required by Silero)
+        self.vad.set_sample_rate(16000)
+
+        # Silero needs exactly 512 samples (1024 bytes) per call
+        self.vad_frame_size = self.vad.num_frames_required() * 2  # 512 samples * 2 bytes = 1024
+        print(f"🎯 Silero VAD initialized: frame_size={self.vad_frame_size} bytes", flush=True)
+
+        # VAD timing state
+        self.speech_start_time: float = 0
+        self.silence_start_time: float = 0
+        self.is_speech_confirmed = False
 
         # Fetch Ella config to get persona and memory context
         try:
@@ -183,75 +197,128 @@ class ManualVoicePipeline:
         self.chunks_received += 1
         self.bytes_received += len(audio_bytes)
 
-        # Log every 10th chunk for debugging
-        if self.chunks_received % 10 == 1:
+        # Log every 50th chunk for debugging (reduced spam)
+        if self.chunks_received % 50 == 1:
             print(f"🔊 Chunk #{self.chunks_received}: {len(audio_bytes)} bytes (total: {self.bytes_received / 1024:.1f}KB)", flush=True)
 
         # Add to buffer
         self.audio_buffer.extend(audio_bytes)
 
-        # Process VAD on chunks (Silero needs ~512ms of audio at 16kHz)
-        # 16kHz * 2 bytes/sample * 0.5s = 16000 bytes
-        chunk_size = 16000  # ~0.5 seconds
+        # Process VAD on chunks - Silero needs exactly 1024 bytes (512 samples @ 16kHz)
+        # This is ~32ms of audio per VAD call
+        while len(self.audio_buffer) >= self.vad_frame_size:
+            chunk = bytes(self.audio_buffer[:self.vad_frame_size])
+            del self.audio_buffer[:self.vad_frame_size]
 
-        while len(self.audio_buffer) >= chunk_size:
-            chunk = bytes(self.audio_buffer[:chunk_size])
-            del self.audio_buffer[:chunk_size]
-
-            # Run VAD
+            # Run Silero VAD - returns "speaking", "quiet", or "stopped"
             vad_result = await self._check_vad(chunk)
 
             if vad_result == "speaking":
-                # User is speaking - accumulate audio
+                # Speech detected - accumulate audio
                 self.speaking_audio.extend(chunk)
                 self.last_speech_time = time.time()
 
-            elif vad_result == "quiet" and self.vad_state == VADState.SPEAKING:
-                # Still in speaking mode but this chunk is quiet (pause between words)
-                # Keep accumulating audio to capture complete utterance
-                self.speaking_audio.extend(chunk)
+            elif vad_result == "quiet":
+                # Quiet chunk - but may still need to accumulate if in SPEAKING/STOPPING
+                if self.vad_state in (VADState.SPEAKING, VADState.STOPPING):
+                    # Keep accumulating audio during pauses to capture complete utterance
+                    self.speaking_audio.extend(chunk)
 
             elif vad_result == "stopped":
                 # User stopped speaking - process the utterance
                 if len(self.speaking_audio) > 0:
-                    print(f"🎤 End of speech detected, processing {len(self.speaking_audio)} bytes", flush=True)
+                    duration_ms = len(self.speaking_audio) / 32  # 32 bytes per ms @ 16kHz
+                    print(f"🎤 End of speech: {len(self.speaking_audio)} bytes ({duration_ms:.0f}ms)", flush=True)
                     await self._process_utterance(bytes(self.speaking_audio))
                     self.speaking_audio.clear()
 
     async def _check_vad(self, audio_chunk: bytes) -> str:
-        """Check VAD state for audio chunk."""
-        # Convert bytes to float32 for Silero
-        # PCM16 is 2 bytes per sample, little-endian
-        samples = struct.unpack(f'<{len(audio_chunk)//2}h', audio_chunk)
+        """
+        Check VAD state for audio chunk using Silero neural network.
 
-        # Normalize to float32 [-1, 1]
-        audio_float = [s / 32768.0 for s in samples]
+        Silero VAD is trained to distinguish speech from background noise,
+        including HVAC, traffic, keyboard typing, etc.
 
-        # Calculate RMS volume
-        rms = (sum(s * s for s in audio_float) / len(audio_float)) ** 0.5
+        Returns:
+            "speaking" - Speech detected and confirmed
+            "quiet" - No speech detected
+            "stopped" - Speech ended (was speaking, now quiet for stop_secs)
+        """
+        # Get voice confidence from Silero neural network (0.0 to 1.0)
+        # Silero handles the int16 -> float32 conversion internally
+        confidence = self.vad.voice_confidence(audio_chunk)
 
-        # Log RMS for debugging (every 20th chunk)
+        # Log confidence periodically (every 50 chunks = ~1.6 seconds)
         if not hasattr(self, '_vad_chunk_count'):
             self._vad_chunk_count = 0
         self._vad_chunk_count += 1
-        if self._vad_chunk_count % 20 == 1:
-            print(f"📊 VAD RMS: {rms:.6f} (threshold: 0.001)", flush=True)
+        if self._vad_chunk_count % 50 == 1:
+            state_name = self.vad_state.name if hasattr(self.vad_state, 'name') else str(self.vad_state)
+            print(f"📊 Silero VAD: confidence={confidence:.3f} state={state_name}", flush=True)
 
-        # Simple VAD based on volume threshold
-        # Lowered threshold from 0.01 to 0.001 for test audio
-        if rms > 0.001:  # Threshold for speech (lowered for test audio)
-            if self.vad_state != VADState.SPEAKING:
-                print(f"🗣️ Speech started (RMS: {rms:.4f})", flush=True)
-            self.vad_state = VADState.SPEAKING
-            return "speaking"
+        # Get VAD params
+        confidence_threshold = self.vad._params.confidence  # 0.6
+        start_secs = self.vad._params.start_secs  # 0.2
+        stop_secs = self.vad._params.stop_secs  # 1.5
+
+        current_time = time.time()
+
+        # State machine for speech detection
+        if confidence >= confidence_threshold:
+            # Speech detected
+            if self.vad_state == VADState.QUIET:
+                # Start tracking potential speech
+                self.speech_start_time = current_time
+                self.vad_state = VADState.STARTING
+                return "quiet"  # Not confirmed yet
+
+            elif self.vad_state == VADState.STARTING:
+                # Check if speech sustained long enough to confirm
+                if (current_time - self.speech_start_time) >= start_secs:
+                    print(f"🗣️ Speech confirmed (confidence: {confidence:.2f})", flush=True)
+                    self.vad_state = VADState.SPEAKING
+                    self.is_speech_confirmed = True
+                    return "speaking"
+                return "quiet"  # Still confirming
+
+            elif self.vad_state == VADState.SPEAKING:
+                # Continue speaking
+                self.silence_start_time = 0  # Reset silence timer
+                return "speaking"
+
+            elif self.vad_state == VADState.STOPPING:
+                # Was stopping, but speech resumed
+                print(f"🗣️ Speech resumed (confidence: {confidence:.2f})", flush=True)
+                self.vad_state = VADState.SPEAKING
+                self.silence_start_time = 0
+                return "speaking"
+
         else:
-            # Check if we've been quiet long enough
-            if self.vad_state == VADState.SPEAKING:
-                if self.last_speech_time and (time.time() - self.last_speech_time) > self.config.vad.stop_secs:
-                    print(f"🤫 Speech stopped after {self.config.vad.stop_secs}s silence", flush=True)
+            # Silence detected
+            if self.vad_state == VADState.QUIET:
+                return "quiet"
+
+            elif self.vad_state == VADState.STARTING:
+                # Speech not confirmed, back to quiet
+                self.vad_state = VADState.QUIET
+                return "quiet"
+
+            elif self.vad_state == VADState.SPEAKING:
+                # Start tracking silence
+                self.silence_start_time = current_time
+                self.vad_state = VADState.STOPPING
+                return "quiet"  # Still accumulating audio
+
+            elif self.vad_state == VADState.STOPPING:
+                # Check if silence sustained long enough to stop
+                if (current_time - self.silence_start_time) >= stop_secs:
+                    print(f"🤫 Speech stopped after {stop_secs}s silence", flush=True)
                     self.vad_state = VADState.QUIET
+                    self.is_speech_confirmed = False
                     return "stopped"
-            return "quiet"
+                return "quiet"  # Still accumulating audio
+
+        return "quiet"
 
     async def _process_utterance(self, audio_bytes: bytes):
         """Process a complete user utterance through the pipeline."""
