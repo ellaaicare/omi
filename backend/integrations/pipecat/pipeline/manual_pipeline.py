@@ -732,7 +732,7 @@ class ManualVoicePipeline:
 
             # Use ElevenLabs streaming API - generates and streams simultaneously
             # pcm_16000 format = 16-bit PCM at 16kHz (matches our audio pipeline)
-            audio_stream = self.elevenlabs_client.text_to_speech.convert_as_stream(
+            audio_stream = await self.elevenlabs_client.text_to_speech.stream(
                 voice_id=voice_id,
                 text=text,
                 model_id="eleven_turbo_v2_5",  # Fastest model
