@@ -246,7 +246,9 @@ class ManualVoicePipeline:
         """
         # Get voice confidence from Silero neural network (0.0 to 1.0)
         # Silero handles the int16 -> float32 conversion internally
-        confidence = self.vad.voice_confidence(audio_chunk)
+        confidence_raw = self.vad.voice_confidence(audio_chunk)
+        # Ensure confidence is a plain float (not numpy array)
+        confidence = float(confidence_raw) if hasattr(confidence_raw, '__float__') else confidence_raw
 
         # Log confidence periodically (every 50 chunks = ~1.6 seconds)
         if not hasattr(self, '_vad_chunk_count'):
@@ -257,7 +259,7 @@ class ManualVoicePipeline:
             print(f"📊 Silero VAD: confidence={confidence:.3f} state={state_name}", flush=True)
 
         # Get VAD params
-        confidence_threshold = self.vad._params.confidence  # 0.6
+        confidence_threshold = float(self.vad._params.confidence)  # 0.6
         start_secs = self.vad._params.start_secs  # 0.2
         stop_secs = self.vad._params.stop_secs  # 1.5
 
