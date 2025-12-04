@@ -41,9 +41,27 @@ Future<List<ServerConversation>> getConversations(
   if (response.statusCode == 200) {
     // decode body bytes to utf8 string and then parse json so as to avoid utf8 char issues
     var body = utf8.decode(response.bodyBytes);
-    var memories =
-        (jsonDecode(body) as List<dynamic>).map((conversation) => ServerConversation.fromJson(conversation)).toList();
-    debugPrint('getConversations length: ${memories.length}');
+    var jsonList = jsonDecode(body) as List<dynamic>;
+    debugPrint('getConversations: received ${jsonList.length} items from API');
+
+    // Parse with error handling to catch V2 conversation issues
+    List<ServerConversation> memories = [];
+    for (var i = 0; i < jsonList.length; i++) {
+      try {
+        var conversation = jsonList[i];
+        // Debug: log source for V2 conversations
+        if (conversation['source']?.toString().contains('voice') == true) {
+          debugPrint('🎤 Found voice conversation: id=${conversation['id']}, source=${conversation['source']}, structured=${conversation['structured']}');
+        }
+        memories.add(ServerConversation.fromJson(conversation));
+      } catch (e, stack) {
+        debugPrint('❌ Failed to parse conversation $i: $e');
+        debugPrint('   Raw data: ${jsonList[i]}');
+        debugPrint('   Stack: $stack');
+      }
+    }
+
+    debugPrint('getConversations: parsed ${memories.length} conversations successfully');
     return memories;
   } else {
     debugPrint('getConversations error ${response.statusCode}');

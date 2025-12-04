@@ -187,11 +187,7 @@ class VoiceModeButton extends StatelessWidget {
       listenable: VoiceModeV2Service(),
       builder: (context, _) {
         final v2Service = VoiceModeV2Service();
-        final v2State = v2Service.state;
         final isActive = v2Service.isActive;
-
-        // Map V2 state to V1 state for UI consistency
-        final displayState = _mapV2StateToV1(v2State);
 
         // Use disabled state for visual styling
         final isDisabled = disabled && !isActive;
@@ -205,7 +201,7 @@ class VoiceModeButton extends StatelessWidget {
                   debugPrint('🎙️ [VoiceModeButton] V2 Button disabled');
                   return;
                 }
-                HapticFeedback.mediumImpact();
+                // Haptic is handled inside toggle handler for better feedback
                 await _handleVoiceModeV2Toggle(context, v2Service);
               },
               child: Opacity(
@@ -216,7 +212,10 @@ class VoiceModeButton extends StatelessWidget {
                   height: size,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: isDisabled ? Colors.grey.shade600 : _getBackgroundColor(displayState),
+                    // Red background when active, blue when inactive
+                    color: isDisabled
+                        ? Colors.grey.shade600
+                        : (isActive ? Colors.red.shade700 : Colors.blue.shade700),
                     border: Border.all(
                       color: Colors.black,
                       width: 4,
@@ -224,7 +223,7 @@ class VoiceModeButton extends StatelessWidget {
                     boxShadow: isActive && !isDisabled
                         ? [
                             BoxShadow(
-                              color: _getGlowColor(displayState).withValues(alpha: 0.5),
+                              color: Colors.red.withValues(alpha: 0.5),
                               spreadRadius: 2,
                               blurRadius: 8,
                             ),
@@ -234,7 +233,18 @@ class VoiceModeButton extends StatelessWidget {
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      _buildIcon(displayState, isDisabled: isDisabled),
+                      // Always show phone icon, pulse when active
+                      isActive
+                          ? _PulsingIcon(
+                              icon: FontAwesomeIcons.phone,
+                              color: Colors.white,
+                              size: size * 0.35,
+                            )
+                          : Icon(
+                              FontAwesomeIcons.phone,
+                              color: isDisabled ? Colors.white54 : Colors.white,
+                              size: size * 0.35,
+                            ),
                       // V2 indicator badge
                       Positioned(
                         top: 2,
@@ -260,7 +270,7 @@ class VoiceModeButton extends StatelessWidget {
             if (showLabel) ...[
               const SizedBox(height: 4),
               Text(
-                isDisabled ? 'Recording...' : _getLabel(displayState),
+                isDisabled ? 'Recording...' : (isActive ? 'Tap to end' : 'Talk to Ella'),
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: isDisabled ? 0.5 : 0.8),
                   fontSize: 11,
@@ -274,68 +284,66 @@ class VoiceModeButton extends StatelessWidget {
     );
   }
 
-  /// Map V2 state to V1 state for UI consistency
-  VoiceModeState _mapV2StateToV1(VoiceModeV2State v2State) {
-    switch (v2State) {
-      case VoiceModeV2State.inactive:
-        return VoiceModeState.inactive;
-      case VoiceModeV2State.connecting:
-        return VoiceModeState.transcribing; // Show spinner
-      case VoiceModeV2State.active:
-        return VoiceModeState.listening;
-      case VoiceModeV2State.speaking:
-        return VoiceModeState.speaking;
+  /// Play system click sound
+  Future<void> _playClickSound() async {
+    try {
+      // Use system sound via platform channel
+      await SystemSound.play(SystemSoundType.click);
+    } catch (e) {
+      debugPrint('🎙️ [VoiceModeButton] Click sound error: $e');
     }
   }
 
-  /// Handle V2 voice mode toggle
+  /// Handle V2 voice mode toggle with robust state management
   Future<void> _handleVoiceModeV2Toggle(BuildContext context, VoiceModeV2Service v2Service) async {
+    // Strong haptic feedback on press
+    await HapticFeedback.heavyImpact();
+    _playClickSound();
+
     if (v2Service.isActive) {
       // Stop V2 voice mode
       debugPrint('🎙️ [VoiceModeButton] Stopping V2 voice mode');
 
-      // Stop mic first
+      // Stop mic first (no more user audio)
       ServiceManager.instance().mic.stop();
 
-      // Send 3 seconds of explicit silence to trigger VAD
-      // This tells the backend "user stopped speaking"
-      debugPrint('🎙️ [VoiceModeButton] Sending 3s silence to trigger VAD...');
+      // Send 2 seconds of silence to trigger VAD (backend needs this to know user stopped)
+      debugPrint('🎙️ [VoiceModeButton] Sending silence to trigger VAD...');
       final silence = Uint8List(3200); // 100ms of zeros at 16kHz PCM16
-      for (int i = 0; i < 30; i++) {
+      for (int i = 0; i < 20; i++) {  // 2 seconds total, sent quickly
         v2Service.sendAudio(silence);
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-      debugPrint('🎙️ [VoiceModeButton] Silence sent, waiting for TTS response...');
-
-      // Wait up to 15 seconds for TTS response
-      // The service will handle playback automatically
-      int waitCount = 0;
-      while (v2Service.state == VoiceModeV2State.active && waitCount < 150) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        waitCount++;
-        if (waitCount % 10 == 0) {
-          debugPrint('🎙️ [VoiceModeButton] Waiting for response... ${waitCount / 10}s');
-        }
       }
 
-      // If speaking, wait for playback to complete
-      while (v2Service.state == VoiceModeV2State.speaking) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-
+      // Brief delay then stop - don't block
+      await Future.delayed(const Duration(milliseconds: 300));
       await v2Service.stop();
+
+      // Confirm with lighter haptic
+      await HapticFeedback.lightImpact();
+      debugPrint('🎙️ [VoiceModeButton] V2 voice mode stopped');
     } else {
       // Start V2 voice mode
       debugPrint('🎙️ [VoiceModeButton] Starting V2 voice mode');
+
+      // Force reset if somehow stuck
+      if (v2Service.state != VoiceModeV2State.inactive) {
+        debugPrint('🎙️ [VoiceModeButton] Force resetting stuck state');
+        v2Service.forceReset();
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
 
       // 1. Connect WebSocket first
       final success = await v2Service.start();
       if (!success) {
         debugPrint('🎙️ [VoiceModeButton] V2 voice mode failed to start');
+        await HapticFeedback.vibrate(); // Error feedback
         return;
       }
 
-      // 2. Start mic and route audio to V2 WebSocket (same as cloud ASR mode)
+      // Success haptic
+      await HapticFeedback.mediumImpact();
+
+      // 2. Start mic and route audio to V2 WebSocket
       debugPrint('🎙️ [VoiceModeButton] Starting mic capture for V2');
       ServiceManager.instance().mic.start(
         onByteReceived: (bytes) {

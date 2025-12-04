@@ -27,10 +27,10 @@ class Structured {
 
   static Structured fromJson(Map<String, dynamic> json) {
     var structured = Structured(
-      json['title'],
-      json['overview'],
-      emoji: json['emoji'],
-      category: json['category'],
+      json['title'] ?? '',  // Handle null from V2 voice conversations
+      json['overview'] ?? '',
+      emoji: json['emoji'] ?? '🎤',
+      category: json['category'] ?? 'other',
     );
     var aItems = json['actionItems'] ?? json['action_items'];
     if (aItems != null) {

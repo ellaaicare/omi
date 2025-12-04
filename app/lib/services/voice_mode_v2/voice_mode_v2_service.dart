@@ -105,17 +105,22 @@ class VoiceModeV2Service extends ChangeNotifier {
     }
   }
 
-  /// Stop voice mode session
+  /// Stop voice mode session - robust cleanup with timeout protection
   Future<void> stop() async {
+    if (_state == VoiceModeV2State.inactive) {
+      debugPrint('VoiceModeV2: Already inactive, nothing to stop');
+      return;
+    }
+
     debugPrint('VoiceModeV2: Stopping session - sent $_audioChunksSent chunks, $_audioBytesSent bytes');
 
+    // Set state to inactive FIRST to prevent re-entry issues
+    _state = VoiceModeV2State.inactive;
+    notifyListeners();
+
+    // Cancel subscription immediately
     _subscription?.cancel();
     _subscription = null;
-
-    await _channel?.sink.close();
-    _channel = null;
-
-    await _audioPlayer.stop();
 
     // Clear TTS buffer
     _ttsPlaybackDebounce?.cancel();
@@ -123,9 +128,49 @@ class VoiceModeV2Service extends ChangeNotifier {
     _ttsBuffer.clear();
     _ttsChunksReceived = 0;
 
+    // Stop audio player with timeout
+    try {
+      await _audioPlayer.stop().timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () {
+          debugPrint('VoiceModeV2: Audio player stop timed out, continuing');
+        },
+      );
+    } catch (e) {
+      debugPrint('VoiceModeV2: Audio player stop error: $e');
+    }
+
+    // Close WebSocket with timeout
+    try {
+      final channel = _channel;
+      _channel = null; // Clear reference immediately
+      if (channel != null) {
+        await channel.sink.close().timeout(
+          const Duration(milliseconds: 500),
+          onTimeout: () {
+            debugPrint('VoiceModeV2: WebSocket close timed out, continuing');
+          },
+        );
+      }
+    } catch (e) {
+      debugPrint('VoiceModeV2: WebSocket close error: $e');
+    }
+
+    debugPrint('VoiceModeV2: Session stopped, ready for restart');
+    onSessionEnded?.call();
+  }
+
+  /// Force reset state - use if stuck
+  void forceReset() {
+    debugPrint('VoiceModeV2: Force reset');
+    _subscription?.cancel();
+    _subscription = null;
+    _channel = null;
+    _ttsPlaybackDebounce?.cancel();
+    _ttsBuffer.clear();
+    _ttsChunksReceived = 0;
     _state = VoiceModeV2State.inactive;
     notifyListeners();
-    onSessionEnded?.call();
   }
 
   // Audio stats tracking
@@ -136,8 +181,10 @@ class VoiceModeV2Service extends ChangeNotifier {
   /// Send audio data to server
   /// Call this continuously with PCM16 16kHz audio chunks
   void sendAudio(Uint8List audioData) {
-    if (_state != VoiceModeV2State.active && _state != VoiceModeV2State.speaking) {
-      // Don't spam logs when inactive - this is expected
+    // ONLY send audio when active (listening to user)
+    // Do NOT send during 'speaking' state - prevents feedback loop
+    // where AI's TTS output is picked up by mic and sent back!
+    if (_state != VoiceModeV2State.active) {
       return;
     }
 
