@@ -629,11 +629,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
                                             return GestureDetector(
                                               onTap: () async {
-                                                // Disabled when voice mode active or initializing
-                                                if (isDisabled || isInitializing) {
-                                                  if (isVoiceModeActive) {
-                                                    debugPrint('🎙️ [HomePage] Mic button disabled - voice mode active');
-                                                  }
+                                                // If voice mode is stuck active, force reset it
+                                                if (isVoiceModeActive) {
+                                                  debugPrint('🎙️ [HomePage] Force resetting stuck voice mode');
+                                                  HapticFeedback.heavyImpact();
+                                                  VoiceModeManager().forceReset();
+                                                  return;
+                                                }
+                                                // Normal disabled check (initializing)
+                                                if (isInitializing) {
                                                   return;
                                                 }
                                                 HapticFeedback.heavyImpact();

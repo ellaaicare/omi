@@ -155,8 +155,11 @@ class VoiceModeManager extends ChangeNotifier {
     await _cleanup();
   }
 
-  /// Cleanup and reset state
+  /// Cleanup and reset state - robust version with timeout protection
   Future<void> _cleanup() async {
+    debugPrint('VoiceModeManager: _cleanup starting');
+
+    // Cancel all timers first
     _silenceTimer?.cancel();
     _sessionTimer?.cancel();
     _maxUtteranceTimer?.cancel();
@@ -166,8 +169,37 @@ class VoiceModeManager extends ChangeNotifier {
     _deferredSessionEnd = false;
     _lastTranscriptText = '';
 
-    await _audioPlayer.stop();
+    // Stop audio player with timeout to prevent hanging
+    try {
+      await _audioPlayer.stop().timeout(
+        const Duration(milliseconds: 500),
+        onTimeout: () {
+          debugPrint('VoiceModeManager: Audio player stop timed out');
+        },
+      );
+    } catch (e) {
+      debugPrint('VoiceModeManager: Audio player stop error: $e');
+    }
 
+    // ALWAYS reset state, even if audio stop failed
+    _state = VoiceModeState.inactive;
+    _sessionId = null;
+    _currentTranscript = '';
+    _responseText = '';
+    notifyListeners();
+
+    debugPrint('VoiceModeManager: _cleanup complete, state=inactive');
+  }
+
+  /// Force reset - use if stuck
+  void forceReset() {
+    debugPrint('VoiceModeManager: Force reset');
+    _silenceTimer?.cancel();
+    _sessionTimer?.cancel();
+    _maxUtteranceTimer?.cancel();
+    _audioQueue.clear();
+    _isPlayingQueue = false;
+    _deferredSessionEnd = false;
     _state = VoiceModeState.inactive;
     _sessionId = null;
     _currentTranscript = '';
@@ -288,7 +320,7 @@ class VoiceModeManager extends ChangeNotifier {
     _silenceTimer?.cancel();
     debugPrint('⏱️ VoiceModeManager: Starting ${silenceTimeout.inMilliseconds}ms silence timer');
     _silenceTimer = Timer(silenceTimeout, () {
-      debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? _currentTranscript.substring(0, 50) + "..." : _currentTranscript}"');
+      debugPrint('⏱️ VoiceModeManager: Silence timeout fired! State: $_state, transcript: "${_currentTranscript.length > 50 ? "${_currentTranscript.substring(0, 50)}..." : _currentTranscript}"');
       if (_state == VoiceModeState.listening && _currentTranscript.isNotEmpty) {
         // Send the accumulated transcript as an utterance
         debugPrint('📤 VoiceModeManager: Sending utterance to backend');
