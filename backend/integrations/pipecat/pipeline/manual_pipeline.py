@@ -478,7 +478,13 @@ class ManualVoicePipeline:
             return ""
 
     async def _generate_response_groq(self, user_message: str) -> str:
-        """Generate response using Groq LLM with OpenAI fallback."""
+        """Generate response using Groq LLM."""
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.config.llm.api_key}",
+            "Content-Type": "application/json",
+        }
+
         # Build messages with history
         messages = [{"role": "system", "content": self.system_prompt}]
 
@@ -495,23 +501,6 @@ class ManualVoicePipeline:
             "content": user_message,
         })
 
-        # Try Groq first
-        response = await self._call_groq_llm(messages)
-        if response:
-            return response
-
-        # Fallback to OpenAI if Groq fails (rate limit, error, etc.)
-        print("🔄 Falling back to OpenAI GPT-4o-mini...", flush=True)
-        return await self._call_openai_llm(messages)
-
-    async def _call_groq_llm(self, messages: list) -> str:
-        """Call Groq LLM API."""
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.config.llm.api_key}",
-            "Content-Type": "application/json",
-        }
-
         payload = {
             "model": self.config.llm.model,
             "messages": messages,
@@ -519,45 +508,21 @@ class ManualVoicePipeline:
             "max_tokens": self.config.llm.max_tokens,
         }
 
-        try:
-            response = await self.http_client.post(
-                url,
-                headers=headers,
-                json=payload,
-            )
+        response = await self.http_client.post(
+            url,
+            headers=headers,
+            json=payload,
+        )
 
-            if response.status_code == 429:
-                # Rate limited - log and return empty for fallback
-                print(f"⚠️ Groq rate limited (429): {response.text[:200]}...", flush=True)
-                return ""
-
-            if response.status_code != 200:
-                print(f"❌ Groq error: {response.status_code} - {response.text}", flush=True)
-                return ""
-
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-
-        except Exception as e:
-            print(f"❌ Groq exception: {e}", flush=True)
+        if response.status_code != 200:
+            print(f"❌ Groq error: {response.status_code} - {response.text}", flush=True)
             return ""
 
-    async def _call_openai_llm(self, messages: list) -> str:
-        """Call OpenAI LLM API as fallback."""
-        try:
-            # Use the existing OpenAI client (already initialized for TTS)
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",  # Fast, cheap, reliable
-                messages=messages,
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens,
-            )
-            content = response.choices[0].message.content
-            print(f"✅ OpenAI fallback successful", flush=True)
-            return content
+        result = response.json()
 
-        except Exception as e:
-            print(f"❌ OpenAI fallback error: {e}", flush=True)
+        try:
+            return result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
             return ""
 
     async def _speak_response(self, text: str):

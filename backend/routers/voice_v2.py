@@ -90,7 +90,7 @@ async def voice_v2_health():
 
     return {
         "status": "ok",
-        "version": "2.2.0",  # Updated for LLM fallback
+        "version": "2.1.1",  # Removed fallback for debugging
         "endpoint": "/v2/voice",
         "config": {
             "vad_provider": config.vad.provider,
@@ -102,7 +102,6 @@ async def voice_v2_health():
             "tts_streaming": config.tts.streaming,
             "llm_provider": config.llm.provider,
             "llm_model": config.llm.model,
-            "llm_fallback": "gpt-4o-mini",  # OpenAI fallback on Groq rate limit
         },
         "dependencies": {
             "deepgram_key_set": bool(config.stt.api_key),
@@ -110,7 +109,6 @@ async def voice_v2_health():
             "groq_key_set": bool(config.llm.api_key),
         },
         "features": {
-            "llm_fallback": "OpenAI GPT-4o-mini used when Groq rate limits (429)",
             "tts_streaming": "Stream TTS audio for lower TTFB",
             "barge_in": "Interrupt AI with speech to cancel TTS",
         },
