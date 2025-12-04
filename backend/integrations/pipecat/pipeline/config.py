@@ -46,8 +46,8 @@ class TTSConfig:
 class LLMConfig:
     """Language Model configuration."""
 
-    provider: str = "groq"
-    model: str = "llama-3.3-70b-versatile"
+    provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "groq"))
+    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "llama-3.1-8b-instant"))  # Smaller, faster, higher rate limits
     temperature: float = 0.7
     max_tokens: int = 150  # Keep responses short for voice
     api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
