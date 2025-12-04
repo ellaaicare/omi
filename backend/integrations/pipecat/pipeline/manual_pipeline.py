@@ -160,21 +160,31 @@ class ManualVoicePipeline:
         self.silence_start_time: float = 0
         self.is_speech_confirmed = False
 
-        # Fetch Ella config to get persona and memory context
-        try:
-            ella_config = await self.n8n_client.fetch_voice_config(self.uid)
-            self.system_prompt = self._build_system_prompt(ella_config)
+        # Fetch Ella config to get persona, memory context, and LLM settings
+        # CRITICAL: All config MUST come from n8n - no hard-coded fallbacks
+        ella_config = await self.n8n_client.fetch_voice_config(self.uid)
 
-            # Load user audio preferences (gracefully fallback to defaults)
-            user_audio = ella_config.get("audio_preferences", {})
-            if user_audio:
-                self.audio_preferences.update(user_audio)
-                print(f"🔊 Loaded audio preferences: sample_rate={self.audio_preferences.get('tts_sample_rate')}Hz")
+        # Load LLM config from n8n (REQUIRED - no fallbacks)
+        agent_config = ella_config.get("agent_config", {})
+        if not agent_config.get("model"):
+            raise ValueError(f"n8n voice-config missing agent_config.model for uid={self.uid}")
 
-            print(f"✅ Loaded Ella config for uid={self.uid}")
-        except Exception as e:
-            print(f"⚠️ Failed to fetch Ella config: {e}, using default")
-            self.system_prompt = self._default_system_prompt()
+        self.llm_model = agent_config["model"]
+        self.llm_provider = self._detect_llm_provider(self.llm_model)
+        self.llm_temperature = agent_config.get("temperature", 0.7)
+        self.llm_max_tokens = agent_config.get("max_tokens", 150)
+        print(f"🧠 LLM config from n8n: provider={self.llm_provider}, model={self.llm_model}", flush=True)
+
+        # Load system prompt from n8n
+        self.system_prompt = self._build_system_prompt(ella_config)
+
+        # Load user audio preferences
+        user_audio = ella_config.get("audio_preferences", {})
+        if user_audio:
+            self.audio_preferences.update(user_audio)
+            print(f"🔊 Loaded audio preferences: sample_rate={self.audio_preferences.get('tts_sample_rate')}Hz")
+
+        print(f"✅ Loaded Ella config for uid={self.uid}")
 
         self.start_time = time.time()
         self.is_running = True
@@ -477,14 +487,23 @@ class ManualVoicePipeline:
             print(f"⚠️ Deepgram parse error: {e}, result keys: {result.keys()}", flush=True)
             return ""
 
-    async def _generate_response_groq(self, user_message: str) -> str:
-        """Generate response using Groq LLM."""
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.config.llm.api_key}",
-            "Content-Type": "application/json",
-        }
+    def _detect_llm_provider(self, model_name: str) -> str:
+        """Detect LLM provider from model name."""
+        model_lower = model_name.lower()
+        if "grok" in model_lower:
+            return "xai"  # xAI Grok
+        elif "gpt" in model_lower or "o1" in model_lower:
+            return "openai"
+        elif "claude" in model_lower:
+            return "anthropic"
+        elif "llama" in model_lower or "mixtral" in model_lower:
+            return "groq"
+        else:
+            # Default to groq for unknown models
+            return "groq"
 
+    async def _generate_response_groq(self, user_message: str) -> str:
+        """Generate response using configured LLM provider (from n8n config)."""
         # Build messages with history
         messages = [{"role": "system", "content": self.system_prompt}]
 
@@ -501,25 +520,91 @@ class ManualVoicePipeline:
             "content": user_message,
         })
 
-        payload = {
-            "model": self.config.llm.model,
-            "messages": messages,
-            "temperature": self.config.llm.temperature,
-            "max_tokens": self.config.llm.max_tokens,
+        # Use LLM config from n8n (set during initialize)
+        provider = self.llm_provider
+        model = self.llm_model
+        temperature = self.llm_temperature
+        max_tokens = self.llm_max_tokens
+
+        print(f"🤖 LLM call: provider={provider}, model={model}", flush=True)
+
+        if provider == "xai":
+            return await self._call_xai_llm(messages, model, temperature, max_tokens)
+        elif provider == "openai":
+            return await self._call_openai_llm(messages, model, temperature, max_tokens)
+        else:
+            # Default to Groq
+            return await self._call_groq_llm(messages, model, temperature, max_tokens)
+
+    async def _call_groq_llm(self, messages: list, model: str, temperature: float, max_tokens: int) -> str:
+        """Call Groq LLM API."""
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.config.llm.api_key}",
+            "Content-Type": "application/json",
         }
 
-        response = await self.http_client.post(
-            url,
-            headers=headers,
-            json=payload,
-        )
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        response = await self.http_client.post(url, headers=headers, json=payload)
 
         if response.status_code != 200:
             print(f"❌ Groq error: {response.status_code} - {response.text}", flush=True)
             return ""
 
         result = response.json()
+        try:
+            return result["choices"][0]["message"]["content"]
+        except (KeyError, IndexError):
+            return ""
 
+    async def _call_openai_llm(self, messages: list, model: str, temperature: float, max_tokens: int) -> str:
+        """Call OpenAI LLM API."""
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"❌ OpenAI error: {e}", flush=True)
+            return ""
+
+    async def _call_xai_llm(self, messages: list, model: str, temperature: float, max_tokens: int) -> str:
+        """Call xAI (Grok) LLM API."""
+        import os
+        xai_api_key = os.getenv("XAI_API_KEY", "")
+        if not xai_api_key:
+            print(f"❌ XAI_API_KEY not set, cannot use Grok model", flush=True)
+            return ""
+
+        url = "https://api.x.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {xai_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        response = await self.http_client.post(url, headers=headers, json=payload)
+
+        if response.status_code != 200:
+            print(f"❌ xAI error: {response.status_code} - {response.text}", flush=True)
+            return ""
+
+        result = response.json()
         try:
             return result["choices"][0]["message"]["content"]
         except (KeyError, IndexError):
