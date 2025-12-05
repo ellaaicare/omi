@@ -23,6 +23,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
+import 'package:omi/services/incoming_call/incoming_call_service.dart';
 import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
 import 'package:omi/utils/test_suite_manager.dart';
 
@@ -1111,7 +1112,38 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Triggers the incoming call UI. Say "Answer" to start voice mode, or "Decline" for voicemail.',
+                    'Triggers the incoming call UI via backend push notification.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Local test (no backend needed)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.phone_callback, size: 20),
+                    label: const Text('📞 Test Call UI Locally (No Backend)'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.orange.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () {
+                      debugPrint('📞 [DEBUG] Local incoming call test triggered');
+                      // Trigger incoming call UI directly without push notification
+                      IncomingCallService().handleIncomingCall({
+                        'call_id': 'local-test-${DateTime.now().millisecondsSinceEpoch}',
+                        'reason': 'test',
+                        'reason_display': 'Test Call (Local)',
+                        'priority': 'normal',
+                        'auto_answer': 'false',
+                        'timeout_seconds': '30',
+                        'voicemail_text': 'This is a local test. The incoming call UI is working!',
+                      });
+                      AppSnackbar.showSnackbar('📞 Incoming call UI triggered locally!');
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Tests the UI directly without backend. Say "Answer" or "Decline", or tap buttons.',
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
