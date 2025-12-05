@@ -13,6 +13,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:omi/services/notifications/notification_interface.dart';
 import 'package:omi/services/notifications/action_item_notification_handler.dart';
+import 'package:omi/services/incoming_call/incoming_call_service.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 /// Firebase Cloud Messaging enabled notification service
@@ -282,6 +283,20 @@ class _FCMNotificationService implements NotificationInterface {
 
           // Continue to show the notification popup (don't return)
           // Fall through to show foreground notification
+        }
+
+        // Handle incoming call from Ella
+        if (action == 'incoming_call') {
+          debugPrint('📞 [CALL] Received incoming call notification');
+          debugPrint('📞 [CALL] Call ID: ${data['call_id']}');
+          debugPrint('📞 [CALL] Reason: ${data['reason_display'] ?? data['reason']}');
+          debugPrint('📞 [CALL] Priority: ${data['priority']}');
+
+          // Trigger incoming call service
+          IncomingCallService().handleIncomingCall(data);
+
+          // Don't show standard notification - incoming call UI handles it
+          return;
         }
 
         // Handle action item data messages

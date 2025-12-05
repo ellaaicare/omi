@@ -33,6 +33,7 @@ import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/voice_mode_button.dart';
 import 'package:omi/services/voice_mode/voice_mode_manager.dart';
+import 'package:omi/widgets/incoming_call/incoming_call_overlay.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -437,6 +438,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           ),
                         ],
                       ),
+                      // Incoming call overlay (shows when Ella calls user)
+                      const IncomingCallOverlay(),
                       Consumer2<HomeProvider, DeviceProvider>(
                         builder: (context, home, deviceProvider, child) {
                           if (home.isChatFieldFocused ||

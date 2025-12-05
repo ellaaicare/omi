@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -66,6 +67,11 @@ class VoiceModeManager extends ChangeNotifier {
   final AudioPlayer _audioPlayer = AudioPlayer();
   final List<_AudioChunk> _audioQueue = [];
   bool _isPlayingQueue = false;
+
+  // Accumulate audio chunks before playing (prevents glitchy playback)
+  final BytesBuilder _audioAccumulator = BytesBuilder();
+  int _accumulatedSampleRate = 24000;
+  Timer? _audioPlaybackDebounce;
 
   // Deferred session end - wait for audio to finish before cleanup
   bool _deferredSessionEnd = false;
@@ -163,8 +169,10 @@ class VoiceModeManager extends ChangeNotifier {
     _silenceTimer?.cancel();
     _sessionTimer?.cancel();
     _maxUtteranceTimer?.cancel();
+    _audioPlaybackDebounce?.cancel();
     _utteranceStartTime = null;
     _audioQueue.clear();
+    _audioAccumulator.clear();
     _isPlayingQueue = false;
     _deferredSessionEnd = false;
     _lastTranscriptText = '';
@@ -197,7 +205,9 @@ class VoiceModeManager extends ChangeNotifier {
     _silenceTimer?.cancel();
     _sessionTimer?.cancel();
     _maxUtteranceTimer?.cancel();
+    _audioPlaybackDebounce?.cancel();
     _audioQueue.clear();
+    _audioAccumulator.clear();
     _isPlayingQueue = false;
     _deferredSessionEnd = false;
     _state = VoiceModeState.inactive;
@@ -400,25 +410,32 @@ class VoiceModeManager extends ChangeNotifier {
       return;
     }
 
-    debugPrint('🔊 VoiceModeManager: Received audio chunk $sequence (format: $format, rate: $sampleRate, data length: ${audioData.length})');
+    // Decode and accumulate audio (don't play yet - wait for all chunks)
+    try {
+      final bytes = base64Decode(audioData);
+      _audioAccumulator.add(bytes);
+      _accumulatedSampleRate = sampleRate;
+      debugPrint('🔊 VoiceModeManager: Accumulated chunk $sequence (${bytes.length} bytes, total: ${_audioAccumulator.length} bytes)');
+    } catch (e) {
+      debugPrint('🔊 VoiceModeManager: Failed to decode audio chunk: $e');
+      return;
+    }
 
-    // Queue audio for playback
-    _audioQueue.add(_AudioChunk(
-      data: audioData,
-      sequence: sequence,
-      format: format,
-      sampleRate: sampleRate,
-    ));
-
-    // Start playing if not already
-    if (!_isPlayingQueue) {
-      debugPrint('🔊 VoiceModeManager: Starting audio queue playback');
+    // Update state to speaking
+    if (_state != VoiceModeState.speaking) {
       _state = VoiceModeState.speaking;
       notifyListeners();
-      _playAudioQueue();
-    } else {
-      debugPrint('🔊 VoiceModeManager: Audio queued (already playing)');
     }
+
+    // Debounce: if no more chunks arrive for 300ms, play what we have
+    // This handles cases where voice_response_complete doesn't arrive
+    _audioPlaybackDebounce?.cancel();
+    _audioPlaybackDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (_audioAccumulator.isNotEmpty && !_isPlayingQueue) {
+        debugPrint('🔊 VoiceModeManager: Debounce triggered - playing accumulated audio');
+        _playAccumulatedAudio();
+      }
+    });
   }
 
   /// Handle voice_response_complete event from backend
@@ -428,8 +445,12 @@ class VoiceModeManager extends ChangeNotifier {
 
     debugPrint('VoiceModeManager: Response complete (${durationMs}ms): $_responseText');
 
-    // Wait for audio queue to finish, then go back to listening
-    // or end session based on backend instruction
+    // Cancel debounce timer and play accumulated audio now
+    _audioPlaybackDebounce?.cancel();
+    if (_audioAccumulator.isNotEmpty && !_isPlayingQueue) {
+      debugPrint('🔊 VoiceModeManager: Response complete - playing accumulated audio');
+      _playAccumulatedAudio();
+    }
   }
 
   /// Handle voice_mode_ended event from backend
@@ -471,7 +492,88 @@ class VoiceModeManager extends ChangeNotifier {
   // Audio Playback
   // ============================================
 
-  /// Play queued audio chunks
+  /// Play accumulated audio as a single file (prevents glitchy playback)
+  Future<void> _playAccumulatedAudio() async {
+    if (_audioAccumulator.isEmpty) return;
+
+    _isPlayingQueue = true;
+
+    // Get accumulated audio and clear buffer
+    final pcmData = _audioAccumulator.toBytes();
+    _audioAccumulator.clear();
+
+    debugPrint('🔊 VoiceModeManager: Playing accumulated audio (${pcmData.length} bytes, ${(_accumulatedSampleRate > 0 ? pcmData.length / (_accumulatedSampleRate * 2) : 0).toStringAsFixed(2)}s)');
+
+    // CRITICAL: Stop ASR before playing audio to avoid iOS audio session conflict
+    debugPrint('🔊 VoiceModeManager: Stopping ASR before audio playback...');
+    try {
+      await asr.OnDeviceASRService().stopTranscription();
+      await Future.delayed(const Duration(milliseconds: 100));
+      debugPrint('🔊 VoiceModeManager: ASR stopped');
+    } catch (e) {
+      debugPrint('🔊 VoiceModeManager: Failed to stop ASR: $e');
+    }
+
+    try {
+      // Create WAV from accumulated PCM data
+      final wavData = _createWavFromPcm16(pcmData, _accumulatedSampleRate);
+
+      // Write to temp file
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = File('${tempDir.path}/voice_response_${DateTime.now().millisecondsSinceEpoch}.wav');
+      await tempFile.writeAsBytes(wavData);
+
+      debugPrint('🔊 VoiceModeManager: Playing ${tempFile.path}');
+
+      // Play the audio
+      await _audioPlayer.setFilePath(tempFile.path);
+      await _audioPlayer.play();
+
+      // Wait for playback to complete
+      await _audioPlayer.processingStateStream.firstWhere(
+        (state) => state == ProcessingState.completed,
+      );
+
+      debugPrint('🔊 VoiceModeManager: Playback completed');
+
+      // Clean up temp file
+      try {
+        await tempFile.delete();
+      } catch (_) {}
+
+    } catch (e) {
+      debugPrint('🔊 VoiceModeManager: Playback error: $e');
+    }
+
+    _isPlayingQueue = false;
+
+    // Check if session end was deferred
+    if (_deferredSessionEnd) {
+      debugPrint('🔊 VoiceModeManager: Ending deferred session');
+      _deferredSessionEnd = false;
+      _cleanup();
+      return;
+    }
+
+    // Return to listening state for multi-turn
+    if (_state == VoiceModeState.speaking) {
+      _state = VoiceModeState.listening;
+      notifyListeners();
+
+      // Resume ASR
+      debugPrint('🔊 VoiceModeManager: Restarting ASR...');
+      try {
+        await asr.OnDeviceASRService().startTranscription();
+        debugPrint('🔊 VoiceModeManager: ASR restarted');
+      } catch (e) {
+        debugPrint('🔊 VoiceModeManager: Failed to restart ASR: $e');
+      }
+
+      _resetSilenceTimer();
+    }
+  }
+
+  /// Play queued audio chunks (legacy - kept for compatibility)
   Future<void> _playAudioQueue() async {
     _isPlayingQueue = true;
 
@@ -723,6 +825,7 @@ class VoiceModeManager extends ChangeNotifier {
   void dispose() {
     _silenceTimer?.cancel();
     _sessionTimer?.cancel();
+    _audioPlaybackDebounce?.cancel();
     _audioPlayer.dispose();
     _wakeWordSoundPlayer.dispose();
     super.dispose();
