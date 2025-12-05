@@ -148,6 +148,15 @@ class TestTTSPushRequest(BaseModel):
     pregenerate: bool = Field(True, description="Pre-generate TTS audio before sending push")
 
 
+class TestIncomingCallRequest(BaseModel):
+    """Request model for test incoming call push notification"""
+    reason: str = Field("test", description="Call reason: medication_reminder, check_in, urgent, follow_up, test")
+    priority: str = Field("normal", description="Call priority: normal, high, urgent")
+    auto_answer: bool = Field(False, description="Auto-answer the call (for urgent)")
+    timeout_seconds: int = Field(30, description="Timeout in seconds")
+    voicemail_text: Optional[str] = Field(None, description="Custom voicemail text")
+
+
 @router.post('/v1/notifications/test-tts-push')
 async def test_tts_push(
     request: TestTTSPushRequest,
@@ -272,4 +281,135 @@ async def test_tts_push(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to send push notification: {error_message}"
+        )
+
+
+# Predefined call reasons with display text and voicemail
+CALL_REASONS = {
+    "medication_reminder": {
+        "display": "Medication Reminder",
+        "voicemail": "Hi! I wanted to remind you about your medication. Please take it when you get a chance!"
+    },
+    "check_in": {
+        "display": "Daily Check-in",
+        "voicemail": "Hi! Just checking in to see how you're doing today. Call me back when you have a moment!"
+    },
+    "urgent": {
+        "display": "Urgent Alert",
+        "voicemail": "Hi, this is an urgent message. Please call me back as soon as possible."
+    },
+    "follow_up": {
+        "display": "Follow-up Call",
+        "voicemail": "Hi! I wanted to follow up on our earlier conversation. Call me back when you're free!"
+    },
+    "test": {
+        "display": "Test Call",
+        "voicemail": "This is a test call from Ella. If you're seeing this, the incoming call feature is working!"
+    }
+}
+
+
+@router.post('/v1/notifications/test-incoming-call')
+async def test_incoming_call(
+    request: TestIncomingCallRequest,
+    uid: str = Depends(auth.get_current_user_uid)
+):
+    """
+    Send test incoming call push notification to current user's device.
+
+    This triggers the incoming call UI on iOS:
+    - Full-screen overlay with "Ella is calling"
+    - Voice detection for "Answer" / "Decline"
+    - Answer → starts V2 voice mode
+    - Decline/Timeout → plays voicemail
+
+    Used for testing the agent-initiated inbound calls feature.
+    """
+
+    reason_config = CALL_REASONS.get(request.reason, CALL_REASONS["test"])
+    call_id = f"call-test-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+
+    print(f"📞 Test incoming call requested by user {uid}")
+    print(f"   Reason: {request.reason} ({reason_config['display']})")
+    print(f"   Priority: {request.priority}")
+    print(f"   Auto-answer: {request.auto_answer}")
+    print(f"   Timeout: {request.timeout_seconds}s")
+
+    # Get user's FCM token
+    fcm_token = notification_db.get_token_only(uid)
+    if not fcm_token:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No FCM token found for user {uid}. Please open the app to register your device."
+        )
+
+    print(f"   FCM Token: {fcm_token[:20]}...")
+
+    # Build incoming call push notification
+    voicemail_text = request.voicemail_text or reason_config["voicemail"]
+
+    message = messaging.Message(
+        token=fcm_token,
+        notification=messaging.Notification(
+            title="Ella is calling",
+            body=reason_config["display"]
+        ),
+        data={
+            "action": "incoming_call",
+            "call_id": call_id,
+            "reason": request.reason,
+            "reason_display": reason_config["display"],
+            "priority": request.priority,
+            "auto_answer": str(request.auto_answer).lower(),
+            "timeout_seconds": str(request.timeout_seconds),
+            "voicemail_text": voicemail_text,
+        },
+        apns=messaging.APNSConfig(
+            headers={
+                "apns-priority": "10",  # High priority for immediate delivery
+            },
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title="Ella is calling",
+                        body=reason_config["display"]
+                    ),
+                    sound="default",
+                    content_available=True,
+                )
+            )
+        )
+    )
+
+    try:
+        message_id = messaging.send(message)
+        print(f"   ✅ Incoming call push sent: {message_id}")
+
+        return {
+            "status": "sent",
+            "user_id": uid,
+            "message_id": message_id,
+            "call_id": call_id,
+            "reason": request.reason,
+            "reason_display": reason_config["display"],
+            "priority": request.priority,
+            "auto_answer": request.auto_answer,
+            "timeout_seconds": request.timeout_seconds,
+            "voicemail_text": voicemail_text,
+        }
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"   ❌ Incoming call push failed: {error_message}")
+
+        if "Requested entity was not found" in error_message:
+            notification_db.remove_token(fcm_token)
+            raise HTTPException(
+                status_code=404,
+                detail="FCM token is invalid or expired. Please restart the app to re-register."
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send incoming call push: {error_message}"
         )
