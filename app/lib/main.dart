@@ -48,6 +48,8 @@ import 'package:omi/services/auth_service.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/action_item_notification_handler.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/incoming_call/incoming_call_service.dart';
+import 'package:omi/widgets/incoming_call/incoming_call_overlay.dart';
 import 'package:omi/utils/analytics/growthbook.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/debugging/crashlytics_manager.dart';
@@ -479,6 +481,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           ChangeNotifierProvider(create: (context) => UserProvider()),
           ChangeNotifierProvider(create: (context) => ActionItemsProvider()),
           ChangeNotifierProvider(create: (context) => SyncProvider()),
+          ChangeNotifierProvider.value(value: IncomingCallService()),
         ],
         builder: (context, child) {
           return WithForegroundTask(
@@ -528,7 +531,13 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                 ErrorWidget.builder = (errorDetails) {
                   return CustomErrorWidget(errorMessage: errorDetails.exceptionAsString());
                 };
-                return child!;
+                // Wrap with incoming call overlay so it shows above all screens
+                return Stack(
+                  children: [
+                    child!,
+                    const IncomingCallOverlay(),
+                  ],
+                );
               },
               home: TalkerWrapper(
                 talker: Logger.instance.talker,

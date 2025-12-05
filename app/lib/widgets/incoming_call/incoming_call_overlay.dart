@@ -9,22 +9,19 @@ class IncomingCallOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider.value(
-      value: IncomingCallService(),
-      child: Consumer<IncomingCallService>(
-        builder: (context, service, child) {
-          if (!service.isRinging && service.state == IncomingCallState.idle) {
-            return const SizedBox.shrink();
-          }
+    return Consumer<IncomingCallService>(
+      builder: (context, service, child) {
+        if (!service.isRinging && service.state == IncomingCallState.idle) {
+          return const SizedBox.shrink();
+        }
 
-          return Material(
-            color: Colors.black.withOpacity(0.95),
-            child: SafeArea(
-              child: _IncomingCallContent(service: service),
-            ),
-          );
-        },
-      ),
+        return Material(
+          color: Colors.black.withOpacity(0.95),
+          child: SafeArea(
+            child: _IncomingCallContent(service: service),
+          ),
+        );
+      },
     );
   }
 }
