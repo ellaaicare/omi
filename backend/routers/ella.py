@@ -529,6 +529,95 @@ async def ella_health_check():
         "endpoints": [
             "POST /v1/ella/memory",
             "POST /v1/ella/conversation",
-            "POST /v1/ella/notification"
+            "POST /v1/ella/notification",
+            "GET /v1/ella/conversations",
+            "GET /v1/ella/conversations/{conversation_id}"
         ]
     }
+
+
+# ============================================================
+# ADMIN ENDPOINTS - For Letta agent tools
+# ============================================================
+
+from fastapi import Header, Query
+
+def verify_internal_key(secret_key: str = Header(..., alias="secret-key")) -> bool:
+    """Verify INTERNAL_API_KEY or ADMIN_KEY for admin endpoints"""
+    admin_key = os.getenv('ADMIN_KEY')
+    internal_key = os.getenv('INTERNAL_API_KEY')
+    if secret_key != admin_key and secret_key != internal_key:
+        raise HTTPException(status_code=403, detail='Invalid API key')
+    return True
+
+
+@router.get("/v1/ella/conversations/{conversation_id}", tags=["ella"])
+async def get_conversation_for_letta(
+    conversation_id: str,
+    uid: str = Query(..., description="User ID"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Get a single conversation by ID for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Response includes**:
+    - id, created_at, started_at, finished_at
+    - transcript_segments: List of {text, speaker, start, end, is_user}
+    - structured: {title, overview, emoji, category, action_items, events}
+    - source, language, status
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations/conv-123?uid=user-456" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found for user {uid}")
+
+    print(f"📖 Letta fetched conversation {conversation_id} for uid={uid}")
+    return conversation
+
+
+@router.get("/v1/ella/conversations", tags=["ella"])
+async def get_conversations_for_letta(
+    uid: str = Query(..., description="User ID"),
+    limit: int = Query(10, description="Max conversations to return"),
+    offset: int = Query(0, description="Pagination offset"),
+    include_transcript: bool = Query(False, description="Include full transcript_segments"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Get recent conversations for a user for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Response**: List of conversations with:
+    - id, created_at, started_at, finished_at
+    - structured: {title, overview, emoji, category}
+    - transcript_segments (if include_transcript=true)
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=user-456&limit=5" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    conversations = conversations_db.get_conversations(
+        uid,
+        limit=limit,
+        offset=offset,
+        include_discarded=False,
+        statuses=["completed"]
+    )
+
+    # Remove transcript_segments if not requested (to reduce response size)
+    if not include_transcript:
+        for conv in conversations:
+            conv.pop('transcript_segments', None)
+
+    print(f"📖 Letta fetched {len(conversations)} conversations for uid={uid}")
+    return conversations
