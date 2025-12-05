@@ -1,14 +1,14 @@
 # Letta API Endpoints
 
-**Version**: 1.0 | **Updated**: December 5, 2025
+**Version**: 1.1 | **Updated**: December 5, 2025
 
-API endpoints for Letta agent tools to access OMI conversation data.
+API endpoints for Letta agent tools to read and write OMI data.
 
 ---
 
 ## Authentication
 
-All endpoints require the `secret-key` header with either:
+All endpoints accept the `secret-key` header with either:
 - `INTERNAL_API_KEY` (preferred for Letta)
 - `ADMIN_KEY`
 
@@ -16,9 +16,150 @@ All endpoints require the `secret-key` header with either:
 -H "secret-key: ${INTERNAL_API_KEY}"
 ```
 
+**Note:** Write endpoints (`POST /v1/ella/*`) allow requests without auth for backwards compatibility with existing n8n workflows, but will log a warning. Read endpoints (`GET /v1/ella/*`) require auth.
+
 ---
 
-## Endpoints
+## Write Endpoints
+
+### POST /v1/ella/memory
+
+Store memories extracted by Letta memory agent.
+
+**Auth**: Optional (recommended)
+
+**Request:**
+```json
+{
+  "uid": "user-123",
+  "conversation_id": "conv-456",
+  "memories": [
+    {
+      "content": "User takes blood pressure medication daily at 8am",
+      "category": "system",
+      "visibility": "private",
+      "tags": ["medication", "health"]
+    }
+  ]
+}
+```
+
+**Example:**
+```bash
+curl -X POST "https://api.ella-ai-care.com/v1/ella/memory" \
+  -H "Content-Type: application/json" \
+  -H "secret-key: ${INTERNAL_API_KEY}" \
+  -d '{"uid": "user-123", "conversation_id": "conv-456", "memories": [{"content": "User likes coffee", "category": "personal"}]}'
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "count": 1,
+  "message": "Stored 1 memories for user user-123"
+}
+```
+
+**Memory Categories:** `personal`, `work`, `health`, `interests`, `habits`, `goals`, `relationships`, `system`
+
+---
+
+### POST /v1/ella/conversation
+
+Store or update conversation summary from Letta summary agent.
+
+**Auth**: Optional (recommended)
+
+**Request:**
+```json
+{
+  "uid": "user-123",
+  "conversation_id": "conv-456",
+  "title": "Morning Health Check",
+  "overview": "User discussed medication schedule and upcoming doctor visit",
+  "emoji": "💊",
+  "category": "health",
+  "action_items": [
+    {
+      "description": "Schedule follow-up appointment",
+      "due_at": "2025-12-15T10:00:00Z"
+    }
+  ],
+  "events": [
+    {
+      "title": "Doctor appointment",
+      "start": "2025-12-11T14:00:00Z",
+      "duration": 30
+    }
+  ]
+}
+```
+
+**Example:**
+```bash
+curl -X POST "https://api.ella-ai-care.com/v1/ella/conversation" \
+  -H "Content-Type: application/json" \
+  -H "secret-key: ${INTERNAL_API_KEY}" \
+  -d '{"uid": "user-123", "conversation_id": "conv-456", "title": "Coffee Chat", "overview": "Discussed favorite cafes", "emoji": "☕", "category": "personal"}'
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "conversation_id": "conv-456",
+  "action": "updated"
+}
+```
+
+**Categories:** `personal`, `work`, `health`, `education`, `finance`, `social`, `travel`, `other`
+
+---
+
+### POST /v1/ella/notification
+
+Send push notification with optional TTS audio.
+
+**Auth**: Optional (recommended)
+
+**Request:**
+```json
+{
+  "uid": "user-123",
+  "message": "Time to take your medication!",
+  "urgency": "QUESTION",
+  "generate_audio": true,
+  "metadata": {"trigger": "medication_reminder"}
+}
+```
+
+**Urgency Levels:** `EMERGENCY`, `QUESTION`, `WAKE_WORD`, `INTERESTING`, `NORMAL`
+
+---
+
+### POST /v1/trigger-incoming-call
+
+Trigger incoming call UI on user's device.
+
+**Auth**: Required
+
+**Request:**
+```json
+{
+  "uid": "user-123",
+  "reason": "medication_reminder",
+  "priority": "normal",
+  "timeout_seconds": 30,
+  "voicemail_text": "Hi! Time to take your medication."
+}
+```
+
+**Reasons:** `medication_reminder`, `check_in`, `urgent`, `follow_up`, `test`
+
+---
+
+## Read Endpoints
 
 ### GET /v1/ella/conversations/{conversation_id}
 

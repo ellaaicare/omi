@@ -175,12 +175,36 @@ class EllaNotificationCallback(BaseModel):
 # CALLBACK ENDPOINTS
 # ================================
 
+from fastapi import Header
+
+def verify_internal_key_callback(secret_key: str = Header(None, alias="secret-key")) -> bool:
+    """Verify INTERNAL_API_KEY or ADMIN_KEY for callback endpoints.
+
+    Note: Made optional (None default) for backwards compatibility with n8n.
+    Will log warning if no key provided but still allow request.
+    """
+    if not secret_key:
+        print("⚠️ Callback called without secret-key header (backwards compat mode)")
+        return True
+
+    admin_key = os.getenv('ADMIN_KEY')
+    internal_key = os.getenv('INTERNAL_API_KEY')
+    if secret_key != admin_key and secret_key != internal_key:
+        raise HTTPException(status_code=403, detail='Invalid API key')
+    return True
+
+
 @router.post("/v1/ella/memory", tags=["ella"])
-async def ella_memory_callback(request: EllaMemoryCallback):
+async def ella_memory_callback(
+    request: EllaMemoryCallback,
+    _: bool = Depends(verify_internal_key_callback)
+):
     """
     **Ella Memory Agent Callback**
 
     Ella's memory agent sends extracted memories here after processing a conversation.
+
+    **Auth**: Optional `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
 
     **Flow:**
     1. Ella memory agent processes transcript segments
@@ -246,11 +270,16 @@ async def ella_memory_callback(request: EllaMemoryCallback):
 
 
 @router.post("/v1/ella/conversation", tags=["ella"])
-async def ella_conversation_callback(request: EllaConversationCallback):
+async def ella_conversation_callback(
+    request: EllaConversationCallback,
+    _: bool = Depends(verify_internal_key_callback)
+):
     """
     **Ella Summary Agent Callback**
 
     Ella's summary agent sends conversation summary here after processing full transcript.
+
+    **Auth**: Optional `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
 
     **Flow:**
     1. Ella summary agent processes complete conversation transcript
@@ -366,11 +395,16 @@ async def ella_conversation_callback(request: EllaConversationCallback):
 
 
 @router.post("/v1/ella/notification", tags=["ella"])
-async def ella_notification_callback(request: EllaNotificationCallback):
+async def ella_notification_callback(
+    request: EllaNotificationCallback,
+    _: bool = Depends(verify_internal_key_callback)
+):
     """
     **Ella Scanner Notification Callback**
 
     Ella's scanner sends urgent notifications here when detecting important events.
+
+    **Auth**: Optional `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
 
     **Flow:**
     1. Ella scanner processes realtime chunks
