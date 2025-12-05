@@ -11,7 +11,9 @@ class IncomingCallOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<IncomingCallService>(
       builder: (context, service, child) {
-        if (!service.isRinging && service.state == IncomingCallState.idle) {
+        // Hide overlay when idle or inCall (V2 UI takes over)
+        if (service.state == IncomingCallState.idle ||
+            service.state == IncomingCallState.inCall) {
           return const SizedBox.shrink();
         }
 

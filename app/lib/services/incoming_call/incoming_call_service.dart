@@ -6,12 +6,14 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/services/incoming_call/voice_answer_detector.dart';
 import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/services/audio/ella_tts_service.dart';
 
 /// Incoming call states
 enum IncomingCallState {
   idle,        // No incoming call
   ringing,     // Call incoming, waiting for answer
   answering,   // User answered, connecting
+  inCall,      // Call active (V2 voice mode running)
   declined,    // User declined, playing voicemail
   timeout,     // Call timed out
 }
@@ -114,19 +116,44 @@ class IncomingCallService extends ChangeNotifier {
       return;
     }
 
-    // Play ringtone
-    await _playRingtone();
+    // Start haptic pulse ringtone
+    _startHapticPulse();
 
-    // Start voice detection
-    _voiceDetector.startListening(
-      onAnswer: answerCall,
-      onDecline: declineCall,
-    );
+    // Play initial greeting TTS - explain WHY Ella is calling
+    // THEN start voice detection after greeting finishes
+    debugPrint('IncomingCallService: Playing greeting: ${callData.reasonDisplay}');
+    final greeting = _buildGreeting(callData);
+    await EllaTtsService().speak(greeting);
+
+    // Now start voice detection (after greeting)
+    if (_state == IncomingCallState.ringing) {
+      debugPrint('IncomingCallService: Starting voice detection');
+      _voiceDetector.startListening(
+        onAnswer: answerCall,
+        onDecline: declineCall,
+      );
+    }
 
     // Start timeout timer
     _startTimeoutTimer();
 
     onCallStarted?.call();
+  }
+
+  /// Build greeting message based on call reason
+  String _buildGreeting(IncomingCallData call) {
+    switch (call.reason) {
+      case 'medication_reminder':
+        return "Hi, it's Ella. I'm calling about your medication reminder. Would you like to talk?";
+      case 'check_in':
+        return "Hi, it's Ella calling for your daily check-in. How are you doing?";
+      case 'urgent':
+        return "Hi, this is Ella with an urgent message. Please answer.";
+      case 'follow_up':
+        return "Hi, it's Ella. I wanted to follow up with you. Got a moment?";
+      default:
+        return "Hi, it's Ella calling. ${call.reasonDisplay}. Would you like to answer?";
+    }
   }
 
   /// Answer the call - start V2 voice mode
@@ -162,6 +189,10 @@ class IncomingCallService extends ChangeNotifier {
     if (success) {
       debugPrint('IncomingCallService: Call connected, starting mic');
 
+      // Change to inCall state - overlay will hide, but V2 UI will show
+      _state = IncomingCallState.inCall;
+      notifyListeners();
+
       // 2. Start mic and route audio to V2 WebSocket (like voice mode button)
       ServiceManager.instance().mic.start(
         onByteReceived: (bytes) {
@@ -179,15 +210,27 @@ class IncomingCallService extends ChangeNotifier {
         },
       );
 
+      // Listen for V2 to end, then cleanup
+      v2Service.addListener(_onV2StateChanged);
+
       // Notify backend of answer
       await _sendCallResponse('answered');
     } else {
       debugPrint('IncomingCallService: Failed to connect call');
       onError?.call('Failed to connect call');
       await _playVoicemail();
+      _cleanup();
     }
+  }
 
-    _cleanup();
+  /// Called when V2 voice mode state changes
+  void _onV2StateChanged() {
+    final v2Service = VoiceModeV2Service();
+    if (v2Service.state == VoiceModeV2State.inactive && _state == IncomingCallState.inCall) {
+      debugPrint('IncomingCallService: V2 call ended, cleaning up');
+      v2Service.removeListener(_onV2StateChanged);
+      _cleanup();
+    }
   }
 
   /// Decline the call - play voicemail
@@ -238,17 +281,6 @@ class IncomingCallService extends ChangeNotifier {
     _cleanup();
   }
 
-  /// Play ringtone
-  Future<void> _playRingtone() async {
-    try {
-      // TODO: Use custom ringtone asset
-      // For now, just use haptic pulses
-      _startHapticPulse();
-    } catch (e) {
-      debugPrint('IncomingCallService: Ringtone error: $e');
-    }
-  }
-
   Timer? _hapticTimer;
   void _startHapticPulse() {
     _hapticTimer = Timer.periodic(const Duration(milliseconds: 1500), (timer) {
@@ -276,15 +308,19 @@ class IncomingCallService extends ChangeNotifier {
 
     try {
       if (call.voicemailAudioUrl != null && call.voicemailAudioUrl!.isNotEmpty) {
-        // Play pre-generated audio
+        // Play pre-generated audio (from backend)
         await _voicemailPlayer.setUrl(call.voicemailAudioUrl!);
         await _voicemailPlayer.play();
         await _voicemailPlayer.processingStateStream.firstWhere(
           (state) => state == ProcessingState.completed,
         );
       } else if (call.voicemailText != null && call.voicemailText!.isNotEmpty) {
-        // TODO: Use TTS service to speak voicemail text
-        debugPrint('IncomingCallService: Voicemail text: ${call.voicemailText}');
+        // Use TTS service to speak voicemail text
+        debugPrint('IncomingCallService: Speaking voicemail: ${call.voicemailText}');
+        await EllaTtsService().speak(call.voicemailText!);
+      } else {
+        // Default voicemail if none provided
+        await EllaTtsService().speak("Sorry I missed you. I'll try again later.");
       }
     } catch (e) {
       debugPrint('IncomingCallService: Voicemail playback error: $e');
