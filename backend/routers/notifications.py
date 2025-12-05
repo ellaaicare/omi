@@ -85,6 +85,123 @@ def send_notification_to_user(data: dict, secret_key: str = Header(...)):
     return {'status': 'Ok'}
 
 
+@router.post('/v1/trigger-incoming-call')
+def trigger_incoming_call(data: dict, secret_key: str = Header(...)):
+    """
+    Trigger an incoming call push notification to a user.
+    Used by n8n workflows to initiate proactive calls.
+
+    Required headers:
+        secret-key: ADMIN_KEY
+
+    Request body:
+        uid: User ID (required)
+        reason: Call reason - medication_reminder, check_in, urgent, follow_up, test (default: test)
+        priority: normal, high, urgent (default: normal)
+        auto_answer: Auto-answer the call (default: false)
+        timeout_seconds: Timeout in seconds (default: 30)
+        voicemail_text: Custom voicemail text (optional)
+    """
+    if secret_key != os.getenv('ADMIN_KEY'):
+        raise HTTPException(status_code=403, detail='You are not authorized to perform this action')
+
+    if not data.get('uid'):
+        raise HTTPException(status_code=400, detail='uid is required')
+
+    uid = data['uid']
+    reason = data.get('reason', 'test')
+    priority = data.get('priority', 'normal')
+    auto_answer = data.get('auto_answer', False)
+    timeout_seconds = data.get('timeout_seconds', 30)
+
+    reason_config = CALL_REASONS.get(reason, CALL_REASONS["test"])
+    call_id = f"call-{uuid.uuid4().hex[:8]}-{int(time.time())}"
+
+    print(f"📞 Incoming call triggered for user {uid}")
+    print(f"   Reason: {reason} ({reason_config['display']})")
+    print(f"   Priority: {priority}")
+    print(f"   Auto-answer: {auto_answer}")
+    print(f"   Timeout: {timeout_seconds}s")
+
+    # Get user's FCM token
+    fcm_token = notification_db.get_token_only(uid)
+    if not fcm_token:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No FCM token found for user {uid}. User must open the app to register device."
+        )
+
+    print(f"   FCM Token: {fcm_token[:20]}...")
+
+    voicemail_text = data.get('voicemail_text') or reason_config["voicemail"]
+
+    message = messaging.Message(
+        token=fcm_token,
+        notification=messaging.Notification(
+            title="Ella is calling",
+            body=reason_config["display"]
+        ),
+        data={
+            "action": "incoming_call",
+            "call_id": call_id,
+            "reason": reason,
+            "reason_display": reason_config["display"],
+            "priority": priority,
+            "auto_answer": str(auto_answer).lower(),
+            "timeout_seconds": str(timeout_seconds),
+            "voicemail_text": voicemail_text,
+        },
+        apns=messaging.APNSConfig(
+            headers={
+                "apns-priority": "10",
+            },
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    alert=messaging.ApsAlert(
+                        title="Ella is calling",
+                        body=reason_config["display"]
+                    ),
+                    sound="default",
+                    content_available=True,
+                )
+            )
+        )
+    )
+
+    try:
+        message_id = messaging.send(message)
+        print(f"   ✅ Incoming call push sent: {message_id}")
+
+        return {
+            "status": "sent",
+            "user_id": uid,
+            "message_id": message_id,
+            "call_id": call_id,
+            "reason": reason,
+            "reason_display": reason_config["display"],
+            "priority": priority,
+            "auto_answer": auto_answer,
+            "timeout_seconds": timeout_seconds,
+            "voicemail_text": voicemail_text,
+        }
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"   ❌ Incoming call push failed: {error_message}")
+
+        if "Requested entity was not found" in error_message:
+            notification_db.remove_token(fcm_token)
+            raise HTTPException(
+                status_code=404,
+                detail="FCM token is invalid or expired. User must restart app to re-register."
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send incoming call push: {error_message}"
+        )
+
+
 @router.post('/v1/integrations/notification')
 def send_app_notification_to_user(request: Request, data: dict, authorization: Optional[str] = Header(None)):
     # Check app-based auth
