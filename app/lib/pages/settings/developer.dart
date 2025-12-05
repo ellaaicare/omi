@@ -1061,6 +1061,60 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),
+
+                  // Test incoming call button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.call, size: 20),
+                    label: const Text('📞 Test Incoming Call from Ella'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.green.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        debugPrint('📞 [DEBUG] Test incoming call button pressed');
+                        AppSnackbar.showSnackbar('📞 Requesting test incoming call...');
+
+                        final response = await http.post(
+                          Uri.parse('${Env.apiBaseUrl}v1/notifications/test-incoming-call'),
+                          headers: {
+                            'Authorization': 'Bearer ${SharedPreferencesUtil().authToken}',
+                            'Content-Type': 'application/json',
+                          },
+                          body: jsonEncode({
+                            'reason': 'medication_reminder',
+                            'priority': 'normal',
+                            'auto_answer': false,
+                            'timeout_seconds': 30,
+                          }),
+                        );
+
+                        debugPrint('📞 [DEBUG] Response status: ${response.statusCode}');
+                        debugPrint('📞 [DEBUG] Response body: ${response.body}');
+
+                        if (response.statusCode == 200) {
+                          AppSnackbar.showSnackbar(
+                            '✅ Incoming call push sent!\n'
+                            'You should see the call UI now.',
+                          );
+                        } else {
+                          AppSnackbar.showSnackbarError(
+                            'Call failed: ${response.statusCode}\n${response.body}',
+                          );
+                        }
+                      } catch (e) {
+                        debugPrint('📞 [DEBUG] ❌ Incoming call error: $e');
+                        AppSnackbar.showSnackbarError('Incoming call error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Triggers the incoming call UI. Say "Answer" to start voice mode, or "Decline" for voicemail.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 16),
                   Divider(color: Colors.grey.shade500),
                   const SizedBox(height: 24),
 
