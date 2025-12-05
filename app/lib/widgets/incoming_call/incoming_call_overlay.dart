@@ -11,9 +11,8 @@ class IncomingCallOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<IncomingCallService>(
       builder: (context, service, child) {
-        // Hide overlay when idle or inCall (V2 UI takes over)
-        if (service.state == IncomingCallState.idle ||
-            service.state == IncomingCallState.inCall) {
+        // Hide overlay only when idle
+        if (service.state == IncomingCallState.idle) {
           return const SizedBox.shrink();
         }
 
@@ -113,16 +112,18 @@ class _IncomingCallContentState extends State<_IncomingCallContent>
 
         const SizedBox(height: 32),
 
-        // "Ella is calling"
+        // Status text
         Text(
-          state == IncomingCallState.answering
-              ? 'Connecting...'
-              : state == IncomingCallState.declined ||
-                      state == IncomingCallState.timeout
-                  ? 'Playing voicemail...'
-                  : 'Ella is calling',
-          style: const TextStyle(
-            color: Colors.white,
+          state == IncomingCallState.inCall
+              ? 'Call Connected'
+              : state == IncomingCallState.answering
+                  ? 'Connecting...'
+                  : state == IncomingCallState.declined ||
+                          state == IncomingCallState.timeout
+                      ? 'Playing voicemail...'
+                      : 'Ella is calling',
+          style: TextStyle(
+            color: state == IncomingCallState.inCall ? Colors.green : Colors.white,
             fontSize: 28,
             fontWeight: FontWeight.bold,
           ),
@@ -169,7 +170,7 @@ class _IncomingCallContentState extends State<_IncomingCallContent>
 
         const Spacer(flex: 2),
 
-        // Answer/Decline buttons
+        // Answer/Decline buttons (ringing state)
         if (state == IncomingCallState.ringing) ...[
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -194,8 +195,28 @@ class _IncomingCallContentState extends State<_IncomingCallContent>
           const SizedBox(height: 48),
         ],
 
-        // Cancel button for other states
+        // End Call button (inCall state)
+        if (state == IncomingCallState.inCall) ...[
+          _CallActionButton(
+            icon: Icons.call_end,
+            label: 'End Call',
+            color: Colors.red,
+            onTap: () => service.endCall(),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Speak to Ella...',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.6),
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 48),
+        ],
+
+        // Cancel button for other states (connecting, voicemail)
         if (state != IncomingCallState.ringing &&
+            state != IncomingCallState.inCall &&
             state != IncomingCallState.idle)
           TextButton(
             onPressed: () => service.forceCancel(),

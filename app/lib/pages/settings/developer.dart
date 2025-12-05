@@ -1128,15 +1128,22 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     ),
                     onPressed: () {
                       debugPrint('📞 [DEBUG] Local incoming call test triggered');
-                      // Trigger incoming call UI directly without push notification
-                      IncomingCallService().handleIncomingCall({
-                        'call_id': 'local-test-${DateTime.now().millisecondsSinceEpoch}',
-                        'reason': 'test',
-                        'reason_display': 'Test Call (Local)',
-                        'priority': 'normal',
-                        'auto_answer': 'false',
-                        'timeout_seconds': '30',
-                        'voicemail_text': 'This is a local test. The incoming call UI is working!',
+
+                      // Force reset any stuck state first
+                      final callService = IncomingCallService();
+                      callService.forceCancel();
+
+                      // Small delay then trigger
+                      Future.delayed(const Duration(milliseconds: 100), () {
+                        callService.handleIncomingCall({
+                          'call_id': 'local-test-${DateTime.now().millisecondsSinceEpoch}',
+                          'reason': 'medication_reminder',
+                          'reason_display': 'Medication Reminder',
+                          'priority': 'normal',
+                          'auto_answer': 'false',
+                          'timeout_seconds': '60',
+                          'voicemail_text': 'This is a local test. The incoming call UI is working!',
+                        });
                       });
                       AppSnackbar.showSnackbar('📞 Incoming call UI triggered locally!');
                     },

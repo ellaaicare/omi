@@ -233,6 +233,26 @@ class IncomingCallService extends ChangeNotifier {
     }
   }
 
+  /// End an active call
+  Future<void> endCall() async {
+    if (_state != IncomingCallState.inCall) return;
+
+    debugPrint('IncomingCallService: Ending call ${_currentCall?.callId}');
+
+    // Stop mic
+    ServiceManager.instance().mic.stop();
+
+    // Stop V2 voice mode
+    final v2Service = VoiceModeV2Service();
+    v2Service.removeListener(_onV2StateChanged);
+    await v2Service.stop();
+
+    // Haptic feedback
+    await HapticFeedback.lightImpact();
+
+    _cleanup();
+  }
+
   /// Decline the call - play voicemail
   Future<void> declineCall() async {
     if (_state != IncomingCallState.ringing) return;
@@ -386,18 +406,18 @@ class IncomingCallService extends ChangeNotifier {
 
   /// Cleanup after call ends
   void _cleanup() {
+    debugPrint('IncomingCallService: Cleanup called, current state: $_state');
     _timeoutTimer?.cancel();
     _hapticTimer?.cancel();
     _voiceDetector.stopListening();
 
-    // Reset state after short delay (for UI transition)
-    Future.delayed(const Duration(seconds: 2), () {
-      _state = IncomingCallState.idle;
-      _currentCall = null;
-      _remainingSeconds = 0;
-      notifyListeners();
-      onCallEnded?.call();
-    });
+    // Reset state immediately
+    _state = IncomingCallState.idle;
+    _currentCall = null;
+    _remainingSeconds = 0;
+    notifyListeners();
+    onCallEnded?.call();
+    debugPrint('IncomingCallService: Cleanup complete, state reset to idle');
   }
 
   /// Force cancel any ongoing call
