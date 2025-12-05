@@ -92,7 +92,7 @@ def trigger_incoming_call(data: dict, secret_key: str = Header(...)):
     Used by n8n workflows to initiate proactive calls.
 
     Required headers:
-        secret-key: ADMIN_KEY
+        secret-key: ADMIN_KEY or INTERNAL_API_KEY
 
     Request body:
         uid: User ID (required)
@@ -102,7 +102,9 @@ def trigger_incoming_call(data: dict, secret_key: str = Header(...)):
         timeout_seconds: Timeout in seconds (default: 30)
         voicemail_text: Custom voicemail text (optional)
     """
-    if secret_key != os.getenv('ADMIN_KEY'):
+    admin_key = os.getenv('ADMIN_KEY')
+    internal_key = os.getenv('INTERNAL_API_KEY')
+    if secret_key != admin_key and secret_key != internal_key:
         raise HTTPException(status_code=403, detail='You are not authorized to perform this action')
 
     if not data.get('uid'):
