@@ -5,6 +5,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/services/incoming_call/voice_answer_detector.dart';
 import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
+import 'package:omi/services/services.dart';
 
 /// Incoming call states
 enum IncomingCallState {
@@ -145,11 +146,39 @@ class IncomingCallService extends ChangeNotifier {
     // Haptic feedback
     await HapticFeedback.mediumImpact();
 
-    // Start V2 voice mode
-    final success = await VoiceModeV2Service().start();
+    // Start V2 voice mode (same as voice mode button)
+    final v2Service = VoiceModeV2Service();
+
+    // Force reset if somehow stuck
+    if (v2Service.state != VoiceModeV2State.inactive) {
+      debugPrint('IncomingCallService: Force resetting stuck state');
+      v2Service.forceReset();
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+
+    // 1. Connect WebSocket first
+    final success = await v2Service.start();
 
     if (success) {
-      debugPrint('IncomingCallService: Call connected');
+      debugPrint('IncomingCallService: Call connected, starting mic');
+
+      // 2. Start mic and route audio to V2 WebSocket (like voice mode button)
+      ServiceManager.instance().mic.start(
+        onByteReceived: (bytes) {
+          // Send raw PCM16 audio directly to V2 WebSocket
+          v2Service.sendAudio(bytes);
+        },
+        onRecording: () {
+          debugPrint('IncomingCallService: Mic recording started');
+        },
+        onStop: () {
+          debugPrint('IncomingCallService: Mic recording stopped');
+        },
+        onInitializing: () {
+          debugPrint('IncomingCallService: Mic initializing');
+        },
+      );
+
       // Notify backend of answer
       await _sendCallResponse('answered');
     } else {
