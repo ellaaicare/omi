@@ -559,16 +559,24 @@ async def ella_health_check():
     return {
         "status": "healthy",
         "service": "ella-integration",
-        "version": "1.0.0",
-        "endpoints": [
-            "POST /v1/ella/memory",
-            "POST /v1/ella/conversation",
-            "POST /v1/ella/notification",
-            "GET /v1/ella/conversations",
-            "GET /v1/ella/conversations/{conversation_id}",
-            "GET /v1/ella/memories",
-            "GET /v1/ella/memories/{memory_id}"
-        ]
+        "version": "1.1.0",
+        "endpoints": {
+            "read": [
+                "GET /v1/ella/conversations",
+                "GET /v1/ella/conversations/{id}",
+                "GET /v1/ella/memories",
+                "GET /v1/ella/memories/{id}",
+                "GET /v1/ella/search/conversations"
+            ],
+            "write": [
+                "POST /v1/ella/memory",
+                "POST /v1/ella/conversation",
+                "POST /v1/ella/notification",
+                "PATCH /v1/ella/memories/{id}",
+                "DELETE /v1/ella/memories/{id}",
+                "DELETE /v1/ella/conversations/{id}"
+            ]
+        }
     }
 
 
@@ -787,3 +795,182 @@ async def get_memory_for_letta(
 
     print(f"📖 Letta fetched memory {memory_id} for uid={uid}")
     return memory
+
+
+# ============================================================
+# WRITE/DELETE ENDPOINTS - For Letta agent tools
+# ============================================================
+
+@router.delete("/v1/ella/memories/{memory_id}", tags=["ella"])
+async def delete_memory_for_letta(
+    memory_id: str,
+    uid: str = Query(..., description="User ID"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Delete a memory by ID for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Example**:
+    ```bash
+    curl -X DELETE "https://api.ella-ai-care.com/v1/ella/memories/mem-123?uid=user-456" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    # Verify memory exists
+    memory = memories_db.get_memory(uid, memory_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found for user {uid}")
+
+    memories_db.delete_memory(uid, memory_id)
+    print(f"🗑️ Letta deleted memory {memory_id} for uid={uid}")
+    return {"status": "success", "message": f"Memory {memory_id} deleted"}
+
+
+@router.patch("/v1/ella/memories/{memory_id}", tags=["ella"])
+async def edit_memory_for_letta(
+    memory_id: str,
+    uid: str = Query(..., description="User ID"),
+    content: str = Query(..., description="New memory content"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Edit a memory's content for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Example**:
+    ```bash
+    curl -X PATCH "https://api.ella-ai-care.com/v1/ella/memories/mem-123?uid=user-456&content=Updated%20memory%20text" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    # Verify memory exists
+    memory = memories_db.get_memory(uid, memory_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found for user {uid}")
+
+    memories_db.edit_memory(uid, memory_id, content)
+    print(f"✏️ Letta edited memory {memory_id} for uid={uid}")
+    return {"status": "success", "message": f"Memory {memory_id} updated", "content": content}
+
+
+@router.delete("/v1/ella/conversations/{conversation_id}", tags=["ella"])
+async def delete_conversation_for_letta(
+    conversation_id: str,
+    uid: str = Query(..., description="User ID"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Delete a conversation by ID for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Warning**: This permanently deletes the conversation and cannot be undone.
+
+    **Example**:
+    ```bash
+    curl -X DELETE "https://api.ella-ai-care.com/v1/ella/conversations/conv-123?uid=user-456" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    # Verify conversation exists
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found for user {uid}")
+
+    conversations_db.delete_conversation(uid, conversation_id)
+    print(f"🗑️ Letta deleted conversation {conversation_id} for uid={uid}")
+    return {"status": "success", "message": f"Conversation {conversation_id} deleted"}
+
+
+# ============================================================
+# SEMANTIC SEARCH ENDPOINTS - For Letta agent tools
+# ============================================================
+
+from database import vector_db
+from utils.llm.clients import generate_embedding
+
+@router.get("/v1/ella/search/conversations", tags=["ella"])
+async def semantic_search_conversations(
+    uid: str = Query(..., description="User ID"),
+    query: str = Query(..., description="Natural language search query"),
+    limit: int = Query(10, description="Max results to return (max 20)"),
+    start_date: str = Query(None, description="Filter after this date (ISO format)"),
+    end_date: str = Query(None, description="Filter before this date (ISO format)"),
+    include_transcript: bool = Query(False, description="Include full transcript_segments"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Semantic search across conversations using vector similarity.
+
+    Unlike keyword search, this finds conversations by **meaning**, not exact words.
+
+    **Example queries**:
+    - "discussions about health" → finds "doctor visit", "medication", "feeling tired"
+    - "family conversations" → finds "daughter Sarah", "grandkids", "son's birthday"
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/search/conversations?uid=USER&query=health%20concerns&limit=5" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    # Cap limit
+    limit = min(limit, 20)
+
+    # Parse dates to timestamps
+    starts_at = None
+    ends_at = None
+    if start_date:
+        try:
+            dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            starts_at = int(dt.timestamp())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid start_date format: {start_date}")
+    if end_date:
+        try:
+            dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            ends_at = int(dt.timestamp())
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}")
+
+    print(f"🔍 Semantic search for uid={uid}: '{query}' (limit={limit})")
+
+    try:
+        # Query Pinecone for similar conversations
+        conversation_ids = vector_db.query_vectors(
+            query=query,
+            uid=uid,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            k=limit
+        )
+
+        if not conversation_ids:
+            print(f"  No results found for query: '{query}'")
+            return []
+
+        print(f"  Found {len(conversation_ids)} matching conversations")
+
+        # Fetch full conversation data
+        conversations = []
+        for conv_id in conversation_ids:
+            conv = conversations_db.get_conversation(uid, conv_id)
+            if conv:
+                # Remove transcript if not requested
+                if not include_transcript:
+                    conv.pop('transcript_segments', None)
+                conversations.append(conv)
+
+        print(f"🔍 Returning {len(conversations)} conversations for query: '{query}'")
+        return conversations
+
+    except Exception as e:
+        print(f"❌ Semantic search error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
