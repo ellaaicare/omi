@@ -171,6 +171,11 @@ enum DeviceType {
   frame,
   appleWatch,
   xor,
+  // Third-party devices (upstream support)
+  plaud,
+  bee,
+  fieldy,
+  friendPendant,
 }
 
 Map<String, DeviceType> cachedDevicesMap = {};
@@ -432,7 +437,8 @@ class BtDevice {
       case DeviceType.openglass:
       case DeviceType.frame:
       case DeviceType.appleWatch:
-        return ''; // No warning needed
+      case DeviceType.xor:
+        return ''; // No warning needed for first-party devices
     }
   }
 
@@ -464,7 +470,8 @@ class BtDevice {
       case DeviceType.openglass:
       case DeviceType.frame:
       case DeviceType.appleWatch:
-        return ''; // No warning needed
+      case DeviceType.xor:
+        return ''; // No warning needed for first-party devices
     }
   }
 

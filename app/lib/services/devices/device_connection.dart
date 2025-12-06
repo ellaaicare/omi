@@ -44,6 +44,11 @@ class DeviceConnectionFactory {
     switch (device.type) {
       case DeviceType.omi:
       case DeviceType.openglass:
+      case DeviceType.plaud:
+      case DeviceType.bee:
+      case DeviceType.fieldy:
+      case DeviceType.friendPendant:
+        // Third-party devices use generic Omi connection
         return OmiDeviceConnection(device, transport);
       case DeviceType.xor:
         return XorDeviceConnection(device, transport);
