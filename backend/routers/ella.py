@@ -669,16 +669,26 @@ async def get_conversations_for_letta(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}. Use ISO format (YYYY-MM-DD)")
 
+    # Fetch without category filter to avoid composite index requirement
+    # Then filter client-side if categories specified
+    fetch_limit = limit * 3 if category_list else limit  # Over-fetch if filtering
     conversations = conversations_db.get_conversations(
         uid,
-        limit=limit,
+        limit=fetch_limit,
         offset=offset,
         include_discarded=False,
         statuses=["completed"],
         start_date=parsed_start,
         end_date=parsed_end,
-        categories=category_list
+        categories=None  # Filter client-side to avoid Firestore index
     )
+
+    # Client-side category filtering (avoids complex Firestore composite index)
+    if category_list:
+        conversations = [
+            c for c in conversations
+            if c.get('structured', {}).get('category') in category_list
+        ][:limit]
 
     # Remove transcript_segments if not requested (to reduce response size)
     if not include_transcript:
@@ -738,7 +748,17 @@ async def get_memories_for_letta(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}. Use ISO format (YYYY-MM-DD)")
 
-    memories = memories_db.get_memories(uid, limit, offset, category_list, parsed_start, parsed_end)
+    # Fetch without category filter to avoid composite index requirement
+    # Then filter client-side if categories specified
+    fetch_limit = limit * 3 if category_list else limit  # Over-fetch if filtering
+    memories = memories_db.get_memories(uid, fetch_limit, offset, [], parsed_start, parsed_end)
+
+    # Client-side category filtering (avoids complex Firestore composite index)
+    if category_list:
+        memories = [
+            m for m in memories
+            if m.get('category') in category_list
+        ][:limit]
 
     print(f"📖 Letta fetched {len(memories)} memories for uid={uid}")
     return memories
