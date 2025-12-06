@@ -33,11 +33,8 @@ LOG_MODULE_REGISTER(transport, CONFIG_LOG_DEFAULT_LEVEL);
 static const struct gpio_dt_spec rfsw_en = GPIO_DT_SPEC_GET_OR(DT_NODELABEL(rfsw_en_pin), gpios, {0});
 #endif
 
-#define MAX_STORAGE_BYTES 0x1E000000 // 480MB
-
 #ifdef CONFIG_OMI_ENABLE_OFFLINE_STORAGE
 extern struct bt_gatt_service storage_service;
-extern uint32_t file_num_array[MAX_AUDIO_FILES];
 extern bool storage_is_on;
 #endif
 
@@ -46,11 +43,6 @@ extern bool is_connected;
 struct bt_conn *current_connection = NULL;
 uint16_t current_mtu = 0;
 uint16_t current_package_index = 0;
-//
-// Internal
-//
-
-struct k_mutex write_sdcard_mutex;
 
 static ssize_t audio_data_write_handler(struct bt_conn *conn,
                                         const struct bt_gatt_attr *attr,
@@ -388,15 +380,17 @@ static void exchange_func(struct bt_conn *conn, uint8_t att_err, struct bt_gatt_
 // Battery Service Handlers
 //
 
-#define BATTERY_REFRESH_INTERVAL 60000 // 60 seconds
-
 #ifdef CONFIG_OMI_ENABLE_BATTERY
+#define BATTERY_REFRESH_INTERVAL        10000 // 10 seconds
+#define CONFIG_OMI_BATTERY_CRITICAL_MV  3500  // mV
+
 void broadcast_battery_level(struct k_work *work_item);
 
 K_WORK_DELAYABLE_DEFINE(battery_work, broadcast_battery_level);
 
 void broadcast_battery_level(struct k_work *work_item)
 {
+    static uint8_t notify_counter = 6;
     uint16_t battery_millivolt;
     uint8_t battery_percentage;
     if (battery_get_millivolt(&battery_millivolt) == 0 &&
@@ -404,10 +398,19 @@ void broadcast_battery_level(struct k_work *work_item)
 
         LOG_PRINTK("Battery at %d mV (capacity %d%%)\n", battery_millivolt, battery_percentage);
 
-        // Use the Zephyr BAS function to set (and notify) the battery level
-        int err = bt_bas_set_battery_level(battery_percentage);
-        if (err) {
-            LOG_ERR("Error updating battery level: %d", err);
+        if (battery_millivolt < CONFIG_OMI_BATTERY_CRITICAL_MV) {
+            LOG_WRN("Battery critical level reached (%d mV). Initiating shutdown.", battery_millivolt);
+            turnoff_all();
+        } else {
+            notify_counter++;
+            if (notify_counter >= 6) {
+                // Use the Zephyr BAS function to set (and notify) the battery level
+                int err = bt_bas_set_battery_level(battery_percentage);
+                if (err) {
+                    LOG_ERR("Error updating battery level: %d", err);
+                }
+                notify_counter = 0;
+            }
         }
     } else {
         LOG_ERR("Failed to read battery level");
@@ -458,10 +461,6 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
     k_sleep(K_MSEC(1000));
     update_data_length(current_connection);
     update_mtu(current_connection);
-
-#ifdef CONFIG_OMI_ENABLE_BATTERY
-    k_work_schedule(&battery_work, K_MSEC(3000));
-#endif
 
     is_connected = true;
 }
@@ -784,13 +783,6 @@ static bool use_storage = true;
 #define MAX_AUDIO_FILE_SIZE 300000
 static int recent_file_size_updated = 0;
 static uint8_t heartbeat_count = 0;
-#ifdef CONFIG_OMI_ENABLE_OFFLINE_STORAGE
-void update_file_size()
-{
-    file_num_array[0] = get_file_size(1);
-    file_num_array[1] = get_offset();
-}
-#endif
 
 void test_pusher(void)
 {
@@ -832,24 +824,14 @@ void pusher(void)
         // Load current connection
         //
         struct bt_conn *conn = current_connection;
-        // updating the most recent file size is expensive!
-        static bool file_size_updated = true;
         static bool connection_was_true = false;
         if (conn && !connection_was_true) {
             k_msleep(100);
-            file_size_updated = false;
             connection_was_true = true;
         } else if (!conn) {
             connection_was_true = false;
         }
-#ifdef CONFIG_OMI_ENABLE_OFFLINE_STORAGE
-        if (!file_size_updated) {
-            LOG_PRINTK("updating file size\n");
-            update_file_size();
 
-            file_size_updated = true;
-        }
-#endif
         if (conn) {
             conn = bt_conn_ref(conn);
         }
@@ -865,17 +847,14 @@ void pusher(void)
 #ifdef CONFIG_OMI_ENABLE_OFFLINE_STORAGE
         if (!valid && !storage_is_on) {
             bool result = false;
-            if (file_num_array[1] < MAX_STORAGE_BYTES) {
-                k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+            if (get_file_size() < MAX_STORAGE_BYTES) {
                 if (is_sd_on()) {
                     result = write_to_storage();
                 }
-                k_mutex_unlock(&write_sdcard_mutex);
             }
             if (result) {
                 heartbeat_count++;
                 if (heartbeat_count == 255) {
-                    update_file_size();
                     heartbeat_count = 0;
                     LOG_PRINTK("drawing\n");
                 }
@@ -940,8 +919,6 @@ int transport_off()
 // periodic advertising
 int transport_start()
 {
-    k_mutex_init(&write_sdcard_mutex);
-
     int err = 0;
 
     // Pull the nfsw control high
@@ -1028,6 +1005,8 @@ int transport_start()
     } else {
         LOG_INF("Battery initialized");
     }
+
+    k_work_schedule(&battery_work, K_MSEC(3000));
 #endif
 
     // Start pusher
