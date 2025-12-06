@@ -624,12 +624,20 @@ async def get_conversations_for_letta(
     limit: int = Query(10, description="Max conversations to return"),
     offset: int = Query(0, description="Pagination offset"),
     include_transcript: bool = Query(False, description="Include full transcript_segments"),
+    categories: str = Query(None, description="Comma-separated categories to filter (e.g., health,personal)"),
+    start_date: str = Query(None, description="Filter conversations after this date (ISO format: 2025-12-01)"),
+    end_date: str = Query(None, description="Filter conversations before this date (ISO format: 2025-12-31)"),
     _: bool = Depends(verify_internal_key)
 ):
     """
     Get recent conversations for a user for Letta agent tools.
 
     **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Filtering**:
+    - categories: health,personal,work (comma-separated)
+    - start_date: 2025-12-01 (ISO format)
+    - end_date: 2025-12-31 (ISO format)
 
     **Response**: List of conversations with:
     - id, created_at, started_at, finished_at
@@ -638,16 +646,38 @@ async def get_conversations_for_letta(
 
     **Example**:
     ```bash
-    curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=user-456&limit=5" \\
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=user-456&limit=5&categories=health&start_date=2025-12-01" \\
       -H "secret-key: YOUR_INTERNAL_API_KEY"
     ```
     """
+    # Parse categories
+    category_list = None
+    if categories:
+        category_list = [c.strip() for c in categories.split(",") if c.strip()]
+
+    # Parse dates
+    parsed_start = None
+    parsed_end = None
+    if start_date:
+        try:
+            parsed_start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid start_date format: {start_date}. Use ISO format (YYYY-MM-DD)")
+    if end_date:
+        try:
+            parsed_end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}. Use ISO format (YYYY-MM-DD)")
+
     conversations = conversations_db.get_conversations(
         uid,
         limit=limit,
         offset=offset,
         include_discarded=False,
-        statuses=["completed"]
+        statuses=["completed"],
+        start_date=parsed_start,
+        end_date=parsed_end,
+        categories=category_list
     )
 
     # Remove transcript_segments if not requested (to reduce response size)
@@ -664,7 +694,9 @@ async def get_memories_for_letta(
     uid: str = Query(..., description="User ID"),
     limit: int = Query(100, description="Max memories to return"),
     offset: int = Query(0, description="Pagination offset"),
-    categories: str = Query(None, description="Comma-separated categories to filter"),
+    categories: str = Query(None, description="Comma-separated categories to filter (e.g., health,personal)"),
+    start_date: str = Query(None, description="Filter memories after this date (ISO format: 2025-12-01)"),
+    end_date: str = Query(None, description="Filter memories before this date (ISO format: 2025-12-31)"),
     _: bool = Depends(verify_internal_key)
 ):
     """
@@ -672,21 +704,41 @@ async def get_memories_for_letta(
 
     **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
 
+    **Filtering**:
+    - categories: health,personal,system (comma-separated)
+    - start_date: 2025-12-01 (ISO format)
+    - end_date: 2025-12-31 (ISO format)
+
     **Response**: List of memories with:
     - id, content, category, created_at
     - conversation_id (if linked to a conversation)
 
     **Example**:
     ```bash
-    curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=user-456&limit=50" \\
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=user-456&limit=50&categories=health&start_date=2025-12-01" \\
       -H "secret-key: YOUR_INTERNAL_API_KEY"
     ```
     """
+    # Parse categories
     category_list = []
     if categories:
         category_list = [c.strip() for c in categories.split(",") if c.strip()]
 
-    memories = memories_db.get_memories(uid, limit, offset, category_list)
+    # Parse dates
+    parsed_start = None
+    parsed_end = None
+    if start_date:
+        try:
+            parsed_start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid start_date format: {start_date}. Use ISO format (YYYY-MM-DD)")
+    if end_date:
+        try:
+            parsed_end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid end_date format: {end_date}. Use ISO format (YYYY-MM-DD)")
+
+    memories = memories_db.get_memories(uid, limit, offset, category_list, parsed_start, parsed_end)
 
     print(f"📖 Letta fetched {len(memories)} memories for uid={uid}")
     return memories
