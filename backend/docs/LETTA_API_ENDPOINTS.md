@@ -270,6 +270,63 @@ curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=5aGC5YE9Bnhc
 
 ---
 
+### GET /v1/ella/memories
+
+Get memories for a user.
+
+**Parameters:**
+| Name | Location | Required | Default | Description |
+|------|----------|----------|---------|-------------|
+| `uid` | query | Yes | - | User's OMI UID |
+| `limit` | query | No | 100 | Max memories to return |
+| `offset` | query | No | 0 | Pagination offset |
+| `categories` | query | No | - | Comma-separated categories to filter |
+
+**Example:**
+```bash
+curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=5aGC5YE9BnhcSoTxxtT4ar6ILQy2&limit=50" \
+  -H "secret-key: ${INTERNAL_API_KEY}"
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "mem-123",
+    "content": "User takes blood pressure medication daily at 8am",
+    "category": "health",
+    "created_at": "2025-12-05T10:00:00Z",
+    "conversation_id": "conv-456"
+  },
+  {
+    "id": "mem-124",
+    "content": "User prefers Blue Bottle NOLA coffee",
+    "category": "personal",
+    "created_at": "2025-12-05T22:05:17Z"
+  }
+]
+```
+
+---
+
+### GET /v1/ella/memories/{memory_id}
+
+Get a single memory by ID.
+
+**Parameters:**
+| Name | Location | Required | Description |
+|------|----------|----------|-------------|
+| `memory_id` | path | Yes | Memory ID |
+| `uid` | query | Yes | User's OMI UID |
+
+**Example:**
+```bash
+curl -X GET "https://api.ella-ai-care.com/v1/ella/memories/mem-123?uid=user-456" \
+  -H "secret-key: ${INTERNAL_API_KEY}"
+```
+
+---
+
 ## Letta Tool Implementation
 
 ### Python Tool for Letta Agents

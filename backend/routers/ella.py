@@ -565,7 +565,9 @@ async def ella_health_check():
             "POST /v1/ella/conversation",
             "POST /v1/ella/notification",
             "GET /v1/ella/conversations",
-            "GET /v1/ella/conversations/{conversation_id}"
+            "GET /v1/ella/conversations/{conversation_id}",
+            "GET /v1/ella/memories",
+            "GET /v1/ella/memories/{memory_id}"
         ]
     }
 
@@ -655,3 +657,61 @@ async def get_conversations_for_letta(
 
     print(f"📖 Letta fetched {len(conversations)} conversations for uid={uid}")
     return conversations
+
+
+@router.get("/v1/ella/memories", tags=["ella"])
+async def get_memories_for_letta(
+    uid: str = Query(..., description="User ID"),
+    limit: int = Query(100, description="Max memories to return"),
+    offset: int = Query(0, description="Pagination offset"),
+    categories: str = Query(None, description="Comma-separated categories to filter"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Get memories for a user for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Response**: List of memories with:
+    - id, content, category, created_at
+    - conversation_id (if linked to a conversation)
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=user-456&limit=50" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    category_list = []
+    if categories:
+        category_list = [c.strip() for c in categories.split(",") if c.strip()]
+
+    memories = memories_db.get_memories(uid, limit, offset, category_list)
+
+    print(f"📖 Letta fetched {len(memories)} memories for uid={uid}")
+    return memories
+
+
+@router.get("/v1/ella/memories/{memory_id}", tags=["ella"])
+async def get_memory_for_letta(
+    memory_id: str,
+    uid: str = Query(..., description="User ID"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Get a single memory by ID for Letta agent tools.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/memories/mem-123?uid=user-456" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    memory = memories_db.get_memory(uid, memory_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found for user {uid}")
+
+    print(f"📖 Letta fetched memory {memory_id} for uid={uid}")
+    return memory
