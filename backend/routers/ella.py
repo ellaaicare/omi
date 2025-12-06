@@ -559,14 +559,15 @@ async def ella_health_check():
     return {
         "status": "healthy",
         "service": "ella-integration",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "endpoints": {
             "read": [
                 "GET /v1/ella/conversations",
                 "GET /v1/ella/conversations/{id}",
                 "GET /v1/ella/memories",
                 "GET /v1/ella/memories/{id}",
-                "GET /v1/ella/search/conversations"
+                "GET /v1/ella/search/conversations",
+                "GET /v1/ella/search/memories"
             ],
             "write": [
                 "POST /v1/ella/memory",
@@ -971,6 +972,63 @@ async def semantic_search_conversations(
 
     except Exception as e:
         print(f"❌ Semantic search error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get("/v1/ella/search/memories", tags=["ella"])
+async def search_memories(
+    uid: str = Query(..., description="User ID"),
+    query: str = Query(..., description="Search query (searches memory content)"),
+    limit: int = Query(20, description="Max results to return (max 100)"),
+    categories: str = Query(None, description="Comma-separated categories to filter"),
+    _: bool = Depends(verify_internal_key)
+):
+    """
+    Search memories by content text.
+
+    Note: This is text-based search (not semantic). For semantic search,
+    use /v1/ella/search/conversations which searches conversation context.
+
+    **Auth**: Requires `secret-key` header (INTERNAL_API_KEY or ADMIN_KEY)
+
+    **Example**:
+    ```bash
+    curl -X GET "https://api.ella-ai-care.com/v1/ella/search/memories?uid=USER&query=medication&limit=10" \\
+      -H "secret-key: YOUR_INTERNAL_API_KEY"
+    ```
+    """
+    # Cap limit
+    limit = min(limit, 100)
+
+    # Parse categories
+    category_list = []
+    if categories:
+        category_list = [c.strip() for c in categories.split(",") if c.strip()]
+
+    print(f"🔍 Memory search for uid={uid}: '{query}' (limit={limit})")
+
+    try:
+        # Fetch memories (more than needed for filtering)
+        fetch_limit = limit * 5  # Over-fetch for text filtering
+        memories = memories_db.get_memories(uid, fetch_limit, 0, category_list, None, None)
+
+        # Filter by query (case-insensitive content search)
+        query_lower = query.lower()
+        matching_memories = []
+        for memory in memories:
+            content = memory.get('content', '')
+            if query_lower in content.lower():
+                matching_memories.append(memory)
+                if len(matching_memories) >= limit:
+                    break
+
+        print(f"🔍 Found {len(matching_memories)} memories matching '{query}'")
+        return matching_memories
+
+    except Exception as e:
+        print(f"❌ Memory search error: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
