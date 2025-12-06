@@ -1,6 +1,6 @@
 # Letta API Endpoints
 
-**Version**: 1.1 | **Updated**: December 5, 2025
+**Version**: 1.2 | **Updated**: December 6, 2025
 
 API endpoints for Letta agent tools to read and write OMI data.
 
@@ -224,7 +224,7 @@ curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations/1764972191258?ui
 
 ### GET /v1/ella/conversations
 
-List recent conversations for a user.
+List recent conversations for a user with optional filtering.
 
 **Parameters:**
 | Name | Location | Required | Default | Description |
@@ -233,10 +233,21 @@ List recent conversations for a user.
 | `limit` | query | No | 10 | Max conversations to return |
 | `offset` | query | No | 0 | Pagination offset |
 | `include_transcript` | query | No | false | Include full transcript_segments |
+| `categories` | query | No | - | Comma-separated categories (e.g., `health,personal`) |
+| `start_date` | query | No | - | Filter after this date (ISO format: `2025-12-01`) |
+| `end_date` | query | No | - | Filter before this date (ISO format: `2025-12-31`) |
 
-**Example:**
+**Categories:** `personal`, `work`, `health`, `education`, `finance`, `social`, `travel`, `other`
+
+**Example (basic):**
 ```bash
 curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=5aGC5YE9BnhcSoTxxtT4ar6ILQy2&limit=5" \
+  -H "secret-key: ${INTERNAL_API_KEY}"
+```
+
+**Example (with filters):**
+```bash
+curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=USER_ID&categories=health,personal&start_date=2025-12-01&limit=20" \
   -H "secret-key: ${INTERNAL_API_KEY}"
 ```
 
@@ -272,7 +283,7 @@ curl -X GET "https://api.ella-ai-care.com/v1/ella/conversations?uid=5aGC5YE9Bnhc
 
 ### GET /v1/ella/memories
 
-Get memories for a user.
+Get memories for a user with optional filtering.
 
 **Parameters:**
 | Name | Location | Required | Default | Description |
@@ -280,11 +291,21 @@ Get memories for a user.
 | `uid` | query | Yes | - | User's OMI UID |
 | `limit` | query | No | 100 | Max memories to return |
 | `offset` | query | No | 0 | Pagination offset |
-| `categories` | query | No | - | Comma-separated categories to filter |
+| `categories` | query | No | - | Comma-separated categories (e.g., `health,system`) |
+| `start_date` | query | No | - | Filter after this date (ISO format: `2025-12-01`) |
+| `end_date` | query | No | - | Filter before this date (ISO format: `2025-12-31`) |
 
-**Example:**
+**Categories:** `personal`, `work`, `health`, `interests`, `habits`, `goals`, `relationships`, `system`, `interesting`
+
+**Example (basic):**
 ```bash
 curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=5aGC5YE9BnhcSoTxxtT4ar6ILQy2&limit=50" \
+  -H "secret-key: ${INTERNAL_API_KEY}"
+```
+
+**Example (with filters):**
+```bash
+curl -X GET "https://api.ella-ai-care.com/v1/ella/memories?uid=USER_ID&categories=health&start_date=2025-12-01&end_date=2025-12-31" \
   -H "secret-key: ${INTERNAL_API_KEY}"
 ```
 
@@ -365,27 +386,78 @@ def get_conversation(conversation_id: str, uid: str) -> Dict[str, Any]:
 def list_conversations(
     uid: str,
     limit: int = 10,
-    include_transcript: bool = False
+    include_transcript: bool = False,
+    categories: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    List recent conversations for a user.
+    List recent conversations for a user with optional filtering.
 
     Args:
         uid: User's OMI UID
         limit: Max conversations to return (default: 10)
         include_transcript: Include full transcript_segments (default: False)
+        categories: Filter by categories (e.g., ["health", "personal"])
+        start_date: Filter after this date (ISO format: "2025-12-01")
+        end_date: Filter before this date (ISO format: "2025-12-31")
 
     Returns:
         List of conversation dicts with structured summaries
     """
+    params = {
+        "uid": uid,
+        "limit": limit,
+        "include_transcript": include_transcript
+    }
+    if categories:
+        params["categories"] = ",".join(categories)
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
     response = requests.get(
         f"{BASE_URL}/v1/ella/conversations",
         headers={"secret-key": INTERNAL_API_KEY},
-        params={
-            "uid": uid,
-            "limit": limit,
-            "include_transcript": include_transcript
-        }
+        params=params
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def list_memories(
+    uid: str,
+    limit: int = 100,
+    categories: Optional[List[str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    List memories for a user with optional filtering.
+
+    Args:
+        uid: User's OMI UID
+        limit: Max memories to return (default: 100)
+        categories: Filter by categories (e.g., ["health", "system"])
+        start_date: Filter after this date (ISO format: "2025-12-01")
+        end_date: Filter before this date (ISO format: "2025-12-31")
+
+    Returns:
+        List of memory dicts
+    """
+    params = {"uid": uid, "limit": limit}
+    if categories:
+        params["categories"] = ",".join(categories)
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+
+    response = requests.get(
+        f"{BASE_URL}/v1/ella/memories",
+        headers={"secret-key": INTERNAL_API_KEY},
+        params=params
     )
     response.raise_for_status()
     return response.json()
