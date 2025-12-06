@@ -34,6 +34,7 @@ from routers import (
     ella,
     analytics,
     testing,
+    voice_v2,  # Pipecat voice mode
 )
 
 from utils.other.timeout import TimeoutMiddleware
@@ -111,6 +112,9 @@ app.include_router(analytics.router)
 
 # E2E Agent Testing endpoints
 app.include_router(testing.router, tags=['testing'])
+
+# Pipecat Voice Mode v2
+app.include_router(voice_v2.router, tags=['voice-v2'])
 
 
 methods_timeout = {

@@ -171,6 +171,11 @@ enum DeviceType {
   frame,
   appleWatch,
   xor,
+  // Third-party devices (upstream support)
+  plaud,
+  bee,
+  fieldy,
+  friendPendant,
 }
 
 Map<String, DeviceType> cachedDevicesMap = {};
@@ -417,6 +422,57 @@ class BtDevice {
       manufacturerName: manufacturerName,
       type: DeviceType.xor,
     );
+  }
+
+  /// Returns firmware warning title for this device type
+  /// Empty string means no warning needed
+  String getFirmwareWarningTitle() {
+    switch (type) {
+      case DeviceType.plaud:
+      case DeviceType.bee:
+      case DeviceType.fieldy:
+      case DeviceType.friendPendant:
+        return 'Firmware Recommendation';
+      case DeviceType.omi:
+      case DeviceType.openglass:
+      case DeviceType.frame:
+      case DeviceType.appleWatch:
+      case DeviceType.xor:
+        return ''; // No warning needed for first-party devices
+    }
+  }
+
+  /// Returns firmware warning message for this device type
+  /// Empty string means no warning needed
+  String getFirmwareWarningMessage() {
+    switch (type) {
+      case DeviceType.plaud:
+        return 'Your device is running firmware V0207, which works great with Omi.\n\n'
+            'ℹ️ We recommend avoiding firmware updates through the PLAUD app, as newer versions may affect compatibility.\n\n'
+            'For the best experience, please keep firmware V0207.';
+
+      case DeviceType.bee:
+        return 'Your device\'s current firmware works great with Omi.\n\n'
+            'ℹ️ We recommend avoiding firmware updates through the Bee app, as newer versions may affect compatibility.\n\n'
+            'For the best experience, please keep your current firmware.';
+
+      case DeviceType.fieldy:
+        return 'Your device\'s current firmware works great with Omi.\n\n'
+            'ℹ️ We recommend avoiding firmware updates through the Compass app, as newer versions may affect compatibility.\n\n'
+            'For the best experience, please keep your current firmware.';
+
+      case DeviceType.friendPendant:
+        return 'Your device\'s current firmware works great with Omi.\n\n'
+            'ℹ️ We recommend avoiding firmware updates through the Friend app, as newer versions may affect compatibility.\n\n'
+            'For the best experience, please keep your current firmware.';
+
+      case DeviceType.omi:
+      case DeviceType.openglass:
+      case DeviceType.frame:
+      case DeviceType.appleWatch:
+      case DeviceType.xor:
+        return ''; // No warning needed for first-party devices
+    }
   }
 
   // from BluetoothDevice

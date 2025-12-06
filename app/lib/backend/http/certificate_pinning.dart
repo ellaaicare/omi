@@ -12,6 +12,14 @@ class CertificatePinningConfig {
 
   CertificatePinningConfig._internal();
 
+  /// OPTIMIZATION: Prevent double initialization
+  bool _pinningInitialized = false;
+  bool _pinningInitializing = false;
+
+  /// OPTIMIZATION: Cache validated hosts to avoid repeated validation
+  final Map<String, DateTime> _validatedHosts = {};
+  static const Duration _validationCacheTtl = Duration(minutes: 30);
+
   /// Certificate pinning enabled flag
   /// Set to false in development, true in production
   bool get isPinningEnabled {
@@ -97,8 +105,22 @@ class CertificatePinningConfig {
 
   /// Initialize certificate pinning checker
   Future<void> initializePinning() async {
+    // OPTIMIZATION: Prevent double initialization
+    if (_pinningInitialized) {
+      debugPrint('Certificate pinning already initialized, skipping');
+      return;
+    }
+    if (_pinningInitializing) {
+      debugPrint('Certificate pinning initialization in progress, skipping');
+      return;
+    }
+
+    _pinningInitializing = true;
+
     if (!shouldEnforce()) {
       debugPrint('Certificate pinning disabled for development');
+      _pinningInitialized = true;
+      _pinningInitializing = false;
       return;
     }
 
@@ -117,6 +139,7 @@ class CertificatePinningConfig {
       } else {
         Logger.error('Certificate pinning validation failed: $result');
       }
+      _pinningInitialized = true;
     } catch (e) {
       // Don't crash the app if pinning check fails during init
       // This allows development to continue
@@ -125,6 +148,9 @@ class CertificatePinningConfig {
         // In production, this should be treated more seriously
         Logger.error('CRITICAL: Certificate pinning failed in production');
       }
+      _pinningInitialized = true; // Mark as initialized to avoid retry loops
+    } finally {
+      _pinningInitializing = false;
     }
   }
 
@@ -136,10 +162,34 @@ class CertificatePinningConfig {
     return url.startsWith(apiUrl);
   }
 
+  /// Check if a host was recently validated (within TTL)
+  bool _isRecentlyValidated(String host) {
+    final validatedAt = _validatedHosts[host];
+    if (validatedAt == null) return false;
+    return DateTime.now().difference(validatedAt) < _validationCacheTtl;
+  }
+
+  /// Mark a host as validated
+  void _markValidated(String host) {
+    _validatedHosts[host] = DateTime.now();
+  }
+
   /// Validate a specific URL with certificate pinning
   Future<bool> validateUrl(String url) async {
     if (!requiresPinning(url)) {
       return true;
+    }
+
+    // OPTIMIZATION: Check validation cache first
+    try {
+      final uri = Uri.parse(url);
+      final host = uri.host;
+      if (_isRecentlyValidated(host)) {
+        debugPrint('Certificate validation cached for: $host');
+        return true;
+      }
+    } catch (e) {
+      // Continue with validation if URL parsing fails
     }
 
     if (sha256Fingerprints.isEmpty) {
@@ -157,7 +207,17 @@ class CertificatePinningConfig {
         timeout: 10,
       );
 
-      return result.contains('CONNECTION_SECURE');
+      final isValid = result.contains('CONNECTION_SECURE');
+      if (isValid) {
+        // Cache successful validation
+        try {
+          final uri = Uri.parse(url);
+          _markValidated(uri.host);
+        } catch (e) {
+          // Ignore URL parsing errors for caching
+        }
+      }
+      return isValid;
     } catch (e) {
       Logger.error('Certificate validation failed for $url: $e');
       return false;

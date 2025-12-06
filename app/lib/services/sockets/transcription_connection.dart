@@ -151,8 +151,8 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
       return;
     }
 
-    // Message event
-    if (jsonEvent.containsKey("type")) {
+    // Message event - support both 'type' (legacy) and 'event' (voice mode) keys
+    if (jsonEvent.containsKey("type") || jsonEvent.containsKey("event")) {
       var event = MessageEvent.fromJson(jsonEvent);
       _listeners.forEach((k, v) {
         v.onMessageEventReceived(event);

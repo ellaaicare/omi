@@ -1,0 +1,8 @@
+# Pipecat Voice Mode Dependencies
+# Always use latest - Pipecat is under active development
+# See: https://github.com/pipecat-ai/pipecat/releases
+
+pipecat-ai[silero,groq,openai,deepgram,websocket]
+
+# Note: Core dependencies (httpx, google-cloud-firestore) are
+# already in the main backend requirements.txt

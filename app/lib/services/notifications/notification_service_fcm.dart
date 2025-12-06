@@ -13,6 +13,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import 'package:omi/services/notifications/notification_interface.dart';
 import 'package:omi/services/notifications/action_item_notification_handler.dart';
+import 'package:omi/services/incoming_call/incoming_call_service.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 /// Firebase Cloud Messaging enabled notification service
@@ -22,6 +23,12 @@ class _FCMNotificationService implements NotificationInterface {
 
   MethodChannel platform = const MethodChannel('com.friend.ios/notifyOnKill');
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
+
+  /// OPTIMIZATION: Debounce fields to prevent duplicate token saves
+  DateTime? _lastSaveTokenTime;
+  bool _isSavingToken = false;
+  bool _tokenRefreshListenerRegistered = false;
+  static const Duration _saveTokenCooldown = Duration(minutes: 1);
 
   final channel = NotificationChannel(
     channelGroupKey: 'channel_group_key',
@@ -151,41 +158,66 @@ class _FCMNotificationService implements NotificationInterface {
   @override
   void saveNotificationToken() async {
     debugPrint('🔔 [DEBUG] saveNotificationToken called');
-    if (Platform.isIOS) {
-      debugPrint('🔔 [DEBUG] iOS platform: Getting APNS token...');
 
-      // Wait for APNS token to be available (iOS requirement)
-      String? apnsToken;
-      int retries = 0;
-      while (apnsToken == null && retries < 10) {
-        apnsToken = await _firebaseMessaging.getAPNSToken();
-        if (apnsToken == null) {
-          debugPrint('🔔 [DEBUG] APNS token not ready yet, waiting 500ms... (attempt ${retries + 1}/10)');
-          await Future.delayed(const Duration(milliseconds: 500));
-          retries++;
-        }
-      }
-
-      if (apnsToken != null) {
-        debugPrint('🔔 [DEBUG] APNS token received: ${apnsToken.substring(0, apnsToken.length > 20 ? 20 : apnsToken.length)}...');
-        debugPrint('🔔 [FULL_TOKEN] APNS_HEX: $apnsToken');
-      } else {
-        debugPrint('🔔 [DEBUG] ⚠️ Failed to get APNS token after 10 retries (5 seconds)');
-        debugPrint('🔔 [DEBUG] This is normal if device is not registered with APNs yet');
-      }
-    }
-    if (Platform.isMacOS) {
-      debugPrint('🔔 [DEBUG] macOS platform: Returning early');
+    // OPTIMIZATION: Debounce to prevent duplicate calls within 1 minute
+    final now = DateTime.now();
+    if (_isSavingToken) {
+      debugPrint('🔔 [DEBUG] Already saving token, skipping duplicate call');
       return;
     }
-    debugPrint('🔔 [DEBUG] Getting FCM token from Firebase Messaging...');
-    String? token = await _firebaseMessaging.getToken();
-    debugPrint('🔔 [DEBUG] FCM token received: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
-    debugPrint('🔔 [DEBUG] Calling saveFcmToken...');
-    await saveFcmToken(token);
-    debugPrint('🔔 [DEBUG] Setting up token refresh listener...');
-    _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
-    debugPrint('🔔 [DEBUG] saveNotificationToken completed');
+    if (_lastSaveTokenTime != null &&
+        now.difference(_lastSaveTokenTime!) < _saveTokenCooldown) {
+      debugPrint('🔔 [DEBUG] Token was saved recently (${now.difference(_lastSaveTokenTime!).inSeconds}s ago), skipping');
+      return;
+    }
+
+    _isSavingToken = true;
+    _lastSaveTokenTime = now;
+
+    try {
+      if (Platform.isIOS) {
+        debugPrint('🔔 [DEBUG] iOS platform: Getting APNS token...');
+
+        // Wait for APNS token to be available (iOS requirement)
+        String? apnsToken;
+        int retries = 0;
+        while (apnsToken == null && retries < 10) {
+          apnsToken = await _firebaseMessaging.getAPNSToken();
+          if (apnsToken == null) {
+            debugPrint('🔔 [DEBUG] APNS token not ready yet, waiting 500ms... (attempt ${retries + 1}/10)');
+            await Future.delayed(const Duration(milliseconds: 500));
+            retries++;
+          }
+        }
+
+        if (apnsToken != null) {
+          debugPrint('🔔 [DEBUG] APNS token received: ${apnsToken.substring(0, apnsToken.length > 20 ? 20 : apnsToken.length)}...');
+          debugPrint('🔔 [FULL_TOKEN] APNS_HEX: $apnsToken');
+        } else {
+          debugPrint('🔔 [DEBUG] ⚠️ Failed to get APNS token after 10 retries (5 seconds)');
+          debugPrint('🔔 [DEBUG] This is normal if device is not registered with APNs yet');
+        }
+      }
+      if (Platform.isMacOS) {
+        debugPrint('🔔 [DEBUG] macOS platform: Returning early');
+        return;
+      }
+      debugPrint('🔔 [DEBUG] Getting FCM token from Firebase Messaging...');
+      String? token = await _firebaseMessaging.getToken();
+      debugPrint('🔔 [DEBUG] FCM token received: ${token != null ? "YES (${token.substring(0, token.length > 20 ? 20 : token.length)}...)" : "NULL"}');
+      debugPrint('🔔 [DEBUG] Calling saveFcmToken...');
+      await saveFcmToken(token);
+
+      // OPTIMIZATION: Only register token refresh listener once
+      if (!_tokenRefreshListenerRegistered) {
+        debugPrint('🔔 [DEBUG] Setting up token refresh listener...');
+        _firebaseMessaging.onTokenRefresh.listen(saveFcmToken);
+        _tokenRefreshListenerRegistered = true;
+      }
+      debugPrint('🔔 [DEBUG] saveNotificationToken completed');
+    } finally {
+      _isSavingToken = false;
+    }
   }
 
   @override
@@ -251,6 +283,20 @@ class _FCMNotificationService implements NotificationInterface {
 
           // Continue to show the notification popup (don't return)
           // Fall through to show foreground notification
+        }
+
+        // Handle incoming call from Ella
+        if (action == 'incoming_call') {
+          debugPrint('📞 [CALL] Received incoming call notification');
+          debugPrint('📞 [CALL] Call ID: ${data['call_id']}');
+          debugPrint('📞 [CALL] Reason: ${data['reason_display'] ?? data['reason']}');
+          debugPrint('📞 [CALL] Priority: ${data['priority']}');
+
+          // Trigger incoming call service
+          IncomingCallService().handleIncomingCall(data);
+
+          // Don't show standard notification - incoming call UI handles it
+          return;
         }
 
         // Handle action item data messages

@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 
 class DeviceAnimationWidget extends StatefulWidget {
   final bool animatedBackground;
   final double sizeMultiplier;
   final bool isConnected;
   final String? deviceName;
+  final DeviceType? deviceType;
+  final String? modelNumber;
 
   const DeviceAnimationWidget({
     super.key,
@@ -13,6 +16,8 @@ class DeviceAnimationWidget extends StatefulWidget {
     this.animatedBackground = true,
     this.isConnected = false,
     this.deviceName,
+    this.deviceType,
+    this.modelNumber,
   });
 
   @override
@@ -127,6 +132,28 @@ class _DeviceAnimationWidgetState extends State<DeviceAnimationWidget> with Tick
   }
 
   String _getImagePath() {
+    // Use deviceType if available (more reliable)
+    if (widget.deviceType != null) {
+      switch (widget.deviceType!) {
+        case DeviceType.plaud:
+          return Assets.images.plaudNotePin.path;
+        case DeviceType.openglass:
+          return Assets.images.omiGlass.path;
+        case DeviceType.appleWatch:
+          return Assets.images.appleWatch.path;
+        case DeviceType.frame:
+          return Assets.images.omiDevkitWithoutRope.path;
+        case DeviceType.omi:
+        case DeviceType.xor:
+        case DeviceType.bee:
+        case DeviceType.fieldy:
+        case DeviceType.friendPendant:
+          // Fall through to name-based detection or default
+          break;
+      }
+    }
+
+    // Fallback to name-based detection
     // Check for PLAUD
     if (widget.deviceName != null && widget.deviceName!.toUpperCase().contains('PLAUD')) {
       return Assets.images.plaudNotePin.path;

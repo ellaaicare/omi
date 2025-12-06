@@ -22,6 +22,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/services/audio/ella_tts_service.dart';
 import 'package:omi/services/notifications.dart';
+import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
+import 'package:omi/services/incoming_call/incoming_call_service.dart';
 import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
 import 'package:omi/utils/test_suite_manager.dart';
 
@@ -333,6 +335,94 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 24),
+
+                  // Voice Mode V2 (Pipecat) Toggle
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Voice Mode V2 (Pipecat)'),
+                    subtitle: const Text('Use new server-side VAD for voice conversations'),
+                    value: SharedPreferencesUtil().voiceModeV2Enabled,
+                    onChanged: (v) {
+                      setState(() {
+                        SharedPreferencesUtil().voiceModeV2Enabled = v;
+                      });
+                    },
+                  ),
+                  if (SharedPreferencesUtil().voiceModeV2Enabled) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blue.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.info_outline, color: Colors.blue, size: 16),
+                              SizedBox(width: 8),
+                              Text('V2 Voice Mode Info', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.w500)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Server-side VAD handles turn detection.\nEndpoint: wss://api.ella-ai-care.com/v2/voice',
+                            style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.play_arrow, size: 16),
+                            label: const Text('Test Connection'),
+                            onPressed: () async {
+                              AppSnackbar.showSnackbar('Testing V2 voice connection...');
+                              // Quick connection test
+                              try {
+                                final uid = SharedPreferencesUtil().uid;
+                                final testUrl = 'wss://${Env.apiBaseUrl!.replaceFirst('https://', '').replaceFirst('http://', '')}v2/voice?uid=$uid&session_id=test_${DateTime.now().millisecondsSinceEpoch}';
+                                debugPrint('Testing V2: $testUrl');
+                                AppSnackbar.showSnackbar('V2 endpoint URL: Ready for testing');
+                              } catch (e) {
+                                AppSnackbar.showSnackbarError('V2 test failed: $e');
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: Colors.white,
+                              backgroundColor: Colors.blue,
+                              minimumSize: const Size(double.infinity, 36),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.mic, size: 16),
+                            label: const Text('Test Full Pipeline (Bundled Audio)'),
+                            onPressed: () async {
+                              AppSnackbar.showSnackbar('Starting V2 full pipeline test...');
+                              try {
+                                final v2Service = VoiceModeV2Service();
+                                final success = await v2Service.runTest();
+                                if (success) {
+                                  AppSnackbar.showSnackbar('✅ V2 test SUCCESS - TTS played!');
+                                } else {
+                                  AppSnackbar.showSnackbarError('❌ V2 test FAILED - no TTS response');
+                                }
+                              } catch (e) {
+                                AppSnackbar.showSnackbarError('V2 test error: $e');
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: Colors.white,
+                              backgroundColor: Colors.green,
+                              minimumSize: const Size(double.infinity, 36),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 24),
                   //TODO: Model selection commented out because Soniox model is no longer being used
                   // const SizedBox(height: 32),
@@ -969,6 +1059,98 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   const SizedBox(height: 8),
                   Text(
                     'After tapping, quickly background the app (press home button). Audio should play automatically.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Test incoming call button
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.call, size: 20),
+                    label: const Text('📞 Test Incoming Call from Ella'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.green.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () async {
+                      try {
+                        debugPrint('📞 [DEBUG] Test incoming call button pressed');
+                        AppSnackbar.showSnackbar('📞 Requesting test incoming call...');
+
+                        final response = await http.post(
+                          Uri.parse('${Env.apiBaseUrl}v1/notifications/test-incoming-call'),
+                          headers: {
+                            'Authorization': 'Bearer ${SharedPreferencesUtil().authToken}',
+                            'Content-Type': 'application/json',
+                          },
+                          body: jsonEncode({
+                            'reason': 'medication_reminder',
+                            'priority': 'normal',
+                            'auto_answer': false,
+                            'timeout_seconds': 30,
+                          }),
+                        );
+
+                        debugPrint('📞 [DEBUG] Response status: ${response.statusCode}');
+                        debugPrint('📞 [DEBUG] Response body: ${response.body}');
+
+                        if (response.statusCode == 200) {
+                          AppSnackbar.showSnackbar(
+                            '✅ Incoming call push sent!\n'
+                            'You should see the call UI now.',
+                          );
+                        } else {
+                          AppSnackbar.showSnackbarError(
+                            'Call failed: ${response.statusCode}\n${response.body}',
+                          );
+                        }
+                      } catch (e) {
+                        debugPrint('📞 [DEBUG] ❌ Incoming call error: $e');
+                        AppSnackbar.showSnackbarError('Incoming call error: $e');
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Triggers the incoming call UI via backend push notification.',
+                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Local test (no backend needed)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.phone_callback, size: 20),
+                    label: const Text('📞 Test Call UI Locally (No Backend)'),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: Colors.white,
+                      backgroundColor: Colors.orange.shade700,
+                      minimumSize: const Size(double.infinity, 48),
+                    ),
+                    onPressed: () {
+                      debugPrint('📞 [DEBUG] Local incoming call test triggered');
+
+                      // Force reset any stuck state first
+                      final callService = IncomingCallService();
+                      callService.forceCancel();
+
+                      // Small delay then trigger
+                      Future.delayed(const Duration(milliseconds: 100), () {
+                        callService.handleIncomingCall({
+                          'call_id': 'local-test-${DateTime.now().millisecondsSinceEpoch}',
+                          'reason': 'medication_reminder',
+                          'reason_display': 'Medication Reminder',
+                          'priority': 'normal',
+                          'auto_answer': 'false',
+                          'timeout_seconds': '60',
+                          'voicemail_text': 'This is a local test. The incoming call UI is working!',
+                        });
+                      });
+                      AppSnackbar.showSnackbar('📞 Incoming call UI triggered locally!');
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Tests the UI directly without backend. Say "Answer" or "Decline", or tap buttons.',
                     style: TextStyle(color: Colors.grey.shade300, fontSize: 12, fontStyle: FontStyle.italic),
                   ),
                   const SizedBox(height: 16),

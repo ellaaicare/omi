@@ -1181,16 +1181,25 @@ public class OnDeviceASRPlugin: NSObject, FlutterPlugin {
 
     private func setupCallbacks() {
         asrService?.onTranscriptReceived = { [weak self] transcript, isFinal in
-            self?.channel?.invokeMethod("onTranscript", arguments: [
-                "text": transcript,
-                "isFinal": isFinal
-            ])
+            // CRITICAL: MethodChannel calls MUST be on the main thread!
+            // The speech recognizer callback runs on a background thread.
+            DispatchQueue.main.async {
+                NSLog("📨 [OnDeviceASR] Sending transcript to Flutter: \"\(transcript.prefix(50))...\" (final: \(isFinal))")
+                self?.channel?.invokeMethod("onTranscript", arguments: [
+                    "text": transcript,
+                    "isFinal": isFinal
+                ])
+            }
         }
 
         asrService?.onError = { [weak self] error in
-            self?.channel?.invokeMethod("onError", arguments: [
-                "error": error.localizedDescription
-            ])
+            // CRITICAL: MethodChannel calls MUST be on the main thread!
+            DispatchQueue.main.async {
+                NSLog("📨 [OnDeviceASR] Sending error to Flutter: \(error.localizedDescription)")
+                self?.channel?.invokeMethod("onError", arguments: [
+                    "error": error.localizedDescription
+                ])
+            }
         }
     }
 }

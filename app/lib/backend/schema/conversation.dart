@@ -158,7 +158,10 @@ class ServerConversation {
     return ServerConversation(
       id: json['id'],
       createdAt: DateTime.parse(json['created_at']).toLocal(),
-      structured: Structured.fromJson(json['structured']),
+      // Handle null structured for V2 voice conversations
+      structured: json['structured'] != null
+          ? Structured.fromJson(json['structured'])
+          : Structured('', '', emoji: '🎤', category: 'other'),
       startedAt: json['started_at'] != null ? DateTime.parse(json['started_at']).toLocal() : null,
       finishedAt: json['finished_at'] != null ? DateTime.parse(json['finished_at']).toLocal() : null,
       transcriptSegments: ((json['transcript_segments'] ?? []) as List<dynamic>)

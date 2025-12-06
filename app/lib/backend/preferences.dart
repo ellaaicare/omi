@@ -135,6 +135,10 @@ class SharedPreferencesUtil {
 
   bool get onDeviceASREnabled => getBool('onDeviceASREnabled') ?? false;
 
+  set voiceModeV2Enabled(bool value) => saveBool('voiceModeV2Enabled', value);
+
+  bool get voiceModeV2Enabled => getBool('voiceModeV2Enabled') ?? false;
+
   set asrMode(String value) => saveString('asrMode', value);
 
   String get asrMode => getString('asrMode') ?? 'cloud';
