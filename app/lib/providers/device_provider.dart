@@ -64,12 +64,17 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   Future<void> setConnectedDevice(BtDevice? device) async {
     await _connectionLock.synchronized(() async {
-      connectedDevice = device;
-      pairedDevice = device;
-      await getDeviceInfo();
-      Logger.debug('setConnectedDevice: $device');
+      await _setConnectedDeviceInternal(device);
     });
     notifyListeners();
+  }
+
+  // Internal version that doesn't acquire lock - for use within synchronized blocks
+  Future<void> _setConnectedDeviceInternal(BtDevice? device) async {
+    connectedDevice = device;
+    pairedDevice = device;
+    await getDeviceInfo();
+    Logger.debug('setConnectedDevice: $device');
   }
 
   Future getDeviceInfo() async {
@@ -250,7 +255,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       if (device != null) {
         var cDevice = await _getConnectedDevice();
         if (cDevice != null) {
-          await setConnectedDevice(cDevice);
+          await _setConnectedDeviceInternal(cDevice);  // Use internal version to avoid deadlock
           await setisDeviceStorageSupport();
           SharedPreferencesUtil().deviceName = cDevice.name;
           MixpanelManager().deviceConnected();
@@ -343,7 +348,7 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
       Logger.debug('_onConnected inside: $connectedDevice');
       _disconnectNotificationTimer?.cancel();
       NotificationService.instance.clearNotification(1);
-      await setConnectedDevice(device);
+      await _setConnectedDeviceInternal(device);  // Use internal version to avoid deadlock
 
       if (captureProvider != null) {
         captureProvider?.updateRecordingDevice(device);
