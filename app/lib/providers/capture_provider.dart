@@ -26,6 +26,7 @@ import 'package:omi/services/wals.dart';
 import 'package:omi/services/asr/on_device_asr_service.dart' as asr;
 import 'package:omi/services/asr/transcript_sender_service.dart';
 import 'package:omi/services/voice_mode/voice_mode_manager.dart';
+import 'package:omi/services/heuristics/heuristics_service.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/debug_log_manager.dart';
@@ -1638,6 +1639,14 @@ class CaptureProvider extends ChangeNotifier
     }
     var remainSegments = TranscriptSegment.updateSegments(segments, newSegments);
     segments.addAll(remainSegments);
+
+    // Scan new segments for wake words (cloud ASR path)
+    // This enables on-device detection even when using cloud transcription
+    for (final segment in newSegments) {
+      if (segment.text.isNotEmpty) {
+        HeuristicsService().scanForWakeWord(segment.text);
+      }
+    }
 
     hasTranscripts = true;
     notifyListeners();
