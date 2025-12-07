@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:omi/services/asr/transcript_sender_service.dart';
+import 'package:omi/services/heuristics/heuristics_service.dart';
 
 /// On-Device Automatic Speech Recognition Service
 /// Uses iOS Speech framework for local transcription
@@ -56,6 +57,12 @@ class OnDeviceASRService {
 
         // Emit to stream (for UI/debugging)
         _transcriptController.add(segment);
+
+        // Scan for wake words (on-device heuristics)
+        // Only scan final segments to avoid false triggers
+        if (isFinal && text.trim().isNotEmpty) {
+          HeuristicsService().scanForWakeWord(text);
+        }
 
         // Send to backend if sender is configured
         if (_transcriptSender != null && text.trim().isNotEmpty) {

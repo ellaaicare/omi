@@ -677,27 +677,29 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                       },
                                     ),
                                   ),
-                                // Voice Mode Button - "Talk to Ella" - next to the mic button
-                                // Disabled when ambient recording is active (not voice mode recording)
-                                if (!isOmiDeviceConnected)
-                                  Positioned(
-                                    left: MediaQuery.of(context).size.width / 2 + 5, // Position right of mic button
-                                    bottom: 60,
-                                    child: Consumer<CaptureProvider>(
-                                      builder: (context, captureProvider, _) {
-                                        final isRecording = captureProvider.recordingState == RecordingState.record;
-                                        final isVoiceModeActive = VoiceModeManager().isActive;
-                                        // Disable voice mode button if ambient recording is in progress
-                                        // (not voice mode - can't start voice call during ambient recording)
-                                        final isAmbientRecording = isRecording && !isVoiceModeActive;
-                                        return VoiceModeButton(
-                                          size: 66,
-                                          showLabel: false,
-                                          disabled: isAmbientRecording,
-                                        );
-                                      },
-                                    ),
+                                // Voice Mode Button - "Talk to Ella" - always visible for manual calls
+                                // Position depends on whether mic button is shown
+                                Positioned(
+                                  // When device connected: center. When not connected: right of mic button
+                                  left: isOmiDeviceConnected
+                                      ? MediaQuery.of(context).size.width / 2 - 33  // Centered when device connected
+                                      : MediaQuery.of(context).size.width / 2 + 5,  // Right of mic when no device
+                                  bottom: 60,
+                                  child: Consumer<CaptureProvider>(
+                                    builder: (context, captureProvider, _) {
+                                      final isRecording = captureProvider.recordingState == RecordingState.record;
+                                      final isVoiceModeActive = VoiceModeManager().isActive;
+                                      // Disable voice mode button if ambient recording is in progress
+                                      // (not voice mode - can't start voice call during ambient recording)
+                                      final isAmbientRecording = isRecording && !isVoiceModeActive;
+                                      return VoiceModeButton(
+                                        size: 66,
+                                        showLabel: false,
+                                        disabled: isAmbientRecording,
+                                      );
+                                    },
                                   ),
+                                ),
                                 // Remove the floating chat button - moving it to app bar
                               ],
                             );

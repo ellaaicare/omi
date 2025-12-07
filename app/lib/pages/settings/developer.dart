@@ -26,6 +26,7 @@ import 'package:omi/services/voice_mode_v2/voice_mode_v2_service.dart';
 import 'package:omi/services/incoming_call/incoming_call_service.dart';
 import 'package:omi/backend/http/api/e2e_testing.dart' as e2e_api;
 import 'package:omi/utils/test_suite_manager.dart';
+import 'package:omi/services/heuristics/heuristics_service.dart';
 
 import 'widgets/appbar_with_banner.dart';
 import 'widgets/toggle_section_widget.dart';
@@ -72,6 +73,10 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   TestResult? _lastMemoryTestResult;
   TestResult? _lastSummaryTestResult;
 
+  // Wake Word state
+  final TextEditingController _newWakeWordController = TextEditingController();
+  bool _wakeWordEnabled = true;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -86,6 +91,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   void dispose() {
     _cloudTtsTextController.dispose();
     _e2eTestTextController.dispose();
+    _newWakeWordController.dispose();
     super.dispose();
   }
 
@@ -490,6 +496,156 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   //     ),
                   //   ),
                   // ),
+                  const SizedBox(height: 32.0),
+
+                  // Wake Word Detection Section
+                  ListenableBuilder(
+                    listenable: HeuristicsService(),
+                    builder: (context, _) {
+                      final heuristics = HeuristicsService();
+                      return Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withAlpha(26),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.orange.withAlpha(77)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.record_voice_over, color: Colors.orange, size: 20),
+                                const SizedBox(width: 8),
+                                const Expanded(
+                                  child: Text(
+                                    'Wake Word Detection (On-Device)',
+                                    style: TextStyle(
+                                      color: Colors.orange,
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                ),
+                                Switch(
+                                  value: heuristics.isEnabled,
+                                  activeColor: Colors.orange,
+                                  onChanged: (v) {
+                                    heuristics.setEnabled(v);
+                                  },
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Detects wake words locally for instant response. When detected, plays a chime and can auto-start voice call.',
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Current Wake Words:',
+                              style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w500),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: heuristics.wakeWords.map((word) {
+                                return Chip(
+                                  label: Text(word, style: const TextStyle(color: Colors.white)),
+                                  backgroundColor: Colors.orange.withAlpha(51),
+                                  deleteIcon: const Icon(Icons.close, size: 16, color: Colors.white70),
+                                  onDeleted: () {
+                                    final newWords = List<String>.from(heuristics.wakeWords)..remove(word);
+                                    heuristics.updateWakeWords(newWords);
+                                  },
+                                );
+                              }).toList(),
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    controller: _newWakeWordController,
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: InputDecoration(
+                                      hintText: 'Add wake word...',
+                                      hintStyle: TextStyle(color: Colors.grey.shade600),
+                                      isDense: true,
+                                      border: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                        borderSide: BorderSide(color: Colors.grey.shade700),
+                                      ),
+                                      enabledBorder: OutlineInputBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                        borderSide: BorderSide(color: Colors.grey.shade700),
+                                      ),
+                                    ),
+                                    onSubmitted: (value) {
+                                      if (value.trim().isNotEmpty) {
+                                        final newWords = List<String>.from(heuristics.wakeWords)..add(value.trim().toLowerCase());
+                                        heuristics.updateWakeWords(newWords);
+                                        _newWakeWordController.clear();
+                                      }
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                IconButton(
+                                  icon: const Icon(Icons.add_circle, color: Colors.orange),
+                                  onPressed: () {
+                                    final value = _newWakeWordController.text;
+                                    if (value.trim().isNotEmpty) {
+                                      final newWords = List<String>.from(heuristics.wakeWords)..add(value.trim().toLowerCase());
+                                      heuristics.updateWakeWords(newWords);
+                                      _newWakeWordController.clear();
+                                    }
+                                  },
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Auto-start voice call',
+                                  style: TextStyle(color: Colors.white70),
+                                ),
+                                Switch(
+                                  value: heuristics.autoStartCall,
+                                  activeColor: Colors.orange,
+                                  onChanged: (v) {
+                                    heuristics.setAutoStartCall(v);
+                                  },
+                                ),
+                              ],
+                            ),
+                            Text(
+                              'When enabled, detecting a wake word will automatically start a voice call with Ella.',
+                              style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                            ),
+                            const SizedBox(height: 12),
+                            ElevatedButton.icon(
+                              icon: const Icon(Icons.play_arrow, size: 16),
+                              label: const Text('Test Wake Word Detection'),
+                              onPressed: () async {
+                                AppSnackbar.showSnackbar('Testing wake word detection...');
+                                // Manually trigger for testing
+                                heuristics.scanForWakeWord('hey ella');
+                              },
+                              style: ElevatedButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                backgroundColor: Colors.orange,
+                                minimumSize: const Size(double.infinity, 40),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
                   const SizedBox(height: 32.0),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
