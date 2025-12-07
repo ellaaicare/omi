@@ -61,6 +61,7 @@ class N8NConfig:
     voice_config_path: str = "/webhook/voice-config"
     memory_agent_path: str = "/webhook/memory-agent"
     summary_agent_path: str = "/webhook/summary-agent"
+    call_state_path: str = "/webhook/call-state"  # Call state notifications
     timeout_seconds: float = 10.0
 
     @property
@@ -74,6 +75,10 @@ class N8NConfig:
     @property
     def summary_agent_url(self) -> str:
         return f"{self.base_url}{self.summary_agent_path}"
+
+    @property
+    def call_state_url(self) -> str:
+        return f"{self.base_url}{self.call_state_path}"
 
 
 @dataclass

@@ -151,6 +151,91 @@ class N8NClient:
                 print(f"⚠️ Summary agent failed: {e}")
                 return {"error": str(e)}
 
+    async def notify_call_start(
+        self,
+        uid: str,
+        session_id: str,
+        call_type: str = "voice_mode",
+        initiated_by: str = "user",
+    ) -> None:
+        """
+        Notify n8n that a voice call has started.
+
+        Fire-and-forget - logs errors but doesn't block the voice pipeline.
+        This enables the scanner to skip processing during active calls.
+
+        Args:
+            uid: Firebase user ID
+            session_id: Voice session ID (used as call_sid)
+            call_type: Type of call ("voice_mode", "inbound_call", etc.)
+            initiated_by: Who started the call ("user", "agent", "system")
+        """
+        payload = {
+            "action": "start",
+            "uid": uid,
+            "params": {
+                "call_type": call_type,
+                "call_sid": session_id,
+                "initiated_by": initiated_by,
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    self.config.call_state_url,
+                    json=payload,
+                )
+                if response.status_code == 200:
+                    print(f"📞 Call state START: {session_id[:8]}", flush=True)
+                else:
+                    print(f"⚠️ Call state START failed: {response.status_code}", flush=True)
+        except Exception as e:
+            # Fire-and-forget - don't let call state errors affect voice
+            print(f"⚠️ Call state START error: {e}", flush=True)
+
+    async def notify_call_end(
+        self,
+        uid: str,
+        session_id: str,
+        ended_by: str = "user",
+        status: str = "completed",
+    ) -> None:
+        """
+        Notify n8n that a voice call has ended.
+
+        Fire-and-forget - logs errors but doesn't block the voice pipeline.
+
+        Args:
+            uid: Firebase user ID
+            session_id: Voice session ID (used as call_sid)
+            ended_by: Who ended the call ("user", "timeout", "system", "error")
+            status: Call completion status ("completed", "failed", "cancelled")
+        """
+        payload = {
+            "action": "end",
+            "uid": uid,
+            "params": {
+                "call_sid": session_id,
+                "ended_by": ended_by,
+                "status": status,
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    self.config.call_state_url,
+                    json=payload,
+                )
+                if response.status_code == 200:
+                    print(f"📞 Call state END: {session_id[:8]}", flush=True)
+                else:
+                    print(f"⚠️ Call state END failed: {response.status_code}", flush=True)
+        except Exception as e:
+            # Fire-and-forget - don't let call state errors affect cleanup
+            print(f"⚠️ Call state END error: {e}", flush=True)
+
     def _default_config(self) -> dict:
         """
         Return default configuration when n8n is unavailable.

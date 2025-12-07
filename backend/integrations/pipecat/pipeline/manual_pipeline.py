@@ -189,6 +189,16 @@ class ManualVoicePipeline:
         self.start_time = time.time()
         self.is_running = True
 
+        # Notify n8n that call started (fire-and-forget)
+        asyncio.create_task(
+            self.n8n_client.notify_call_start(
+                uid=self.uid,
+                session_id=self.session_id,
+                call_type="voice_mode",
+                initiated_by="user",
+            )
+        )
+
         print(f"🎙️ Manual pipeline initialized: session={self.session_id[:8]}", flush=True)
 
     async def run(self):
@@ -217,20 +227,25 @@ class ManualVoicePipeline:
 
                 except asyncio.TimeoutError:
                     print(f"⏰ Session timeout: {self.session_id[:8]}", flush=True)
+                    self._cleanup_reason = "timeout"
                     break
 
         except Exception as e:
             # Ignore disconnect errors during cleanup
             if "disconnect" not in str(e).lower():
                 print(f"❌ Pipeline error: {e}", flush=True)
+                self._cleanup_reason = "error"
                 raise
+            else:
+                # WebSocket disconnect - normal user action
+                self._cleanup_reason = "user"
 
         finally:
             # Process any remaining audio in buffer before cleanup
             if len(self.speaking_audio) > 0:
                 print(f"🔄 Processing remaining audio buffer ({len(self.speaking_audio)} bytes)", flush=True)
                 await self._process_utterance(bytes(self.speaking_audio))
-            await self.cleanup()
+            await self.cleanup(ended_by=getattr(self, '_cleanup_reason', 'user'))
 
     async def _process_audio(self, audio_bytes: bytes):
         """Process incoming audio chunk."""
@@ -924,8 +939,13 @@ class ManualVoicePipeline:
         except json.JSONDecodeError:
             print(f"⚠️ Invalid JSON: {message[:50]}...")
 
-    async def cleanup(self):
-        """Clean up resources and finalize session."""
+    async def cleanup(self, ended_by: str = "user"):
+        """
+        Clean up resources and finalize session.
+
+        Args:
+            ended_by: How the session ended ("user", "timeout", "error")
+        """
         self.is_running = False
 
         duration = time.time() - self.start_time if self.start_time else 0
@@ -935,6 +955,17 @@ class ManualVoicePipeline:
         print(f"   Chunks: {self.chunks_received}")
         print(f"   Bytes: {self.bytes_received / 1024:.1f}KB")
         print(f"   Turns: {len(self.turns)}")
+
+        # Notify n8n that call ended
+        try:
+            await self.n8n_client.notify_call_end(
+                uid=self.uid,
+                session_id=self.session_id,
+                ended_by=ended_by,
+                status="completed" if ended_by != "error" else "failed",
+            )
+        except Exception as e:
+            print(f"⚠️ Call state END notification failed: {e}", flush=True)
 
         # Store conversation in Firestore
         if self.turns:
