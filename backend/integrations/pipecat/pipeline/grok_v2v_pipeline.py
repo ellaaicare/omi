@@ -1,15 +1,25 @@
 """
 Grok Voice-to-Voice Pipeline - Ultra-Low Latency Mode
 
-This pipeline proxies audio to Grok's voice-to-voice API for ~500ms latency
+This pipeline proxies audio to Ella's Grok voice proxy for ~500ms latency
 instead of the traditional STT→LLM→TTS pipeline (2-3s latency).
 
 Architecture:
-    iOS (16kHz PCM16) → Resample to 24kHz → Grok Proxy → Grok API
-                                                ↓
-                                          24kHz response
-                                                ↓
-                                          iOS playback
+    iOS (16kHz PCM16) → Backend → Resample to 24kHz → Grok Proxy
+                                                          ↓
+                                                    Grok handles:
+                                                    - System prompt (Ella persona)
+                                                    - Tool definitions (5 tools)
+                                                    - Function calling → n8n
+                                                    - User context from Letta
+                                                          ↓
+                                                    24kHz audio response
+                                                          ↓
+                                                    iOS playback
+
+The proxy handles all LLM config server-side. Client just sends:
+- uid query param
+- 24kHz PCM16 audio bytes
 
 Reference: Issue #30 - https://github.com/ellaaicare/omi/issues/30
 """
@@ -75,25 +85,21 @@ class GrokVoicePipeline:
         self.conversation_turns = []
 
     async def initialize(self) -> bool:
-        """Initialize the Grok V2V session."""
+        """Initialize the Grok V2V session.
+
+        The Ella proxy handles all configuration server-side:
+        - Grok API key
+        - System prompt (Ella persona)
+        - Tool definitions
+        - User context from Letta
+
+        We just need to connect with uid and stream audio.
+        """
         try:
-            # Initialize n8n client
+            # Initialize n8n client for call state notifications and post-call processing
             self.n8n_client = N8NClient(self.config.n8n)
 
-            # Fetch voice config from n8n (same endpoint as Pipecat)
-            ella_config = await self.n8n_client.fetch_voice_config(self.uid)
-
-            # Extract session config
-            agent_config = ella_config.get("agent_config", {})
-            user_info = ella_config.get("user", {})
-
-            self.session_config = GrokSessionConfig(
-                system_prompt=agent_config.get("system_prompt", "You are Ella, a caring AI companion."),
-                temperature=agent_config.get("temperature", 0.7),
-                user_name=user_info.get("name", "User"),
-            )
-
-            # Notify n8n that call started
+            # Notify n8n that call started (for scanner to pause)
             await self.n8n_client.notify_call_start(
                 uid=self.uid,
                 session_id=self.session_id,
@@ -101,9 +107,9 @@ class GrokVoicePipeline:
                 initiated_by="user",
             )
 
-            # Connect to Grok proxy
+            # Connect to Grok proxy - just needs uid, proxy handles everything else
             grok_url = f"{self.config.grok_v2v.proxy_url}?uid={self.uid}"
-            print(f"🔌 Connecting to Grok proxy: {grok_url[:50]}...", flush=True)
+            print(f"🔌 Connecting to Grok proxy: {grok_url}", flush=True)
 
             self.grok_ws = await websockets.connect(
                 grok_url,
@@ -111,16 +117,8 @@ class GrokVoicePipeline:
                 ping_timeout=10,
             )
 
-            # Send session initialization to Grok
-            init_message = {
-                "type": "session.init",
-                "system_prompt": self.session_config.system_prompt,
-                "voice": self.session_config.voice,
-                "temperature": self.session_config.temperature,
-            }
-            await self.grok_ws.send(str(init_message))
-
-            print(f"✅ Grok V2V initialized for uid={self.uid[:8]}", flush=True)
+            # No init message needed - proxy configures session automatically
+            print(f"✅ Grok V2V connected for uid={self.uid[:8]}", flush=True)
             return True
 
         except Exception as e:
@@ -197,7 +195,15 @@ class GrokVoicePipeline:
             print(f"⚠️ Grok→iOS error: {e}", flush=True)
 
     async def _handle_grok_event(self, message: str):
-        """Handle non-audio messages from Grok."""
+        """Handle JSON control messages from Grok proxy.
+
+        Message types:
+        - transcript: Speech-to-text result {"type": "transcript", "text": "..."}
+        - function_calling: Tool being called {"type": "function_calling", "function": "...", "call_id": "..."}
+        - function_executed: Tool finished {"type": "function_executed", "function": "...", "call_id": "..."}
+        - audio_done: AI finished speaking {"type": "audio_done"}
+        - error: Error occurred {"type": "error", "message": "..."}
+        """
         try:
             import json
             event = json.loads(message)
@@ -205,18 +211,36 @@ class GrokVoicePipeline:
 
             if event_type == "transcript":
                 # Track conversation for post-call processing
-                role = event.get("role", "assistant")
                 text = event.get("text", "")
                 if text:
+                    # Proxy doesn't send role, infer from context
+                    # (transcripts during audio playback are assistant, otherwise user)
+                    role = "assistant"  # Default - proxy mainly sends assistant transcripts
                     self.conversation_turns.append({
                         "role": role,
                         "text": text,
                         "timestamp": time.time(),
                     })
-                    print(f"📝 [{role}]: {text[:50]}...", flush=True)
+                    print(f"📝 {text[:60]}{'...' if len(text) > 60 else ''}", flush=True)
+
+            elif event_type == "function_calling":
+                func_name = event.get("function", "unknown")
+                call_id = event.get("call_id", "")[:8]
+                print(f"🔧 Calling tool: {func_name} ({call_id})", flush=True)
+
+            elif event_type == "function_executed":
+                func_name = event.get("function", "unknown")
+                call_id = event.get("call_id", "")[:8]
+                print(f"✅ Tool done: {func_name} ({call_id})", flush=True)
+
+            elif event_type == "audio_done":
+                print(f"🔊 AI finished speaking", flush=True)
 
             elif event_type == "error":
                 print(f"⚠️ Grok error: {event.get('message', 'Unknown')}", flush=True)
+
+            else:
+                print(f"📨 Grok event: {event_type}", flush=True)
 
         except Exception as e:
             print(f"⚠️ Grok event parse error: {e}", flush=True)
