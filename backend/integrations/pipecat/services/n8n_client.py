@@ -30,7 +30,7 @@ class N8NClient:
         """
         self.config = config or N8NConfig()
 
-    async def fetch_voice_config(self, uid: str) -> dict:
+    async def fetch_voice_config(self, uid: str, message_limit: int = 10) -> dict:
         """
         Fetch voice configuration from n8n.
 
@@ -38,19 +38,23 @@ class N8NClient:
 
         Args:
             uid: Firebase user ID
+            message_limit: Number of recent messages to include for context (default: 10)
 
         Returns:
             Configuration dict with keys:
-            - agent_config: LLM settings (model, temperature, etc.)
+            - agent_config: LLM settings (model, temperature, system_prompt, etc.)
             - blocks: Memory blocks (user_profile, rolling_memories, etc.)
-            - persona: Ella's persona/system prompt base
+            - recent_messages: Recent chat history for conversation continuity
             - user: User info (name, timezone, etc.)
         """
         async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
             try:
                 response = await client.post(
                     self.config.voice_config_url,
-                    json={"uid": uid},
+                    json={
+                        "uid": uid,
+                        "message_limit": message_limit,
+                    },
                 )
                 response.raise_for_status()
                 config = response.json()

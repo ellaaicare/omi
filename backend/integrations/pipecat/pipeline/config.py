@@ -58,7 +58,7 @@ class N8NConfig:
     """n8n webhook endpoints configuration."""
 
     base_url: str = "https://n8n.ella-ai-care.com"
-    voice_config_path: str = "/webhook/voice-config"
+    voice_config_path: str = "/webhook/voice-init"
     memory_agent_path: str = "/webhook/memory-agent"
     summary_agent_path: str = "/webhook/summary-agent"
     call_state_path: str = "/webhook/call-state"  # Call state notifications

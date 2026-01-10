@@ -170,13 +170,29 @@ class ManualVoicePipeline:
             raise ValueError(f"n8n voice-config missing agent_config.model for uid={self.uid}")
 
         self.llm_model = agent_config["model"]
-        self.llm_provider = self._detect_llm_provider(self.llm_model)
+        # Use provider from config if available, otherwise detect from model name
+        self.llm_provider = agent_config.get("provider") or self._detect_llm_provider(self.llm_model)
         self.llm_temperature = agent_config.get("temperature", 0.7)
         self.llm_max_tokens = agent_config.get("max_tokens", 150)
         print(f"🧠 LLM config from n8n: provider={self.llm_provider}, model={self.llm_model}", flush=True)
 
         # Load system prompt from n8n
         self.system_prompt = self._build_system_prompt(ella_config)
+
+        # Load recent messages for conversation continuity (from Letta chat history)
+        # n8n controls how many messages to send via message_limit parameter
+        recent_messages = ella_config.get("recent_messages", [])
+        if recent_messages:
+            for msg in recent_messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if content:
+                    self.turns.append(ConversationTurn(
+                        role=role,
+                        text=content,
+                        timestamp=time.time()
+                    ))
+            print(f"📝 Loaded {len(self.turns)} recent messages from Letta", flush=True)
 
         # Load user audio preferences
         user_audio = ella_config.get("audio_preferences", {})
@@ -1055,7 +1071,19 @@ class ManualVoicePipeline:
             print(f"⚠️ n8n agent call failed: {e}")
 
     def _build_system_prompt(self, ella_config: dict) -> str:
-        """Build system prompt with persona and memory blocks."""
+        """
+        Build system prompt from n8n config.
+
+        n8n/Letta owns the full prompt including voice guidelines.
+        Backend just uses what's provided.
+        """
+        agent_config = ella_config.get("agent_config", {})
+
+        # If n8n provides system_prompt, use it directly (Letta owns the prompt)
+        if agent_config.get("system_prompt"):
+            return agent_config["system_prompt"]
+
+        # Fallback: build from persona + blocks (legacy /webhook/voice-config)
         persona = ella_config.get("persona", "You are Ella, a warm and caring AI companion.")
         blocks = ella_config.get("blocks", {})
         user_info = ella_config.get("user", {})
