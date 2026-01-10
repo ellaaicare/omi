@@ -54,6 +54,18 @@ class LLMConfig:
 
 
 @dataclass
+class GrokV2VConfig:
+    """Grok Voice-to-Voice configuration for ultra-low latency mode."""
+
+    enabled: bool = field(default_factory=lambda: os.getenv("GROK_V2V_ENABLED", "false").lower() == "true")
+    proxy_url: str = field(default_factory=lambda: os.getenv("GROK_V2V_PROXY_URL", "wss://voice.ella-ai-care.com/ws"))
+    api_key: str = field(default_factory=lambda: os.getenv("XAI_API_KEY", ""))
+    model: str = field(default_factory=lambda: os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning"))  # Latest fast Grok (non-reasoning for speed)
+    input_sample_rate: int = 24000  # Grok expects 24kHz input
+    output_sample_rate: int = 24000  # Grok outputs 24kHz
+
+
+@dataclass
 class N8NConfig:
     """n8n webhook endpoints configuration."""
 
@@ -92,16 +104,24 @@ class PipelineConfig:
             vad=VADConfig(stop_secs=2.0),
             llm=LLMConfig(model="llama-3.1-8b-instant")
         )
+
+    Voice Pipeline Modes:
+        - "pipecat": Default STT→LLM→TTS pipeline (2-3s latency)
+        - "grok_v2v": Grok voice-to-voice API (~500ms latency)
     """
+
+    # Voice pipeline mode selection
+    voice_pipeline_mode: str = field(default_factory=lambda: os.getenv("VOICE_PIPELINE_MODE", "pipecat"))
 
     vad: VADConfig = field(default_factory=VADConfig)
     stt: STTConfig = field(default_factory=STTConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     n8n: N8NConfig = field(default_factory=N8NConfig)
+    grok_v2v: GrokV2VConfig = field(default_factory=GrokV2VConfig)
 
     # Audio settings
-    audio_sample_rate: int = 16000  # Input audio sample rate
+    audio_sample_rate: int = 16000  # Input audio sample rate (Pipecat mode)
     audio_channels: int = 1  # Mono
 
     # Session settings

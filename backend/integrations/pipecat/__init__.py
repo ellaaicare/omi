@@ -16,16 +16,19 @@ License:
 """
 
 from .pipeline.builder import create_voice_pipeline, run_voice_session
-from .pipeline.config import PipelineConfig, VADConfig, STTConfig, TTSConfig, LLMConfig
+from .pipeline.config import PipelineConfig, VADConfig, STTConfig, TTSConfig, LLMConfig, GrokV2VConfig
+from .pipeline.grok_v2v_pipeline import run_grok_v2v_session
 
 __all__ = [
     "create_voice_pipeline",
     "run_voice_session",
+    "run_grok_v2v_session",
     "PipelineConfig",
     "VADConfig",
     "STTConfig",
     "TTSConfig",
     "LLMConfig",
+    "GrokV2VConfig",
 ]
 
 __version__ = "0.1.0"
