@@ -177,12 +177,15 @@ class GrokVoicePipeline:
     async def _ios_to_grok(self):
         """Forward audio from iOS to Grok (with resampling).
 
-        Grok's realtime API expects audio in JSON format:
-        {"type": "input_audio_buffer.append", "audio": "<base64-pcm16>"}
+        Supports two modes based on GROK_USE_RAW_AUDIO env var:
+        - Raw binary: Send PCM16 bytes directly (simpler, for custom proxies)
+        - JSON base64: {"type": "input_audio_buffer.append", "audio": "<base64>"}
         """
         import base64
         import json
+        import os
 
+        use_raw_audio = os.getenv("GROK_USE_RAW_AUDIO", "true").lower() == "true"
         audio_chunks_sent = 0
         total_bytes_sent = 0
 
@@ -192,18 +195,25 @@ class GrokVoicePipeline:
                 data = await self.websocket.receive_bytes()
 
                 if audio_chunks_sent == 0:
-                    print(f"🎤 First audio chunk from iOS: {len(data)} bytes", flush=True)
+                    mode = "raw binary" if use_raw_audio else "base64 JSON"
+                    print(f"🎤 First audio chunk from iOS: {len(data)} bytes (sending as {mode})", flush=True)
 
                 # Resample 16kHz → 24kHz
                 resampled = self._resample_16k_to_24k(data)
 
-                # Forward to Grok in required JSON format
+                # Forward to Grok
                 if self.grok_ws and resampled:
-                    audio_event = {
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(resampled).decode('utf-8')
-                    }
-                    await self.grok_ws.send(json.dumps(audio_event))
+                    if use_raw_audio:
+                        # Raw binary mode - send PCM16 bytes directly
+                        await self.grok_ws.send(resampled)
+                    else:
+                        # JSON mode - base64 encode for Grok realtime API
+                        audio_event = {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(resampled).decode('utf-8')
+                        }
+                        await self.grok_ws.send(json.dumps(audio_event))
+
                     audio_chunks_sent += 1
                     total_bytes_sent += len(resampled)
 
