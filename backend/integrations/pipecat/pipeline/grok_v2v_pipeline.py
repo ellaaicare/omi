@@ -183,10 +183,16 @@ class GrokVoicePipeline:
         import base64
         import json
 
+        audio_chunks_sent = 0
+        total_bytes_sent = 0
+
         try:
             while self.is_running:
                 # Receive audio from iOS (16kHz PCM16)
                 data = await self.websocket.receive_bytes()
+
+                if audio_chunks_sent == 0:
+                    print(f"🎤 First audio chunk from iOS: {len(data)} bytes", flush=True)
 
                 # Resample 16kHz → 24kHz
                 resampled = self._resample_16k_to_24k(data)
@@ -198,9 +204,15 @@ class GrokVoicePipeline:
                         "audio": base64.b64encode(resampled).decode('utf-8')
                     }
                     await self.grok_ws.send(json.dumps(audio_event))
+                    audio_chunks_sent += 1
+                    total_bytes_sent += len(resampled)
+
+                    # Log progress every 50 chunks (~1 second of audio)
+                    if audio_chunks_sent % 50 == 0:
+                        print(f"📤 Sent {audio_chunks_sent} chunks ({total_bytes_sent // 1024}KB) to Grok", flush=True)
 
         except WebSocketDisconnect:
-            print(f"📱 iOS disconnected from Grok V2V", flush=True)
+            print(f"📱 iOS disconnected from Grok V2V (sent {audio_chunks_sent} chunks, {total_bytes_sent // 1024}KB)", flush=True)
         except Exception as e:
             print(f"⚠️ iOS→Grok error: {e}", flush=True)
 
