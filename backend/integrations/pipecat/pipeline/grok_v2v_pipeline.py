@@ -117,7 +117,26 @@ class GrokVoicePipeline:
                 ping_timeout=10,
             )
 
-            # No init message needed - proxy configures session automatically
+            # Send session configuration for proper turn-taking
+            # Required: input_audio_transcription + turn_detection for multi-turn conversations
+            import json
+            session_config = {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "model": "whisper-1"  # Required for user speech detection
+                    },
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500
+                    }
+                }
+            }
+            await self.grok_ws.send(json.dumps(session_config))
+            print(f"📋 Sent session config with turn_detection", flush=True)
+
             print(f"✅ Grok V2V connected for uid={self.uid[:8]}", flush=True)
             return True
 
@@ -197,31 +216,57 @@ class GrokVoicePipeline:
     async def _handle_grok_event(self, message: str):
         """Handle JSON control messages from Grok proxy.
 
-        Message types:
-        - transcript: Speech-to-text result {"type": "transcript", "text": "..."}
-        - function_calling: Tool being called {"type": "function_calling", "function": "...", "call_id": "..."}
-        - function_executed: Tool finished {"type": "function_executed", "function": "...", "call_id": "..."}
-        - audio_done: AI finished speaking {"type": "audio_done"}
-        - error: Error occurred {"type": "error", "message": "..."}
+        Key Grok VAD events (for turn-taking):
+        - input_audio_buffer.speech_started: User started speaking
+        - input_audio_buffer.speech_stopped: VAD detected silence
+        - conversation.item.input_audio_transcription.completed: User speech transcribed
+        - response.created: Grok generating response
+
+        Proxy-level events:
+        - transcript: Speech-to-text result
+        - function_calling: Tool being called
+        - function_executed: Tool finished
+        - audio_done: AI finished speaking
+        - error: Error occurred
         """
         try:
             import json
             event = json.loads(message)
             event_type = event.get("type", "")
 
-            if event_type == "transcript":
-                # Track conversation for post-call processing
+            # === Grok VAD events (turn-taking) ===
+            if event_type == "input_audio_buffer.speech_started":
+                print(f"🎙️ User started speaking", flush=True)
+
+            elif event_type == "input_audio_buffer.speech_stopped":
+                print(f"🔇 User stopped speaking (VAD)", flush=True)
+
+            elif event_type == "conversation.item.input_audio_transcription.completed":
+                transcript = event.get("transcript", "")
+                if transcript:
+                    self.conversation_turns.append({
+                        "role": "user",
+                        "text": transcript,
+                        "timestamp": time.time(),
+                    })
+                    print(f"👤 User: {transcript[:60]}{'...' if len(transcript) > 60 else ''}", flush=True)
+
+            elif event_type == "response.created":
+                print(f"🤖 Grok generating response...", flush=True)
+
+            elif event_type == "response.done":
+                print(f"✅ Grok response complete", flush=True)
+
+            # === Proxy-level events ===
+            elif event_type == "transcript":
                 text = event.get("text", "")
                 if text:
-                    # Proxy doesn't send role, infer from context
-                    # (transcripts during audio playback are assistant, otherwise user)
-                    role = "assistant"  # Default - proxy mainly sends assistant transcripts
                     self.conversation_turns.append({
-                        "role": role,
+                        "role": "assistant",
                         "text": text,
                         "timestamp": time.time(),
                     })
-                    print(f"📝 {text[:60]}{'...' if len(text) > 60 else ''}", flush=True)
+                    print(f"🤖 Ella: {text[:60]}{'...' if len(text) > 60 else ''}", flush=True)
 
             elif event_type == "function_calling":
                 func_name = event.get("function", "unknown")
@@ -239,7 +284,14 @@ class GrokVoicePipeline:
             elif event_type == "error":
                 print(f"⚠️ Grok error: {event.get('message', 'Unknown')}", flush=True)
 
+            elif event_type == "session.created":
+                print(f"📋 Grok session created", flush=True)
+
+            elif event_type == "session.updated":
+                print(f"📋 Grok session updated", flush=True)
+
             else:
+                # Log unknown events for debugging
                 print(f"📨 Grok event: {event_type}", flush=True)
 
         except Exception as e:
