@@ -175,7 +175,14 @@ class GrokVoicePipeline:
             await self.cleanup()
 
     async def _ios_to_grok(self):
-        """Forward audio from iOS to Grok (with resampling)."""
+        """Forward audio from iOS to Grok (with resampling).
+
+        Grok's realtime API expects audio in JSON format:
+        {"type": "input_audio_buffer.append", "audio": "<base64-pcm16>"}
+        """
+        import base64
+        import json
+
         try:
             while self.is_running:
                 # Receive audio from iOS (16kHz PCM16)
@@ -184,9 +191,13 @@ class GrokVoicePipeline:
                 # Resample 16kHz → 24kHz
                 resampled = self._resample_16k_to_24k(data)
 
-                # Forward to Grok
+                # Forward to Grok in required JSON format
                 if self.grok_ws and resampled:
-                    await self.grok_ws.send(resampled)
+                    audio_event = {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(resampled).decode('utf-8')
+                    }
+                    await self.grok_ws.send(json.dumps(audio_event))
 
         except WebSocketDisconnect:
             print(f"📱 iOS disconnected from Grok V2V", flush=True)
@@ -194,19 +205,40 @@ class GrokVoicePipeline:
             print(f"⚠️ iOS→Grok error: {e}", flush=True)
 
     async def _grok_to_ios(self):
-        """Forward audio from Grok to iOS."""
+        """Forward audio from Grok to iOS.
+
+        Grok sends audio in JSON format:
+        {"type": "response.audio.delta", "delta": "<base64-pcm16>"}
+        """
+        import base64
+        import json
+
         try:
             while self.is_running and self.grok_ws:
-                # Receive from Grok (24kHz PCM16)
+                # Receive from Grok (always JSON for realtime API)
                 message = await self.grok_ws.recv()
 
                 if isinstance(message, bytes):
-                    # Audio data - forward directly to iOS
-                    # Note: iOS handles 24kHz playback natively
+                    # Unexpected binary - forward directly (fallback)
                     await self.websocket.send_bytes(message)
                 else:
-                    # JSON message (transcript, events, etc.)
-                    await self._handle_grok_event(message)
+                    # Parse JSON event
+                    try:
+                        event = json.loads(message)
+                        event_type = event.get("type", "")
+
+                        # Handle audio delta - decode and forward to iOS
+                        if event_type == "response.audio.delta":
+                            audio_b64 = event.get("delta", "")
+                            if audio_b64:
+                                audio_bytes = base64.b64decode(audio_b64)
+                                await self.websocket.send_bytes(audio_bytes)
+                        else:
+                            # Other events (transcripts, VAD, etc.)
+                            await self._handle_grok_event(message)
+
+                    except json.JSONDecodeError:
+                        print(f"⚠️ Invalid JSON from Grok: {message[:100]}", flush=True)
 
         except websockets.ConnectionClosed:
             print(f"🔌 Grok proxy disconnected", flush=True)
@@ -256,6 +288,25 @@ class GrokVoicePipeline:
 
             elif event_type == "response.done":
                 print(f"✅ Grok response complete", flush=True)
+
+            elif event_type == "response.audio.done":
+                print(f"🔊 Grok audio stream complete", flush=True)
+
+            elif event_type == "response.audio_transcript.delta":
+                # Streaming transcript of AI speech
+                delta = event.get("delta", "")
+                if delta:
+                    print(f"🗣️ {delta}", end="", flush=True)
+
+            elif event_type == "response.audio_transcript.done":
+                transcript = event.get("transcript", "")
+                if transcript:
+                    self.conversation_turns.append({
+                        "role": "assistant",
+                        "text": transcript,
+                        "timestamp": time.time(),
+                    })
+                    print(f"\n🤖 Ella said: {transcript[:80]}{'...' if len(transcript) > 80 else ''}", flush=True)
 
             # === Proxy-level events ===
             elif event_type == "transcript":
