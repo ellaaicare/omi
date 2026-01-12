@@ -2,7 +2,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
-import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import '../fixtures/test_data.dart';
 
 void main() {

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/pages/chat/widgets/files_handler_widget.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:omi/utils/other/temp.dart';
 
 class HumanMessage extends StatelessWidget {
   final ServerMessage message;

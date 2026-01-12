@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/backend/schema/app.dart';
-import 'package:omi/backend/preferences.dart';
 import '../../fixtures/test_data.dart';
 
 void main() {

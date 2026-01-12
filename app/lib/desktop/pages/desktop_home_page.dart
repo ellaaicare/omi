@@ -31,7 +31,6 @@ import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
-import 'package:omi/utils/enums.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
@@ -39,7 +38,6 @@ import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:intercom_flutter/intercom_flutter.dart';
 import '../../pages/conversations/sync_page.dart';
-import 'home/widgets/battery_info_widget.dart';
 
 enum MacWindowButtonType { close, minimize, maximize }
 

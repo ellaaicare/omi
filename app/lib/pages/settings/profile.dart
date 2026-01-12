@@ -13,8 +13,6 @@ import 'package:omi/providers/home_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_svg/flutter_svg.dart';
-import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
 
 import 'delete_account.dart';
