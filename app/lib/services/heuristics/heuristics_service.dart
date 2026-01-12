@@ -25,6 +25,10 @@ class HeuristicsService extends ChangeNotifier {
   /// Auto-start voice call on wake word detection
   bool _autoStartCall = true;
 
+  /// Flag to disable scanning during active call
+  /// Prevents re-triggering wake word while talking to agent
+  bool _inCall = false;
+
   /// Callback when wake word is detected
   VoidCallback? onWakeWordDetected;
 
@@ -39,10 +43,18 @@ class HeuristicsService extends ChangeNotifier {
   List<String> get wakeWords => List.unmodifiable(_wakeWords);
   bool get isEnabled => _isEnabled;
   bool get autoStartCall => _autoStartCall;
+  bool get inCall => _inCall;
 
   /// Set auto-start call behavior
   void setAutoStartCall(bool enabled) {
     _autoStartCall = enabled;
+    notifyListeners();
+  }
+
+  /// Set in-call state (disables wake word scanning during call)
+  void setInCall(bool inCall) {
+    _inCall = inCall;
+    debugPrint('🎯 [Heuristics] In-call state: $_inCall (scanning ${_inCall ? "disabled" : "enabled"})');
     notifyListeners();
   }
 
@@ -63,6 +75,9 @@ class HeuristicsService extends ChangeNotifier {
   /// Returns true if wake word detected
   bool scanForWakeWord(String transcript) {
     if (!_isEnabled) return false;
+
+    // Don't scan during active call to prevent re-triggering
+    if (_inCall) return false;
 
     final normalizedText = transcript.toLowerCase().trim();
 
@@ -109,17 +124,27 @@ class HeuristicsService extends ChangeNotifier {
         return;
       }
 
+      // Set in-call flag to prevent re-triggering wake word during call
+      setInCall(true);
+
       // Start the V2 voice mode
       final success = await v2Service.start();
       if (success) {
         debugPrint('📞 [Heuristics] Voice call started successfully!');
         // Haptic feedback to confirm
         await HapticFeedback.heavyImpact();
+
+        // Listen for call end to re-enable scanner
+        // TODO: V2Service should notify when call ends via callback or stream
+        // For now, we'll rely on external call to setInCall(false)
       } else {
         debugPrint('❌ [Heuristics] Failed to start voice call');
+        // Re-enable scanning since call didn't start
+        setInCall(false);
       }
     } catch (e) {
       debugPrint('❌ [Heuristics] Error starting voice call: $e');
+      setInCall(false);
     }
   }
 

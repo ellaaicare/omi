@@ -7,6 +7,7 @@ import 'package:flutter/services.dart' show rootBundle, ByteData;
 import 'package:just_audio/just_audio.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/heuristics/heuristics_service.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -71,9 +72,11 @@ class VoiceModeV2Service extends ChangeNotifier {
     try {
       final uid = SharedPreferencesUtil().uid;
       final sessionId = DateTime.now().millisecondsSinceEpoch.toString();
-      final wsUrl = '${Env.apiBaseUrl!.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://')}v2/voice?uid=$uid&session_id=$sessionId';
+      final pipelineMode = SharedPreferencesUtil().voicePipelineMode;
+      final wsUrl = '${Env.apiBaseUrl!.replaceFirst('https://', 'wss://').replaceFirst('http://', 'ws://')}v2/voice?uid=$uid&session_id=$sessionId&pipeline_mode=$pipelineMode';
 
-      debugPrint('VoiceModeV2: Connecting to $wsUrl');
+      debugPrint('VoiceModeV2: Connecting with pipeline_mode=$pipelineMode');
+      debugPrint('VoiceModeV2: URL: $wsUrl');
 
       _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
@@ -157,6 +160,10 @@ class VoiceModeV2Service extends ChangeNotifier {
     }
 
     debugPrint('VoiceModeV2: Session stopped, ready for restart');
+
+    // Re-enable wake word scanner now that call has ended
+    HeuristicsService().setInCall(false);
+
     onSessionEnded?.call();
   }
 

@@ -59,8 +59,8 @@ class OnDeviceASRService {
         _transcriptController.add(segment);
 
         // Scan for wake words (on-device heuristics)
-        // Only scan final segments to avoid false triggers
-        if (isFinal && text.trim().isNotEmpty) {
+        // HeuristicsService has built-in debounce to prevent false triggers
+        if (text.trim().isNotEmpty) {
           HeuristicsService().scanForWakeWord(text);
         }
 

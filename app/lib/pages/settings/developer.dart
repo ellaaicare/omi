@@ -75,7 +75,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
 
   // Wake Word state
   final TextEditingController _newWakeWordController = TextEditingController();
-  bool _wakeWordEnabled = true;
+  final bool _wakeWordEnabled = true;
 
   @override
   void initState() {
@@ -357,6 +357,54 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   if (SharedPreferencesUtil().voiceModeV2Enabled) ...[
                     const SizedBox(height: 8),
+
+                    // Pipeline Mode Selection
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.deepPurple.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Pipeline Mode',
+                            style: TextStyle(fontWeight: FontWeight.w500, color: Colors.white),
+                          ),
+                          const SizedBox(height: 8),
+                          RadioListTile<String>(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Standard (Pipecat)', style: TextStyle(color: Colors.white)),
+                            subtitle: const Text('Default pipeline', style: TextStyle(color: Colors.grey)),
+                            value: 'default',
+                            groupValue: SharedPreferencesUtil().voicePipelineMode,
+                            onChanged: (value) {
+                              setState(() {
+                                SharedPreferencesUtil().voicePipelineMode = value!;
+                              });
+                            },
+                            activeColor: Colors.deepPurple,
+                          ),
+                          RadioListTile<String>(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Grok V2V (~500ms latency)', style: TextStyle(color: Colors.white)),
+                            subtitle: const Text('Low-latency voice-to-voice', style: TextStyle(color: Colors.grey)),
+                            value: 'grok_v2v',
+                            groupValue: SharedPreferencesUtil().voicePipelineMode,
+                            onChanged: (value) {
+                              setState(() {
+                                SharedPreferencesUtil().voicePipelineMode = value!;
+                              });
+                            },
+                            activeColor: Colors.deepPurple,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -376,7 +424,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'Server-side VAD handles turn detection.\nEndpoint: wss://api.ella-ai-care.com/v2/voice',
+                            'Server-side VAD handles turn detection.\nPipeline: ${SharedPreferencesUtil().voicePipelineMode}',
                             style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                           ),
                           const SizedBox(height: 8),
@@ -529,7 +577,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 ),
                                 Switch(
                                   value: heuristics.isEnabled,
-                                  activeColor: Colors.orange,
+                                  activeThumbColor: Colors.orange,
                                   onChanged: (v) {
                                     heuristics.setEnabled(v);
                                   },
@@ -615,7 +663,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 ),
                                 Switch(
                                   value: heuristics.autoStartCall,
-                                  activeColor: Colors.orange,
+                                  activeThumbColor: Colors.orange,
                                   onChanged: (v) {
                                     heuristics.setAutoStartCall(v);
                                   },

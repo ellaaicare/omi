@@ -139,6 +139,11 @@ class SharedPreferencesUtil {
 
   bool get voiceModeV2Enabled => getBool('voiceModeV2Enabled') ?? false;
 
+  // Voice Mode V2 Pipeline Mode (default, grok_v2v)
+  set voicePipelineMode(String value) => saveString('voicePipelineMode', value);
+
+  String get voicePipelineMode => getString('voicePipelineMode') ?? 'default';
+
   set asrMode(String value) => saveString('asrMode', value);
 
   String get asrMode => getString('asrMode') ?? 'cloud';
