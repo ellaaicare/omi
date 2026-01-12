@@ -202,3 +202,8 @@ backend/test_audio/*.wav
 backend/test_audio/*.mp3
 backend/test_audio/*.opus
 !backend/test_audio/README.md
+
+# Local documentation (not committed - team-specific research/notes)
+/app/docs/
+/backend/docs/
+!/docs/  # Keep root docs/ for public documentation
