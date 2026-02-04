@@ -148,6 +148,10 @@ async def _stream_handler(
 
     use_custom_stt = custom_stt_mode == CustomSttMode.enabled
 
+    # Set Ella context for LLM proxy
+    from utils.llm.clients import set_ella_context
+    set_ella_context(uid=uid, task='transcription')
+
     # Helper to gate person_id based on client capability (backward compatibility)
     # OLD apps don't send speaker_auto_assign param -> receive empty person_id
     # NEW apps send speaker_auto_assign=enabled -> receive populated person_id
@@ -1495,6 +1499,17 @@ async def _stream_handler(
 
             if transcript_segments:
                 await websocket.send_json([segment.dict() for segment in updated_segments])
+
+                # ====== ELLA INTEGRATION: Send chunks to scanner ======
+                try:
+                    from utils.ella import send_to_scanner
+                    send_to_scanner(
+                        uid=uid,
+                        conversation_id=str(current_conversation_id),
+                        segments=[s.dict() for s in transcript_segments],
+                    )
+                except ImportError:
+                    pass
 
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])

@@ -108,6 +108,7 @@ def _get_structured(
                     tz,
                     existing_action_items=existing_action_items,
                     calendar_meeting_context=calendar_context,
+                    uid=uid,
                 )
                 return structured, False
 
@@ -157,6 +158,8 @@ def _get_structured(
                 photos=conversation.photos,
                 existing_action_items=existing_action_items,
                 calendar_meeting_context=calendar_context,
+                uid=uid,
+                existing_conversation_id=conversation.id if hasattr(conversation, 'id') else None,
             ),
             False,
         )

@@ -72,6 +72,10 @@ def send_message(
     compat_app_id = app_id or plugin_id
     print('send_message', data.text, compat_app_id, uid)
 
+    # Set Ella context for LLM proxy
+    from utils.llm.clients import set_ella_context
+    set_ella_context(uid=uid, task='chat')
+
     if compat_app_id in ['null', '']:
         compat_app_id = None
 
