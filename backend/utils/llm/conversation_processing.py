@@ -564,7 +564,21 @@ def get_transcript_structure(
     photos: List[ConversationPhoto] = None,
     existing_action_items: List[dict] = None,
     calendar_meeting_context: 'CalendarMeetingContext' = None,
+    uid: str = None,
+    existing_conversation_id: str = None,
 ) -> Structured:
+    # ====== ELLA SUMMARY ADAPTER HOOK ======
+    try:
+        from utils.ella.summary import call_summary_agent
+        result = call_summary_agent(uid, existing_conversation_id, transcript, started_at, language_code, tz)
+        if result is not None:
+            return result
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️  Ella summary adapter failed: {e}, falling back to upstream LLM", flush=True)
+    # ====== END ELLA HOOK ======
+
     context_parts = []
     if transcript and transcript.strip():
         context_parts.append(f"Transcript: ```{transcript.strip()}```")
