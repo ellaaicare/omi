@@ -110,7 +110,17 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
                   const SizedBox(width: 48),
                 ],
               ),
-              const Spacer(flex: 2),
+              const SizedBox(height: 16),
+              // Hero illustration
+              ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: Image.asset(
+                  'assets/images/ella_onboarding_2.png',
+                  height: 220,
+                  fit: BoxFit.contain,
+                ),
+              ),
+              const SizedBox(height: 24),
               Text(
                 context.l10n.ellaConnectTitle,
                 textAlign: TextAlign.center,
@@ -234,7 +244,7 @@ class _EllaConnectState extends State<EllaConnect> with SingleTickerProviderStat
                   style: const TextStyle(fontSize: 16, color: EllaColors.warning),
                 ),
               ],
-              const Spacer(flex: 3),
+              const Spacer(),
               if (_deviceFound)
                 SizedBox(
                   width: double.infinity,
