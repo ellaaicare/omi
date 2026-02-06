@@ -27,7 +27,7 @@ import hmac
 import io
 import logging
 import os
-import random
+import secrets
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -941,7 +941,7 @@ async def resend_caregiver_invite(request: ResendInviteRequest):
     if existing.get('status') != 'invited':
         raise HTTPException(status_code=400, detail="Caregiver has already joined; cannot resend invite")
 
-    new_code = ''.join(random.choices(string.digits, k=6))
+    new_code = ''.join(secrets.choice(string.digits) for _ in range(6))
     new_expiry = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
 
     result = update_caregiver(
