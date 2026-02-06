@@ -7,6 +7,7 @@ class Caregiver {
   final String status; // "active" or "invited"
   final DateTime? joinedAt;
   final DateTime? invitedAt;
+  final bool receiveDailySummary;
 
   Caregiver({
     required this.id,
@@ -17,6 +18,7 @@ class Caregiver {
     required this.status,
     this.joinedAt,
     this.invitedAt,
+    this.receiveDailySummary = true,
   });
 
   Caregiver.fromJson(Map<String, dynamic> json)
@@ -27,7 +29,8 @@ class Caregiver {
         relationship = json['relationship'] ?? '',
         status = json['status'] ?? 'invited',
         joinedAt = json['joined_at'] != null ? DateTime.parse(json['joined_at']) : null,
-        invitedAt = json['invited_at'] != null ? DateTime.parse(json['invited_at']) : null;
+        invitedAt = json['invited_at'] != null ? DateTime.parse(json['invited_at']) : null,
+        receiveDailySummary = (json['permissions'] as Map<String, dynamic>?)?['receive_daily_summary'] as bool? ?? true;
 
   String get initial => name.isNotEmpty ? name[0].toUpperCase() : '?';
 
