@@ -105,3 +105,9 @@ After making changes, always run the appropriate test script to verify your chan
 
 - **Backend changes**: Run `backend/test.sh`
 - **App changes**: Run `app/test.sh`
+
+## Ella Session State
+
+**IMPORTANT**: On every new session, read `ELLA_SESSION_STATE.md` in the repo root FIRST before doing anything else. It contains the current work-in-progress, team status, decisions made, and what to do next. Update it whenever significant progress is made or the session ends.
+
+If the user says "continue" or asks what's going on, consult that file immediately — it's your persistent memory across sessions.
