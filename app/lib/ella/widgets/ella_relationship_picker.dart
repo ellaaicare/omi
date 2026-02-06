@@ -40,70 +40,73 @@ class EllaRelationshipPicker extends StatelessWidget {
     ];
 
     return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(height: 12),
-          Container(
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: EllaColors.textDisabled,
-              borderRadius: BorderRadius.circular(2),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: EllaColors.textDisabled,
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                context.l10n.ellaAddCaregiverRelationship,
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                  color: EllaColors.textPrimary,
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  context.l10n.ellaAddCaregiverRelationship,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    color: EllaColors.textPrimary,
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          ...options.map((option) {
-            final isSelected = selected == option.$1;
-            return Column(
-              children: [
-                Semantics(
-                  button: true,
-                  label: '${option.$2}${isSelected ? ', selected' : ''}',
-                  child: InkWell(
-                    onTap: () => onSelected(option.$1),
-                    child: Container(
-                      height: 56,
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      decoration: BoxDecoration(
-                        border: isSelected ? const Border(left: BorderSide(color: EllaColors.primary, width: 4)) : null,
-                      ),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          option.$2,
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w400,
-                            color: isSelected ? EllaColors.primary : EllaColors.textPrimary,
+            const SizedBox(height: 16),
+            ...options.map((option) {
+              final isSelected = selected == option.$1;
+              return Column(
+                children: [
+                  Semantics(
+                    button: true,
+                    label: '${option.$2}${isSelected ? ', selected' : ''}',
+                    child: InkWell(
+                      onTap: () => onSelected(option.$1),
+                      child: Container(
+                        height: 56,
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        decoration: BoxDecoration(
+                          border:
+                              isSelected ? const Border(left: BorderSide(color: EllaColors.primary, width: 4)) : null,
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            option.$2,
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w400,
+                              color: isSelected ? EllaColors.primary : EllaColors.textPrimary,
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                if (option != options.last)
-                  const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 24, endIndent: 24),
-              ],
-            );
-          }),
-          const SizedBox(height: 16),
-        ],
+                  if (option != options.last)
+                    const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 24, endIndent: 24),
+                ],
+              );
+            }),
+            const SizedBox(height: 16),
+          ],
+        ),
       ),
     );
   }
