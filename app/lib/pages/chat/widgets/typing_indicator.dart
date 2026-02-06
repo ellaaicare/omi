@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class TypingIndicator extends StatefulWidget {
   const TypingIndicator({super.key});
@@ -45,8 +46,8 @@ class _TypingIndicatorState extends State<TypingIndicator> with SingleTickerProv
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
 
     _colorAnimation = ColorTween(
-      begin: Colors.grey[400],
-      end: Colors.grey[600],
+      begin: EllaColors.textDisabled,
+      end: EllaColors.textTertiary,
     ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
   }
 
