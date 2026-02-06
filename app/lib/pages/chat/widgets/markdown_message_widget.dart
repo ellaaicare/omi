@@ -9,11 +9,11 @@ Widget getMarkdownWidget(BuildContext context, String message, {Function(String)
     data: message.trimRight(),
     selectable: false,
     styleSheet: MarkdownStyleSheet(
-      p: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4),
+      p: const TextStyle(color: EllaColors.textPrimary, fontSize: 16, height: 1.4),
       a: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
-      listBullet: const TextStyle(color: Colors.white, fontSize: 16),
+      listBullet: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
       blockquote: const TextStyle(
-        color: Colors.white,
+        color: EllaColors.textPrimary,
         fontSize: 16,
         height: 1.4,
         backgroundColor: Colors.transparent,
@@ -23,7 +23,7 @@ Widget getMarkdownWidget(BuildContext context, String message, {Function(String)
         borderRadius: BorderRadius.circular(4),
       ),
       code: const TextStyle(
-        color: Colors.white,
+        color: EllaColors.textPrimary,
         backgroundColor: Colors.transparent,
         fontFamily: 'monospace',
       ),
