@@ -117,7 +117,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   ShimmerWithTimeout(
-                    baseColor: EllaColors.bgTertiary,
+                    baseColor: EllaColors.textTertiary,
                     highlightColor: Colors.white,
                     child: Text(
                       context.l10n.transcribing,
