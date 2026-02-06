@@ -34,6 +34,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ChatPage extends StatefulWidget {
   final bool isPivotBottom;
@@ -1013,7 +1014,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
   Widget _buildChatAppsEndDrawer(BuildContext context) {
     return Drawer(
-      backgroundColor: const Color(0xFF1F1F25),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.only(
           topLeft: Radius.circular(20),

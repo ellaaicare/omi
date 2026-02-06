@@ -9,6 +9,7 @@ import 'package:omi/pages/apps/widgets/capability_category_section.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/ui_guidelines.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CapabilityAppsPage extends StatefulWidget {
   final AppCapability capability;
@@ -211,7 +212,7 @@ class _CapabilityAppsPageState extends State<CapabilityAppsPage> {
                 HapticFeedback.mediumImpact();
                 await _loadCapabilityApps();
               },
-              color: Colors.deepPurpleAccent,
+              color: EllaColors.primaryLight,
               backgroundColor: Colors.white,
               child: _totalCount == 0
                   ? Center(

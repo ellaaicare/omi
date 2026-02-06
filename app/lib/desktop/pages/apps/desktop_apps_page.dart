@@ -22,6 +22,7 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
 import 'widgets/desktop_app_detail.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class DesktopAppsPage extends StatefulWidget {
   final VoidCallback? onNavigateToCreateApp;
@@ -694,7 +695,7 @@ class _DesktopAppsPageState extends State<DesktopAppsPage> with AutomaticKeepAli
                   height: 60,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
-                    color: const Color(0xFF35343B),
+                    color: EllaColors.bgTertiary,
                   ),
                 ),
                 errorWidget: (context, url, error) => Container(
@@ -702,7 +703,7 @@ class _DesktopAppsPageState extends State<DesktopAppsPage> with AutomaticKeepAli
                   height: 60,
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
-                    color: const Color(0xFF35343B),
+                    color: EllaColors.bgTertiary,
                   ),
                   child: const Icon(Icons.apps, color: Colors.white54, size: 24),
                 ),

@@ -22,6 +22,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'action_item_form_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ActionItemTileWidget extends StatefulWidget {
   final ActionItemWithMetadata actionItem;
@@ -185,10 +186,18 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
 
   String _formatDueDate(BuildContext context, DateTime date, {bool showFullDate = false}) {
     final months = [
-      context.l10n.monthJan, context.l10n.monthFeb, context.l10n.monthMar,
-      context.l10n.monthApr, context.l10n.monthMay, context.l10n.monthJun,
-      context.l10n.monthJul, context.l10n.monthAug, context.l10n.monthSep,
-      context.l10n.monthOct, context.l10n.monthNov, context.l10n.monthDec
+      context.l10n.monthJan,
+      context.l10n.monthFeb,
+      context.l10n.monthMar,
+      context.l10n.monthApr,
+      context.l10n.monthMay,
+      context.l10n.monthJun,
+      context.l10n.monthJul,
+      context.l10n.monthAug,
+      context.l10n.monthSep,
+      context.l10n.monthOct,
+      context.l10n.monthNov,
+      context.l10n.monthDec
     ];
 
     if (showFullDate) {
@@ -225,8 +234,12 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
       return context.l10n.yesterday;
     } else if (difference > 1 && difference <= 7) {
       final weekdays = [
-        context.l10n.weekdayMon, context.l10n.weekdayTue, context.l10n.weekdayWed,
-        context.l10n.weekdayThu, context.l10n.weekdayFri, context.l10n.weekdaySat,
+        context.l10n.weekdayMon,
+        context.l10n.weekdayTue,
+        context.l10n.weekdayWed,
+        context.l10n.weekdayThu,
+        context.l10n.weekdayFri,
+        context.l10n.weekdaySat,
         context.l10n.weekdaySun
       ];
       return weekdays[date.weekday - 1];
@@ -299,7 +312,7 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                   color: isExported ? Colors.green : Colors.blue,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: const Color(0xFF1F1F25),
+                    color: EllaColors.bgSecondary,
                     width: 1.5,
                   ),
                 ),
@@ -668,7 +681,9 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
             children: [
               Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
               const SizedBox(width: 8),
-              Text(success ? context.l10n.addedToService('Google Tasks') : context.l10n.failedToAddToService('Google Tasks')),
+              Text(success
+                  ? context.l10n.addedToService('Google Tasks')
+                  : context.l10n.failedToAddToService('Google Tasks')),
             ],
           ),
           backgroundColor: success ? Colors.green : Colors.red,
@@ -892,7 +907,9 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
             children: [
               Icon(success ? Icons.check_circle : Icons.error, color: Colors.white, size: 20),
               const SizedBox(width: 8),
-              Text(success ? context.l10n.addedToService('Apple Reminders') : context.l10n.failedToAddToService('Reminders')),
+              Text(success
+                  ? context.l10n.addedToService('Apple Reminders')
+                  : context.l10n.failedToAddToService('Reminders')),
             ],
           ),
           backgroundColor: success ? Colors.green : Colors.red,
@@ -957,10 +974,10 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
                           border: Border.all(
-                            color: widget.isSelected ? Colors.deepPurpleAccent : Colors.grey.shade600,
+                            color: widget.isSelected ? EllaColors.primaryLight : Colors.grey.shade600,
                             width: 2,
                           ),
-                          color: widget.isSelected ? Colors.deepPurpleAccent : Colors.transparent,
+                          color: widget.isSelected ? EllaColors.primaryLight : Colors.transparent,
                         ),
                         child: widget.isSelected
                             ? const Icon(
@@ -984,12 +1001,12 @@ class _ActionItemTileWidgetState extends State<ActionItemTileWidget> {
                             shape: BoxShape.circle,
                             border: Border.all(
                               color: (widget.actionItem.completed || _isAnimating)
-                                  ? Colors.deepPurpleAccent
+                                  ? EllaColors.primaryLight
                                   : Colors.grey.shade600,
                               width: 2,
                             ),
                             color: (widget.actionItem.completed || _isAnimating)
-                                ? Colors.deepPurpleAccent
+                                ? EllaColors.primaryLight
                                 : Colors.transparent,
                           ),
                           child: (widget.actionItem.completed || _isAnimating)

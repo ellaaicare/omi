@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Contact with phone number for sharing
 class ShareableContact {
@@ -315,13 +316,13 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
-                          color: Colors.deepPurple.withOpacity(0.3),
+                          color: EllaColors.primary.withOpacity(0.3),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
                           context.l10n.contactsSelectedCount(_selectedContacts.length),
                           style: const TextStyle(
-                            color: Colors.deepPurple,
+                            color: EllaColors.primary,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -381,7 +382,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                       child: ElevatedButton(
                         onPressed: _selectedContacts.isEmpty || _isPreparingShare ? null : _openNativeSms,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.deepPurple,
+                          backgroundColor: EllaColors.primary,
                           disabledBackgroundColor: Colors.grey.shade800,
                           padding: const EdgeInsets.symmetric(vertical: 16),
                           shape: RoundedRectangleBorder(
@@ -423,7 +424,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
   Widget _buildContactsList(ScrollController scrollController) {
     if (_isLoading) {
       return const Center(
-        child: CircularProgressIndicator(color: Colors.deepPurple),
+        child: CircularProgressIndicator(color: EllaColors.primary),
       );
     }
 
@@ -459,7 +460,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                 }
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepPurple,
+                backgroundColor: EllaColors.primary,
               ),
               child: Text(context.l10n.openSettings),
             ),
@@ -504,7 +505,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
     return ListTile(
       onTap: () => _toggleContactSelection(contact),
       leading: CircleAvatar(
-        backgroundColor: contact.isSelected ? Colors.deepPurple : Colors.grey.shade800,
+        backgroundColor: contact.isSelected ? EllaColors.primary : Colors.grey.shade800,
         child: contact.isSelected
             ? const Icon(Icons.check, color: Colors.white, size: 20)
             : Text(
@@ -524,7 +525,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
         style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
       ),
       trailing: contact.isSelected
-          ? const Icon(Icons.check_circle, color: Colors.deepPurple)
+          ? const Icon(Icons.check_circle, color: EllaColors.primary)
           : Icon(Icons.circle_outlined, color: Colors.grey.shade600),
     );
   }

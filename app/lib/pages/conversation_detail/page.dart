@@ -37,6 +37,7 @@ import 'test_prompts.dart';
 import 'widgets/audio_download_progress_sheet.dart';
 import 'widgets/name_speaker_sheet.dart';
 import 'widgets/share_to_contacts_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 // import 'package:omi/backend/preferences.dart';
 
@@ -799,7 +800,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                           height: 36,
                           margin: const EdgeInsets.only(right: 8),
                           decoration: BoxDecoration(
-                            color: _isSearching ? Colors.deepPurple.withOpacity(0.8) : Colors.grey.withOpacity(0.3),
+                            color: _isSearching ? EllaColors.primary.withOpacity(0.8) : Colors.grey.withOpacity(0.3),
                             shape: BoxShape.circle,
                           ),
                           child: IconButton(
@@ -1070,7 +1071,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
               //        ),
               //        decoration: BoxDecoration(
               //          borderRadius: BorderRadius.circular(16),
-              //          color: const Color(0xFF1F1F25),
+              //          color: EllaColors.bgSecondary,
               //          boxShadow: [
               //            BoxShadow(
               //              color: Colors.black.withOpacity(0.3),
@@ -1107,7 +1108,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
               //            ),
               //            ElevatedButton(
               //              style: ElevatedButton.styleFrom(
-              //                backgroundColor: Colors.deepPurple.withOpacity(0.5),
+              //                backgroundColor: EllaColors.primary.withOpacity(0.5),
               //                shape: RoundedRectangleBorder(
               //                  borderRadius: BorderRadius.circular(16),
               //                ),

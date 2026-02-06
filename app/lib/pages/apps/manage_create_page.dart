@@ -9,6 +9,7 @@ import 'package:omi/pages/apps/list_item.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ManageCreatePage extends StatelessWidget {
   const ManageCreatePage({super.key});
@@ -102,7 +103,7 @@ class ManageCreatePage extends StatelessWidget {
                             padding: const EdgeInsets.all(12.0),
                             margin: const EdgeInsets.only(left: 12.0, right: 12.0, top: 2, bottom: 24),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1F1F25),
+                              color: EllaColors.bgSecondary,
                               borderRadius: BorderRadius.circular(16.0),
                             ),
                             child: ListTile(

@@ -33,6 +33,7 @@ import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/widgets/text_selection_controls.dart';
 import 'chart_message_widget.dart';
 import 'markdown_message_widget.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Parse app_id from thinking text (format: "text|app_id:app_id")
 String? parseAppIdFromThinking(String thinkingText) {
@@ -866,7 +867,7 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12),
                 width: double.maxFinite,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1F1F25),
+                  color: EllaColors.bgSecondary,
                   borderRadius: BorderRadius.circular(16.0),
                 ),
                 child: Row(
@@ -1372,7 +1373,7 @@ class InitialOptionWidget extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10),
         width: double.maxFinite,
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(12.0),
         ),
         child: Text(optionText, style: Theme.of(context).textTheme.bodyMedium),

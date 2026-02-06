@@ -8,6 +8,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/pages/apps/providers/add_app_provider.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ApiKeysWidget extends StatefulWidget {
   final String appId;
@@ -80,7 +81,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         title: Text(context.l10n.createAKey, textAlign: TextAlign.center),
         content: _buildNewKeyContent(),
         contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
@@ -134,7 +135,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(12.0),
       ),
       padding: const EdgeInsets.all(14.0),
@@ -165,7 +166,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
                         showDialog(
                           context: context,
                           builder: (dialogContext) => AlertDialog(
-                            backgroundColor: const Color(0xFF1F1F25),
+                            backgroundColor: EllaColors.bgSecondary,
                             title: Text(context.l10n.omiApiKeys),
                             content: Text(
                               context.l10n.apiKeysDescription,
@@ -253,7 +254,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
         Container(
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: const Color(0xFF35343B),
+            color: EllaColors.bgTertiary,
             borderRadius: BorderRadius.circular(4),
           ),
           child: Row(
@@ -322,7 +323,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
         final key = provider.apiKeys[index];
         return Container(
           decoration: BoxDecoration(
-            color: Color(0xFF35343B),
+            color: EllaColors.bgTertiary,
             borderRadius: BorderRadius.circular(10.0),
           ),
           child: ListTile(
@@ -368,7 +369,7 @@ class _ApiKeysWidgetState extends State<ApiKeysWidget> {
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         title: Text(context.l10n.revokeApiKeyQuestion),
         content: Text(
           context.l10n.revokeApiKeyWarning,

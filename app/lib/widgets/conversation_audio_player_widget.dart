@@ -8,6 +8,7 @@ import 'package:omi/backend/http/api/audio.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationAudioPlayerWidget extends StatefulWidget {
   final ServerConversation conversation;
@@ -231,11 +232,11 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(16),
         ),
         child: const Center(
-          child: CircularProgressIndicator(color: Colors.deepPurpleAccent),
+          child: CircularProgressIndicator(color: EllaColors.primaryLight),
         ),
       );
     }
@@ -245,7 +246,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(16),
         ),
         child: Column(
@@ -269,7 +270,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
               icon: const Icon(Icons.refresh, size: 18),
               label: Text(context.l10n.retry),
               style: TextButton.styleFrom(
-                foregroundColor: Colors.deepPurpleAccent,
+                foregroundColor: EllaColors.primaryLight,
               ),
             ),
           ],
@@ -281,7 +282,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
@@ -323,7 +324,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
                                       _totalDuration.inMilliseconds.toDouble(),
                                     ),
                                 max: _totalDuration.inMilliseconds.toDouble().clamp(1.0, double.infinity),
-                                activeColor: Colors.deepPurpleAccent,
+                                activeColor: EllaColors.primaryLight,
                                 inactiveColor: Colors.grey.shade700,
                                 onChanged: (value) {
                                   _seekToCombinedPosition(Duration(milliseconds: value.toInt()));
@@ -414,7 +415,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
             width: 48,
             height: 48,
             decoration: const BoxDecoration(
-              color: Colors.deepPurpleAccent,
+              color: EllaColors.primaryLight,
               shape: BoxShape.circle,
             ),
             child: const Center(
@@ -438,7 +439,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
             size: 32,
           ),
           style: IconButton.styleFrom(
-            backgroundColor: Colors.deepPurpleAccent,
+            backgroundColor: EllaColors.primaryLight,
             shape: const CircleBorder(),
             fixedSize: const Size(48, 48),
           ),
@@ -454,7 +455,7 @@ class _ConversationAudioPlayerWidgetState extends State<ConversationAudioPlayerW
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.deepPurpleAccent : const Color(0xFF35343B),
+          color: isSelected ? EllaColors.primaryLight : EllaColors.bgTertiary,
           borderRadius: BorderRadius.circular(8),
         ),
         child: Text(

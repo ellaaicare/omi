@@ -10,6 +10,7 @@ import 'package:omi/backend/http/api/conversations.dart' hide getActionItems;
 import 'package:omi/backend/http/api/memories.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Daily grade record for history tracking
 class DailyGrade {
@@ -328,7 +329,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -337,7 +338,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
             width: 48,
             height: 48,
             decoration: BoxDecoration(
-              color: const Color(0xFF35343B),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(12),
             ),
             child: const Center(
@@ -392,7 +393,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
@@ -487,7 +488,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
             if (_history.isNotEmpty) ...[
               Container(
                 height: 1,
-                color: const Color(0xFF35343B),
+                color: EllaColors.bgTertiary,
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -523,7 +524,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
                   // Divider
                   Container(
                     height: 1,
-                    color: const Color(0xFF35343B),
+                    color: EllaColors.bgTertiary,
                   ),
 
                   // Score breakdown
@@ -571,7 +572,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
                     margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF35343B).withOpacity(0.5),
+                      color: EllaColors.bgTertiary.withOpacity(0.5),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Column(
@@ -780,7 +781,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
         Container(
           height: 6,
           decoration: BoxDecoration(
-            color: const Color(0xFF35343B),
+            color: EllaColors.bgTertiary,
             borderRadius: BorderRadius.circular(3),
           ),
           child: FractionallySizedBox(
@@ -846,7 +847,7 @@ class _ScoreWidgetState extends State<ScoreWidget> with SingleTickerProviderStat
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF1F1F25),
+          backgroundColor: EllaColors.bgSecondary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
@@ -1020,7 +1021,7 @@ class _LineChartPainter extends CustomPainter {
 
         // White border
         final borderPaint = Paint()
-          ..color = const Color(0xFF1F1F25)
+          ..color = EllaColors.bgSecondary
           ..strokeWidth = 2
           ..style = PaintingStyle.stroke;
         canvas.drawCircle(Offset(x, y), point.isToday ? 6 : 5, borderPaint);
@@ -1045,7 +1046,7 @@ class _LineChartPainter extends CustomPainter {
       } else {
         // Draw empty placeholder dot for days without data
         final emptyPaint = Paint()
-          ..color = const Color(0xFF35343B)
+          ..color = EllaColors.bgTertiary
           ..style = PaintingStyle.fill;
         canvas.drawCircle(Offset(x, chartHeight / 2), 3, emptyPaint);
       }

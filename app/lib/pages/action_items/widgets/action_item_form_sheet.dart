@@ -12,6 +12,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
 import 'package:omi/widgets/calendar_date_picker_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ActionItemFormSheet extends StatefulWidget {
   final ActionItemWithMetadata? actionItem; // null for create, non-null for edit
@@ -287,7 +288,7 @@ class _ActionItemFormSheetState extends State<ActionItemFormSheet> {
                       width: 24,
                       child: Checkbox(
                         value: _isCompleted,
-                        activeColor: Colors.deepPurpleAccent,
+                        activeColor: EllaColors.primaryLight,
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(5),
                         ),

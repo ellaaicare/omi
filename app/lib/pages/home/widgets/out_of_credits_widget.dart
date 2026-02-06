@@ -7,6 +7,7 @@ import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class OutOfCreditsWidget extends StatelessWidget {
   const OutOfCreditsWidget({super.key});
@@ -20,7 +21,7 @@ class OutOfCreditsWidget extends StatelessWidget {
         }
 
         return Container(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,

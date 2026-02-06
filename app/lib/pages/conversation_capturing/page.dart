@@ -21,6 +21,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
 import 'package:omi/widgets/photo_viewer_page.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationCapturingPage extends StatefulWidget {
   final String? topConversationId;
@@ -349,7 +350,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                           width: 52,
                           height: 52,
                           decoration: BoxDecoration(
-                            color: _isMuted ? Colors.red : const Color(0xFF35343B),
+                            color: _isMuted ? Colors.red : EllaColors.bgTertiary,
                             shape: BoxShape.circle,
                             boxShadow: [
                               BoxShadow(

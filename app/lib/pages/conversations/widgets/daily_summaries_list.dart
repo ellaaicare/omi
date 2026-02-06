@@ -9,6 +9,7 @@ import 'package:omi/pages/settings/daily_summary_detail_page.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/ui_guidelines.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class DailySummariesList extends StatefulWidget {
   const DailySummariesList({super.key});
@@ -223,7 +224,7 @@ class _DailySummariesListState extends State<DailySummariesList> {
         child: Container(
           width: double.maxFinite,
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(24.0),
           ),
           child: Padding(
@@ -236,7 +237,7 @@ class _DailySummariesListState extends State<DailySummariesList> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF35343B),
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(12),
                   ),
                   alignment: Alignment.center,
@@ -263,40 +264,40 @@ class _DailySummariesListState extends State<DailySummariesList> {
                         children: [
                           Text(
                             _formatCondensedDate(summary.date),
-                            style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                            style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                             maxLines: 1,
                           ),
                           if (summary.stats.totalConversations > 0) ...[
                             const Text(
                               ' • ',
-                              style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                              style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                             ),
                             const FaIcon(
                               FontAwesomeIcons.solidComments,
                               size: 10,
-                              color: Color(0xFF9A9BA1),
+                              color: EllaColors.textTertiary,
                             ),
                             const SizedBox(width: 4),
                             Text(
                               '${summary.stats.totalConversations}',
-                              style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                              style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                               maxLines: 1,
                             ),
                           ],
                           if (summary.stats.actionItemsCount > 0) ...[
                             const Text(
                               ' • ',
-                              style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                              style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                             ),
                             const FaIcon(
                               FontAwesomeIcons.listCheck,
                               size: 11,
-                              color: Color(0xFF9A9BA1),
+                              color: EllaColors.textTertiary,
                             ),
                             const SizedBox(width: 4),
                             Text(
                               '${summary.stats.actionItemsCount}',
-                              style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                              style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                               maxLines: 1,
                             ),
                           ],

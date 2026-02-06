@@ -6,6 +6,7 @@ import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class FilterBottomSheet extends StatelessWidget {
   const FilterBottomSheet({super.key});
@@ -70,7 +71,7 @@ class FilterBottomSheet extends StatelessWidget {
               Container(
                 margin: const EdgeInsets.symmetric(vertical: 16),
                 height: 1,
-                color: Color(0xFF35343B),
+                color: EllaColors.bgTertiary,
               ),
 
               // Content
@@ -118,7 +119,7 @@ class FilterBottomSheet extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: const Color(0xFF1C1C1E),
                   border: Border(
-                    top: BorderSide(color: Color(0xFF35343B), width: 1),
+                    top: BorderSide(color: EllaColors.bgTertiary, width: 1),
                   ),
                 ),
                 child: Row(
@@ -211,7 +212,7 @@ class FilterBottomSheet extends StatelessWidget {
               margin: const EdgeInsets.only(right: 8),
               padding: const EdgeInsets.symmetric(vertical: 12),
               decoration: BoxDecoration(
-                color: isSelected ? Color(0xFF8B5CF6) : Color(0xFF35343B),
+                color: isSelected ? Color(0xFF8B5CF6) : EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Center(
@@ -246,7 +247,7 @@ class FilterBottomSheet extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: isSelected ? Color(0xFF8B5CF6) : Color(0xFF35343B),
+              color: isSelected ? Color(0xFF8B5CF6) : EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(
@@ -287,7 +288,7 @@ class FilterBottomSheet extends StatelessWidget {
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25).withOpacity(0.5),
+                color: EllaColors.bgSecondary.withOpacity(0.5),
                 borderRadius: BorderRadius.circular(12),
                 border: isSelected ? Border.all(color: Color(0xFF8B5CF6), width: 2) : null,
               ),
@@ -345,7 +346,7 @@ class FilterBottomSheet extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: isSelected ? Color(0xFF8B5CF6) : Color(0xFF35343B),
+              color: isSelected ? Color(0xFF8B5CF6) : EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(20),
             ),
             child: Text(

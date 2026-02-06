@@ -13,6 +13,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class BatteryInfoWidget extends StatelessWidget {
   const BatteryInfoWidget({super.key});
@@ -41,7 +42,7 @@ class BatteryInfoWidget extends StatelessWidget {
                     height: 36,
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1F1F25),
+                      color: EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(18),
                     ),
                     child: Row(
@@ -95,7 +96,7 @@ class BatteryInfoWidget extends StatelessWidget {
                   height: 36,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1F1F25),
+                    color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(18),
                   ),
                   child: Row(
@@ -144,7 +145,7 @@ class BatteryInfoWidget extends StatelessWidget {
                   height: 36,
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1F1F25),
+                    color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(18),
                   ),
                   child: Row(

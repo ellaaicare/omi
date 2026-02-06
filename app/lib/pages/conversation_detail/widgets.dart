@@ -35,6 +35,7 @@ import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'maps_util.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 // Highlight search matches with current result highlighting
 List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int currentResultIndex = -1}) {
@@ -61,7 +62,7 @@ List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int curr
       text: text.substring(index, index + searchQuery.length),
       style: TextStyle(
         backgroundColor:
-            isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : Colors.deepPurple.withValues(alpha: 0.6),
+            isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : EllaColors.primary.withValues(alpha: 0.6),
         color: Colors.white,
         fontWeight: FontWeight.bold,
       ),

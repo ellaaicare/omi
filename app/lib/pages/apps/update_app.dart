@@ -16,6 +16,7 @@ import 'widgets/capabilities_chips_widget.dart';
 import 'widgets/external_trigger_fields_widget.dart';
 import 'widgets/payment_details_widget.dart';
 import 'widgets/prompt_text_field.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class UpdateAppPage extends StatefulWidget {
   final App app;
@@ -129,7 +130,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                         const SizedBox(height: 18),
                         Container(
                           decoration: BoxDecoration(
-                            color: const Color(0xFF1F1F25),
+                            color: EllaColors.bgSecondary,
                             borderRadius: BorderRadius.circular(12.0),
                           ),
                           padding: const EdgeInsets.all(14.0),
@@ -162,7 +163,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                                           height: height,
                                           margin: const EdgeInsets.only(right: 8),
                                           decoration: BoxDecoration(
-                                            color: Color(0xFF35343B),
+                                            color: EllaColors.bgTertiary,
                                             borderRadius: BorderRadius.circular(8),
                                           ),
                                           child: provider.isUploadingThumbnail
@@ -265,7 +266,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                         const SizedBox(height: 18),
                         Container(
                           decoration: BoxDecoration(
-                            color: const Color(0xFF1F1F25),
+                            color: EllaColors.bgSecondary,
                             borderRadius: BorderRadius.circular(12.0),
                           ),
                           padding: const EdgeInsets.all(14.0),
@@ -301,7 +302,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                                   },
                                   child: Container(
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF1F1F25),
+                                      color: EllaColors.bgSecondary,
                                       borderRadius: BorderRadius.circular(12.0),
                                     ),
                                     padding: const EdgeInsets.all(14.0),
@@ -338,7 +339,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                               const SizedBox(height: 18),
                               Container(
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFF1F1F25),
+                                  color: EllaColors.bgSecondary,
                                   borderRadius: BorderRadius.circular(12.0),
                                 ),
                                 padding: const EdgeInsets.all(14.0),
@@ -385,7 +386,7 @@ class _UpdateAppPageState extends State<UpdateAppPage> {
                   padding: const EdgeInsets.only(left: 30.0, right: 30, bottom: 50, top: 10),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12.0),
-                    color: const Color(0xFF1F1F25),
+                    color: EllaColors.bgSecondary,
                     gradient: LinearGradient(
                       colors: [Colors.black, Colors.black.withValues(alpha: 0)],
                       begin: Alignment.bottomCenter,

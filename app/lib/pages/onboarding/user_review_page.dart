@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class UserReviewPage extends StatefulWidget {
   final VoidCallback goNext;
@@ -118,12 +119,12 @@ class _UserReviewPageState extends State<UserReviewPage> {
                   child: ElevatedButton(
                     onPressed: _isLoading ? null : _requestReview,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.deepPurple,
+                      backgroundColor: EllaColors.primary,
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(28),
                       ),
-                      disabledBackgroundColor: Colors.deepPurple.withOpacity(0.5),
+                      disabledBackgroundColor: EllaColors.primary.withOpacity(0.5),
                     ),
                     child: _isLoading
                         ? const SizedBox(

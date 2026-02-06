@@ -13,6 +13,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
 import 'package:omi/widgets/calendar_date_picker_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class SearchWidget extends StatefulWidget {
   const SearchWidget({super.key});
@@ -85,7 +86,7 @@ class _SearchWidgetState extends State<SearchWidget> {
           margin: EdgeInsets.only(
             bottom: MediaQuery.of(context).viewInsets.bottom,
           ),
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           child: SafeArea(
             top: false,
             child: Column(
@@ -94,10 +95,10 @@ class _SearchWidgetState extends State<SearchWidget> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                   decoration: const BoxDecoration(
-                    color: Color(0xFF1F1F25),
+                    color: EllaColors.bgSecondary,
                     border: Border(
                       bottom: BorderSide(
-                        color: Color(0xFF35343B),
+                        color: EllaColors.bgTertiary,
                         width: 0.5,
                       ),
                     ),
@@ -137,7 +138,7 @@ class _SearchWidgetState extends State<SearchWidget> {
                         child: Text(
                           context.l10n.done,
                           style: const TextStyle(
-                            color: Colors.deepPurple,
+                            color: EllaColors.primary,
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
                           ),
@@ -202,7 +203,7 @@ class _SearchWidgetState extends State<SearchWidget> {
                 hintText: context.l10n.searchConversations,
                 hintStyle: const TextStyle(color: Colors.white60, fontSize: 14),
                 filled: true,
-                fillColor: const Color(0xFF1F1F25),
+                fillColor: EllaColors.bgSecondary,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(24),
                   borderSide: BorderSide.none,
@@ -251,8 +252,8 @@ class _SearchWidgetState extends State<SearchWidget> {
                 height: 48,
                 decoration: BoxDecoration(
                   color: convoProvider.selectedDate != null
-                      ? Colors.deepPurple.withValues(alpha: 0.5)
-                      : const Color(0xFF1F1F25),
+                      ? EllaColors.primary.withValues(alpha: 0.5)
+                      : EllaColors.bgSecondary,
                   borderRadius: BorderRadius.circular(24),
                 ),
                 child: IconButton(

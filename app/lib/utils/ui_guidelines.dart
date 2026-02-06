@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// UI Guidelines to ensure consistent styling throughout the app
 /// Use this class for reference when creating new UI components
@@ -40,8 +41,8 @@ class AppStyles {
 
   // Colors
   static final Color backgroundPrimary = Colors.black;
-  static final Color backgroundSecondary = const Color(0xFF1F1F25);
-  static final Color backgroundTertiary = Color(0xFF35343B);
+  static final Color backgroundSecondary = EllaColors.bgSecondary;
+  static final Color backgroundTertiary = EllaColors.bgTertiary;
 
   static const Color textPrimary = Colors.white;
   static final Color textSecondary = Colors.white.withOpacity(0.8);

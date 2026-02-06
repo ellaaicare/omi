@@ -17,6 +17,7 @@ import 'widgets/memory_edit_sheet.dart';
 import 'widgets/memory_graph_page.dart';
 import 'widgets/memory_item.dart';
 import 'widgets/memory_management_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MemoriesPage extends StatefulWidget {
   const MemoriesPage({super.key});
@@ -162,7 +163,7 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
                   showMemoryDialog(context, provider);
                   MixpanelManager().memoriesPageCreateMemoryBtn();
                 },
-                backgroundColor: Colors.deepPurple,
+                backgroundColor: EllaColors.primary,
                 tooltip: context.l10n.createMemoryTooltip,
                 child: const Icon(
                   Icons.add,
@@ -175,7 +176,7 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
                 HapticFeedback.mediumImpact();
                 await provider.init();
               },
-              color: Colors.deepPurpleAccent,
+              color: EllaColors.primaryLight,
               backgroundColor: Colors.white,
               child: provider.loading && _isInitialLoad
                   ? CustomScrollView(
@@ -479,7 +480,7 @@ class MemoriesPageState extends State<MemoriesPage> with AutomaticKeepAliveClien
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         title: Text(
           context.l10n.clearMemoryTitle,
           style: const TextStyle(color: Colors.white),

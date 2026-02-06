@@ -17,6 +17,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CreateTemplateBottomSheet extends StatefulWidget {
   final String? conversationId;
@@ -320,7 +321,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                           hintText: context.l10n.templateNameHint,
                           hintStyle: TextStyle(color: Colors.grey.shade600),
                           filled: true,
-                          fillColor: const Color(0xFF1F1F25),
+                          fillColor: EllaColors.bgSecondary,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
                             borderSide: BorderSide.none,
@@ -359,7 +360,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                           hintText: context.l10n.conversationPromptHint,
                           hintStyle: TextStyle(color: Colors.grey.shade600),
                           filled: true,
-                          fillColor: const Color(0xFF1F1F25),
+                          fillColor: EllaColors.bgSecondary,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
                             borderSide: BorderSide.none,
@@ -383,7 +384,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                       Container(
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF1F1F25),
+                          color: EllaColors.bgSecondary,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(

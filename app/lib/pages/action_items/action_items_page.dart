@@ -12,6 +12,7 @@ import 'package:omi/services/app_review_service.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'widgets/action_item_form_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 // Re-export Goal from goals.dart for use in this file
 export 'package:omi/backend/http/api/goals.dart' show Goal;
@@ -214,7 +215,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
             defaultDueDate: _getDefaultDueDateForCategory(TaskCategory.today),
           );
         },
-        backgroundColor: Colors.deepPurple,
+        backgroundColor: EllaColors.primary,
         child: const Icon(Icons.add, color: Colors.white),
       ),
     );
@@ -417,7 +418,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
                 HapticFeedback.mediumImpact();
                 return provider.forceRefreshActionItems();
               },
-              color: Colors.deepPurple,
+              color: EllaColors.primary,
               backgroundColor: Colors.white,
               child: provider.isLoading && provider.actionItems.isEmpty
                   ? _buildLoadingState()
@@ -433,7 +434,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
 
   Widget _buildLoadingState() {
     return const Center(
-      child: CircularProgressIndicator(color: Colors.deepPurple),
+      child: CircularProgressIndicator(color: EllaColors.primary),
     );
   }
 
@@ -458,13 +459,13 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
                     width: 80,
                     height: 80,
                     decoration: BoxDecoration(
-                      color: Colors.deepPurple.withOpacity(0.1),
+                      color: EllaColors.primary.withOpacity(0.1),
                       borderRadius: BorderRadius.circular(24),
                     ),
                     child: Icon(
                       Icons.check_circle_outline,
                       size: 40,
-                      color: Colors.deepPurple.withOpacity(0.6),
+                      color: EllaColors.primary.withOpacity(0.6),
                     ),
                   ),
                   const SizedBox(height: 24),
@@ -760,7 +761,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
           height: showIndicator ? 6 : (isDragging ? 20 : 4),
           margin: const EdgeInsets.symmetric(horizontal: 4),
           decoration: BoxDecoration(
-            color: showIndicator ? Colors.deepPurple : Colors.transparent,
+            color: showIndicator ? EllaColors.primary : Colors.transparent,
             borderRadius: BorderRadius.circular(2),
           ),
         );
@@ -856,7 +857,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
                 height: 2,
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurple,
+                  color: EllaColors.primary,
                   borderRadius: BorderRadius.circular(1),
                 ),
               ),
@@ -867,7 +868,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
                 height: 2,
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurple,
+                  color: EllaColors.primary,
                   borderRadius: BorderRadius.circular(1),
                 ),
               ),
@@ -1171,7 +1172,7 @@ class _ActionItemsPageState extends State<ActionItemsPage> with AutomaticKeepAli
         return await showDialog<bool>(
               context: context,
               builder: (context) => AlertDialog(
-                backgroundColor: const Color(0xFF1F1F25),
+                backgroundColor: EllaColors.bgSecondary,
                 title: const Text('Delete Goal', style: TextStyle(color: Colors.white)),
                 content: Text('Delete "${goal.title}"?', style: const TextStyle(color: Colors.white70)),
                 actions: [
@@ -1650,7 +1651,7 @@ class _GoalEditSheetState extends State<_GoalEditSheet> {
                         final confirm = await showDialog<bool>(
                           context: context,
                           builder: (context) => AlertDialog(
-                            backgroundColor: const Color(0xFF1F1F25),
+                            backgroundColor: EllaColors.bgSecondary,
                             title: const Text('Delete Goal', style: TextStyle(color: Colors.white)),
                             content:
                                 Text('Delete "${widget.goal.title}"?', style: const TextStyle(color: Colors.white70)),

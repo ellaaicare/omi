@@ -11,6 +11,7 @@ import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ReviewsListPage extends StatefulWidget {
   final App app;
@@ -56,7 +57,7 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
     await showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(
           context.l10n.replyToReview,
@@ -138,7 +139,7 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
                         }
                       },
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.deepPurple,
+                  backgroundColor: EllaColors.primary,
                   foregroundColor: Colors.white,
                 ),
                 child: submitting
@@ -294,10 +295,10 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: selected ? Colors.deepPurple : Colors.grey.shade800.withOpacity(0.5),
+          color: selected ? EllaColors.primary : Colors.grey.shade800.withOpacity(0.5),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: selected ? Colors.deepPurple : Colors.grey.shade700,
+            color: selected ? EllaColors.primary : Colors.grey.shade700,
             width: 1,
           ),
         ),
@@ -321,7 +322,7 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
     return Container(
       padding: const EdgeInsets.all(16.0),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25).withOpacity(0.8),
+        color: EllaColors.bgSecondary.withOpacity(0.8),
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(
@@ -400,7 +401,7 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
                           child: Icon(
                             FontAwesomeIcons.solidStar,
                             size: 14,
-                            color: index < review.score.round() ? Colors.deepPurple : Colors.grey.shade700,
+                            color: index < review.score.round() ? EllaColors.primary : Colors.grey.shade700,
                           ),
                         );
                       }),
@@ -479,11 +480,11 @@ class _ReviewsListPageState extends State<ReviewsListPage> {
                 icon: Icon(
                   review.response.isNotEmpty ? FontAwesomeIcons.pencil : FontAwesomeIcons.reply,
                   size: 12,
-                  color: Colors.deepPurple,
+                  color: EllaColors.primary,
                 ),
                 label: Text(
                   review.response.isNotEmpty ? context.l10n.editReply : context.l10n.reply,
-                  style: const TextStyle(color: Colors.deepPurple, fontSize: 13),
+                  style: const TextStyle(color: EllaColors.primary, fontSize: 13),
                 ),
               ),
             ),

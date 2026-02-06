@@ -620,6 +620,17 @@ class SharedPreferencesUtil {
     }
   }
 
+  //--------------------------- Emergency Contact ----------------------------//
+
+  String get emergencyContactName => getString('emergencyContactName');
+  set emergencyContactName(String value) => saveString('emergencyContactName', value);
+
+  String get emergencyContactPhone => getString('emergencyContactPhone');
+  set emergencyContactPhone(String value) => saveString('emergencyContactPhone', value);
+
+  String get pendingEmergency => getString('pendingEmergency');
+  set pendingEmergency(String value) => saveString('pendingEmergency', value);
+
   //--------------------------- Setters & Getters -----------------------------//
 
   String getString(String key, {String defaultValue = ''}) => _preferences?.getString(key) ?? defaultValue;

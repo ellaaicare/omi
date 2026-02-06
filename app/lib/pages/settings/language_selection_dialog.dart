@@ -6,6 +6,7 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class LanguageSelectionDialog {
   static Future<void> show(BuildContext context,
@@ -138,15 +139,15 @@ class LanguageSelectionDialog {
                         fillColor: const Color(0xFF2A2A2A),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: Color(0xFF35343B)),
+                          borderSide: BorderSide(color: EllaColors.bgTertiary),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: Color(0xFF35343B)),
+                          borderSide: BorderSide(color: EllaColors.bgTertiary),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Colors.deepPurple),
+                          borderSide: const BorderSide(color: EllaColors.primary),
                         ),
                       ),
                     ),
@@ -172,9 +173,9 @@ class LanguageSelectionDialog {
                                     style: const TextStyle(color: Colors.white),
                                   ),
                                   trailing:
-                                      isSelected ? const Icon(Icons.check_circle, color: Colors.deepPurple) : null,
+                                      isSelected ? const Icon(Icons.check_circle, color: EllaColors.primary) : null,
                                   selected: isSelected,
-                                  selectedTileColor: Colors.deepPurple.withOpacity(0.2),
+                                  selectedTileColor: EllaColors.primary.withOpacity(0.2),
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(8),
                                   ),
@@ -237,8 +238,8 @@ class LanguageSelectionDialog {
                           }
                         },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.deepPurple,
-                    disabledBackgroundColor: Colors.deepPurple.withOpacity(0.3),
+                    backgroundColor: EllaColors.primary,
+                    disabledBackgroundColor: EllaColors.primary.withOpacity(0.3),
                     foregroundColor: Colors.white,
                   ),
                   child: Text(context.l10n.confirm),

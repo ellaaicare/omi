@@ -12,6 +12,7 @@ import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/dialog.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 enum ChatMode { chat, chat_clone }
 
@@ -115,7 +116,7 @@ class ChatAppsDropdownWidget extends StatelessWidget {
               itemBuilder: (BuildContext context) {
                 return _getAppsDropdownItems(context, messageProvider, appProvider);
               },
-              color: const Color(0xFF1F1F25),
+              color: EllaColors.bgSecondary,
             ),
           ),
         );

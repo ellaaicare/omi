@@ -18,6 +18,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class SummarizedAppsBottomSheet extends StatelessWidget {
   const SummarizedAppsBottomSheet({super.key});
@@ -213,8 +214,8 @@ class _AppsListState extends State<_AppsList> {
 
   Widget _buildShimmerListItem() {
     return ShimmerWithTimeout(
-      baseColor: const Color(0xFF1F1F25),
-      highlightColor: const Color(0xFF35343B),
+      baseColor: EllaColors.bgSecondary,
+      highlightColor: EllaColors.bgTertiary,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
@@ -224,7 +225,7 @@ class _AppsListState extends State<_AppsList> {
               width: 32,
               height: 32,
               decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25),
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.circular(16),
               ),
             ),
@@ -238,7 +239,7 @@ class _AppsListState extends State<_AppsList> {
                     width: double.infinity,
                     height: 16,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1F1F25),
+                      color: EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(4),
                     ),
                   ),
@@ -247,7 +248,7 @@ class _AppsListState extends State<_AppsList> {
                     width: 200,
                     height: 12,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1F1F25),
+                      color: EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(4),
                     ),
                   ),
@@ -578,7 +579,7 @@ class _AppListItemState extends State<_AppListItem> {
           begin: isLeft ? Alignment.centerLeft : Alignment.centerRight,
           end: isLeft ? Alignment.centerRight : Alignment.centerLeft,
           colors: [
-            Colors.deepPurple.withValues(alpha: 0.7),
+            EllaColors.primary.withValues(alpha: 0.7),
             Colors.transparent,
           ],
         ),

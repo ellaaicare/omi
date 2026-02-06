@@ -25,6 +25,7 @@ import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
 import 'widgets/capabilities_chips_widget.dart';
 import 'widgets/prompt_text_field.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AddAppPage extends StatefulWidget {
   final bool presetForConversationAnalysis;
@@ -160,7 +161,7 @@ class _AddAppPageState extends State<AddAppPage> {
                           const SizedBox(height: 18),
                           Container(
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1F1F25),
+                              color: EllaColors.bgSecondary,
                               borderRadius: BorderRadius.circular(18.0),
                             ),
                             padding: const EdgeInsets.all(14.0),
@@ -222,7 +223,7 @@ class _AddAppPageState extends State<AddAppPage> {
                                                 height: 180,
                                                 margin: const EdgeInsets.only(right: 8),
                                                 decoration: BoxDecoration(
-                                                  color: Color(0xFF35343B),
+                                                  color: EllaColors.bgTertiary,
                                                   borderRadius: BorderRadius.circular(8),
                                                 ),
                                                 child: provider.isUploadingThumbnail
@@ -327,7 +328,7 @@ class _AddAppPageState extends State<AddAppPage> {
                           const SizedBox(height: 18),
                           Container(
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1F1F25),
+                              color: EllaColors.bgSecondary,
                               borderRadius: BorderRadius.circular(18.0),
                             ),
                             padding: const EdgeInsets.fromLTRB(14.0, 20.0, 14.0, 14.0),
@@ -392,7 +393,7 @@ class _AddAppPageState extends State<AddAppPage> {
                                     },
                                     child: Container(
                                       decoration: BoxDecoration(
-                                        color: const Color(0xFF1F1F25),
+                                        color: EllaColors.bgSecondary,
                                         borderRadius: BorderRadius.circular(18.0),
                                       ),
                                       padding: const EdgeInsets.all(14.0),
@@ -431,7 +432,7 @@ class _AddAppPageState extends State<AddAppPage> {
                                 ),
                                 Container(
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF1F1F25),
+                                    color: EllaColors.bgSecondary,
                                     borderRadius: BorderRadius.circular(18.0),
                                   ),
                                   padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 20.0),
@@ -462,7 +463,7 @@ class _AddAppPageState extends State<AddAppPage> {
                           Container(
                             padding: const EdgeInsets.all(20),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1F1F25),
+                              color: EllaColors.bgSecondary,
                               borderRadius: BorderRadius.circular(18),
                             ),
                             child: Column(
@@ -653,7 +654,7 @@ class _AddAppPageState extends State<AddAppPage> {
                 padding: const EdgeInsets.only(left: 16.0, right: 16, bottom: 30, top: 10),
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12.0),
-                  color: const Color(0xFF1F1F25),
+                  color: EllaColors.bgSecondary,
                   gradient: LinearGradient(
                     colors: [Colors.black, Colors.black.withValues(alpha: 0)],
                     begin: Alignment.bottomCenter,
@@ -718,7 +719,7 @@ class _AddAppPageState extends State<AddAppPage> {
                                               builder: (ctx) => Container(
                                                 padding: const EdgeInsets.all(20),
                                                 decoration: BoxDecoration(
-                                                  color: const Color(0xFF1F1F25),
+                                                  color: EllaColors.bgSecondary,
                                                   borderRadius: const BorderRadius.vertical(
                                                     top: Radius.circular(20),
                                                   ),

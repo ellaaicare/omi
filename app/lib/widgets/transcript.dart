@@ -14,6 +14,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/constants.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 // Use speaker colors from person.dart for bubble colors
 final List<Color> _speakerColors = speakerColors;
@@ -397,7 +398,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
         child: Container(
           key: matchKey,
           decoration: BoxDecoration(
-            color: isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : Colors.deepPurple.withValues(alpha: 0.6),
+            color: isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : EllaColors.primary.withValues(alpha: 0.6),
             borderRadius: BorderRadius.circular(2),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 1),

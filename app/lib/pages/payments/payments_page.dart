@@ -11,6 +11,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'models/payment_method_config.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class PaymentsPage extends StatefulWidget {
   const PaymentsPage({super.key});
@@ -39,10 +40,10 @@ class _PaymentsPageState extends State<PaymentsPage> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: Color(0xFF35343B),
+          color: EllaColors.bgTertiary,
           width: 1,
         ),
       ),

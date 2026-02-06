@@ -19,6 +19,7 @@ import 'package:omi/pages/settings/transcription_settings_page.dart';
 import 'package:omi/pages/settings/widgets/plans_sheet.dart';
 import 'package:omi/providers/usage_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class UsagePage extends StatefulWidget {
   final bool showUpgradeDialog;
@@ -294,7 +295,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
         ],
         bottom: TabBar(
           controller: _tabController,
-          indicatorColor: Colors.deepPurple,
+          indicatorColor: EllaColors.primary,
           isScrollable: true,
           indicatorWeight: 3,
           labelStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
@@ -315,7 +316,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
               provider.allTimeUsage != null;
 
           if (provider.isLoading && !hasAnyData) {
-            return const Center(child: CircularProgressIndicator(color: Colors.deepPurple));
+            return const Center(child: CircularProgressIndicator(color: EllaColors.primary));
           }
 
           if (provider.error != null && !hasAnyData) {
@@ -379,7 +380,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
       margin: const EdgeInsets.fromLTRB(16, 24, 16, 0),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
       ),
@@ -507,7 +508,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
     }
 
     if (stats == null) {
-      return const Center(child: CircularProgressIndicator(color: Colors.deepPurple));
+      return const Center(child: CircularProgressIndicator(color: EllaColors.primary));
     }
 
     if (stats.transcriptionSeconds == 0 &&
@@ -516,7 +517,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
         stats.memoriesCreated == 0) {
       return RefreshIndicator(
         onRefresh: onRefresh,
-        color: Colors.deepPurple,
+        color: EllaColors.primary,
         child: RepaintBoundary(
           key: key,
           child: Container(
@@ -540,7 +541,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
 
     return RefreshIndicator(
       onRefresh: onRefresh,
-      color: Colors.deepPurple,
+      color: EllaColors.primary,
       child: RepaintBoundary(
         key: key,
         child: Container(
@@ -870,7 +871,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
           height: 200,
           padding: const EdgeInsets.only(top: 16, right: 16),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
           ),
@@ -942,7 +943,7 @@ class _UsagePageState extends State<UsagePage> with TickerProviderStateMixin {
         gradient: const LinearGradient(
           colors: [
             Color(0xFF2A2A2E),
-            Color(0xFF1F1F25),
+            EllaColors.bgSecondary,
           ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,

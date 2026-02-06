@@ -21,6 +21,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/confirmation_dialog.dart';
 import 'package:omi/pages/settings/payment_webview_page.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class PlansSheet extends StatefulWidget {
   final AnimationController waveController;
@@ -85,7 +86,7 @@ class _PlansSheetState extends State<PlansSheet> {
     return StatefulBuilder(
       builder: (context, setDialogState) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF1F1F25),
+          backgroundColor: EllaColors.bgSecondary,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Text(
             context.l10n.omiTraining,
@@ -374,7 +375,7 @@ class _PlansSheetState extends State<PlansSheet> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text(
           'Downgrade to Freemium?',
@@ -483,11 +484,11 @@ class _PlansSheetState extends State<PlansSheet> {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF1F1F25),
+          backgroundColor: EllaColors.bgSecondary,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Row(
             children: [
-              const Icon(Icons.payment, color: Colors.deepPurple, size: 24),
+              const Icon(Icons.payment, color: EllaColors.primary, size: 24),
               const SizedBox(width: 8),
               Text(
                 context.l10n.upgradeToAnnualPlan,
@@ -530,19 +531,19 @@ class _PlansSheetState extends State<PlansSheet> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurple.withOpacity(0.1),
+                  color: EllaColors.primary.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
+                  border: Border.all(color: EllaColors.primary.withOpacity(0.3)),
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.info_outline, color: Colors.deepPurple, size: 20),
+                    const Icon(Icons.info_outline, color: EllaColors.primary, size: 20),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         context.l10n.thirteenMonthsCoverage,
                         style: TextStyle(
-                          color: Colors.deepPurple.shade300,
+                          color: EllaColors.primaryLight,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
@@ -564,7 +565,7 @@ class _PlansSheetState extends State<PlansSheet> {
             ElevatedButton(
               onPressed: () => Navigator.of(ctx).pop(true),
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepPurple,
+                backgroundColor: EllaColors.primary,
                 foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
@@ -714,8 +715,8 @@ class _PlansSheetState extends State<PlansSheet> {
                 begin: Alignment.bottomCenter,
                 end: Alignment.topCenter,
                 colors: [
-                  Colors.deepPurple.withOpacity(0.5),
-                  Colors.deepPurple.withOpacity(0.3),
+                  EllaColors.primary.withOpacity(0.5),
+                  EllaColors.primary.withOpacity(0.3),
                   Colors.black.withOpacity(0.8),
                   Colors.black,
                 ],
@@ -1063,7 +1064,7 @@ class _PlansSheetState extends State<PlansSheet> {
                               'Your annual plan will start automatically when your monthly plan ends.',
                               textAlign: TextAlign.center,
                               style: TextStyle(
-                                color: Colors.deepPurple.shade400,
+                                color: EllaColors.primary,
                                 fontSize: 14,
                               ),
                             );
@@ -1140,18 +1141,18 @@ class _PlansSheetState extends State<PlansSheet> {
                             return Container(
                               padding: const EdgeInsets.all(20),
                               decoration: BoxDecoration(
-                                color: Colors.deepPurple.withOpacity(0.1),
+                                color: EllaColors.primary.withOpacity(0.1),
                                 borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
+                                border: Border.all(color: EllaColors.primary.withOpacity(0.3)),
                               ),
                               child: Column(
                                 children: [
-                                  const Icon(Icons.schedule, color: Colors.deepPurple, size: 32),
+                                  const Icon(Icons.schedule, color: EllaColors.primary, size: 32),
                                   const SizedBox(height: 8),
                                   Text(
                                     'Upgrade Scheduled!',
                                     style: TextStyle(
-                                      color: Colors.deepPurple.shade300,
+                                      color: EllaColors.primaryLight,
                                       fontSize: 16,
                                       fontWeight: FontWeight.w600,
                                     ),
@@ -1161,7 +1162,7 @@ class _PlansSheetState extends State<PlansSheet> {
                                     'Your annual plan will start automatically when your monthly plan ends.',
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
-                                      color: Colors.deepPurple.shade400,
+                                      color: EllaColors.primary,
                                       fontSize: 14,
                                     ),
                                   ),
@@ -1809,7 +1810,7 @@ class _PlansSheetState extends State<PlansSheet> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25), // Use conversation list background
+          color: EllaColors.bgSecondary, // Use conversation list background
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: isSelected ? Colors.white : Colors.transparent,
@@ -1949,7 +1950,7 @@ class _PlansSheetState extends State<PlansSheet> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25), // Use conversation list background
+        color: EllaColors.bgSecondary, // Use conversation list background
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: Colors.white.withOpacity(0.1),
@@ -2121,7 +2122,7 @@ class _PlansSheetState extends State<PlansSheet> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
               color: Colors.transparent,
@@ -2210,7 +2211,7 @@ class _PlansSheetState extends State<PlansSheet> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(20),
             border: Border.all(
               color: Colors.transparent,
@@ -2260,7 +2261,7 @@ class _PlansSheetState extends State<PlansSheet> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: Colors.transparent,

@@ -21,6 +21,7 @@ import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationListItem extends StatefulWidget {
   final bool isFromOnboarding;
@@ -157,13 +158,13 @@ class _ConversationListItemState extends State<ConversationListItem> {
                   width: double.maxFinite,
                   decoration: BoxDecoration(
                     color: isSelected
-                        ? Colors.deepPurple.withValues(alpha: 0.3)
+                        ? EllaColors.primary.withValues(alpha: 0.3)
                         : (isSelectionMode && !isEligible)
                             ? Colors.grey.shade800
-                            : const Color(0xFF1F1F25),
+                            : EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(24.0),
                     border: isSelected
-                        ? Border.all(color: Colors.deepPurple, width: 2)
+                        ? Border.all(color: EllaColors.primary, width: 2)
                         : (isSelectionMode && !isEligible)
                             ? Border.all(color: Colors.grey.shade600, width: 1)
                             : null,
@@ -270,7 +271,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                     width: 40,
                     height: 40,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF35343B),
+                      color: EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     alignment: Alignment.center,
@@ -318,17 +319,17 @@ class _ConversationListItemState extends State<ConversationListItem> {
                                     widget.conversation.startedAt ?? widget.conversation.createdAt,
                                     locale: Localizations.localeOf(context).languageCode,
                                   ),
-                                  style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                                  style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                                   maxLines: 1,
                                 ),
                                 if (_getConversationDuration(context).isNotEmpty) ...[
                                   const Text(
                                     ' • ',
-                                    style: TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                                    style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                                   ),
                                   Text(
                                     _getConversationDuration(context),
-                                    style: const TextStyle(color: Color(0xFF9A9BA1), fontSize: 14),
+                                    style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                                     maxLines: 1,
                                   ),
                                 ],
@@ -496,7 +497,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                           widget.conversation.startedAt ?? widget.conversation.createdAt,
                           locale: Localizations.localeOf(context).languageCode,
                         ),
-                        style: const TextStyle(color: Color(0xFF6A6B71), fontSize: 14),
+                        style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                         maxLines: 1,
                       ),
                       if (_getConversationDuration(context).isNotEmpty)
@@ -505,7 +506,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF35343B),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(

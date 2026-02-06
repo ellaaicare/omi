@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class DeleteConfirmation {
   static Future<bool> show(BuildContext context, {String? title, String? content}) async {
@@ -38,7 +39,7 @@ class DeleteConfirmation {
       return await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              backgroundColor: const Color(0xFF1F1F25),
+              backgroundColor: EllaColors.bgSecondary,
               surfaceTintColor: Colors.transparent,
               title: Text(
                 title!,

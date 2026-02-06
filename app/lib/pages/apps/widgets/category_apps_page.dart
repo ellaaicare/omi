@@ -9,6 +9,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CategoryAppsPage extends StatefulWidget {
   final Category category;
@@ -107,7 +108,7 @@ class _CategoryAppsPageState extends State<CategoryAppsPage> {
             child: _isLoading
                 ? const Center(
                     child: CircularProgressIndicator(
-                      color: Colors.deepPurpleAccent,
+                      color: EllaColors.primaryLight,
                     ),
                   )
                 : _apps.isEmpty
