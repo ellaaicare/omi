@@ -15194,6 +15194,390 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Next'**
   String get ellaNext;
+
+  /// No description provided for @ellaCareTeam.
+  ///
+  /// In en, this message translates to:
+  /// **'Care Team'**
+  String get ellaCareTeam;
+
+  /// No description provided for @ellaCareTeamDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Your care team can see your daily activity and will be alerted in an emergency.'**
+  String get ellaCareTeamDescription;
+
+  /// No description provided for @ellaCareTeamEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'No one on your care team yet'**
+  String get ellaCareTeamEmpty;
+
+  /// No description provided for @ellaCareTeamEmptyDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a family member so they can check in on you and be alerted if you need help.'**
+  String get ellaCareTeamEmptyDescription;
+
+  /// No description provided for @ellaAddFamilyMember.
+  ///
+  /// In en, this message translates to:
+  /// **'Add Family Member'**
+  String get ellaAddFamilyMember;
+
+  /// No description provided for @ellaCareTeamSpotsUsed.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} of {max} spots used'**
+  String ellaCareTeamSpotsUsed(int count, int max);
+
+  /// No description provided for @ellaCareTeamFull.
+  ///
+  /// In en, this message translates to:
+  /// **'5 of 5 spots used. Remove someone to add a new member.'**
+  String get ellaCareTeamFull;
+
+  /// No description provided for @ellaCareTeamFullDialog.
+  ///
+  /// In en, this message translates to:
+  /// **'Your care team is full (5 people). Remove someone to add a new member.'**
+  String get ellaCareTeamFullDialog;
+
+  /// No description provided for @ellaCaregiverStatusActive.
+  ///
+  /// In en, this message translates to:
+  /// **'Active — receives alerts'**
+  String get ellaCaregiverStatusActive;
+
+  /// No description provided for @ellaCaregiverStatusInvited.
+  ///
+  /// In en, this message translates to:
+  /// **'Invited — waiting to join'**
+  String get ellaCaregiverStatusInvited;
+
+  /// No description provided for @ellaFamilyCaregivers.
+  ///
+  /// In en, this message translates to:
+  /// **'Family & Caregivers'**
+  String get ellaFamilyCaregivers;
+
+  /// No description provided for @ellaFamilyCaregiversSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 person} other{{count} people}}'**
+  String ellaFamilyCaregiversSubtitle(int count);
+
+  /// No description provided for @ellaFamilyCaregiversNotSetUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Not set up'**
+  String get ellaFamilyCaregiversNotSetUp;
+
+  /// No description provided for @ellaEmergencyContact.
+  ///
+  /// In en, this message translates to:
+  /// **'Emergency Contact'**
+  String get ellaEmergencyContact;
+
+  /// No description provided for @ellaEmergencyContactNotSetUp.
+  ///
+  /// In en, this message translates to:
+  /// **'Not set up'**
+  String get ellaEmergencyContactNotSetUp;
+
+  /// No description provided for @ellaEmergencyContactDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'This person will be called when you tap the emergency button.'**
+  String get ellaEmergencyContactDescription;
+
+  /// No description provided for @ellaAddCaregiverTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Add Family Member'**
+  String get ellaAddCaregiverTitle;
+
+  /// No description provided for @ellaAddCaregiverName.
+  ///
+  /// In en, this message translates to:
+  /// **'Their name'**
+  String get ellaAddCaregiverName;
+
+  /// No description provided for @ellaAddCaregiverNamePlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., Jane'**
+  String get ellaAddCaregiverNamePlaceholder;
+
+  /// No description provided for @ellaAddCaregiverPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Their phone number'**
+  String get ellaAddCaregiverPhone;
+
+  /// No description provided for @ellaAddCaregiverPhonePlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., (555) 123-4567'**
+  String get ellaAddCaregiverPhonePlaceholder;
+
+  /// No description provided for @ellaAddCaregiverEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Their email (optional)'**
+  String get ellaAddCaregiverEmail;
+
+  /// No description provided for @ellaAddCaregiverEmailPlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., jane@email.com'**
+  String get ellaAddCaregiverEmailPlaceholder;
+
+  /// No description provided for @ellaAddCaregiverRelationship.
+  ///
+  /// In en, this message translates to:
+  /// **'Relationship'**
+  String get ellaAddCaregiverRelationship;
+
+  /// No description provided for @ellaAddCaregiverRelationshipSelect.
+  ///
+  /// In en, this message translates to:
+  /// **'Select...'**
+  String get ellaAddCaregiverRelationshipSelect;
+
+  /// No description provided for @ellaRelationshipDaughter.
+  ///
+  /// In en, this message translates to:
+  /// **'Daughter'**
+  String get ellaRelationshipDaughter;
+
+  /// No description provided for @ellaRelationshipSon.
+  ///
+  /// In en, this message translates to:
+  /// **'Son'**
+  String get ellaRelationshipSon;
+
+  /// No description provided for @ellaRelationshipSpouse.
+  ///
+  /// In en, this message translates to:
+  /// **'Spouse'**
+  String get ellaRelationshipSpouse;
+
+  /// No description provided for @ellaRelationshipSibling.
+  ///
+  /// In en, this message translates to:
+  /// **'Sibling'**
+  String get ellaRelationshipSibling;
+
+  /// No description provided for @ellaRelationshipFriend.
+  ///
+  /// In en, this message translates to:
+  /// **'Friend'**
+  String get ellaRelationshipFriend;
+
+  /// No description provided for @ellaRelationshipDoctor.
+  ///
+  /// In en, this message translates to:
+  /// **'Doctor'**
+  String get ellaRelationshipDoctor;
+
+  /// No description provided for @ellaRelationshipOther.
+  ///
+  /// In en, this message translates to:
+  /// **'Other'**
+  String get ellaRelationshipOther;
+
+  /// No description provided for @ellaPermissionsHeader.
+  ///
+  /// In en, this message translates to:
+  /// **'They will receive:'**
+  String get ellaPermissionsHeader;
+
+  /// No description provided for @ellaPermissionEmergencyAlerts.
+  ///
+  /// In en, this message translates to:
+  /// **'Emergency alerts'**
+  String get ellaPermissionEmergencyAlerts;
+
+  /// No description provided for @ellaPermissionEmergencyAlertsDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Called/texted when you tap the emergency button'**
+  String get ellaPermissionEmergencyAlertsDescription;
+
+  /// No description provided for @ellaPermissionDailySummary.
+  ///
+  /// In en, this message translates to:
+  /// **'Daily summary email'**
+  String get ellaPermissionDailySummary;
+
+  /// No description provided for @ellaPermissionDailySummaryDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'A daily email with your activity and conversations'**
+  String get ellaPermissionDailySummaryDescription;
+
+  /// No description provided for @ellaSendInvite.
+  ///
+  /// In en, this message translates to:
+  /// **'Send Invite'**
+  String get ellaSendInvite;
+
+  /// No description provided for @ellaInviteSentTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} has been invited!'**
+  String ellaInviteSentTitle(String name);
+
+  /// No description provided for @ellaInviteSentDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'We sent a text message to {phone} with instructions to join your care team.'**
+  String ellaInviteSentDescription(String phone);
+
+  /// No description provided for @ellaInviteExpiry.
+  ///
+  /// In en, this message translates to:
+  /// **'The invite expires in 7 days.'**
+  String get ellaInviteExpiry;
+
+  /// No description provided for @ellaResendInvite.
+  ///
+  /// In en, this message translates to:
+  /// **'Resend Invite'**
+  String get ellaResendInvite;
+
+  /// No description provided for @ellaResendSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite resent to {name}.'**
+  String ellaResendSuccess(String name);
+
+  /// No description provided for @ellaRemoveFromCareTeam.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove from Care Team'**
+  String get ellaRemoveFromCareTeam;
+
+  /// No description provided for @ellaRemoveConfirmTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove {name}?'**
+  String ellaRemoveConfirmTitle(String name);
+
+  /// No description provided for @ellaRemoveConfirmDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} will no longer receive emergency alerts or daily summaries.'**
+  String ellaRemoveConfirmDescription(String name);
+
+  /// No description provided for @ellaRemoveConfirmButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get ellaRemoveConfirmButton;
+
+  /// No description provided for @ellaRemoveSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} has been removed.'**
+  String ellaRemoveSuccess(String name);
+
+  /// No description provided for @ellaInviteErrorNetwork.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t send invite. Check your internet connection.'**
+  String get ellaInviteErrorNetwork;
+
+  /// No description provided for @ellaInviteErrorDuplicate.
+  ///
+  /// In en, this message translates to:
+  /// **'This phone number is already on your care team.'**
+  String get ellaInviteErrorDuplicate;
+
+  /// No description provided for @ellaInviteErrorInvalidPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Please enter a valid phone number'**
+  String get ellaInviteErrorInvalidPhone;
+
+  /// No description provided for @ellaSettingsProfile.
+  ///
+  /// In en, this message translates to:
+  /// **'Your Name'**
+  String get ellaSettingsProfile;
+
+  /// No description provided for @ellaSettingsDevice.
+  ///
+  /// In en, this message translates to:
+  /// **'Connected Device'**
+  String get ellaSettingsDevice;
+
+  /// No description provided for @ellaSettingsPrivacy.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy Policy'**
+  String get ellaSettingsPrivacy;
+
+  /// No description provided for @ellaSettingsTerms.
+  ///
+  /// In en, this message translates to:
+  /// **'Terms of Service'**
+  String get ellaSettingsTerms;
+
+  /// No description provided for @ellaSettingsSignOut.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign Out'**
+  String get ellaSettingsSignOut;
+
+  /// No description provided for @ellaDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get ellaDone;
+
+  /// No description provided for @ellaSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get ellaSave;
+
+  /// No description provided for @ellaCancel.
+  ///
+  /// In en, this message translates to:
+  /// **'Cancel'**
+  String get ellaCancel;
+
+  /// No description provided for @ellaCareTeamSection.
+  ///
+  /// In en, this message translates to:
+  /// **'CARE TEAM'**
+  String get ellaCareTeamSection;
+
+  /// No description provided for @ellaDeviceSection.
+  ///
+  /// In en, this message translates to:
+  /// **'DEVICE'**
+  String get ellaDeviceSection;
+
+  /// No description provided for @ellaAboutSection.
+  ///
+  /// In en, this message translates to:
+  /// **'ABOUT'**
+  String get ellaAboutSection;
+
+  /// No description provided for @ellaJoinedDate.
+  ///
+  /// In en, this message translates to:
+  /// **'Joined {date}'**
+  String ellaJoinedDate(String date);
+
+  /// No description provided for @ellaInvitedDate.
+  ///
+  /// In en, this message translates to:
+  /// **'Invited {date}'**
+  String ellaInvitedDate(String date);
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

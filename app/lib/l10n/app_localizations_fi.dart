@@ -8130,4 +8130,224 @@ class AppLocalizationsFi extends AppLocalizations {
 
   @override
   String get ellaNext => 'Next';
+
+  @override
+  String get ellaCareTeam => 'Care Team';
+
+  @override
+  String get ellaCareTeamDescription =>
+      'Your care team can see your daily activity and will be alerted in an emergency.';
+
+  @override
+  String get ellaCareTeamEmpty => 'No one on your care team yet';
+
+  @override
+  String get ellaCareTeamEmptyDescription =>
+      'Add a family member so they can check in on you and be alerted if you need help.';
+
+  @override
+  String get ellaAddFamilyMember => 'Add Family Member';
+
+  @override
+  String ellaCareTeamSpotsUsed(int count, int max) {
+    return '$count of $max spots used';
+  }
+
+  @override
+  String get ellaCareTeamFull => '5 of 5 spots used. Remove someone to add a new member.';
+
+  @override
+  String get ellaCareTeamFullDialog => 'Your care team is full (5 people). Remove someone to add a new member.';
+
+  @override
+  String get ellaCaregiverStatusActive => 'Active — receives alerts';
+
+  @override
+  String get ellaCaregiverStatusInvited => 'Invited — waiting to join';
+
+  @override
+  String get ellaFamilyCaregivers => 'Family & Caregivers';
+
+  @override
+  String ellaFamilyCaregiversSubtitle(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count people',
+      one: '1 person',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get ellaFamilyCaregiversNotSetUp => 'Not set up';
+
+  @override
+  String get ellaEmergencyContact => 'Emergency Contact';
+
+  @override
+  String get ellaEmergencyContactNotSetUp => 'Not set up';
+
+  @override
+  String get ellaEmergencyContactDescription => 'This person will be called when you tap the emergency button.';
+
+  @override
+  String get ellaAddCaregiverTitle => 'Add Family Member';
+
+  @override
+  String get ellaAddCaregiverName => 'Their name';
+
+  @override
+  String get ellaAddCaregiverNamePlaceholder => 'e.g., Jane';
+
+  @override
+  String get ellaAddCaregiverPhone => 'Their phone number';
+
+  @override
+  String get ellaAddCaregiverPhonePlaceholder => 'e.g., (555) 123-4567';
+
+  @override
+  String get ellaAddCaregiverEmail => 'Their email (optional)';
+
+  @override
+  String get ellaAddCaregiverEmailPlaceholder => 'e.g., jane@email.com';
+
+  @override
+  String get ellaAddCaregiverRelationship => 'Relationship';
+
+  @override
+  String get ellaAddCaregiverRelationshipSelect => 'Select...';
+
+  @override
+  String get ellaRelationshipDaughter => 'Daughter';
+
+  @override
+  String get ellaRelationshipSon => 'Son';
+
+  @override
+  String get ellaRelationshipSpouse => 'Spouse';
+
+  @override
+  String get ellaRelationshipSibling => 'Sibling';
+
+  @override
+  String get ellaRelationshipFriend => 'Friend';
+
+  @override
+  String get ellaRelationshipDoctor => 'Doctor';
+
+  @override
+  String get ellaRelationshipOther => 'Other';
+
+  @override
+  String get ellaPermissionsHeader => 'They will receive:';
+
+  @override
+  String get ellaPermissionEmergencyAlerts => 'Emergency alerts';
+
+  @override
+  String get ellaPermissionEmergencyAlertsDescription => 'Called/texted when you tap the emergency button';
+
+  @override
+  String get ellaPermissionDailySummary => 'Daily summary email';
+
+  @override
+  String get ellaPermissionDailySummaryDescription => 'A daily email with your activity and conversations';
+
+  @override
+  String get ellaSendInvite => 'Send Invite';
+
+  @override
+  String ellaInviteSentTitle(String name) {
+    return '$name has been invited!';
+  }
+
+  @override
+  String ellaInviteSentDescription(String phone) {
+    return 'We sent a text message to $phone with instructions to join your care team.';
+  }
+
+  @override
+  String get ellaInviteExpiry => 'The invite expires in 7 days.';
+
+  @override
+  String get ellaResendInvite => 'Resend Invite';
+
+  @override
+  String ellaResendSuccess(String name) {
+    return 'Invite resent to $name.';
+  }
+
+  @override
+  String get ellaRemoveFromCareTeam => 'Remove from Care Team';
+
+  @override
+  String ellaRemoveConfirmTitle(String name) {
+    return 'Remove $name?';
+  }
+
+  @override
+  String ellaRemoveConfirmDescription(String name) {
+    return '$name will no longer receive emergency alerts or daily summaries.';
+  }
+
+  @override
+  String get ellaRemoveConfirmButton => 'Remove';
+
+  @override
+  String ellaRemoveSuccess(String name) {
+    return '$name has been removed.';
+  }
+
+  @override
+  String get ellaInviteErrorNetwork => 'Couldn\'t send invite. Check your internet connection.';
+
+  @override
+  String get ellaInviteErrorDuplicate => 'This phone number is already on your care team.';
+
+  @override
+  String get ellaInviteErrorInvalidPhone => 'Please enter a valid phone number';
+
+  @override
+  String get ellaSettingsProfile => 'Your Name';
+
+  @override
+  String get ellaSettingsDevice => 'Connected Device';
+
+  @override
+  String get ellaSettingsPrivacy => 'Privacy Policy';
+
+  @override
+  String get ellaSettingsTerms => 'Terms of Service';
+
+  @override
+  String get ellaSettingsSignOut => 'Sign Out';
+
+  @override
+  String get ellaDone => 'Done';
+
+  @override
+  String get ellaSave => 'Save';
+
+  @override
+  String get ellaCancel => 'Cancel';
+
+  @override
+  String get ellaCareTeamSection => 'CARE TEAM';
+
+  @override
+  String get ellaDeviceSection => 'DEVICE';
+
+  @override
+  String get ellaAboutSection => 'ABOUT';
+
+  @override
+  String ellaJoinedDate(String date) {
+    return 'Joined $date';
+  }
+
+  @override
+  String ellaInvitedDate(String date) {
+    return 'Invited $date';
+  }
 }
