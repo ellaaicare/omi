@@ -588,6 +588,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                               return const EllaEmergencyButton();
                             },
                           ),
+                          // Bottom padding to account for BottomNavBar overlay
+                          const SizedBox(height: 80),
                         ],
                       ),
                       Consumer<HomeProvider>(
