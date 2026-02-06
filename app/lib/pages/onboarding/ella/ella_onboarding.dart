@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/http/api/users.dart';
@@ -27,6 +28,12 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // In debug builds, skip auth to allow simulator testing
+      if (kDebugMode && !AuthService.instance.isSignedIn()) {
+        debugPrint('EllaOnboarding: debug mode, skipping auth');
+        setState(() => _isSignedIn = true);
+        return;
+      }
       if (AuthService.instance.isSignedIn()) {
         if (SharedPreferencesUtil().onboardingCompleted) {
           routeToPage(context, const HomePageWrapper(), replace: true);
@@ -54,7 +61,9 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
   void _completeOnboarding() {
     SharedPreferencesUtil().onboardingCompleted = true;
-    updateUserOnboardingState(completed: true);
+    if (AuthService.instance.isSignedIn()) {
+      updateUserOnboardingState(completed: true);
+    }
     routeToPage(context, const HomePageWrapper(), replace: true);
   }
 
