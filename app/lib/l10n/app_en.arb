@@ -9904,5 +9904,142 @@
   "ellaGetStarted": "Get Started",
   "ellaSkipForNow": "Skip for now",
   "ellaSkipConfirmation": "You can add an emergency contact later in Settings.",
-  "ellaNext": "Next"
+  "ellaNext": "Next",
+  "ellaCareTeam": "Care Team",
+  "ellaCareTeamDescription": "Your care team can see your daily activity and will be alerted in an emergency.",
+  "ellaCareTeamEmpty": "No one on your care team yet",
+  "ellaCareTeamEmptyDescription": "Add a family member so they can check in on you and be alerted if you need help.",
+  "ellaAddFamilyMember": "Add Family Member",
+  "ellaCareTeamSpotsUsed": "{count} of {max} spots used",
+  "@ellaCareTeamSpotsUsed": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "ellaCareTeamFull": "5 of 5 spots used. Remove someone to add a new member.",
+  "ellaCareTeamFullDialog": "Your care team is full (5 people). Remove someone to add a new member.",
+  "ellaCaregiverStatusActive": "Active — receives alerts",
+  "ellaCaregiverStatusInvited": "Invited — waiting to join",
+  "ellaFamilyCaregivers": "Family & Caregivers",
+  "ellaFamilyCaregiversSubtitle": "{count, plural, =1{1 person} other{{count} people}}",
+  "@ellaFamilyCaregiversSubtitle": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "ellaFamilyCaregiversNotSetUp": "Not set up",
+  "ellaEmergencyContact": "Emergency Contact",
+  "ellaEmergencyContactNotSetUp": "Not set up",
+  "ellaEmergencyContactDescription": "This person will be called when you tap the emergency button.",
+  "ellaAddCaregiverTitle": "Add Family Member",
+  "ellaAddCaregiverName": "Their name",
+  "ellaAddCaregiverNamePlaceholder": "e.g., Jane",
+  "ellaAddCaregiverPhone": "Their phone number",
+  "ellaAddCaregiverPhonePlaceholder": "e.g., (555) 123-4567",
+  "ellaAddCaregiverEmail": "Their email (optional)",
+  "ellaAddCaregiverEmailPlaceholder": "e.g., jane@email.com",
+  "ellaAddCaregiverRelationship": "Relationship",
+  "ellaAddCaregiverRelationshipSelect": "Select...",
+  "ellaRelationshipDaughter": "Daughter",
+  "ellaRelationshipSon": "Son",
+  "ellaRelationshipSpouse": "Spouse",
+  "ellaRelationshipSibling": "Sibling",
+  "ellaRelationshipFriend": "Friend",
+  "ellaRelationshipDoctor": "Doctor",
+  "ellaRelationshipOther": "Other",
+  "ellaPermissionsHeader": "They will receive:",
+  "ellaPermissionEmergencyAlerts": "Emergency alerts",
+  "ellaPermissionEmergencyAlertsDescription": "Called/texted when you tap the emergency button",
+  "ellaPermissionDailySummary": "Daily summary email",
+  "ellaPermissionDailySummaryDescription": "A daily email with your activity and conversations",
+  "ellaSendInvite": "Send Invite",
+  "ellaInviteSentTitle": "{name} has been invited!",
+  "@ellaInviteSentTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaInviteSentDescription": "We sent a text message to {phone} with instructions to join your care team.",
+  "@ellaInviteSentDescription": {
+    "placeholders": {
+      "phone": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaInviteExpiry": "The invite expires in 7 days.",
+  "ellaResendInvite": "Resend Invite",
+  "ellaResendSuccess": "Invite resent to {name}.",
+  "@ellaResendSuccess": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaRemoveFromCareTeam": "Remove from Care Team",
+  "ellaRemoveConfirmTitle": "Remove {name}?",
+  "@ellaRemoveConfirmTitle": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaRemoveConfirmDescription": "{name} will no longer receive emergency alerts or daily summaries.",
+  "@ellaRemoveConfirmDescription": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaRemoveConfirmButton": "Remove",
+  "ellaRemoveSuccess": "{name} has been removed.",
+  "@ellaRemoveSuccess": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaInviteErrorNetwork": "Couldn't send invite. Check your internet connection.",
+  "ellaInviteErrorDuplicate": "This phone number is already on your care team.",
+  "ellaInviteErrorInvalidPhone": "Please enter a valid phone number",
+  "ellaSettingsProfile": "Your Name",
+  "ellaSettingsDevice": "Connected Device",
+  "ellaSettingsPrivacy": "Privacy Policy",
+  "ellaSettingsTerms": "Terms of Service",
+  "ellaSettingsSignOut": "Sign Out",
+  "ellaDone": "Done",
+  "ellaSave": "Save",
+  "ellaCancel": "Cancel",
+  "ellaCareTeamSection": "CARE TEAM",
+  "ellaDeviceSection": "DEVICE",
+  "ellaAboutSection": "ABOUT",
+  "ellaJoinedDate": "Joined {date}",
+  "@ellaJoinedDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaInvitedDate": "Invited {date}",
+  "@ellaInvitedDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  }
 }
