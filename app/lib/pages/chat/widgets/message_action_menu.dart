@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 import 'markdown_message_widget.dart';
@@ -27,7 +28,7 @@ class MessageActionMenu extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
-        color: Colors.black54,
+        color: Colors.white.withOpacity(0.95),
         borderRadius: BorderRadius.vertical(
           top: Radius.circular(20),
         ),
@@ -41,7 +42,7 @@ class MessageActionMenu extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.grey[900],
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child:
@@ -99,14 +100,14 @@ class MessageActionMenu extends StatelessWidget {
               title,
               style: TextStyle(
                 fontSize: 16,
-                color: isDestructive ? Colors.red : Colors.white,
+                color: isDestructive ? Colors.red : EllaColors.textPrimary,
               ),
             ),
             const Spacer(),
             Icon(
               icon,
               size: 20,
-              color: isDestructive ? Colors.red : Colors.white,
+              color: isDestructive ? Colors.red : EllaColors.textPrimary,
             ),
           ],
         ),
