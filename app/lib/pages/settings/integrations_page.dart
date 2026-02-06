@@ -11,6 +11,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 enum IntegrationApp {
   appleHealth,
@@ -250,24 +251,24 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF1C1C1E),
+          backgroundColor: EllaColors.bgSecondary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
           title: Text(
             context.l10n.disconnectAppTitle(app.displayName),
-            style: const TextStyle(color: Colors.white),
+            style: const TextStyle(color: EllaColors.textPrimary),
           ),
           content: Text(
             context.l10n.disconnectAppMessage(app.displayName),
-            style: const TextStyle(color: Color(0xFF8E8E93)),
+            style: const TextStyle(color: EllaColors.textSecondary),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
               child: Text(
                 context.l10n.cancel,
-                style: const TextStyle(color: Color(0xFF8E8E93)),
+                style: const TextStyle(color: EllaColors.textSecondary),
               ),
             ),
             TextButton(
@@ -355,31 +356,31 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          backgroundColor: const Color(0xFF1C1C1E),
+          backgroundColor: EllaColors.bgSecondary,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
           title: Text(
             context.l10n.connectTo(app.displayName),
-            style: const TextStyle(color: Colors.white),
+            style: const TextStyle(color: EllaColors.textPrimary),
           ),
           content: Text(
             context.l10n.authAccessMessage(app.displayName),
-            style: const TextStyle(color: Color(0xFF8E8E93)),
+            style: const TextStyle(color: EllaColors.textSecondary),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
               child: Text(
                 context.l10n.cancel,
-                style: const TextStyle(color: Color(0xFF8E8E93)),
+                style: const TextStyle(color: EllaColors.textSecondary),
               ),
             ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(true),
               child: Text(
                 context.l10n.continueAction,
-                style: const TextStyle(color: Colors.white),
+                style: const TextStyle(color: EllaColors.textPrimary),
               ),
             ),
           ],
@@ -477,7 +478,7 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
               child: Text(
                 app.displayName,
                 style: TextStyle(
-                  color: isAvailable ? Colors.white : Colors.grey,
+                  color: isAvailable ? EllaColors.textPrimary : EllaColors.textDisabled,
                   fontSize: 17,
                   fontWeight: FontWeight.w400,
                 ),
@@ -514,7 +515,7 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
                 child: Text(
                   context.l10n.disconnect,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: Colors.red,
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -558,7 +559,7 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
               child: Text(
                 context.l10n.createYourOwnApp,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 17,
                   fontWeight: FontWeight.w400,
                 ),
@@ -590,18 +591,18 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
     final isLoading = provider.isLoading || !provider.hasLoaded;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF000000),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF000000),
+        backgroundColor: EllaColors.bgPrimary,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
+          icon: const Icon(Icons.arrow_back, color: EllaColors.textPrimary),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
           context.l10n.integrations,
           style: const TextStyle(
-            color: Colors.white,
+            color: EllaColors.textPrimary,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
@@ -621,8 +622,8 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
                     ...IntegrationApp.values.map((app) => _buildAppTile(app, isLoading)),
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Divider(
-                        color: Colors.grey.shade800,
+                      child: const Divider(
+                        color: EllaColors.bgTertiary,
                         thickness: 1,
                       ),
                     ),
@@ -635,13 +636,13 @@ class _IntegrationsPageState extends State<IntegrationsPage> with WidgetsBinding
                 padding: const EdgeInsets.only(top: 20),
                 child: Row(
                   children: [
-                    const Icon(Icons.info_outline, color: Color(0xFF8E8E93), size: 16),
+                    const Icon(Icons.info_outline, color: EllaColors.textTertiary, size: 16),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         context.l10n.integrationsFooter,
                         style: const TextStyle(
-                          color: Color(0xFF8E8E93),
+                          color: EllaColors.textTertiary,
                           fontSize: 12,
                         ),
                       ),
