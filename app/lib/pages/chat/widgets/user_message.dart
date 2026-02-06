@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/chat/widgets/files_handler_widget.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'package:omi/widgets/text_selection_controls.dart';
@@ -44,13 +45,13 @@ class HumanMessage extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(Icons.subdirectory_arrow_right, size: 14, color: Colors.grey),
+                    const Icon(Icons.subdirectory_arrow_right, size: 14, color: EllaColors.textTertiary),
                     const SizedBox(width: 8),
                     Flexible(
                       child: Text(
                         contextText.length > 50 ? '${contextText.substring(0, 50)}...' : contextText,
-                        style: TextStyle(
-                          color: Colors.grey.shade500,
+                        style: const TextStyle(
+                          color: EllaColors.textTertiary,
                           fontSize: 13,
                         ),
                         maxLines: 2,
@@ -66,7 +67,7 @@ class HumanMessage extends StatelessWidget {
             children: [
               Container(
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1f1f25),
+                  color: EllaColors.primary,
                   borderRadius: BorderRadius.circular(20.0),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
