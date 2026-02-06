@@ -292,13 +292,13 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
                   ),
                   child: Center(
                     child: _sending
-                        ? const CupertinoActivityIndicator(color: EllaColors.textPrimary)
+                        ? const CupertinoActivityIndicator(color: Colors.white)
                         : Text(
                             context.l10n.ellaSendInvite,
                             style: TextStyle(
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
-                              color: _isValid ? EllaColors.textPrimary : EllaColors.textDisabled,
+                              color: _isValid ? Colors.white : EllaColors.textDisabled,
                             ),
                           ),
                   ),
