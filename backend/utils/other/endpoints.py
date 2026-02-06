@@ -39,6 +39,11 @@ def verify_token(token: str) -> str:
         if os.getenv('LOCAL_DEVELOPMENT') == 'true':
             return '123'
         raise
+    except Exception as e:
+        print(f"Token verification error: {type(e).__name__}: {e}", flush=True)
+        if os.getenv('LOCAL_DEVELOPMENT') == 'true':
+            return '123'
+        raise InvalidIdTokenError(str(e))
 
 
 def get_current_user_uid(authorization: str = Header(None)):
@@ -50,9 +55,11 @@ def get_current_user_uid(authorization: str = Header(None)):
 
     try:
         token = authorization.split(' ')[1]
+        if not token:
+            raise HTTPException(status_code=401, detail="Empty authorization token")
         return verify_token(token)
     except InvalidIdTokenError as e:
-        print(e)
+        print(f"Error verifying Firebase ID token: {e}", flush=True)
         raise HTTPException(status_code=401, detail="Invalid authorization token")
 
 
