@@ -195,13 +195,13 @@ class _CapabilityAppsPageState extends State<CapabilityAppsPage> {
         title: Text(
           widget.capability.getLocalizedTitle(context),
           style: const TextStyle(
-            color: Colors.white,
+            color: EllaColors.textPrimary,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
         ),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+          icon: const Icon(Icons.arrow_back_ios, color: EllaColors.textPrimary),
           onPressed: () => Navigator.pop(context),
         ),
       ),
@@ -219,21 +219,21 @@ class _CapabilityAppsPageState extends State<CapabilityAppsPage> {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
+                          const Icon(
                             Icons.apps_outlined,
                             size: 64,
-                            color: Colors.grey.shade600,
+                            color: EllaColors.textDisabled,
                           ),
                           const SizedBox(height: 16),
                           const Text(
                             'No apps found',
-                            style: TextStyle(fontSize: 18, color: Colors.white70),
+                            style: TextStyle(fontSize: 18, color: EllaColors.textSecondary),
                             textAlign: TextAlign.center,
                           ),
                           const SizedBox(height: 8),
-                          Text(
+                          const Text(
                             'Check back later for new apps',
-                            style: TextStyle(fontSize: 14, color: Colors.grey.shade400),
+                            style: TextStyle(fontSize: 14, color: EllaColors.textTertiary),
                             textAlign: TextAlign.center,
                           ),
                         ],
