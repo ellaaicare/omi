@@ -236,7 +236,7 @@ class _FolderTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Use a visible color for "All" tab (white), otherwise use folder color
-    final effectiveColor = color ?? Colors.white;
+    final effectiveColor = color ?? EllaColors.textPrimary;
 
     return GestureDetector(
       onTap: () {
@@ -266,7 +266,7 @@ class _FolderTab extends StatelessWidget {
                 child: FaIcon(
                   folderIconToFa(icon),
                   size: 12,
-                  color: isSelected ? effectiveColor : Colors.grey[400],
+                  color: isSelected ? effectiveColor : EllaColors.textSecondary,
                 ),
               ),
               const SizedBox(width: 5),
@@ -274,7 +274,7 @@ class _FolderTab extends StatelessWidget {
             Text(
               label,
               style: TextStyle(
-                color: isSelected ? effectiveColor : Colors.grey[400],
+                color: isSelected ? effectiveColor : EllaColors.textSecondary,
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
                 fontSize: 13,
               ),
@@ -419,8 +419,8 @@ class _FolderContextMenu extends StatelessWidget {
 
             // Edit option
             ListTile(
-              leading: const Icon(Icons.edit_outlined, color: Colors.white),
-              title: Text(context.l10n.editFolder, style: const TextStyle(color: Colors.white)),
+              leading: const Icon(Icons.edit_outlined, color: EllaColors.textPrimary),
+              title: Text(context.l10n.editFolder, style: const TextStyle(color: EllaColors.textPrimary)),
               onTap: () => _handleEdit(context),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             ),

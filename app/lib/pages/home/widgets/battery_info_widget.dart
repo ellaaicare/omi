@@ -80,7 +80,8 @@ class BatteryInfoWidget extends StatelessWidget {
                           const SizedBox(width: 6.0),
                           Text(
                             '$batteryLevel%',
-                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: EllaColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
                           ),
                         ],
                       ],
@@ -125,7 +126,10 @@ class BatteryInfoWidget extends StatelessWidget {
                       const SizedBox(width: 6.0),
                       Text(
                         context.l10n.disconnected,
-                        style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white70, fontSize: 12),
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodyMedium!
+                            .copyWith(color: EllaColors.textSecondary, fontSize: 12),
                       ),
                     ],
                   ),
@@ -161,8 +165,10 @@ class BatteryInfoWidget extends StatelessWidget {
                       isConnecting && isMemoriesPage
                           ? Text(
                               context.l10n.searching,
-                              style:
-                                  Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white, fontSize: 12),
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodyMedium!
+                                  .copyWith(color: EllaColors.textPrimary, fontSize: 12),
                             )
                           : isMemoriesPage
                               ? Text(
@@ -170,7 +176,7 @@ class BatteryInfoWidget extends StatelessWidget {
                                   style: Theme.of(context)
                                       .textTheme
                                       .bodyMedium!
-                                      .copyWith(color: Colors.white, fontSize: 12),
+                                      .copyWith(color: EllaColors.textPrimary, fontSize: 12),
                                 )
                               : const SizedBox.shrink(),
                     ],

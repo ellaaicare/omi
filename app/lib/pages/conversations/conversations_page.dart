@@ -250,7 +250,7 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
                   child: Text(
                     convoProvider.showDailySummaries ? context.l10n.dailyRecaps : context.l10n.conversations,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                     ),
