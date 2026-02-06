@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -40,6 +41,7 @@ class _EllaEmergencyState extends State<EllaEmergency> {
       url: '${Env.apiBaseUrl}v1/ella/emergency-contact',
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
+        'uid': SharedPreferencesUtil().uid,
         'name': _nameController.text.trim(),
         'phone': _phoneController.text.trim(),
         'relationship': 'other',
