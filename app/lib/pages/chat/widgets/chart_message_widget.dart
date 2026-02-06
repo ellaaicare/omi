@@ -1,6 +1,7 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ChartMessageWidget extends StatelessWidget {
   final ChartData chartData;
@@ -24,16 +25,16 @@ class ChartMessageWidget extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 8),
       padding: const EdgeInsets.fromLTRB(12, 16, 16, 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A20),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(0.06)),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             chartData.title,
-            style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 20),
           SizedBox(
@@ -65,7 +66,7 @@ class ChartMessageWidget extends StatelessWidget {
         padding: const EdgeInsets.only(top: 8),
         child: Text(
           text,
-          style: TextStyle(color: Colors.grey.shade500, fontSize: 10),
+          style: TextStyle(color: EllaColors.textTertiary, fontSize: 10),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           textAlign: TextAlign.center,
@@ -95,7 +96,7 @@ class ChartMessageWidget extends StatelessWidget {
           drawVerticalLine: false,
           horizontalInterval: _niceInterval(minY, maxY),
           getDrawingHorizontalLine: (value) => FlLine(
-            color: Colors.white.withOpacity(0.06),
+            color: EllaColors.bgTertiary.withOpacity(0.5),
             strokeWidth: 1,
           ),
         ),
@@ -123,7 +124,7 @@ class ChartMessageWidget extends StatelessWidget {
                 if (value == meta.max || value == meta.min) return const SizedBox.shrink();
                 return Text(
                   _formatValue(value),
-                  style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                  style: TextStyle(color: EllaColors.textTertiary, fontSize: 11),
                 );
               },
             ),
@@ -132,7 +133,7 @@ class ChartMessageWidget extends StatelessWidget {
         borderData: FlBorderData(show: false),
         lineTouchData: LineTouchData(
           touchTooltipData: LineTouchTooltipData(
-            getTooltipColor: (_) => const Color(0xFF2C2C34),
+            getTooltipColor: (_) => EllaColors.bgTertiary,
             tooltipRoundedRadius: 8,
             getTooltipItems: (spots) {
               return spots.map((spot) {
@@ -140,7 +141,7 @@ class ChartMessageWidget extends StatelessWidget {
                 String label = idx >= 0 && idx < points.length ? points[idx].label : '';
                 return LineTooltipItem(
                   '$label\n${_formatValue(spot.y)}',
-                  const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                  const TextStyle(color: EllaColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w500),
                 );
               }).toList();
             },
@@ -194,7 +195,7 @@ class ChartMessageWidget extends StatelessWidget {
           drawVerticalLine: false,
           horizontalInterval: _niceInterval(0, maxY),
           getDrawingHorizontalLine: (value) => FlLine(
-            color: Colors.white.withOpacity(0.06),
+            color: EllaColors.bgTertiary.withOpacity(0.5),
             strokeWidth: 1,
           ),
         ),
@@ -221,7 +222,7 @@ class ChartMessageWidget extends StatelessWidget {
                 if (value == meta.max || value == meta.min) return const SizedBox.shrink();
                 return Text(
                   _formatValue(value),
-                  style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                  style: TextStyle(color: EllaColors.textTertiary, fontSize: 11),
                 );
               },
             ),
@@ -230,14 +231,14 @@ class ChartMessageWidget extends StatelessWidget {
         borderData: FlBorderData(show: false),
         barTouchData: BarTouchData(
           touchTooltipData: BarTouchTooltipData(
-            getTooltipColor: (_) => const Color(0xFF2C2C34),
+            getTooltipColor: (_) => EllaColors.bgTertiary,
             tooltipRoundedRadius: 8,
             getTooltipItem: (group, groupIndex, rod, rodIndex) {
               int idx = group.x;
               String label = idx >= 0 && idx < points.length ? points[idx].label : '';
               return BarTooltipItem(
                 '$label\n${_formatValue(rod.toY)}',
-                const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                const TextStyle(color: EllaColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w500),
               );
             },
           ),
