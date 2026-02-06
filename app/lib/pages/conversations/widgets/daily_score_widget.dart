@@ -13,6 +13,9 @@ import 'package:omi/providers/goals_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/ella/ella_theme.dart';
 
+// TODO: replace with flavor check
+const bool isEllaApp = true;
+
 /// Daily Score Widget - Shows task completion rate as a 0-5 score
 class DailyScoreWidget extends StatefulWidget {
   final GlobalKey<GoalsWidgetState>? goalsWidgetKey;
@@ -48,6 +51,9 @@ class DailyScoreWidgetState extends State<DailyScoreWidget> {
 
   @override
   Widget build(BuildContext context) {
+    // Ella doesn't use daily score
+    if (isEllaApp) return const SizedBox.shrink();
+
     return Consumer2<ActionItemsProvider, GoalsProvider>(
       builder: (context, provider, goalsProvider, child) {
         final goals = goalsProvider.goals;
