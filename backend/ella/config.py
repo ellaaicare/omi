@@ -21,17 +21,13 @@ class EllaConfig:
     # MASTER SWITCHES
     # =========================================================================
 
-    enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_ENABLED", "true").lower() == "true"
-    )
+    enabled: bool = field(default_factory=lambda: os.getenv("ELLA_ENABLED", "true").lower() == "true")
 
     # =========================================================================
     # N8N / LETTA INTEGRATION
     # =========================================================================
 
-    n8n_base_url: str = field(
-        default_factory=lambda: os.getenv("ELLA_N8N_BASE_URL", "https://n8n.ella-ai-care.com")
-    )
+    n8n_base_url: str = field(default_factory=lambda: os.getenv("ELLA_N8N_BASE_URL", "https://n8n.ella-ai-care.com"))
 
     # Webhook endpoints
     summary_endpoint: str = "/webhook/summary-agent"
@@ -39,48 +35,35 @@ class EllaConfig:
     scanner_endpoint: str = "/webhook/scanner-agent"
     voice_init_endpoint: str = "/webhook/voice-init"
     call_state_endpoint: str = "/webhook/call-state"
+    emergency_endpoint: str = "/webhook/emergency-alert"
+    daily_summary_endpoint: str = "/webhook/daily-summary"
 
     # Feature flags
-    summary_enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_SUMMARY_ENABLED", "true").lower() == "true"
+    caregiver_enabled: bool = field(
+        default_factory=lambda: os.getenv("ELLA_CAREGIVER_ENABLED", "true").lower() == "true"
     )
-    memory_enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_MEMORY_ENABLED", "true").lower() == "true"
-    )
-    scanner_enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "true"
-    )
+    summary_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_SUMMARY_ENABLED", "true").lower() == "true")
+    memory_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_MEMORY_ENABLED", "true").lower() == "true")
+    scanner_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "true")
 
     # Timeouts (seconds)
-    summary_timeout: float = field(
-        default_factory=lambda: float(os.getenv("ELLA_SUMMARY_TIMEOUT", "30.0"))
-    )
-    memory_timeout: float = field(
-        default_factory=lambda: float(os.getenv("ELLA_MEMORY_TIMEOUT", "30.0"))
-    )
-    scanner_timeout: float = field(
-        default_factory=lambda: float(os.getenv("ELLA_SCANNER_TIMEOUT", "2.0"))
-    )
+    summary_timeout: float = field(default_factory=lambda: float(os.getenv("ELLA_SUMMARY_TIMEOUT", "30.0")))
+    memory_timeout: float = field(default_factory=lambda: float(os.getenv("ELLA_MEMORY_TIMEOUT", "30.0")))
+    scanner_timeout: float = field(default_factory=lambda: float(os.getenv("ELLA_SCANNER_TIMEOUT", "2.0")))
 
     # =========================================================================
     # VOICE V2 (GROK V2V)
     # =========================================================================
 
-    voice_v2_enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_VOICE_V2_ENABLED", "true").lower() == "true"
-    )
+    voice_v2_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_VOICE_V2_ENABLED", "true").lower() == "true")
 
     grok_proxy_url: str = field(
         default_factory=lambda: os.getenv("GROK_V2V_PROXY_URL", "wss://voice.ella-ai-care.com/ws")
     )
 
-    grok_model: str = field(
-        default_factory=lambda: os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning")
-    )
+    grok_model: str = field(default_factory=lambda: os.getenv("GROK_MODEL", "grok-4-1-fast-non-reasoning"))
 
-    grok_use_raw_audio: bool = field(
-        default_factory=lambda: os.getenv("GROK_USE_RAW_AUDIO", "true").lower() == "true"
-    )
+    grok_use_raw_audio: bool = field(default_factory=lambda: os.getenv("GROK_USE_RAW_AUDIO", "true").lower() == "true")
 
     # =========================================================================
     # NOTIFICATIONS
@@ -94,9 +77,7 @@ class EllaConfig:
     # TESTING / DEVELOPMENT
     # =========================================================================
 
-    testing_enabled: bool = field(
-        default_factory=lambda: os.getenv("ELLA_TESTING_ENABLED", "false").lower() == "true"
-    )
+    testing_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_TESTING_ENABLED", "false").lower() == "true")
 
     # =========================================================================
     # COMPUTED PROPERTIES
@@ -121,6 +102,14 @@ class EllaConfig:
     @property
     def call_state_url(self) -> str:
         return f"{self.n8n_base_url}{self.call_state_endpoint}"
+
+    @property
+    def emergency_url(self) -> str:
+        return f"{self.n8n_base_url}{self.emergency_endpoint}"
+
+    @property
+    def daily_summary_url(self) -> str:
+        return f"{self.n8n_base_url}{self.daily_summary_endpoint}"
 
 
 # Global config instance - import this
