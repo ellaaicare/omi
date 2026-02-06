@@ -31,6 +31,10 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       // In debug builds, skip auth to allow simulator testing
       if (kDebugMode && !AuthService.instance.isSignedIn()) {
         debugPrint('EllaOnboarding: debug mode, skipping auth');
+        if (SharedPreferencesUtil().onboardingCompleted) {
+          routeToPage(context, const HomePageWrapper(), replace: true);
+          return;
+        }
         setState(() => _isSignedIn = true);
         return;
       }
