@@ -149,14 +149,18 @@ Future _init() async {
   await ServiceManager.init();
 
   // Firebase
-  if (Firebase.apps.isEmpty) {
-    final options = (PlatformService.isWindows || F.env == Environment.prod)
-        ? prod.DefaultFirebaseOptions.currentPlatform
-        : dev.DefaultFirebaseOptions.currentPlatform;
-    await Firebase.initializeApp(options: options);
-  } else {
-    // Firebase may already be initialized by native SDK (macOS)
-    debugPrint('Firebase already initialized.');
+  try {
+    if (Firebase.apps.isEmpty) {
+      final options = (PlatformService.isWindows || F.env == Environment.prod)
+          ? prod.DefaultFirebaseOptions.currentPlatform
+          : dev.DefaultFirebaseOptions.currentPlatform;
+      await Firebase.initializeApp(options: options);
+    } else {
+      // Firebase may already be initialized by native SDK (macOS)
+      debugPrint('Firebase already initialized.');
+    }
+  } catch (e) {
+    debugPrint('Firebase init error (continuing): $e');
   }
 
   await PlatformManager.initializeServices();
