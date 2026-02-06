@@ -405,7 +405,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               ],
               supportedLocales: AppLocalizations.supportedLocales,
               theme: ellaThemeData(),
-              themeMode: ThemeMode.dark,
+              themeMode: ThemeMode.light,
               builder: (context, child) {
                 FlutterError.onError = (FlutterErrorDetails details) {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
