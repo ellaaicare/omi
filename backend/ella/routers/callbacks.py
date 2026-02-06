@@ -19,6 +19,7 @@ Endpoints:
 - DELETE /v1/ella/caregivers/{caregiver_id}            - Remove a caregiver
 - PUT    /v1/ella/caregivers/{caregiver_id}/permissions - Update caregiver permissions
 - POST   /v1/ella/caregivers/resend-invite             - Resend caregiver invite
+- POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
 - GET    /v1/ella/health                               - Health check
 """
 
@@ -172,6 +173,7 @@ async def ella_health():
             "/v1/ella/caregivers/{caregiver_id}",
             "/v1/ella/caregivers/{caregiver_id}/permissions",
             "/v1/ella/caregivers/resend-invite",
+            "/v1/ella/chat/stream",
             "/v1/ella/health",
         ],
     }
