@@ -8,7 +8,10 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
 
+import 'package:uuid/uuid.dart';
+
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -268,22 +271,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
               await Provider.of<MessageProvider>(context, listen: false).refreshMessages();
             }
           }
-          // Navigate to chat page directly since it's no longer in the tab bar
-          // If there's an auto-message (e.g., from daily reflection notification), send it
+          // Chat is already shown via IndexedStack at index 1 (set above).
+          // If there's an auto-message (e.g., from daily reflection notification),
+          // inject it directly via MessageProvider instead of pushing a duplicate route.
           final autoMessageToSend = widget.autoMessage;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => ChatPage(
-                    isPivotBottom: false,
-                    autoMessage: autoMessageToSend,
-                  ),
-                ),
-              );
-            }
-          });
+          if (autoMessageToSend != null && autoMessageToSend.isNotEmpty) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                final messageProvider = Provider.of<MessageProvider>(context, listen: false);
+                Future.delayed(const Duration(milliseconds: 800), () {
+                  if (mounted) {
+                    final aiMessage = ServerMessage(
+                      const Uuid().v4(),
+                      DateTime.now(),
+                      autoMessageToSend,
+                      MessageSender.ai,
+                      MessageType.text,
+                      null,
+                      false,
+                      [],
+                      [],
+                      [],
+                      askForNps: false,
+                    );
+                    messageProvider.addMessage(aiMessage);
+                  }
+                });
+              }
+            });
+          }
           break;
         case "settings":
           // Use context from the current widget instead of navigator key for bottom sheet
