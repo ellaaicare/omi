@@ -35,7 +35,10 @@ Future<InviteResponse> sendCaregiverInvite({
       'phone': phone,
       if (email != null && email.isNotEmpty) 'email': email,
       'relationship': relationship,
-      'daily_summary': dailySummary,
+      'permissions': {
+        'receive_daily_summary': dailySummary,
+        'daily_summary_email': dailySummary,
+      },
     }),
   );
   if (response == null || response.statusCode != 201) {
@@ -73,7 +76,7 @@ Future<void> updateCaregiverPermissions(String caregiverId, {required bool daily
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: jsonEncode({
-      'daily_summary': dailySummary,
+      'receive_daily_summary': dailySummary,
     }),
   );
   if (response == null || response.statusCode != 200) {
@@ -85,13 +88,13 @@ Future<void> updateCaregiverPermissions(String caregiverId, {required bool daily
   }
 }
 
-/// POST /v1/ella/caregivers/invite (resend)
-Future<void> resendInvite(String phone) async {
+/// POST /v1/ella/caregivers/resend-invite
+Future<void> resendInvite({required String uid, required String caregiverId}) async {
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/ella/caregivers/resend-invite',
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({'phone': phone}),
+    body: jsonEncode({'uid': uid, 'caregiver_id': caregiverId}),
   );
   if (response == null || response.statusCode != 200) {
     final code = response?.statusCode ?? 0;
