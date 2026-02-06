@@ -5,10 +5,14 @@ Provides Ella-specific callback endpoints that n8n workflows use to trigger
 backend actions (push notifications with TTS audio, etc).
 
 Endpoints:
-- POST /v1/ella/notification    - Push notification with optional TTS audio
-- POST /v1/ella/emergency       - Emergency alert to all configured contacts
-- POST /v1/ella/daily-summary   - Trigger daily summary for a user's caregivers
-- GET  /v1/ella/health          - Health check
+- POST   /v1/ella/notification                - Push notification with optional TTS audio
+- POST   /v1/ella/emergency                   - Emergency alert to all configured contacts
+- POST   /v1/ella/daily-summary               - Trigger daily summary for a user's caregivers
+- POST   /v1/ella/emergency-contact           - Add an emergency contact
+- GET    /v1/ella/emergency-contacts/{uid}    - List all contacts for a user
+- PUT    /v1/ella/emergency-contact/{contact_id} - Update a contact
+- DELETE /v1/ella/emergency-contact/{contact_id} - Remove a contact
+- GET    /v1/ella/health                      - Health check
 """
 
 import io
@@ -19,9 +23,10 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
 from utils.notifications import send_notification
 from utils.other.storage import storage_client
@@ -136,6 +141,8 @@ async def ella_health():
         "endpoints": [
             "/v1/ella/notification",
             "/v1/ella/emergency",
+            "/v1/ella/emergency-contact",
+            "/v1/ella/emergency-contacts/{uid}",
             "/v1/ella/daily-summary",
             "/v1/ella/health",
         ],
@@ -435,3 +442,106 @@ async def ella_daily_summary(request: DailySummaryRequest):
             dispatched=False,
             error=str(e),
         )
+
+
+# ============================================================================
+# Emergency Contact CRUD Models
+# ============================================================================
+
+
+class ContactPermissions(BaseModel):
+    emergency_contact: bool = True
+    daily_summary: bool = False
+    view_conversations: bool = False
+
+
+class EmergencyContactCreate(BaseModel):
+    uid: str
+    name: str = Field(..., min_length=1, max_length=200)
+    phone: str = Field(..., max_length=20)
+    email: Optional[str] = Field(default=None, max_length=254)
+    relationship: str = Field(default="other", max_length=100)
+    permissions: ContactPermissions = ContactPermissions()
+
+
+class EmergencyContactUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    email: Optional[str] = Field(default=None, max_length=254)
+    relationship: Optional[str] = Field(default=None, max_length=100)
+    permissions: Optional[ContactPermissions] = None
+
+
+class EmergencyContactOut(BaseModel):
+    id: str
+    uid: str
+    name: str
+    phone: str = ""
+    email: Optional[str] = None
+    relationship: str = "other"
+    permissions: ContactPermissions = ContactPermissions()
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+# ============================================================================
+# Emergency Contact CRUD Endpoints
+# ============================================================================
+
+
+@router.post("/emergency-contact", response_model=EmergencyContactOut, status_code=201)
+async def create_emergency_contact(request: EmergencyContactCreate):
+    """Add an emergency contact for a user."""
+    data = request.model_dump()
+    data['permissions'] = request.permissions.model_dump()
+    result = create_contact(request.uid, data)
+    logger.info(f"[Ella] Contact created: uid={request.uid}, contact_id={result['id']}, name={request.name}")
+    return EmergencyContactOut(**result)
+
+
+@router.get("/emergency-contacts/{uid}", response_model=List[EmergencyContactOut])
+async def list_emergency_contacts(uid: str):
+    """List all emergency contacts for a user."""
+    contacts = get_contacts(uid)
+    logger.info(f"[Ella] Contacts listed: uid={uid}, count={len(contacts)}")
+    return [EmergencyContactOut(**c) for c in contacts]
+
+
+@router.put("/emergency-contact/{contact_id}", response_model=EmergencyContactOut)
+async def update_emergency_contact(contact_id: str, request: EmergencyContactUpdate, uid: str = ""):
+    """
+    Update an emergency contact. Pass uid as a query parameter.
+
+    Example: PUT /v1/ella/emergency-contact/{contact_id}?uid=abc123
+    """
+    if not uid:
+        raise HTTPException(status_code=422, detail="uid query parameter is required")
+
+    existing = get_contact(uid, contact_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    update_data = request.model_dump(exclude_none=True)
+    if 'permissions' in update_data and request.permissions is not None:
+        update_data['permissions'] = request.permissions.model_dump()
+
+    result = update_contact(uid, contact_id, update_data)
+    logger.info(f"[Ella] Contact updated: uid={uid}, contact_id={contact_id}")
+    return EmergencyContactOut(**result)
+
+
+@router.delete("/emergency-contact/{contact_id}", status_code=204)
+async def delete_emergency_contact(contact_id: str, uid: str = ""):
+    """
+    Remove an emergency contact. Pass uid as a query parameter.
+
+    Example: DELETE /v1/ella/emergency-contact/{contact_id}?uid=abc123
+    """
+    if not uid:
+        raise HTTPException(status_code=422, detail="uid query parameter is required")
+
+    deleted = delete_contact(uid, contact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    logger.info(f"[Ella] Contact deleted: uid={uid}, contact_id={contact_id}")
