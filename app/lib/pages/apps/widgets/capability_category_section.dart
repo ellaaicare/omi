@@ -13,6 +13,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// A category section widget with unlimited horizontal scrolling for capability pages.
 /// Unlike CategorySection which shows max 9 items, this shows all apps in the category.
@@ -183,7 +184,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF35343B),
+                      color: EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
@@ -191,7 +192,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF35343B),
+                      color: EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: const Icon(Icons.error_outline, color: Colors.white54, size: 24),

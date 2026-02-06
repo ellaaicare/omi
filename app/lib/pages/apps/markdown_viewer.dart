@@ -4,6 +4,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MarkdownViewer extends StatefulWidget {
   final String markdown;
@@ -40,7 +41,7 @@ class _MarkdownViewerState extends State<MarkdownViewer> {
                   color: Colors.black,
                 ),
                 blockquoteDecoration: BoxDecoration(
-                  color: Color(0xFF35343B),
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 code: const TextStyle(

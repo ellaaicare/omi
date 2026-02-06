@@ -23,6 +23,7 @@ import 'package:omi/utils/other/debouncer.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/ui_guidelines.dart';
 import 'package:omi/pages/apps/widgets/create_options_sheet.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 String filterValueToString(dynamic value) {
   if (value is String) {
@@ -589,7 +590,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                 HapticFeedback.mediumImpact();
                 await context.read<AppProvider>().forceRefreshApps();
               },
-              color: Colors.deepPurpleAccent,
+              color: EllaColors.primaryLight,
               backgroundColor: Colors.white,
               child: CustomScrollView(
                 controller: widget.scrollController,
@@ -621,7 +622,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                                   Container(
                                     padding: const EdgeInsets.all(8),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF1F1F25),
+                                      color: EllaColors.bgSecondary,
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: const Icon(
@@ -796,7 +797,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                                           curve: Curves.easeInOut,
                                           height: 44,
                                           decoration: BoxDecoration(
-                                            color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                            color: EllaColors.primaryLight.withValues(alpha: 0.5),
                                             borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                                           ),
                                           child: TextButton.icon(
@@ -866,7 +867,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                                           curve: Curves.easeInOut,
                                           height: 44,
                                           decoration: BoxDecoration(
-                                            color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                            color: EllaColors.primaryLight.withValues(alpha: 0.5),
                                             borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                                           ),
                                           child: TextButton.icon(
@@ -938,7 +939,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                                           curve: Curves.easeInOut,
                                           height: 44,
                                           decoration: BoxDecoration(
-                                            color: Colors.deepPurpleAccent.withValues(alpha: 0.5),
+                                            color: EllaColors.primaryLight.withValues(alpha: 0.5),
                                             borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                                           ),
                                           child: TextButton.icon(
@@ -983,7 +984,7 @@ class ExploreInstallPageState extends State<ExploreInstallPage> with AutomaticKe
                                               curve: Curves.easeInOut,
                                               decoration: BoxDecoration(
                                                 color: state.visibleFilterCount > 0
-                                                    ? Colors.deepPurpleAccent.withValues(alpha: 0.5)
+                                                    ? EllaColors.primaryLight.withValues(alpha: 0.5)
                                                     : AppStyles.backgroundSecondary,
                                                 borderRadius: BorderRadius.circular(AppStyles.radiusLarge),
                                               ),

@@ -13,6 +13,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/folders/folder_icon_mapper.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class FolderTabs extends StatefulWidget {
   final List<Folder> folders;
@@ -224,7 +225,7 @@ class _FolderTab extends StatelessWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1F1F25),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),

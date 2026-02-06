@@ -11,6 +11,7 @@ import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'app_detail/app_detail.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppListItem extends StatelessWidget {
   final App app;
@@ -42,7 +43,7 @@ class AppListItem extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             margin: EdgeInsets.only(bottom: 8, top: index == 0 ? 16 : 0),
             decoration: BoxDecoration(
-              color: const Color(0xFF1F1F25).withOpacity(0.3),
+              color: EllaColors.bgSecondary.withOpacity(0.3),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Row(
@@ -54,7 +55,7 @@ class AppListItem extends StatelessWidget {
                     width: 60,
                     height: 60,
                     decoration: BoxDecoration(
-                      color: Color(0xFF35343B),
+                      color: EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: CachedNetworkImage(
@@ -65,13 +66,13 @@ class AppListItem extends StatelessWidget {
                       },
                       fit: BoxFit.cover,
                       placeholder: (context, url) => ShimmerWithTimeout(
-                        baseColor: const Color(0xFF1F1F25),
-                        highlightColor: const Color(0xFF35343B),
+                        baseColor: EllaColors.bgSecondary,
+                        highlightColor: EllaColors.bgTertiary,
                         child: Container(
                           width: double.infinity,
                           height: double.infinity,
                           decoration: BoxDecoration(
-                            color: const Color(0xFF1F1F25),
+                            color: EllaColors.bgSecondary,
                             borderRadius: BorderRadius.circular(12),
                           ),
                         ),

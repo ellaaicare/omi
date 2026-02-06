@@ -5,6 +5,7 @@ import 'package:omi/providers/memories_provider.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'delete_confirmation.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MemoryEditSheet extends StatefulWidget {
   final Memory memory;
@@ -48,7 +49,7 @@ class _MemoryEditSheetState extends State<MemoryEditSheet> {
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -127,13 +128,13 @@ class _MemoryEditSheetState extends State<MemoryEditSheet> {
               child: ElevatedButton(
                 onPressed: _isSaving ? null : _handleSave,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _saveFailed ? Colors.orange : Colors.deepPurpleAccent,
+                  backgroundColor: _saveFailed ? Colors.orange : EllaColors.primaryLight,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  disabledBackgroundColor: Colors.deepPurpleAccent.withOpacity(0.5),
+                  disabledBackgroundColor: EllaColors.primaryLight.withOpacity(0.5),
                   disabledForegroundColor: Colors.white.withOpacity(0.7),
                 ),
                 child: _isSaving

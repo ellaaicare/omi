@@ -5,6 +5,7 @@ import 'package:timeago/timeago.dart' as timeago;
 
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class UserReviewCard extends StatelessWidget {
   final AppReview review;
@@ -18,7 +19,7 @@ class UserReviewCard extends StatelessWidget {
       padding: const EdgeInsets.all(16.0),
       margin: const EdgeInsets.only(left: 12.0, right: 12.0, top: 2, bottom: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(
@@ -37,7 +38,7 @@ class UserReviewCard extends StatelessWidget {
                 itemSize: 20,
                 tapOnlyMode: false,
                 itemPadding: const EdgeInsets.symmetric(horizontal: 0),
-                itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.deepPurple),
+                itemBuilder: (context, _) => const Icon(Icons.star, color: EllaColors.primary),
                 maxRating: 5.0,
                 onRatingUpdate: (rating) {},
               ),

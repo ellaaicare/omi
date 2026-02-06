@@ -10,6 +10,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class SyncedConversationListItem extends StatefulWidget {
   final DateTime date;
@@ -73,7 +74,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
         child: Container(
           width: double.maxFinite,
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(24.0),
           ),
           child: Padding(
@@ -182,7 +183,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
               children: [
                 Text(
                   dateTimeFormat('h:mm a', conversation.startedAt ?? conversation.createdAt),
-                  style: const TextStyle(color: Color(0xFF6A6B71), fontSize: 14),
+                  style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                   maxLines: 1,
                   textAlign: TextAlign.end,
                 ),
@@ -192,7 +193,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF35343B),
+                        color: EllaColors.bgTertiary,
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(

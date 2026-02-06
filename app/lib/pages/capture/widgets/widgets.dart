@@ -21,6 +21,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/photos_grid.dart';
 import 'package:omi/widgets/transcript.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class SpeechProfileCardWidget extends StatelessWidget {
   const SpeechProfileCardWidget({super.key});
@@ -55,7 +56,7 @@ class SpeechProfileCardWidget extends StatelessWidget {
                       },
                       child: Container(
                         decoration: const BoxDecoration(
-                          color: Color(0xFF1F1F25),
+                          color: EllaColors.bgSecondary,
                           borderRadius: BorderRadius.all(Radius.circular(12)),
                         ),
                         margin: const EdgeInsets.fromLTRB(16, 15, 16, 0),
@@ -124,7 +125,7 @@ class UpdateFirmwareCardWidget extends StatelessWidget {
               },
               child: Container(
                 decoration: const BoxDecoration(
-                  color: Color(0xFF1F1F25),
+                  color: EllaColors.bgSecondary,
                   borderRadius: BorderRadius.all(Radius.circular(20)),
                 ),
                 margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),

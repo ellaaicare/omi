@@ -13,6 +13,7 @@ import 'package:omi/ui/atoms/omi_button.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/responsive/responsive_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 enum TaskCategory { today, tomorrow, noDeadline, later }
 
@@ -779,16 +780,16 @@ class DesktopActionsPageState extends State<DesktopActionsPage>
           height: showIndicator ? 36 : (isDragging ? 20 : 4),
           margin: const EdgeInsets.symmetric(horizontal: 4),
           decoration: BoxDecoration(
-            color: showIndicator ? Colors.deepPurpleAccent.withOpacity(0.15) : Colors.transparent,
+            color: showIndicator ? EllaColors.primaryLight.withOpacity(0.15) : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
-            border: showIndicator ? Border.all(color: Colors.deepPurpleAccent.withOpacity(0.5), width: 1.5) : null,
+            border: showIndicator ? Border.all(color: EllaColors.primaryLight.withOpacity(0.5), width: 1.5) : null,
           ),
           child: showIndicator
               ? Center(
                   child: Text(
                     'Drop here for first position',
                     style: TextStyle(
-                      color: Colors.deepPurpleAccent.withOpacity(0.8),
+                      color: EllaColors.primaryLight.withOpacity(0.8),
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
                     ),
@@ -890,7 +891,7 @@ class DesktopActionsPageState extends State<DesktopActionsPage>
                 height: 2,
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurpleAccent,
+                  color: EllaColors.primaryLight,
                   borderRadius: BorderRadius.circular(1),
                 ),
               ),
@@ -901,7 +902,7 @@ class DesktopActionsPageState extends State<DesktopActionsPage>
                 height: 2,
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurpleAccent,
+                  color: EllaColors.primaryLight,
                   borderRadius: BorderRadius.circular(1),
                 ),
               ),

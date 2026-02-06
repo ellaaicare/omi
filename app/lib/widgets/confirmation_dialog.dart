@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConfirmationDialog extends StatefulWidget {
   final String title;
@@ -60,7 +61,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
 
     if (Platform.isAndroid) {
       return AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         contentPadding: const EdgeInsets.only(top: 20, left: 24, right: 24, bottom: 10),
         title: Text(
@@ -96,7 +97,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
                         fillColor: MaterialStateProperty.resolveWith<Color>(
                           (Set<MaterialState> states) {
                             if (states.contains(MaterialState.selected)) {
-                              return Colors.deepPurple;
+                              return EllaColors.primary;
                             }
                             return Colors.grey.shade700;
                           },
@@ -138,7 +139,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
             onPressed: widget.onConfirm,
             style: TextButton.styleFrom(
               foregroundColor: Colors.white,
-              backgroundColor: Colors.deepPurple,
+              backgroundColor: EllaColors.primary,
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(8),
@@ -180,7 +181,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
                   CupertinoCheckbox(
                     value: _checkboxValue,
                     onChanged: _updateCheckboxValue,
-                    activeColor: Colors.deepPurple,
+                    activeColor: EllaColors.primary,
                   ),
                   const SizedBox(width: 8),
                   Text(
@@ -215,7 +216,7 @@ class _ConfirmationDialogState extends State<ConfirmationDialog> {
               widget.confirmText ?? context.l10n.confirm,
               style: const TextStyle(
                 fontSize: 16,
-                color: Colors.deepPurple,
+                color: EllaColors.primary,
                 fontWeight: FontWeight.w600,
               ),
             ),

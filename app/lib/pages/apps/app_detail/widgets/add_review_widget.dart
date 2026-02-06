@@ -11,6 +11,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/animated_loading_button.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AddReviewWidget extends StatefulWidget {
   final App app;
@@ -85,7 +86,7 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
         bottom: 6,
       ),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(
@@ -95,7 +96,8 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
             children: [
               Padding(
                 padding: const EdgeInsets.only(left: 6.0),
-                child: Text(widget.app.userReview?.score == null ? context.l10n.rateAndReviewThisApp : context.l10n.yourReview,
+                child: Text(
+                    widget.app.userReview?.score == null ? context.l10n.rateAndReviewThisApp : context.l10n.yourReview,
                     style: const TextStyle(color: Colors.white, fontSize: 16)),
               ),
             ],
@@ -124,7 +126,7 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                   return dynamicPadding.clamp(8.0, 24.0); // Clamp between reasonable values
                 }(),
               ),
-              itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.deepPurple),
+              itemBuilder: (context, _) => const Icon(Icons.star, color: EllaColors.primary),
               maxRating: 5.0,
               onRatingUpdate: (rating) {
                 if (isLoading) return;
@@ -196,7 +198,9 @@ class _AddReviewWidgetState extends State<AddReviewWidget> {
                           showButton
                               ? AnimatedLoadingButton(
                                   loaderColor: Colors.black,
-                                  text: widget.app.userReview != null ? context.l10n.updateReview : context.l10n.submitReview,
+                                  text: widget.app.userReview != null
+                                      ? context.l10n.updateReview
+                                      : context.l10n.submitReview,
                                   textStyle: const TextStyle(color: Colors.black, fontSize: 16),
                                   onPressed: () async {
                                     FocusScope.of(context).unfocus();

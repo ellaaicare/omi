@@ -8,6 +8,7 @@ import 'package:omi/widgets/shimmer_with_timeout.dart';
 
 import 'package:omi/providers/voice_recorder_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class VoiceRecorderWidget extends StatefulWidget {
   final Function(String) onTranscriptReady;
@@ -116,7 +117,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   ShimmerWithTimeout(
-                    baseColor: Color(0xFF35343B),
+                    baseColor: EllaColors.bgTertiary,
                     highlightColor: Colors.white,
                     child: Text(
                       context.l10n.transcribing,

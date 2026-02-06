@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
 
 import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class PaymentMethodConfig {
   final String title;
@@ -41,7 +42,7 @@ class PaymentMethodConfig {
         width: 80,
         color: Colors.white,
       ),
-      backgroundColor: isActive ? const Color(0xFF635BFF) : Color(0xFF35343B),
+      backgroundColor: isActive ? const Color(0xFF635BFF) : EllaColors.bgTertiary,
       onManageTap: onManageTap,
       onSetActiveTap: onSetActiveTap,
       isActive: isActive,
@@ -65,7 +66,7 @@ class PaymentMethodConfig {
         size: 32,
         color: Colors.white,
       ),
-      backgroundColor: isActive ? const Color(0xFF003087) : Color(0xFF35343B),
+      backgroundColor: isActive ? const Color(0xFF003087) : EllaColors.bgTertiary,
       onManageTap: onManageTap,
       onSetActiveTap: onSetActiveTap,
       isActive: isActive,

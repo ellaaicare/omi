@@ -7,6 +7,7 @@ import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/sync_provider.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class LimitlessSyncCardWidget extends StatelessWidget {
   const LimitlessSyncCardWidget({super.key});
@@ -34,7 +35,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
 
         return Container(
           decoration: const BoxDecoration(
-            color: Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.all(Radius.circular(12)),
           ),
           margin: const EdgeInsets.fromLTRB(16, 15, 16, 0),
@@ -63,7 +64,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
                     ElevatedButton(
                       onPressed: () => syncProvider.syncWals(),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
+                        backgroundColor: EllaColors.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                         shape: RoundedRectangleBorder(
@@ -91,7 +92,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
                   child: LinearProgressIndicator(
                     value: progress > 0 ? progress : null,
                     backgroundColor: Colors.grey.shade800,
-                    color: Colors.deepPurple,
+                    color: EllaColors.primary,
                     minHeight: 4,
                   ),
                 ),

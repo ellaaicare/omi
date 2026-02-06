@@ -11,6 +11,7 @@ import 'package:omi/pages/conversations/widgets/goals_widget.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/goals_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Daily Score Widget - Shows task completion rate as a 0-5 score
 class DailyScoreWidget extends StatefulWidget {
@@ -85,7 +86,7 @@ class DailyScoreWidgetState extends State<DailyScoreWidget> {
           margin: const EdgeInsets.only(bottom: 20),
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(24),
           ),
           child: Stack(

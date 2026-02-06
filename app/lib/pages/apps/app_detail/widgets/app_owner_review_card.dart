@@ -9,6 +9,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppOwnerReviewCard extends StatefulWidget {
   final AppReview review;
@@ -58,7 +59,7 @@ class _AppOwnerReviewCardState extends State<AppOwnerReviewCard> {
         padding: const EdgeInsets.all(16.0),
         margin: const EdgeInsets.only(left: 12.0, right: 12.0, top: 2, bottom: 6),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(16.0),
         ),
         child: Column(
@@ -77,7 +78,7 @@ class _AppOwnerReviewCardState extends State<AppOwnerReviewCard> {
                   itemSize: 20,
                   tapOnlyMode: false,
                   itemPadding: const EdgeInsets.symmetric(horizontal: 0),
-                  itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.deepPurple),
+                  itemBuilder: (context, _) => const Icon(Icons.star, color: EllaColors.primary),
                   maxRating: 5.0,
                   onRatingUpdate: (rating) {},
                 ),
@@ -178,8 +179,8 @@ class _AppOwnerReviewCardState extends State<AppOwnerReviewCard> {
                                         onPressed: () {
                                           updateShowReplyField(false);
                                         },
-                                        child:
-                                            Text(context.l10n.cancel, style: const TextStyle(color: Colors.white, fontSize: 16)),
+                                        child: Text(context.l10n.cancel,
+                                            style: const TextStyle(color: Colors.white, fontSize: 16)),
                                       ),
                                     ),
                                     const SizedBox(

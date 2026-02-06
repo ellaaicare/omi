@@ -10,6 +10,7 @@ import 'package:omi/backend/schema/geolocation.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CreateConversationResponse {
   final List<ServerMessage> messages;
@@ -308,13 +309,13 @@ class ServerConversation {
   }
 
   Color getTagTextColor() {
-    if (source == ConversationSource.screenpipe) return Colors.deepPurple;
+    if (source == ConversationSource.screenpipe) return EllaColors.primary;
     return Colors.white;
   }
 
   Color getTagColor() {
     if (source == ConversationSource.screenpipe) return Colors.white;
-    return const Color(0xFF35343B);
+    return EllaColors.bgTertiary;
   }
 
   VoidCallback? onTagPressed(BuildContext context) {

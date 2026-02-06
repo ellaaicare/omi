@@ -6,6 +6,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'delete_confirmation.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MemoryDialog extends StatefulWidget {
   final MemoriesProvider provider;
@@ -49,7 +50,7 @@ class _MemoryDialogState extends State<MemoryDialog> {
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
         decoration: const BoxDecoration(
-          color: Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
@@ -146,13 +147,13 @@ class _MemoryDialogState extends State<MemoryDialog> {
               child: ElevatedButton(
                 onPressed: _isSaving ? null : _handleSave,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _saveFailed ? Colors.orange : Colors.deepPurpleAccent,
+                  backgroundColor: _saveFailed ? Colors.orange : EllaColors.primaryLight,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  disabledBackgroundColor: Colors.deepPurpleAccent.withOpacity(0.5),
+                  disabledBackgroundColor: EllaColors.primaryLight.withOpacity(0.5),
                   disabledForegroundColor: Colors.white.withOpacity(0.7),
                 ),
                 child: _isSaving

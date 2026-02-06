@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppReviewService {
   static final AppReviewService _instance = AppReviewService._internal();
@@ -174,7 +175,7 @@ class AppReviewService {
                         }
                       },
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.deepPurple,
+                        backgroundColor: EllaColors.primary,
                         foregroundColor: Colors.white,
                         minimumSize: const Size(double.infinity, 48),
                         shape: RoundedRectangleBorder(

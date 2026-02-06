@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ExpandableTextWidget extends StatefulWidget {
   final String text;
@@ -21,7 +22,7 @@ class ExpandableTextWidget extends StatefulWidget {
     this.maxLines = 3,
     this.expandText,
     this.collapseText,
-    this.linkColor = Colors.deepPurple,
+    this.linkColor = EllaColors.primary,
     required this.isExpanded,
     required this.toggleExpand,
   });
@@ -61,7 +62,7 @@ class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
                 color: Colors.black,
               ),
               blockquoteDecoration: BoxDecoration(
-                color: Color(0xFF35343B),
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(4),
               ),
               code: widget.style.copyWith(
@@ -91,7 +92,7 @@ class _ExpandableTextWidgetState extends State<ExpandableTextWidget> {
                 child: Text(
                   widget.isExpanded ? collapseLabel : expandLabel,
                   style: TextStyle(
-                    color: Colors.deepPurple,
+                    color: EllaColors.primary,
                     fontWeight: FontWeight.w500,
                     fontSize: widget.style.fontSize,
                   ),

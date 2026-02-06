@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CategoryCard extends StatelessWidget {
   final Category category;
@@ -91,7 +92,7 @@ class CategoryCard extends StatelessWidget {
       case 'sports':
         return Colors.lime;
       case 'music':
-        return Colors.deepPurple;
+        return EllaColors.primary;
       case 'photo':
         return Colors.brown;
       case 'gaming':
@@ -110,7 +111,7 @@ class CategoryCard extends StatelessWidget {
       onTap: onTap,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25).withOpacity(0.3),
+          color: EllaColors.bgSecondary.withOpacity(0.3),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Padding(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class InfoCardWidget extends StatelessWidget {
   final VoidCallback onTap;
@@ -34,7 +35,7 @@ class InfoCardWidget extends StatelessWidget {
           bottom: 6,
         ),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25).withOpacity(0.8),
+          color: EllaColors.bgSecondary.withOpacity(0.8),
           borderRadius: BorderRadius.circular(16.0),
         ),
         child: Column(
@@ -77,7 +78,7 @@ class InfoCardWidget extends StatelessWidget {
                           backgroundColor: Colors.transparent,
                           shape: StadiumBorder(
                             side: BorderSide(
-                              color: Color(0xFF35343B),
+                              color: EllaColors.bgTertiary,
                             ),
                           ),
                         ))
@@ -98,7 +99,7 @@ class InfoCardWidget extends StatelessWidget {
                           backgroundColor: Colors.transparent,
                           shape: StadiumBorder(
                             side: BorderSide(
-                              color: Color(0xFF35343B),
+                              color: EllaColors.bgTertiary,
                             ),
                           ),
                         ))

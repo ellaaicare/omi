@@ -11,6 +11,7 @@ import 'package:omi/pages/conversation_detail/maps_util.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class DailySummaryDetailPage extends StatefulWidget {
   final String summaryId;
@@ -450,7 +451,7 @@ class _DailySummaryDetailPageState extends State<DailySummaryDetailPage> with Si
         height: 32,
         child: const FaIcon(
           FontAwesomeIcons.locationDot,
-          color: Colors.deepPurple,
+          color: EllaColors.primary,
           size: 28,
         ),
       );
@@ -812,19 +813,19 @@ class _DailySummaryDetailPageState extends State<DailySummaryDetailPage> with Si
                   Container(
                     width: 2,
                     height: 12,
-                    color: isFirst ? Colors.transparent : Colors.deepPurple.withOpacity(0.4),
+                    color: isFirst ? Colors.transparent : EllaColors.primary.withOpacity(0.4),
                   ),
                   // Dot
                   Container(
                     width: 14,
                     height: 14,
                     decoration: BoxDecoration(
-                      color: Colors.deepPurple,
+                      color: EllaColors.primary,
                       shape: BoxShape.circle,
                       border: Border.all(color: const Color(0xFF0A0A0A), width: 2),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.deepPurple.withOpacity(0.4),
+                          color: EllaColors.primary.withOpacity(0.4),
                           blurRadius: 6,
                           spreadRadius: 1,
                         ),
@@ -835,7 +836,7 @@ class _DailySummaryDetailPageState extends State<DailySummaryDetailPage> with Si
                   Expanded(
                     child: Container(
                       width: 2,
-                      color: isLast ? Colors.transparent : Colors.deepPurple.withOpacity(0.4),
+                      color: isLast ? Colors.transparent : EllaColors.primary.withOpacity(0.4),
                     ),
                   ),
                 ],

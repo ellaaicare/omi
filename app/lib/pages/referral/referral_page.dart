@@ -4,6 +4,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ReferralPage extends StatefulWidget {
   const ReferralPage({super.key});
@@ -75,7 +76,7 @@ class _ReferralPageState extends State<ReferralPage> {
           if (_controller != null) WebViewWidget(controller: _controller!),
           if (_isLoading || _controller == null)
             const Center(
-              child: CircularProgressIndicator(color: Colors.deepPurple),
+              child: CircularProgressIndicator(color: EllaColors.primary),
             ),
         ],
       ),

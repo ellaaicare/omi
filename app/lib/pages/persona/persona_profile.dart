@@ -19,6 +19,7 @@ import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class PersonaProfilePage extends StatefulWidget {
   final double? bottomMargin;
@@ -319,7 +320,7 @@ class _PersonaProfilePageState extends State<PersonaProfilePage> {
                                           onChanged: (value) {
                                             provider.setPersonaPublic(value);
                                           },
-                                          activeColor: Colors.deepPurple,
+                                          activeColor: EllaColors.primary,
                                         );
                                       },
                                     ),

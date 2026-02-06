@@ -38,6 +38,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/pages/apps/widgets/show_app_options_sheet.dart';
 import 'widgets/capabilities_card.dart';
 import 'widgets/info_card_widget.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppDetailPage extends StatefulWidget {
   final App app;
@@ -477,7 +478,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
         bottom: 6,
       ),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25).withOpacity(0.8),
+        color: EllaColors.bgSecondary.withOpacity(0.8),
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(
@@ -570,7 +571,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
         bottom: 6,
       ),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25).withOpacity(0.8),
+        color: EllaColors.bgSecondary.withOpacity(0.8),
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(
@@ -903,7 +904,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                                       const FaIcon(
                                         FontAwesomeIcons.solidCircleCheck,
                                         size: 14,
-                                        color: Colors.deepPurpleAccent,
+                                        color: EllaColors.primaryLight,
                                       ),
                                     ],
                                   ],
@@ -916,7 +917,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                                     width: 32,
                                     height: 32,
                                     onPressed: () async {},
-                                    color: const Color(0xFF35343B),
+                                    color: EllaColors.bgTertiary,
                                   )
                                 : app.enabled
                                     ? AnimatedLoadingButton(
@@ -1360,7 +1361,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                             bottom: 6,
                           ),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF1F1F25).withOpacity(0.8),
+                            color: EllaColors.bgSecondary.withOpacity(0.8),
                             borderRadius: BorderRadius.circular(16.0),
                             border: Border.all(
                               color: setupCompleted ? Colors.green.withOpacity(0.3) : Colors.transparent,
@@ -1680,7 +1681,7 @@ class _AppDetailPageState extends State<AppDetailPage> {
                                 bottom: 6,
                               ),
                               decoration: BoxDecoration(
-                                color: const Color(0xFF1F1F25).withOpacity(0.8),
+                                color: EllaColors.bgSecondary.withOpacity(0.8),
                                 borderRadius: BorderRadius.circular(16.0),
                               ),
                               child: Column(
@@ -1942,7 +1943,7 @@ class RatingDistributionWidget extends StatelessWidget {
                   child: Icon(
                     FontAwesomeIcons.solidStar,
                     size: 14,
-                    color: index < ratingAvg.round() ? Colors.deepPurple : Colors.grey.shade700,
+                    color: index < ratingAvg.round() ? EllaColors.primary : Colors.grey.shade700,
                   ),
                 );
               }),
@@ -1981,7 +1982,7 @@ class RatingDistributionWidget extends StatelessWidget {
                     const Icon(
                       FontAwesomeIcons.solidStar,
                       size: 10,
-                      color: Colors.deepPurple,
+                      color: EllaColors.primary,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -1996,7 +1997,7 @@ class RatingDistributionWidget extends StatelessWidget {
                           widthFactor: percentage,
                           child: Container(
                             decoration: BoxDecoration(
-                              color: Colors.deepPurple,
+                              color: EllaColors.primary,
                               borderRadius: BorderRadius.circular(4),
                             ),
                           ),
@@ -2207,9 +2208,9 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.deepPurple.withOpacity(0.1),
+        color: EllaColors.primary.withOpacity(0.1),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.deepPurple.withOpacity(0.3)),
+        border: Border.all(color: EllaColors.primary.withOpacity(0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2257,7 +2258,7 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
                   child: Icon(
                     FontAwesomeIcons.solidStar,
                     size: 24,
-                    color: index < editRating ? Colors.deepPurple : Colors.grey.shade600,
+                    color: index < editRating ? EllaColors.primary : Colors.grey.shade600,
                   ),
                 ),
               );
@@ -2290,7 +2291,7 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
             child: ElevatedButton(
               onPressed: isSubmitting ? null : _submitReview,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.deepPurple,
+                backgroundColor: EllaColors.primary,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 shape: RoundedRectangleBorder(
@@ -2347,14 +2348,14 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
                         width: 36,
                         height: 36,
                         decoration: BoxDecoration(
-                          color: isUserReview ? Colors.deepPurple.withOpacity(0.2) : Colors.grey.shade800,
+                          color: isUserReview ? EllaColors.primary.withOpacity(0.2) : Colors.grey.shade800,
                           shape: BoxShape.circle,
                         ),
                         child: Center(
                           child: Text(
                             initial,
                             style: TextStyle(
-                              color: isUserReview ? Colors.deepPurple : Colors.white,
+                              color: isUserReview ? EllaColors.primary : Colors.white,
                               fontSize: 16,
                               fontWeight: FontWeight.w600,
                             ),
@@ -2376,7 +2377,7 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
                         Text(
                           displayName,
                           style: TextStyle(
-                            color: isUserReview ? Colors.deepPurple : Colors.grey,
+                            color: isUserReview ? EllaColors.primary : Colors.grey,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                           ),
@@ -2408,7 +2409,7 @@ class _RecentReviewsSectionState extends State<RecentReviewsSection> {
                           child: Icon(
                             FontAwesomeIcons.solidStar,
                             size: 14,
-                            color: index < review.score.round() ? Colors.deepPurple : Colors.grey.shade700,
+                            color: index < review.score.round() ? EllaColors.primary : Colors.grey.shade700,
                           ),
                         );
                       }),

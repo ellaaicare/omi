@@ -26,6 +26,7 @@ import 'sync_widgets/fast_transfer_suggestion_dialog.dart';
 import 'sync_widgets/location_permission_dialog.dart';
 import 'synced_conversations_page.dart';
 import 'wal_item_detail/wal_item_detail_page.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 Widget _buildFaIcon(IconData icon, {double size = 18, Color color = const Color(0xFF8E8E93)}) {
   return Padding(
@@ -181,18 +182,18 @@ class WalListItem extends StatelessWidget {
                                       Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                         decoration: BoxDecoration(
-                                          color: Colors.deepPurple.withOpacity(0.2),
+                                          color: EllaColors.primary.withOpacity(0.2),
                                           borderRadius: BorderRadius.circular(4),
                                         ),
                                         child: Row(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            const Icon(Icons.sd_card, size: 10, color: Colors.deepPurpleAccent),
+                                            const Icon(Icons.sd_card, size: 10, color: EllaColors.primaryLight),
                                             const SizedBox(width: 3),
                                             Text(
                                               context.l10n.sdCard,
                                               style: const TextStyle(
-                                                color: Colors.deepPurpleAccent,
+                                                color: EllaColors.primaryLight,
                                                 fontSize: 10,
                                                 fontWeight: FontWeight.w500,
                                               ),
@@ -205,18 +206,18 @@ class WalListItem extends StatelessWidget {
                                       Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                         decoration: BoxDecoration(
-                                          color: Colors.deepPurple.withOpacity(0.15),
+                                          color: EllaColors.primary.withOpacity(0.15),
                                           borderRadius: BorderRadius.circular(4),
                                         ),
                                         child: Row(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            Icon(Icons.sd_card, size: 10, color: Colors.deepPurple.shade300),
+                                            Icon(Icons.sd_card, size: 10, color: EllaColors.primaryLight),
                                             const SizedBox(width: 3),
                                             Text(
                                               context.l10n.fromSd,
                                               style: TextStyle(
-                                                color: Colors.deepPurple.shade300,
+                                                color: EllaColors.primaryLight,
                                                 fontSize: 10,
                                                 fontWeight: FontWeight.w500,
                                               ),
@@ -718,7 +719,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Row(
           children: [
-            _buildFaIcon(FontAwesomeIcons.sdCard, size: 20, color: Colors.deepPurpleAccent),
+            _buildFaIcon(FontAwesomeIcons.sdCard, size: 20, color: EllaColors.primaryLight),
             const SizedBox(width: 12),
             Text(context.l10n.sdCardProcessing, style: const TextStyle(color: Colors.white, fontSize: 18)),
           ],
@@ -737,7 +738,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               _startSyncWithWifiSheet(context, syncProvider);
             },
             child: Text(context.l10n.process,
-                style: const TextStyle(color: Colors.deepPurpleAccent, fontWeight: FontWeight.w600)),
+                style: const TextStyle(color: EllaColors.primaryLight, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
@@ -875,12 +876,12 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                     width: 36,
                     height: 36,
                     decoration: BoxDecoration(
-                      color: isWifiSync ? Colors.blue.withOpacity(0.2) : Colors.deepPurple.withOpacity(0.2),
+                      color: isWifiSync ? Colors.blue.withOpacity(0.2) : EllaColors.primary.withOpacity(0.2),
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: Icon(
                       isWifiSync ? Icons.bolt : Icons.bluetooth,
-                      color: isWifiSync ? Colors.blue : Colors.deepPurpleAccent,
+                      color: isWifiSync ? Colors.blue : EllaColors.primaryLight,
                       size: 20,
                     ),
                   ),
@@ -939,7 +940,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 child: LinearProgressIndicator(
                   value: progress,
                   backgroundColor: const Color(0xFF3C3C43),
-                  color: isWifiSync ? Colors.blue : Colors.deepPurpleAccent,
+                  color: isWifiSync ? Colors.blue : EllaColors.primaryLight,
                   minHeight: 4,
                 ),
               ),
@@ -1010,7 +1011,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
           child: Row(
             children: [
               SizedBox(
-                  width: 24, height: 24, child: _buildFaIcon(FontAwesomeIcons.bolt, color: Colors.deepPurpleAccent)),
+                  width: 24, height: 24, child: _buildFaIcon(FontAwesomeIcons.bolt, color: EllaColors.primaryLight)),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
@@ -1029,7 +1030,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Colors.deepPurpleAccent,
+                  color: EllaColors.primaryLight,
                   borderRadius: BorderRadius.circular(100),
                 ),
                 child: Text(context.l10n.start,

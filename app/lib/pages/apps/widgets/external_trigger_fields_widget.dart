@@ -8,6 +8,7 @@ import 'package:omi/pages/apps/providers/add_app_provider.dart';
 import 'package:omi/pages/apps/widgets/action_fields_widget.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/other/validators.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ExternalTriggerFieldsWidget extends StatelessWidget {
   const ExternalTriggerFieldsWidget({super.key});
@@ -56,7 +57,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
             const SizedBox(height: 18),
             Container(
               decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25),
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.circular(18.0),
               ),
               padding: const EdgeInsets.all(14.0),
@@ -75,7 +76,7 @@ class ExternalTriggerFieldsWidget extends StatelessWidget {
               },
               child: Container(
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1F1F25),
+                  color: EllaColors.bgSecondary,
                   borderRadius: BorderRadius.circular(18.0),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 20.0),

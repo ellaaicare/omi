@@ -7,6 +7,7 @@ import 'package:omi/backend/schema/schema.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Widget showing top 3 today's tasks with "Show all ->" button
 class TodayTasksWidget extends StatelessWidget {
@@ -102,7 +103,7 @@ class TodayTasksWidget extends StatelessWidget {
                   offset: const Offset(-8, 0),
                   child: Container(
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1F1F25),
+                      color: EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(24),
                     ),
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),

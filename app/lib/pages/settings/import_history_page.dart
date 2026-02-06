@@ -13,6 +13,7 @@ import 'package:omi/backend/http/api/imports.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ImportHistoryPage extends StatefulWidget {
   const ImportHistoryPage({super.key});
@@ -209,7 +210,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1F1F25),
+        backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(
           context.l10n.deleteAllLimitlessConversations,
@@ -238,7 +239,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
         context: context,
         barrierDismissible: false,
         builder: (context) => AlertDialog(
-          backgroundColor: const Color(0xFF1F1F25),
+          backgroundColor: EllaColors.bgSecondary,
           content: Row(
             children: [
               const CircularProgressIndicator(color: Colors.white),
@@ -302,9 +303,9 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFF1F1F25),
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.circular(12),
-          border: isAvailable ? Border.all(color: Colors.deepPurple.withValues(alpha: 0.3), width: 1) : null,
+          border: isAvailable ? Border.all(color: EllaColors.primary.withValues(alpha: 0.3), width: 1) : null,
         ),
         child: Row(
           children: [
@@ -386,14 +387,14 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
                       height: 20,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: Colors.deepPurple,
+                        color: EllaColors.primary,
                       ),
                     )
                   : Container(
                       width: 30,
                       height: 30,
                       decoration: BoxDecoration(
-                        color: Colors.deepPurple.withValues(alpha: 0.8),
+                        color: EllaColors.primary.withValues(alpha: 0.8),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: const Icon(
@@ -430,7 +431,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Row(
@@ -513,7 +514,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -656,7 +657,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(12),
           ),
           child: ShimmerWithTimeout(
@@ -755,7 +756,7 @@ class _ImportHistoryPageState extends State<ImportHistoryPage> {
             margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(
-              color: const Color(0xFF1F1F25),
+              color: EllaColors.bgSecondary,
               borderRadius: BorderRadius.circular(12),
             ),
             child: Row(

@@ -12,6 +12,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class DataPrivacyPage extends StatefulWidget {
   const DataPrivacyPage({super.key});
@@ -60,9 +61,9 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                   TextSpan(
                     text: context.l10n.learnMore,
                     style: TextStyle(
-                      color: Colors.deepPurple.shade300,
+                      color: EllaColors.primaryLight,
                       decoration: TextDecoration.underline,
-                      decorationColor: Colors.deepPurple.shade300,
+                      decorationColor: EllaColors.primaryLight,
                     ),
                     recognizer: TapGestureRecognizer()
                       ..onTap = () async {
@@ -206,7 +207,7 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                                   margin: const EdgeInsets.only(bottom: 10),
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(12),
-                                    side: BorderSide(color: Color(0xFF35343B), width: 1),
+                                    side: BorderSide(color: EllaColors.bgTertiary, width: 1),
                                   ),
                                   elevation: 0,
                                   clipBehavior: Clip.antiAlias,

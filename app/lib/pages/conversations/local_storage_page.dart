@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/sync_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class LocalStoragePage extends StatefulWidget {
   const LocalStoragePage({super.key});
@@ -76,7 +77,8 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: Text(context.l10n.enable, style: const TextStyle(color: Colors.deepPurpleAccent, fontWeight: FontWeight.w600)),
+            child: Text(context.l10n.enable,
+                style: const TextStyle(color: EllaColors.primaryLight, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
@@ -123,7 +125,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                 children: [
                   Row(
                     children: [
-                      _buildFaIcon(FontAwesomeIcons.mobile, size: 20, color: Colors.deepPurpleAccent),
+                      _buildFaIcon(FontAwesomeIcons.mobile, size: 20, color: EllaColors.primaryLight),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
@@ -180,7 +182,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                         child: CupertinoSwitch(
                           value: isEnabled,
                           onChanged: _isSaving ? null : _toggleLocalStorage,
-                          activeTrackColor: Colors.deepPurpleAccent,
+                          activeTrackColor: EllaColors.primaryLight,
                         ),
                       ),
                     ],

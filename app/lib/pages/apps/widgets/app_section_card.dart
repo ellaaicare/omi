@@ -11,6 +11,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/widgets/extensions/string.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppSectionCard extends StatelessWidget {
   final String title;
@@ -127,7 +128,7 @@ class SectionAppItemCard extends StatelessWidget {
                   width: 50,
                   height: 50,
                   decoration: BoxDecoration(
-                    color: Color(0xFF35343B),
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: const Icon(Icons.error_outline, color: Colors.white54, size: 24),
@@ -161,7 +162,7 @@ class SectionAppItemCard extends StatelessWidget {
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            Icon(Icons.star, color: Colors.deepPurple.shade300, size: 14),
+                            Icon(Icons.star, color: EllaColors.primaryLight, size: 14),
                             const SizedBox(width: 3),
                             Text(
                               app.getRatingAvg()!,

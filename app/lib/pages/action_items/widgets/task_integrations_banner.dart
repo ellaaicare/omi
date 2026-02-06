@@ -5,6 +5,7 @@ import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/settings/task_integrations_page.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class TaskIntegrationsBanner extends StatelessWidget {
   const TaskIntegrationsBanner({super.key});
@@ -30,7 +31,7 @@ class TaskIntegrationsBanner extends StatelessWidget {
         decoration: BoxDecoration(
           gradient: LinearGradient(
             colors: [
-              Colors.deepPurple.withOpacity(0.3),
+              EllaColors.primary.withOpacity(0.3),
               Colors.purple.withOpacity(0.3),
             ],
             begin: Alignment.topLeft,
@@ -38,7 +39,7 @@ class TaskIntegrationsBanner extends StatelessWidget {
           ),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
-            color: Colors.deepPurpleAccent.withOpacity(0.2),
+            color: EllaColors.primaryLight.withOpacity(0.2),
             width: 1,
           ),
         ),

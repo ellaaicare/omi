@@ -20,6 +20,7 @@ import 'package:omi/utils/device.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/widgets/waveform_section.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class WalItemDetailPage extends StatefulWidget {
   final Wal wal;
@@ -157,7 +158,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
     final storageLabel =
         isFlashPage ? context.l10n.storageLocationLimitlessPendant : context.l10n.storageLocationSdCard;
     final storageIcon = isFlashPage ? Icons.memory : Icons.sd_card;
-    final storageColor = isFlashPage ? Colors.teal : Colors.deepPurpleAccent;
+    final storageColor = isFlashPage ? Colors.teal : EllaColors.primaryLight;
 
     return Consumer<SyncProvider>(
       builder: (context, syncProvider, child) {
@@ -241,14 +242,14 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                         width: 120,
                         height: 120,
                         decoration: BoxDecoration(
-                          color: Colors.deepPurple.withOpacity(0.1),
+                          color: EllaColors.primary.withOpacity(0.1),
                           shape: BoxShape.circle,
                         ),
                         child: Center(
                           child: Icon(
                             isTransferring ? Icons.downloading : Icons.sd_card,
                             size: 56,
-                            color: Colors.deepPurpleAccent,
+                            color: EllaColors.primaryLight,
                           ),
                         ),
                       ),
@@ -282,7 +283,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                           child: LinearProgressIndicator(
                             value: transferProgress > 0 ? transferProgress : null,
                             backgroundColor: Colors.grey.shade800,
-                            color: Colors.deepPurpleAccent,
+                            color: EllaColors.primaryLight,
                             minHeight: 6,
                           ),
                         ),
@@ -336,7 +337,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                 child: ElevatedButton(
                   onPressed: isTransferring ? _handleCancelTransfer : _handleTransferToPhone,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: isTransferring ? Colors.orange : Colors.deepPurpleAccent,
+                    backgroundColor: isTransferring ? Colors.orange : EllaColors.primaryLight,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(16),
                     ),
@@ -666,7 +667,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1F1F25),
+      backgroundColor: EllaColors.bgSecondary,
       builder: (sheetContext) => Container(
         padding: const EdgeInsets.all(24),
         child: Column(

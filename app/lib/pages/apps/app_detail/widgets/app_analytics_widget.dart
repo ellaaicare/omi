@@ -6,6 +6,7 @@ import 'package:skeletonizer/skeletonizer.dart';
 import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppAnalyticsWidget extends StatelessWidget {
   final int installs;
@@ -19,7 +20,7 @@ class AppAnalyticsWidget extends StatelessWidget {
       padding: const EdgeInsets.all(16.0),
       margin: const EdgeInsets.only(left: 8.0, right: 8.0, top: 12, bottom: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(

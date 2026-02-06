@@ -21,6 +21,7 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationCaptureWidget extends StatefulWidget {
   const ConversationCaptureWidget({super.key});
@@ -59,7 +60,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
           margin: const EdgeInsets.fromLTRB(16, 12, 16, 12),
           width: double.maxFinite,
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(24),
           ),
           child: Padding(
@@ -195,7 +196,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
           const SizedBox(width: 12),
           Container(
             decoration: BoxDecoration(
-              color: const Color(0xFF35343B),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(16),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -216,7 +217,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
           const SizedBox(width: 12),
           Container(
             decoration: BoxDecoration(
-              color: const Color(0xFF35343B),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(16),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -321,7 +322,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: const Color(0xFF35343B),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(20),
             ),
             child: Row(
@@ -383,7 +384,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: const Color(0xFF35343B),
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Row(
@@ -452,7 +453,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                           ? const Color(0xFFFE5D50)
                           : const Color(0xFF7C3AED)
                       : isDeviceRecording
-                          ? const Color(0xFF35343B)
+                          ? EllaColors.bgTertiary
                           : const Color(0xFFFF9500),
                   shape: BoxShape.circle,
                 ),
@@ -727,7 +728,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
         child: Container(
           width: double.maxFinite,
           decoration: BoxDecoration(
-            color: const Color(0xFF1F1F25),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(24.0),
           ),
           // Static skeleton - no animation to save CPU/battery
@@ -753,7 +754,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
                     // Processing label
                     Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF35343B),
+                        color: EllaColors.bgTertiary,
                         borderRadius: BorderRadius.circular(16),
                       ),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),

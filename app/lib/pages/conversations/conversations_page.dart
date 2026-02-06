@@ -26,6 +26,7 @@ import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/ui_guidelines.dart';
 import 'widgets/conversations_group_widget.dart';
 import 'widgets/empty_conversations.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationsPage extends StatefulWidget {
   const ConversationsPage({super.key});
@@ -183,7 +184,7 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             Provider.of<FolderProvider>(context, listen: false).loadFolders(),
           ]);
         },
-        color: Colors.deepPurpleAccent,
+        color: EllaColors.primaryLight,
         backgroundColor: Colors.white,
         child: CustomScrollView(
           controller: _scrollController,

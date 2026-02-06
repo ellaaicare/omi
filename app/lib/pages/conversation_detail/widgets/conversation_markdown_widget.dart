@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'package:omi/ella/ella_theme.dart';
 
 class ConversationMarkdownWidget extends StatefulWidget {
   final String content;
@@ -229,7 +230,7 @@ class _ConversationMarkdownWidgetState extends State<ConversationMarkdownWidget>
           color: Colors.white,
         ),
         blockquoteDecoration: BoxDecoration(
-          color: Color(0xFF35343B),
+          color: EllaColors.bgTertiary,
           borderRadius: BorderRadius.circular(4),
         ),
         code: style.copyWith(
@@ -313,7 +314,7 @@ class _SearchHighlightBuilder extends MarkdownElementBuilder {
       text: TextSpan(
         text: element.textContent,
         style: (preferredStyle ?? const TextStyle()).copyWith(
-          backgroundColor: isCurrent ? Colors.orange : Colors.deepPurple,
+          backgroundColor: isCurrent ? Colors.orange : EllaColors.primary,
           color: Colors.white,
         ),
       ),

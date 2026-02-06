@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 Widget getMarkdownWidget(BuildContext context, String message, {Function(String)? onAskOmi}) {
   return MarkdownBody(
@@ -18,7 +19,7 @@ Widget getMarkdownWidget(BuildContext context, String message, {Function(String)
         backgroundColor: Colors.transparent,
       ),
       blockquoteDecoration: BoxDecoration(
-        color: const Color(0xFF35343B),
+        color: EllaColors.bgTertiary,
         borderRadius: BorderRadius.circular(4),
       ),
       code: const TextStyle(
@@ -27,7 +28,7 @@ Widget getMarkdownWidget(BuildContext context, String message, {Function(String)
         fontFamily: 'monospace',
       ),
       codeblockDecoration: BoxDecoration(
-        color: const Color(0xFF1F1F25),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(8),
       ),
     ),

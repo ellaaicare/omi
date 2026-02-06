@@ -4,6 +4,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class CapabilitiesCard extends StatelessWidget {
   final List<AppCapability> capabilities;
@@ -49,7 +50,7 @@ class CapabilitiesCard extends StatelessWidget {
         bottom: 6,
       ),
       decoration: BoxDecoration(
-        color: const Color(0xFF1F1F25).withOpacity(0.8),
+        color: EllaColors.bgSecondary.withOpacity(0.8),
         borderRadius: BorderRadius.circular(16.0),
       ),
       child: Column(

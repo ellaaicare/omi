@@ -14,6 +14,7 @@ import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/pages/apps/providers/add_app_provider.dart';
 import 'package:omi/utils/app_localizations_helper.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class AppMetadataWidget extends StatelessWidget {
   final File? imageFile;
@@ -57,7 +58,7 @@ class AppMetadataWidget extends StatelessWidget {
           children: [
             Container(
               decoration: BoxDecoration(
-                color: const Color(0xFF1F1F25),
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.circular(18.0),
               ),
               padding: const EdgeInsets.all(14.0),
@@ -139,7 +140,7 @@ class AppMetadataWidget extends StatelessWidget {
                               height: 105,
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(16.0),
-                                border: Border.all(color: const Color(0xFF35343B), width: 2.0),
+                                border: Border.all(color: EllaColors.bgTertiary, width: 2.0),
                               ),
                               child: imageFile != null || imageUrl != null
                                   ? (imageUrl == null
@@ -164,7 +165,7 @@ class AppMetadataWidget extends StatelessWidget {
                                 child: Container(
                                   padding: const EdgeInsets.all(6.0),
                                   decoration: const BoxDecoration(
-                                    color: Color(0xFF35343B),
+                                    color: EllaColors.bgTertiary,
                                     shape: BoxShape.circle,
                                   ),
                                   child: const FaIcon(
@@ -303,7 +304,8 @@ class AppMetadataWidget extends StatelessWidget {
                                   children: [
                                     Expanded(
                                       child: Text(
-                                        (category?.isNotEmpty == true ? category : '${context.l10n.categoryLabel}*') ?? '${context.l10n.categoryLabel}*',
+                                        (category?.isNotEmpty == true ? category : '${context.l10n.categoryLabel}*') ??
+                                            '${context.l10n.categoryLabel}*',
                                         style: TextStyle(
                                             color: category != null ? Colors.grey.shade100 : Colors.grey.shade400,
                                             fontSize: 16),
@@ -481,7 +483,7 @@ class AppMetadataWidget extends StatelessWidget {
                             margin: const EdgeInsets.only(left: 2.0, right: 2.0, top: 10, bottom: 6),
                             padding: const EdgeInsets.symmetric(horizontal: 2.0, vertical: 10.0),
                             decoration: BoxDecoration(
-                              color: Color(0xFF35343B),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10.0),
                             ),
                             width: double.infinity,
@@ -491,7 +493,8 @@ class AppMetadataWidget extends StatelessWidget {
                                   width: 12,
                                 ),
                                 Text(
-                                  (appPricing?.isNotEmpty == true ? appPricing : context.l10n.noneSelected) ?? context.l10n.noneSelected,
+                                  (appPricing?.isNotEmpty == true ? appPricing : context.l10n.noneSelected) ??
+                                      context.l10n.noneSelected,
                                   style: TextStyle(
                                       color: appPricing != null ? Colors.grey.shade100 : Colors.grey.shade400,
                                       fontSize: 16),
