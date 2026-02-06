@@ -9,11 +9,17 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/ella/ella_theme.dart';
 
+// TODO: replace with flavor check
+const bool isEllaApp = true;
+
 class OutOfCreditsWidget extends StatelessWidget {
   const OutOfCreditsWidget({super.key});
 
   @override
   Widget build(BuildContext context) {
+    // Ella doesn't use OMI's credit/payment system
+    if (isEllaApp) return const SizedBox.shrink();
+
     return Consumer<UsageProvider>(
       builder: (context, usageProvider, child) {
         if (!usageProvider.isOutOfCredits) {
