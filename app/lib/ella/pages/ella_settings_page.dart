@@ -200,13 +200,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             EllaSettingsRow(
               icon: Icons.privacy_tip,
               title: context.l10n.ellaSettingsPrivacy,
-              onTap: () => launchUrl(Uri.parse('https://www.omi.me/pages/privacy')),
+              onTap: () => launchUrl(Uri.parse('https://ella-ai-care.com/privacy')),
             ),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.description,
               title: context.l10n.ellaSettingsTerms,
-              onTap: () => launchUrl(Uri.parse('https://www.omi.me/pages/terms')),
+              onTap: () => launchUrl(Uri.parse('https://ella-ai-care.com/terms')),
             ),
             const SizedBox(height: 8),
             EllaSettingsRow(
