@@ -91,13 +91,13 @@ Widget _buildAppIcon(BuildContext context, String appId, {double size = 15, doub
             child: Icon(
               Icons.apps,
               size: size * 0.7,
-              color: Colors.white.withOpacity(opacity),
+              color: EllaColors.textTertiary.withOpacity(opacity),
             ),
           ),
           errorWidget: (context, url, error) => Icon(
             Icons.apps,
             size: size * 0.7,
-            color: Colors.white.withOpacity(opacity),
+            color: EllaColors.textTertiary.withOpacity(opacity),
           ),
         ),
       ),
@@ -110,7 +110,7 @@ Widget _buildAppIcon(BuildContext context, String appId, {double size = 15, doub
     child: Icon(
       Icons.apps,
       size: size,
-      color: Colors.white.withOpacity(opacity),
+      color: EllaColors.textTertiary.withOpacity(opacity),
     ),
   );
 }
@@ -156,7 +156,7 @@ IconData _getThinkingIcon(String thinkingText) {
 }
 
 /// Build the thinking icon widget - either an integration logo or a fallback icon
-Widget _buildThinkingIconWidget(String thinkingText, {double size = 15, Color color = Colors.white}) {
+Widget _buildThinkingIconWidget(String thinkingText, {double size = 15, Color color = EllaColors.textPrimary}) {
   final logoPath = _getIntegrationLogoPath(thinkingText);
   if (logoPath != null) {
     return ClipRRect(
@@ -343,7 +343,7 @@ class DaySummaryWidget extends StatelessWidget {
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w500,
-            color: Colors.grey.shade300,
+            color: EllaColors.textSecondary,
             decoration: TextDecoration.underline,
           ),
         ),
@@ -401,7 +401,7 @@ class DaySummaryWidget extends StatelessWidget {
             style: TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.bold,
-              color: Colors.grey.shade500,
+              color: EllaColors.textTertiary,
             ),
           ),
           title: AutoSizeText(
@@ -410,7 +410,7 @@ class DaySummaryWidget extends StatelessWidget {
               fontSize: 16.0,
               fontWeight: FontWeight.w500,
               height: 1.35,
-              color: Colors.white,
+              color: EllaColors.textPrimary,
             ),
             softWrap: true,
             maxLines: 3,
@@ -474,15 +474,15 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: ShimmerWithTimeout(
-        baseColor: const Color(0xFF1A1A20),
-        highlightColor: const Color(0xFF282830),
+        baseColor: EllaColors.bgSecondary,
+        highlightColor: EllaColors.bgTertiary,
         timeoutSeconds: 15,
         child: Container(
           height: 236,
           decoration: BoxDecoration(
-            color: const Color(0xFF1A1A20),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+            border: Border.all(color: EllaColors.bgTertiary),
           ),
         ),
       ),
@@ -534,14 +534,14 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
                                     // Shimmer only applies to text
                                     Flexible(
                                       child: ShimmerWithTimeout(
-                                        baseColor: Colors.white,
-                                        highlightColor: Colors.grey,
+                                        baseColor: EllaColors.textPrimary,
+                                        highlightColor: EllaColors.textTertiary,
                                         child: Text(
                                           overflow: TextOverflow.fade,
                                           maxLines: 1,
                                           softWrap: false,
                                           displayThinkingText,
-                                          style: const TextStyle(color: Colors.white, fontSize: 15),
+                                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
                                         ),
                                       ),
                                     ),
@@ -666,15 +666,15 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: ShimmerWithTimeout(
-        baseColor: const Color(0xFF1A1A20),
-        highlightColor: const Color(0xFF282830),
+        baseColor: EllaColors.bgSecondary,
+        highlightColor: EllaColors.bgTertiary,
         timeoutSeconds: 15,
         child: Container(
           height: 236,
           decoration: BoxDecoration(
-            color: const Color(0xFF1A1A20),
+            color: EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+            border: Border.all(color: EllaColors.bgTertiary),
           ),
         ),
       ),
@@ -733,14 +733,14 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                                     // Shimmer only applies to text
                                     Flexible(
                                       child: ShimmerWithTimeout(
-                                        baseColor: Colors.white,
-                                        highlightColor: Colors.grey,
+                                        baseColor: EllaColors.textPrimary,
+                                        highlightColor: EllaColors.textTertiary,
                                         child: Text(
                                           overflow: TextOverflow.fade,
                                           maxLines: 1,
                                           softWrap: false,
                                           displayThinkingText,
-                                          style: const TextStyle(color: Colors.white, fontSize: 15),
+                                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
                                         ),
                                       ),
                                     ),
@@ -886,10 +886,10 @@ class _MemoriesMessageWidgetState extends State<MemoriesMessageWidget> {
                             height: 16,
                             width: 16,
                             child: CircularProgressIndicator(
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white54),
+                              valueColor: AlwaysStoppedAnimation<Color>(EllaColors.textDisabled),
                               strokeWidth: 2,
                             ))
-                        : const FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: Colors.white54)
+                        : const FaIcon(FontAwesomeIcons.chevronRight, size: 16, color: EllaColors.textDisabled)
                   ],
                 ),
               ),
@@ -974,7 +974,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
       ),
       child: Container(
         decoration: const BoxDecoration(
-          color: Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
@@ -989,7 +989,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                 height: 4,
                 margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade600,
+                  color: EllaColors.textDisabled,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -1004,7 +1004,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                   ),
                 ),
                 TextButton(
@@ -1012,7 +1012,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   child: Text(
                     'Submit',
                     style: TextStyle(
-                      color: _selectedReason != null ? Colors.blue : Colors.grey.shade600,
+                      color: _selectedReason != null ? Colors.blue : EllaColors.textDisabled,
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
                     ),
@@ -1028,7 +1028,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: Colors.grey,
+                color: EllaColors.textTertiary,
               ),
             ),
             const SizedBox(height: 10),
@@ -1049,14 +1049,14 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: isSelected ? Colors.blue.withOpacity(0.2) : const Color(0xFF2C2C2E),
+                      color: isSelected ? Colors.blue.withOpacity(0.2) : EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(20),
                       border: isSelected ? Border.all(color: Colors.blue, width: 1.5) : null,
                     ),
                     child: Text(
                       reason.label,
                       style: TextStyle(
-                        color: isSelected ? Colors.blue : Colors.white,
+                        color: isSelected ? Colors.blue : EllaColors.textPrimary,
                         fontSize: 14,
                         fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
                       ),
@@ -1073,21 +1073,21 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: Colors.grey,
+                color: EllaColors.textTertiary,
               ),
             ),
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
               decoration: BoxDecoration(
-                color: const Color(0xFF2C2C2E),
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: TextField(
                 controller: _commentController,
                 focusNode: _commentFocusNode,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 15,
                   height: 1.4,
                 ),
@@ -1096,7 +1096,7 @@ class _FeedbackBottomSheetState extends State<FeedbackBottomSheet> {
                   contentPadding: const EdgeInsets.symmetric(vertical: 10),
                   hintText: context.l10n.tellUsMoreWhatWentWrong,
                   hintStyle: const TextStyle(
-                    color: Colors.grey,
+                    color: EllaColors.textDisabled,
                     fontSize: 15,
                   ),
                 ),
@@ -1293,7 +1293,7 @@ class _MessageActionBarState extends State<MessageActionBar> {
       onTap: onTap,
       child: FaIcon(
         icon,
-        color: isSelected ? Colors.white : Colors.grey.shade600,
+        color: isSelected ? EllaColors.textPrimary : EllaColors.textTertiary,
         size: 14,
       ),
     );
