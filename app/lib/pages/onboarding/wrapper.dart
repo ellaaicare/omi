@@ -21,6 +21,7 @@ import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/onboarding_provider.dart';
 import 'package:omi/providers/speech_profile_provider.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/pages/onboarding/ella/ella_onboarding.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -195,6 +196,12 @@ class _OnboardingWrapperState extends State<OnboardingWrapper> with TickerProvid
 
   @override
   Widget build(BuildContext context) {
+    // Use Ella onboarding flow
+    const bool isEllaApp = true; // TODO: replace with flavor check
+    if (isEllaApp) {
+      return const EllaOnboarding();
+    }
+
     List<Widget> pages = [
       AuthComponent(
         onSignIn: () {
