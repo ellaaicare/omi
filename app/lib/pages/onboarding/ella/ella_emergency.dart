@@ -76,148 +76,178 @@ class _EllaEmergencyState extends State<EllaEmergency> {
           behavior: HitTestBehavior.opaque,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    GestureDetector(
-                      onTap: widget.onBack,
-                      child: Container(
-                        width: 48,
-                        height: 48,
-                        decoration: const BoxDecoration(
-                          color: EllaColors.bgTertiary,
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(Icons.arrow_back, color: EllaColors.textPrimary, size: 24),
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        context.l10n.ellaOnboardingStep(3, 3),
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 16, color: EllaColors.textTertiary),
-                      ),
-                    ),
-                    const SizedBox(width: 48),
-                  ],
-                ),
-                const SizedBox(height: 48),
-                Text(
-                  context.l10n.ellaEmergencyTitle,
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                    color: EllaColors.textPrimary,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  context.l10n.ellaEmergencySubtitle,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    color: EllaColors.textSecondary,
-                    height: 1.4,
-                  ),
-                ),
-                const SizedBox(height: 40),
-                Text(
-                  context.l10n.ellaEmergencyNameLabel,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 56,
-                  child: TextField(
-                    controller: _nameController,
-                    autofocus: true,
-                    textCapitalization: TextCapitalization.words,
-                    style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
-                    decoration: InputDecoration(
-                      hintText: context.l10n.ellaEmergencyNamePlaceholder,
-                      hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
-                      filled: true,
-                      fillColor: EllaColors.bgTertiary,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(16),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                    ),
-                    textInputAction: TextInputAction.next,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  context.l10n.ellaEmergencyPhoneLabel,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
-                ),
-                const SizedBox(height: 8),
-                SizedBox(
-                  height: 56,
-                  child: TextField(
-                    controller: _phoneController,
-                    keyboardType: TextInputType.phone,
-                    style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
-                    decoration: InputDecoration(
-                      hintText: context.l10n.ellaEmergencyPhonePlaceholder,
-                      hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
-                      filled: true,
-                      fillColor: EllaColors.bgTertiary,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(16),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                    ),
-                    textInputAction: TextInputAction.done,
-                    onChanged: (_) => setState(() {}),
-                    onSubmitted: (_) => _submit(),
-                  ),
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: double.infinity,
-                  height: 64,
-                  child: ElevatedButton(
-                    onPressed: _isValid && !_isSubmitting ? _submit : null,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isValid ? EllaColors.primary : EllaColors.bgTertiary,
-                      foregroundColor: _isValid ? Colors.white : EllaColors.textDisabled,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      elevation: 0,
-                    ),
-                    child: _isSubmitting
-                        ? const SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
-                          )
-                        : Text(
-                            context.l10n.ellaGetStarted,
-                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      GestureDetector(
+                        onTap: widget.onBack,
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          decoration: const BoxDecoration(
+                            color: EllaColors.bgTertiary,
+                            shape: BoxShape.circle,
                           ),
+                          child: const Icon(Icons.arrow_back, color: EllaColors.textPrimary, size: 24),
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          context.l10n.ellaOnboardingStep(3, 3),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+                        ),
+                      ),
+                      const SizedBox(width: 48),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 16),
-                Center(
-                  child: TextButton(
-                    onPressed: _isSubmitting ? null : _handleSkip,
-                    style: TextButton.styleFrom(minimumSize: const Size(double.infinity, 48)),
-                    child: Text(
-                      context.l10n.ellaSkipForNow,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        color: EllaColors.textTertiary,
+                  const SizedBox(height: 16),
+                  // Hero illustration
+                  Center(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24),
+                      child: Image.asset(
+                        'assets/images/ella_onboarding_3.png',
+                        height: 200,
+                        fit: BoxFit.contain,
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 32),
-              ],
+                  const SizedBox(height: 24),
+                  Text(
+                    context.l10n.ellaEmergencyTitle,
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: EllaColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    context.l10n.ellaEmergencySubtitle,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      color: EllaColors.textSecondary,
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  Text(
+                    context.l10n.ellaEmergencyNameLabel,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 56,
+                    child: TextField(
+                      controller: _nameController,
+                      autofocus: true,
+                      textCapitalization: TextCapitalization.words,
+                      style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
+                      decoration: InputDecoration(
+                        hintText: context.l10n.ellaEmergencyNamePlaceholder,
+                        hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      ),
+                      textInputAction: TextInputAction.next,
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    context.l10n.ellaEmergencyPhoneLabel,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 56,
+                    child: TextField(
+                      controller: _phoneController,
+                      keyboardType: TextInputType.phone,
+                      style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
+                      decoration: InputDecoration(
+                        hintText: context.l10n.ellaEmergencyPhonePlaceholder,
+                        hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      ),
+                      textInputAction: TextInputAction.done,
+                      onChanged: (_) => setState(() {}),
+                      onSubmitted: (_) => _submit(),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 64,
+                    child: ElevatedButton(
+                      onPressed: _isValid && !_isSubmitting ? _submit : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _isValid ? EllaColors.primary : EllaColors.bgTertiary,
+                        foregroundColor: _isValid ? Colors.white : EllaColors.textDisabled,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        elevation: 0,
+                      ),
+                      child: _isSubmitting
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                            )
+                          : Text(
+                              context.l10n.ellaGetStarted,
+                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Center(
+                    child: TextButton(
+                      onPressed: _isSubmitting ? null : _handleSkip,
+                      style: TextButton.styleFrom(minimumSize: const Size(double.infinity, 48)),
+                      child: Text(
+                        context.l10n.ellaSkipForNow,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          color: EllaColors.textTertiary,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                ],
+              ),
             ),
           ),
         ),
