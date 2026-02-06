@@ -86,6 +86,7 @@ def get_all_adapters() -> Dict[str, Callable]:
 # EXTENSION REGISTRATION
 # =============================================================================
 
+
 def register_ella_extensions(app) -> None:
     """
     Register all Ella extensions with the FastAPI app.
@@ -209,6 +210,7 @@ def _register_adapters() -> None:
     if ELLA_SUMMARY_ENABLED:
         try:
             from utils.ella.summary import call_summary_agent
+
             register_adapter("summary", call_summary_agent)
         except ImportError as e:
             print(f"  ⚠️ Summary adapter not available: {e}", flush=True)
@@ -216,6 +218,7 @@ def _register_adapters() -> None:
     if ELLA_MEMORY_ENABLED:
         try:
             from utils.ella.memory import call_memory_agent
+
             register_adapter("memory", call_memory_agent)
         except ImportError as e:
             print(f"  ⚠️ Memory adapter not available: {e}", flush=True)
@@ -223,6 +226,7 @@ def _register_adapters() -> None:
     if ELLA_SCANNER_ENABLED:
         try:
             from utils.ella.scanner import send_to_scanner
+
             register_adapter("scanner", send_to_scanner)
         except ImportError as e:
             print(f"  ⚠️ Scanner adapter not available: {e}", flush=True)
@@ -238,15 +242,26 @@ def _register_routers(app) -> None:
     # Ella callback endpoints (receives callbacks from n8n/Letta agents)
     try:
         from ella.routers.callbacks import router as callbacks_router
+
         app.include_router(callbacks_router, tags=["Ella Callbacks"])
         print("  🌐 /v1/ella/* - Callback endpoints", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella callbacks not available: {e}", flush=True)
 
+    # Chat streaming (Grok xAI)
+    try:
+        from ella.routers.chat import router as chat_router
+
+        app.include_router(chat_router, tags=["Ella Chat"])
+        print("  🌐 /v1/ella/chat/* - Chat streaming endpoints", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella chat not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
             from ella.routers.voice import router as voice_router
+
             app.include_router(voice_router, tags=["Ella Voice"])
             print("  🌐 /v1/voice/* - Voice session endpoints", flush=True)
         except ImportError as e:
@@ -256,6 +271,7 @@ def _register_routers(app) -> None:
     if ELLA_TESTING_ENABLED:
         try:
             from routers.testing import router as testing_router
+
             app.include_router(testing_router, tags=["Ella Testing"])
             print("  🌐 /api/v1/testing/* - E2E test endpoints", flush=True)
         except ImportError as e:
@@ -277,12 +293,10 @@ __all__ = [
     'ELLA_TESTING_ENABLED',
     'ELLA_N8N_BASE_URL',
     'GROK_V2V_PROXY_URL',
-
     # Adapter registry
     'register_adapter',
     'get_adapter',
     'get_all_adapters',
-
     # Main entry point
     'register_ella_extensions',
 ]
