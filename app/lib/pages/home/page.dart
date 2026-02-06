@@ -24,6 +24,7 @@ import 'package:omi/pages/settings/daily_summary_detail_page.dart';
 import 'package:omi/pages/settings/data_privacy_page.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
+import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
@@ -176,7 +177,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _pages = [
       ConversationsPage(key: _conversationsPageKey),
       const ChatPage(isPivotBottom: true),
-      const SettingsDrawer(mode: SettingsMode.omi),
+      const EllaSettingsPage(),
     ];
     SharedPreferencesUtil().onboardingCompleted = true;
     updateUserOnboardingState(completed: true);
