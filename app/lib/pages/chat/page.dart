@@ -184,6 +184,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       builder: (context, provider, connectivityProvider, child) {
         return Scaffold(
           key: scaffoldKey,
+          resizeToAvoidBottomInset: widget.isPivotBottom ? true : null,
           backgroundColor: Theme.of(context).colorScheme.primary,
           appBar: _buildAppBar(context, provider),
           endDrawer: _buildChatAppsEndDrawer(context),
@@ -207,12 +208,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             const CircularProgressIndicator(
-                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                             ),
                             const SizedBox(height: 16),
                             Text(
                               provider.firstTimeLoadingText,
-                              style: const TextStyle(color: Colors.white),
+                              style: const TextStyle(color: EllaColors.textPrimary),
                             ),
                           ],
                         )
@@ -221,12 +222,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 const CircularProgressIndicator(
-                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                  valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                                 ),
                                 const SizedBox(height: 16),
                                 Text(
                                   context.l10n.deletingMessages,
-                                  style: const TextStyle(color: Colors.white),
+                                  style: const TextStyle(color: EllaColors.textPrimary),
                                 ),
                               ],
                             )
@@ -239,7 +240,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                             ? context.l10n.noMessagesYet
                                             : context.l10n.noInternetConnection,
                                         textAlign: TextAlign.center,
-                                        style: const TextStyle(color: Colors.white)),
+                                        style: const TextStyle(color: EllaColors.textPrimary)),
                                   ),
                                 )
                               : LayoutBuilder(
@@ -247,8 +248,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                     return Theme(
                                       data: Theme.of(context).copyWith(
                                         textSelectionTheme: TextSelectionThemeData(
-                                          selectionColor: Colors.white.withOpacity(0.3),
-                                          selectionHandleColor: Colors.blue,
+                                          selectionColor: EllaColors.primaryLight.withOpacity(0.3),
+                                          selectionHandleColor: EllaColors.primary,
                                         ),
                                       ),
                                       child: ListView.builder(
@@ -369,7 +370,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   width: 60,
                                   height: 60,
                                   decoration: BoxDecoration(
-                                    color: Colors.grey[800],
+                                    color: EllaColors.bgTertiary,
                                     borderRadius: BorderRadius.circular(16),
                                     image: provider.selectedFileTypes[idx] == 'image'
                                         ? DecorationImage(
@@ -385,7 +386,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                         const Center(
                                           child: Icon(
                                             Icons.insert_drive_file,
-                                            color: Colors.white,
+                                            color: EllaColors.textPrimary,
                                             size: 24,
                                           ),
                                         ),
@@ -459,7 +460,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2F),
+                              color: EllaColors.bgSecondary,
                               borderRadius: BorderRadius.circular(32),
                             ),
                             child: Row(
@@ -485,14 +486,16 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                     child: Container(
                                       height: 44,
                                       width: 44,
-                                      decoration: const BoxDecoration(
-                                        color: Color(0xFF3C3C43),
+                                      decoration: BoxDecoration(
+                                        color: EllaColors.bgTertiary,
                                         shape: BoxShape.circle,
                                       ),
                                       child: Center(
                                         child: FaIcon(
                                           FontAwesomeIcons.plus,
-                                          color: provider.selectedFiles.length > 3 ? Colors.grey : Colors.white,
+                                          color: provider.selectedFiles.length > 3
+                                              ? EllaColors.textDisabled
+                                              : EllaColors.textPrimary,
                                           size: 18,
                                         ),
                                       ),
@@ -510,7 +513,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                           padding: const EdgeInsets.only(bottom: 4, top: 4, left: 2),
                                           child: Container(
                                             decoration: BoxDecoration(
-                                              color: const Color(0xFF1f1f25),
+                                              color: EllaColors.bgTertiary,
                                               borderRadius: BorderRadius.circular(16),
                                             ),
                                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -564,8 +567,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                           : Theme(
                                               data: Theme.of(context).copyWith(
                                                 textSelectionTheme: TextSelectionThemeData(
-                                                  selectionColor: Colors.grey.withOpacity(0.4),
-                                                  selectionHandleColor: Colors.white,
+                                                  selectionColor: EllaColors.primaryLight.withOpacity(0.4),
+                                                  selectionHandleColor: EllaColors.primary,
                                                 ),
                                               ),
                                               child: TextField(
@@ -577,7 +580,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                                 textAlignVertical: TextAlignVertical.center,
                                                 decoration: InputDecoration(
                                                   hintText: context.l10n.askAnything,
-                                                  hintStyle: const TextStyle(fontSize: 16.0, color: Colors.grey),
+                                                  hintStyle:
+                                                      const TextStyle(fontSize: 16.0, color: EllaColors.textDisabled),
                                                   focusedBorder: InputBorder.none,
                                                   enabledBorder: InputBorder.none,
                                                   contentPadding:
@@ -588,8 +592,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                                 maxLines: 10,
                                                 keyboardType: TextInputType.multiline,
                                                 textCapitalization: TextCapitalization.sentences,
-                                                style:
-                                                    const TextStyle(fontSize: 16.0, color: Colors.white, height: 1.4),
+                                                style: const TextStyle(
+                                                    fontSize: 16.0, color: EllaColors.textPrimary, height: 1.4),
                                               ),
                                             ),
                                     ],
@@ -609,7 +613,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                       alignment: Alignment.center,
                                       child: const FaIcon(
                                         FontAwesomeIcons.microphone,
-                                        color: Colors.grey,
+                                        color: EllaColors.textTertiary,
                                         size: 20,
                                       ),
                                     ),
@@ -646,7 +650,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                           child: const Center(
                                             child: FaIcon(
                                               FontAwesomeIcons.arrowUp,
-                                              color: Color(0xFF1f1f25),
+                                              color: EllaColors.textPrimary,
                                               size: 18,
                                             ),
                                           ),
@@ -662,8 +666,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                     ]);
                   }),
                 ),
-                SizedBox(height: textFieldFocusNode.hasFocus ? 12 : 0),
-                if (!textFieldFocusNode.hasFocus)
+                if (!widget.isPivotBottom) SizedBox(height: textFieldFocusNode.hasFocus ? 12 : 0),
+                if (!widget.isPivotBottom && !textFieldFocusNode.hasFocus)
                   BottomNavBar(
                     onTabTap: (index, isRepeat) {
                       context.read<HomeProvider>().setIndex(index);
@@ -921,25 +925,27 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
   PreferredSizeWidget _buildAppBar(BuildContext context, MessageProvider provider) {
     return AppBar(
-      backgroundColor: Theme.of(context).colorScheme.surface,
+      backgroundColor: EllaColors.bgPrimary,
       elevation: 0,
-      leading: Container(
-        width: 36,
-        height: 36,
-        margin: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.grey.withOpacity(0.3),
-          shape: BoxShape.circle,
-        ),
-        child: IconButton(
-          padding: EdgeInsets.zero,
-          icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 18),
-          onPressed: () {
-            HapticFeedback.mediumImpact();
-            Navigator.of(context).pop();
-          },
-        ),
-      ),
+      leading: widget.isPivotBottom
+          ? const SizedBox(width: 48)
+          : Container(
+              width: 36,
+              height: 36,
+              margin: const EdgeInsets.all(8),
+              decoration: const BoxDecoration(
+                color: EllaColors.bgTertiary,
+                shape: BoxShape.circle,
+              ),
+              child: IconButton(
+                padding: EdgeInsets.zero,
+                icon: const Icon(Icons.arrow_back_ios_new, color: EllaColors.textPrimary, size: 18),
+                onPressed: () {
+                  HapticFeedback.mediumImpact();
+                  Navigator.of(context).pop();
+                },
+              ),
+            ),
       title: Consumer<AppProvider>(
         builder: (context, appProvider, child) {
           return _buildSelectedAppDisplay(context, appProvider);
@@ -951,13 +957,13 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
           width: 36,
           height: 36,
           margin: const EdgeInsets.only(right: 8),
-          decoration: BoxDecoration(
-            color: Colors.grey.withOpacity(0.3),
+          decoration: const BoxDecoration(
+            color: EllaColors.bgTertiary,
             shape: BoxShape.circle,
           ),
           child: IconButton(
             padding: EdgeInsets.zero,
-            icon: const Icon(Icons.extension, color: Colors.white, size: 18),
+            icon: const Icon(Icons.extension, color: EllaColors.textPrimary, size: 18),
             onPressed: () {
               HapticFeedback.mediumImpact();
               // Dismiss keyboard before opening drawer
@@ -998,13 +1004,13 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       mainAxisAlignment: MainAxisAlignment.center,
       mainAxisSize: MainAxisSize.min,
       children: [
-        selectedApp != null ? _getAppAvatar(selectedApp) : _getOmiAvatar(),
+        selectedApp != null ? _getAppAvatar(selectedApp) : _getEllaAvatar(),
         const SizedBox(width: 8),
         Container(
           constraints: const BoxConstraints(maxWidth: 140),
           child: Text(
-            selectedApp != null ? selectedApp.getName() : context.l10n.omiAppName,
-            style: const TextStyle(color: Colors.white, fontSize: 16),
+            selectedApp != null ? selectedApp.getName() : 'Ella',
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
             overflow: TextOverflow.ellipsis,
           ),
         ),
@@ -1040,7 +1046,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                       Text(
                         context.l10n.chatAppsTitle,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 20,
                           fontWeight: FontWeight.w600,
                         ),
@@ -1048,14 +1054,14 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                       IconButton(
                         icon: const Padding(
                           padding: EdgeInsets.only(left: 2, top: 1),
-                          child: FaIcon(FontAwesomeIcons.xmark, color: Colors.white60, size: 18),
+                          child: FaIcon(FontAwesomeIcons.xmark, color: EllaColors.textTertiary, size: 18),
                         ),
                         onPressed: () => Navigator.of(context).pop(),
                       ),
                     ],
                   ),
                 ),
-                const Divider(color: Colors.white12, height: 1),
+                const Divider(color: EllaColors.bgTertiary, height: 1),
                 // Actions
                 ListTile(
                   leading: const Padding(
@@ -1074,28 +1080,28 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                 ListTile(
                   leading: const Padding(
                     padding: EdgeInsets.only(left: 2, top: 1),
-                    child: FaIcon(FontAwesomeIcons.circlePlus, color: Colors.white, size: 20),
+                    child: FaIcon(FontAwesomeIcons.circlePlus, color: EllaColors.textPrimary, size: 20),
                   ),
                   title: Text(
                     context.l10n.enableApps,
-                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                   ),
                   trailing: const Padding(
                     padding: EdgeInsets.only(left: 2, top: 1),
-                    child: FaIcon(FontAwesomeIcons.chevronRight, color: Colors.white38, size: 14),
+                    child: FaIcon(FontAwesomeIcons.chevronRight, color: EllaColors.textDisabled, size: 14),
                   ),
                   onTap: () {
                     Navigator.of(context).pop();
                     _navigateToChatAppsPage();
                   },
                 ),
-                const Divider(color: Colors.white12, height: 1),
+                const Divider(color: EllaColors.bgTertiary, height: 1),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 16, 20, 8),
                   child: Text(
                     context.l10n.selectApp,
                     style: const TextStyle(
-                      color: Colors.white60,
+                      color: EllaColors.textTertiary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                     ),
@@ -1106,10 +1112,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   child: ListView(
                     padding: EdgeInsets.zero,
                     children: [
-                      // Omi option
+                      // Ella default option
                       _buildDrawerAppItem(
-                        avatar: _getOmiAvatar(),
-                        name: context.l10n.omiAppName,
+                        avatar: _getEllaAvatar(),
+                        name: 'Ella',
                         isSelected: isOmiSelected,
                         onTap: () {
                           Navigator.of(context).pop();
@@ -1135,7 +1141,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                           padding: const EdgeInsets.all(20),
                           child: Text(
                             context.l10n.noChatAppsEnabled,
-                            style: const TextStyle(color: Colors.white38, fontSize: 14),
+                            style: const TextStyle(color: EllaColors.textDisabled, fontSize: 14),
                             textAlign: TextAlign.center,
                           ),
                         ),
@@ -1172,7 +1178,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
             Expanded(
               child: Text(
                 name,
-                style: const TextStyle(color: Colors.white, fontSize: 16),
+                style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -1234,13 +1240,13 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       leading: avatar,
       title: Text(
         name,
-        style: const TextStyle(color: Colors.white, fontSize: 16),
+        style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
         overflow: TextOverflow.ellipsis,
       ),
       trailing: isSelected
           ? const Padding(
               padding: EdgeInsets.only(left: 2, top: 1),
-              child: FaIcon(FontAwesomeIcons.solidCircleCheck, color: Colors.white, size: 18),
+              child: FaIcon(FontAwesomeIcons.solidCircleCheck, color: EllaColors.primary, size: 18),
             )
           : appId != null && onConfirmDelete != null
               ? GestureDetector(
@@ -1251,12 +1257,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   },
                   child: const Padding(
                     padding: EdgeInsets.only(left: 2, top: 1),
-                    child: FaIcon(FontAwesomeIcons.solidTrashCan, color: Colors.white38, size: 16),
+                    child: FaIcon(FontAwesomeIcons.solidTrashCan, color: EllaColors.textDisabled, size: 16),
                   ),
                 )
               : null,
       selected: isSelected,
-      selectedTileColor: Colors.white.withOpacity(0.1),
+      selectedTileColor: EllaColors.bgTertiary.withOpacity(0.5),
       onTap: onTap,
     );
   }
@@ -1283,7 +1289,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
         radius: 12,
         child: CircularProgressIndicator(
           value: progress.progress,
-          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+          valueColor: const AlwaysStoppedAnimation<Color>(EllaColors.primary),
         ),
       ),
     );
@@ -1313,6 +1319,22 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  Widget _getEllaAvatar() {
+    return Container(
+      height: 24,
+      width: 24,
+      decoration: const BoxDecoration(
+        color: EllaColors.primary,
+        borderRadius: BorderRadius.all(Radius.circular(12.0)),
+      ),
+      child: const Icon(
+        Icons.favorite,
+        color: Colors.white,
+        size: 14,
+      ),
+    );
+  }
+
   void _showIOSStyleActionSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -1327,7 +1349,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               // Main options container
               Container(
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1C1C1E).withOpacity(0.95),
+                  color: Colors.white.withOpacity(0.95),
                   borderRadius: BorderRadius.circular(13),
                 ),
                 child: Column(
@@ -1415,7 +1437,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               if (icon != null && !isCancel)
                 Icon(
                   icon,
-                  color: Colors.grey.shade600,
+                  color: EllaColors.textTertiary,
                   size: 24,
                 ),
             ],
@@ -1428,7 +1450,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   Widget _buildDivider() {
     return Container(
       height: 0.5,
-      color: Colors.grey.shade700,
+      color: EllaColors.bgTertiary,
       margin: const EdgeInsets.symmetric(horizontal: 20),
     );
   }
