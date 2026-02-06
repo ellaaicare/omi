@@ -44,6 +44,7 @@ import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/freemium_switch_dialog.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
+import 'package:omi/ella/widgets/ella_emergency_button.dart';
 import 'widgets/battery_info_widget.dart';
 
 class HomePageWrapper extends StatefulWidget {
@@ -562,6 +563,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                               index: context.watch<HomeProvider>().selectedIndex,
                               children: _pages,
                             ),
+                          ),
+                          // Emergency button -- only visible on Home tab
+                          Consumer<HomeProvider>(
+                            builder: (context, home, _) {
+                              if (home.selectedIndex != 0) return const SizedBox.shrink();
+                              return const EllaEmergencyButton();
+                            },
                           ),
                         ],
                       ),
