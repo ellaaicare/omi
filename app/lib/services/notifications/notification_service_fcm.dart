@@ -14,6 +14,7 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:omi/backend/http/api/notifications.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/services/notifications/action_item_notification_handler.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/services/notifications/important_conversation_notification_handler.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
 import 'package:omi/services/notifications/notification_interface.dart';
@@ -235,6 +236,13 @@ class _FCMNotificationService implements NotificationInterface {
           return;
         } else if (messageType == 'important_conversation') {
           ImportantConversationNotificationHandler.handleImportantConversation(
+            data,
+            channel.channelKey!,
+            isAppInForeground: true,
+          );
+          return;
+        } else if (messageType == 'ella_notification') {
+          EllaNotificationHandler.handleEllaNotification(
             data,
             channel.channelKey!,
             isAppInForeground: true,
