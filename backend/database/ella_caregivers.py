@@ -4,7 +4,7 @@ Ella Caregivers - Firestore CRUD
 Stores caregivers under users/{uid}/ella_caregivers/{caregiver_id}.
 """
 
-import random
+import secrets
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,7 +25,7 @@ def create_caregiver(uid: str, data: dict) -> dict:
     data['invited_at'] = now
     data['joined_at'] = None
     data['status'] = 'invited'
-    data['invite_code'] = ''.join(random.choices(string.digits, k=6))
+    data['invite_code'] = ''.join(secrets.choice(string.digits) for _ in range(6))
     data['invite_expires_at'] = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     _caregivers_ref(uid).document(caregiver_id).set(data)
     return data
