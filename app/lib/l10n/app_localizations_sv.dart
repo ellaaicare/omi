@@ -8064,4 +8064,77 @@ class AppLocalizationsSv extends AppLocalizations {
 
   @override
   String get googleSearch => 'Google Search';
+
+  @override
+  String ellaOnboardingStep(int current, int total) {
+    return 'Screen $current of $total';
+  }
+
+  @override
+  String get ellaWelcomeGreeting => 'Hi there!';
+
+  @override
+  String get ellaWelcomeDescription =>
+      'Ella is your personal care companion. She listens to your conversations and helps keep you safe and connected with your family.';
+
+  @override
+  String get ellaWelcomeNamePrompt => 'What should Ella call you?';
+
+  @override
+  String get ellaWelcomeNamePlaceholder => 'Your first name';
+
+  @override
+  String get ellaConnectTitle => 'Let\'s connect your Ella device';
+
+  @override
+  String get ellaConnectInstructions => 'Make sure your device is turned on and nearby.';
+
+  @override
+  String get ellaConnectScanning => 'Looking for your device...';
+
+  @override
+  String get ellaConnectFound => 'Device found!';
+
+  @override
+  String get ellaConnectFoundDescription =>
+      'Your device is ready. Ella will listen through it and keep you company throughout the day.';
+
+  @override
+  String get ellaConnectConnected => 'Connected';
+
+  @override
+  String get ellaConnectSkip => 'I don\'t have a device yet';
+
+  @override
+  String get ellaConnectTrouble => 'Having trouble? Make sure the device is charged and within arm\'s reach.';
+
+  @override
+  String get ellaEmergencyTitle => 'Add someone Ella can call for help';
+
+  @override
+  String get ellaEmergencySubtitle => 'If you ever need help, Ella will contact this person.';
+
+  @override
+  String get ellaEmergencyNameLabel => 'Their name';
+
+  @override
+  String get ellaEmergencyNamePlaceholder => 'e.g., Sarah';
+
+  @override
+  String get ellaEmergencyPhoneLabel => 'Their phone number';
+
+  @override
+  String get ellaEmergencyPhonePlaceholder => 'e.g., (555) 123-4567';
+
+  @override
+  String get ellaGetStarted => 'Get Started';
+
+  @override
+  String get ellaSkipForNow => 'Skip for now';
+
+  @override
+  String get ellaSkipConfirmation => 'You can add an emergency contact later in Settings.';
+
+  @override
+  String get ellaNext => 'Next';
 }

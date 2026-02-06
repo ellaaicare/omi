@@ -15056,6 +15056,144 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Google Search'**
   String get googleSearch;
+
+  /// No description provided for @ellaOnboardingStep.
+  ///
+  /// In en, this message translates to:
+  /// **'Screen {current} of {total}'**
+  String ellaOnboardingStep(int current, int total);
+
+  /// No description provided for @ellaWelcomeGreeting.
+  ///
+  /// In en, this message translates to:
+  /// **'Hi there!'**
+  String get ellaWelcomeGreeting;
+
+  /// No description provided for @ellaWelcomeDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is your personal care companion. She listens to your conversations and helps keep you safe and connected with your family.'**
+  String get ellaWelcomeDescription;
+
+  /// No description provided for @ellaWelcomeNamePrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'What should Ella call you?'**
+  String get ellaWelcomeNamePrompt;
+
+  /// No description provided for @ellaWelcomeNamePlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'Your first name'**
+  String get ellaWelcomeNamePlaceholder;
+
+  /// No description provided for @ellaConnectTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Let\'s connect your Ella device'**
+  String get ellaConnectTitle;
+
+  /// No description provided for @ellaConnectInstructions.
+  ///
+  /// In en, this message translates to:
+  /// **'Make sure your device is turned on and nearby.'**
+  String get ellaConnectInstructions;
+
+  /// No description provided for @ellaConnectScanning.
+  ///
+  /// In en, this message translates to:
+  /// **'Looking for your device...'**
+  String get ellaConnectScanning;
+
+  /// No description provided for @ellaConnectFound.
+  ///
+  /// In en, this message translates to:
+  /// **'Device found!'**
+  String get ellaConnectFound;
+
+  /// No description provided for @ellaConnectFoundDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Your device is ready. Ella will listen through it and keep you company throughout the day.'**
+  String get ellaConnectFoundDescription;
+
+  /// No description provided for @ellaConnectConnected.
+  ///
+  /// In en, this message translates to:
+  /// **'Connected'**
+  String get ellaConnectConnected;
+
+  /// No description provided for @ellaConnectSkip.
+  ///
+  /// In en, this message translates to:
+  /// **'I don\'t have a device yet'**
+  String get ellaConnectSkip;
+
+  /// No description provided for @ellaConnectTrouble.
+  ///
+  /// In en, this message translates to:
+  /// **'Having trouble? Make sure the device is charged and within arm\'s reach.'**
+  String get ellaConnectTrouble;
+
+  /// No description provided for @ellaEmergencyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Add someone Ella can call for help'**
+  String get ellaEmergencyTitle;
+
+  /// No description provided for @ellaEmergencySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'If you ever need help, Ella will contact this person.'**
+  String get ellaEmergencySubtitle;
+
+  /// No description provided for @ellaEmergencyNameLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Their name'**
+  String get ellaEmergencyNameLabel;
+
+  /// No description provided for @ellaEmergencyNamePlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., Sarah'**
+  String get ellaEmergencyNamePlaceholder;
+
+  /// No description provided for @ellaEmergencyPhoneLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Their phone number'**
+  String get ellaEmergencyPhoneLabel;
+
+  /// No description provided for @ellaEmergencyPhonePlaceholder.
+  ///
+  /// In en, this message translates to:
+  /// **'e.g., (555) 123-4567'**
+  String get ellaEmergencyPhonePlaceholder;
+
+  /// No description provided for @ellaGetStarted.
+  ///
+  /// In en, this message translates to:
+  /// **'Get Started'**
+  String get ellaGetStarted;
+
+  /// No description provided for @ellaSkipForNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Skip for now'**
+  String get ellaSkipForNow;
+
+  /// No description provided for @ellaSkipConfirmation.
+  ///
+  /// In en, this message translates to:
+  /// **'You can add an emergency contact later in Settings.'**
+  String get ellaSkipConfirmation;
+
+  /// No description provided for @ellaNext.
+  ///
+  /// In en, this message translates to:
+  /// **'Next'**
+  String get ellaNext;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

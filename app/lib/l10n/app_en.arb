@@ -9871,5 +9871,38 @@
   "coworker": "Coworker",
   "linkedIn": "LinkedIn",
   "appStore": "App Store",
-  "googleSearch": "Google Search"
+  "googleSearch": "Google Search",
+  "ellaOnboardingStep": "Screen {current} of {total}",
+  "@ellaOnboardingStep": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "ellaWelcomeGreeting": "Hi there!",
+  "ellaWelcomeDescription": "Ella is your personal care companion. She listens to your conversations and helps keep you safe and connected with your family.",
+  "ellaWelcomeNamePrompt": "What should Ella call you?",
+  "ellaWelcomeNamePlaceholder": "Your first name",
+  "ellaConnectTitle": "Let's connect your Ella device",
+  "ellaConnectInstructions": "Make sure your device is turned on and nearby.",
+  "ellaConnectScanning": "Looking for your device...",
+  "ellaConnectFound": "Device found!",
+  "ellaConnectFoundDescription": "Your device is ready. Ella will listen through it and keep you company throughout the day.",
+  "ellaConnectConnected": "Connected",
+  "ellaConnectSkip": "I don't have a device yet",
+  "ellaConnectTrouble": "Having trouble? Make sure the device is charged and within arm's reach.",
+  "ellaEmergencyTitle": "Add someone Ella can call for help",
+  "ellaEmergencySubtitle": "If you ever need help, Ella will contact this person.",
+  "ellaEmergencyNameLabel": "Their name",
+  "ellaEmergencyNamePlaceholder": "e.g., Sarah",
+  "ellaEmergencyPhoneLabel": "Their phone number",
+  "ellaEmergencyPhonePlaceholder": "e.g., (555) 123-4567",
+  "ellaGetStarted": "Get Started",
+  "ellaSkipForNow": "Skip for now",
+  "ellaSkipConfirmation": "You can add an emergency contact later in Settings.",
+  "ellaNext": "Next"
 }
