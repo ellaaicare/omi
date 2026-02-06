@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
@@ -25,7 +26,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   @override
   void initState() {
     super.initState();
-    _dailySummary = true; // Default on; in production would come from caregiver data
+    _dailySummary = widget.caregiver.receiveDailySummary;
   }
 
   String _formatDate(DateTime? date) {
@@ -46,7 +47,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     if (_resending || widget.caregiver.phone == null) return;
     setState(() => _resending = true);
     try {
-      await caregiver_api.resendInvite(widget.caregiver.phone!);
+      await caregiver_api.resendInvite(
+        uid: SharedPreferencesUtil().uid,
+        caregiverId: widget.caregiver.id,
+      );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(context.l10n.ellaResendSuccess(widget.caregiver.name))),
