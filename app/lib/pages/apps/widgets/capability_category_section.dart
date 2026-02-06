@@ -76,21 +76,21 @@ class CapabilityCategorySection extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                   ),
                 ),
                 const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: Colors.grey.shade700,
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
                     '${apps.length}',
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 12,
-                      color: Colors.grey.shade300,
+                      color: EllaColors.textTertiary,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -195,7 +195,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                       color: EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: const Icon(Icons.error_outline, color: Colors.white54, size: 24),
+                    child: const Icon(Icons.error_outline, color: EllaColors.textDisabled, size: 24),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -209,7 +209,8 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                         app.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white, fontSize: 17),
+                        style:
+                            const TextStyle(fontWeight: FontWeight.w500, color: EllaColors.textPrimary, fontSize: 17),
                       ),
                       Padding(
                         padding: const EdgeInsets.only(top: 2.0),
@@ -217,7 +218,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                           categoryTitle,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.grey, fontSize: 13),
+                          style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13),
                         ),
                       ),
                       if (app.ratingAvg != null) ...[
@@ -232,18 +233,18 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                             const SizedBox(width: 4),
                             Text(
                               app.getRatingAvg()!,
-                              style: TextStyle(
+                              style: const TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w500,
-                                color: Colors.grey.shade300,
+                                color: EllaColors.textSecondary,
                               ),
                             ),
                             const SizedBox(width: 4),
                             Text(
                               '(${app.ratingCount})',
-                              style: TextStyle(
+                              style: const TextStyle(
                                 fontSize: 11,
-                                color: Colors.grey.shade500,
+                                color: EllaColors.textTertiary,
                               ),
                             ),
                           ],
@@ -260,7 +261,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                   width: 60,
                   height: 28,
                   decoration: BoxDecoration(
-                    color: isEnabled ? Colors.grey.shade700 : Colors.white,
+                    color: isEnabled ? EllaColors.bgTertiary : EllaColors.primary,
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: Center(
@@ -269,7 +270,7 @@ class CapabilitySectionAppItemCard extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: isEnabled ? Colors.white : Colors.black,
+                        color: isEnabled ? EllaColors.textPrimary : Colors.white,
                       ),
                     ),
                   ),
