@@ -664,7 +664,6 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                 SizedBox(height: textFieldFocusNode.hasFocus ? 12 : 0),
                 if (!textFieldFocusNode.hasFocus)
                   BottomNavBar(
-                    showCenterButton: false,
                     onTabTap: (index, isRepeat) {
                       context.read<HomeProvider>().setIndex(index);
                       Navigator.of(context).pop();
