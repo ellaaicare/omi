@@ -8,6 +8,7 @@ import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -72,6 +73,11 @@ class NotificationUtil {
     if (navigateTo == null) {
       Logger.debug("Navigate To is null");
       return;
+    }
+
+    // Play audio if this is an Ella notification with audio
+    if (EllaNotificationHandler.isEllaAudioPayload(payload)) {
+      EllaNotificationHandler.playAudio(payload['ella_audio_url'] as String);
     }
 
     // Check if this is a daily reflection notification
