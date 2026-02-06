@@ -570,9 +570,18 @@ def get_transcript_structure(
     # ====== ELLA SUMMARY ADAPTER HOOK ======
     try:
         from utils.ella.summary import call_summary_agent
-        result = call_summary_agent(uid, existing_conversation_id, transcript, started_at, language_code, tz)
-        if result is not None:
-            return result
+
+        success, result_dict, error = call_summary_agent(
+            uid=uid,
+            conversation_id=existing_conversation_id,
+            transcript=transcript,
+            started_at=started_at,
+        )
+        if success and result_dict:
+            from utils.ella.summary import parse_summary_response
+
+            parsed = parse_summary_response(result_dict)
+            return Structured(**parsed)
     except ImportError:
         pass
     except Exception as e:
