@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class FilesHandlerWidget extends StatelessWidget {
   final ServerMessage message;
@@ -43,11 +44,11 @@ class FilesHandlerWidget extends StatelessWidget {
                   height: MediaQuery.sizeOf(context).width * 0.22,
                   child: const Center(
                     child: CircularProgressIndicator(
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                     ),
                   ),
                 ),
-                errorWidget: (context, url, error) => const Icon(Icons.error, color: Colors.white),
+                errorWidget: (context, url, error) => const Icon(Icons.error, color: EllaColors.textTertiary),
               );
             } else {
               return Container(
@@ -61,14 +62,14 @@ class FilesHandlerWidget extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.insert_drive_file, color: Colors.white),
+                    const Icon(Icons.insert_drive_file, color: EllaColors.textPrimary),
                     const SizedBox(height: 6),
                     Text(
                       message.files[index].name,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 14,
                       ),
                     ),
