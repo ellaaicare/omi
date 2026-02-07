@@ -66,14 +66,14 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
           case VoiceRecorderState.recording:
             return Container(
               decoration: BoxDecoration(
-                color: Colors.black,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: const Icon(Icons.close, color: EllaColors.textPrimary),
                     onPressed: provider.close,
                   ),
                   Expanded(
@@ -92,12 +92,12 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                       padding: const EdgeInsets.all(4),
                       margin: const EdgeInsets.only(top: 10, bottom: 10, right: 6, left: 16),
                       decoration: const BoxDecoration(
-                        color: Colors.white,
+                        color: EllaColors.primary,
                         shape: BoxShape.circle,
                       ),
                       child: const Icon(
                         Icons.check,
-                        color: Colors.black,
+                        color: Colors.white,
                         size: 20.0,
                       ),
                     ),
@@ -110,7 +110,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: Colors.black,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Row(
@@ -118,11 +118,11 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 children: [
                   ShimmerWithTimeout(
                     baseColor: EllaColors.textTertiary,
-                    highlightColor: Colors.white,
+                    highlightColor: EllaColors.textPrimary,
                     child: Text(
                       context.l10n.transcribing,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                       ),
                     ),
                   ),
@@ -138,12 +138,12 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                   width: double.infinity,
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.black,
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Text(
                     provider.transcript,
-                    style: const TextStyle(color: Colors.white),
+                    style: const TextStyle(color: EllaColors.textPrimary),
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -151,11 +151,11 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white),
+                      icon: const Icon(Icons.close, color: EllaColors.textPrimary),
                       onPressed: provider.close,
                     ),
                     IconButton(
-                      icon: const Icon(Icons.send, color: Colors.white),
+                      icon: const Icon(Icons.send, color: EllaColors.primary),
                       onPressed: () => widget.onTranscriptReady(provider.transcript),
                     ),
                   ],
@@ -167,7 +167,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
             return Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
               decoration: BoxDecoration(
-                color: Colors.black,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Row(
@@ -175,7 +175,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                 children: [
                   Text(
                     context.l10n.error,
-                    style: const TextStyle(color: Colors.redAccent, fontSize: 14, fontWeight: FontWeight.w700),
+                    style: const TextStyle(color: EllaColors.error, fontSize: 14, fontWeight: FontWeight.w700),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
@@ -196,11 +196,11 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                             padding: const EdgeInsets.all(4),
                             margin: const EdgeInsets.only(left: 10, right: 0, top: 10, bottom: 10),
                             decoration: const BoxDecoration(
-                              color: Colors.white,
+                              color: EllaColors.primary,
                               shape: BoxShape.circle,
                             ),
                             child: const Icon(
-                              color: Colors.black,
+                              color: Colors.white,
                               Icons.refresh,
                               size: 20.0,
                             ),
@@ -211,7 +211,7 @@ class _VoiceRecorderWidgetState extends State<VoiceRecorderWidget> with SingleTi
                           padding: const EdgeInsets.only(left: 14, right: 0, top: 14, bottom: 14),
                           child: const Icon(
                             Icons.close,
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             size: 20,
                           ),
                         ),
@@ -243,7 +243,7 @@ class AudioWavePainter extends CustomPainter {
     if (levels.isEmpty) return;
 
     final paint = Paint()
-      ..color = Colors.white
+      ..color = EllaColors.primary
       ..strokeWidth = 4 // Slightly thicker for better visibility
       ..strokeCap = StrokeCap.round;
 
