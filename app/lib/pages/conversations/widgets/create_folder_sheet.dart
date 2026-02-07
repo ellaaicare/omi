@@ -9,7 +9,7 @@ import 'package:omi/providers/folder_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/folders/folder_icon_mapper.dart';
 import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/responsive/responsive_helper.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 /// Available folder colors for selection.
 const List<Color> folderColors = [
@@ -148,7 +148,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
       ),
       child: Container(
         decoration: const BoxDecoration(
-          color: ResponsiveHelper.backgroundSecondary,
+          color: EllaColors.bgSecondary,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
@@ -165,7 +165,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w600,
-                    color: ResponsiveHelper.textPrimary,
+                    color: EllaColors.textPrimary,
                   ),
                 ),
                 TextButton(
@@ -177,14 +177,14 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             valueColor: AlwaysStoppedAnimation<Color>(
-                              ResponsiveHelper.purplePrimary,
+                              EllaColors.primary,
                             ),
                           ),
                         )
                       : Text(
                           isEditing ? context.l10n.save : context.l10n.create,
                           style: const TextStyle(
-                            color: ResponsiveHelper.purplePrimary,
+                            color: EllaColors.primary,
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
                           ),
@@ -198,14 +198,14 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
-                color: ResponsiveHelper.backgroundTertiary,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: TextField(
                 controller: _nameController,
                 autofocus: true,
                 style: const TextStyle(
-                  color: ResponsiveHelper.textPrimary,
+                  color: EllaColors.textPrimary,
                   fontSize: 16,
                   height: 1.3,
                 ),
@@ -215,7 +215,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
                   isDense: true,
                   hintText: context.l10n.folderName,
                   hintStyle: const TextStyle(
-                    color: ResponsiveHelper.textTertiary,
+                    color: EllaColors.textTertiary,
                     fontSize: 16,
                   ),
                 ),
@@ -231,13 +231,13 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
-                color: ResponsiveHelper.backgroundTertiary,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: TextField(
                 controller: _descriptionController,
                 style: const TextStyle(
-                  color: ResponsiveHelper.textSecondary,
+                  color: EllaColors.textSecondary,
                   fontSize: 14,
                   height: 1.4,
                 ),
@@ -247,7 +247,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
                   isDense: true,
                   hintText: context.l10n.descriptionOptional,
                   hintStyle: const TextStyle(
-                    color: ResponsiveHelper.textTertiary,
+                    color: EllaColors.textTertiary,
                     fontSize: 14,
                   ),
                 ),
@@ -264,7 +264,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
               style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: ResponsiveHelper.textTertiary,
+                color: EllaColors.textTertiary,
               ),
             ),
             const SizedBox(height: 8),
@@ -282,7 +282,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
               style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: ResponsiveHelper.textTertiary,
+                color: EllaColors.textTertiary,
               ),
             ),
             const SizedBox(height: 8),
@@ -311,7 +311,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
         height: 40,
         margin: const EdgeInsets.only(right: 8),
         decoration: BoxDecoration(
-          color: isSelected ? _selectedColor.withOpacity(0.2) : ResponsiveHelper.backgroundTertiary,
+          color: isSelected ? _selectedColor.withOpacity(0.2) : EllaColors.bgTertiary,
           borderRadius: BorderRadius.circular(10),
           border: isSelected ? Border.all(color: _selectedColor, width: 1.5) : null,
         ),
@@ -319,7 +319,7 @@ class _CreateFolderBottomSheetState extends State<CreateFolderBottomSheet> {
           child: FaIcon(
             folderIconToFa(icon),
             size: 16,
-            color: isSelected ? _selectedColor : ResponsiveHelper.textSecondary,
+            color: isSelected ? _selectedColor : EllaColors.textSecondary,
           ),
         ),
       ),
