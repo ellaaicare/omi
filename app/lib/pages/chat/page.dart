@@ -82,6 +82,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     });
     textFieldFocusNode.addListener(() {
       setState(() {});
+      // Sync focus state to HomeProvider so BottomNavBar hides when typing
+      if (widget.isPivotBottom && mounted) {
+        final homeProvider = context.read<HomeProvider>();
+        homeProvider.isChatFieldFocused = textFieldFocusNode.hasFocus;
+        homeProvider.notifyListeners();
+      }
       if (textFieldFocusNode.hasFocus) {
         // Scroll to bottom when keyboard opens, with delay to allow keyboard animation
         _ensureAtBottom(delayMs: 300);
@@ -451,7 +457,9 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                             right: 8,
                             top: provider.selectedFiles.isNotEmpty ? 0 : 8,
                             bottom: widget.isPivotBottom
-                                ? 6
+                                ? (textFieldFocusNode.hasFocus
+                                    ? 6
+                                    : EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 8)
                                 : (textFieldFocusNode.hasFocus &&
                                         (textController.text.length > 40 || textController.text.contains('\n'))
                                     ? 0
