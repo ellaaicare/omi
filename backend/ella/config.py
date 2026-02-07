@@ -79,6 +79,16 @@ class EllaConfig:
 
     testing_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_TESTING_ENABLED", "false").lower() == "true")
 
+    # Debug level for chat endpoint:
+    #   0 = production (normal LLM flow via graph routing)
+    #   1 = ACK (hardcoded response, no LLM call — for UI testing)
+    #   2 = Grok LLM (direct xAI Grok call — for LLM testing without n8n/OpenClaw)
+    #   3 = n8n callback (route through n8n webhook — for full pipeline testing)
+    debug_level: int = field(default_factory=lambda: int(os.getenv("ELLA_DEBUG_LEVEL", "0")))
+
+    # n8n chat webhook for debug level 3
+    n8n_chat_webhook: str = field(default_factory=lambda: os.getenv("ELLA_N8N_CHAT_WEBHOOK", ""))
+
     # =========================================================================
     # COMPUTED PROPERTIES
     # =========================================================================
