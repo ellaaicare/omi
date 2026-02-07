@@ -57,14 +57,14 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                     ),
                     child: Text(
                       selectedApp != null ? selectedApp.getName() : context.l10n.omiAppName,
-                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                       overflow: TextOverflow.fade,
                     ),
                   ),
                   const SizedBox(width: 8),
                   const SizedBox(
                     width: 24,
-                    child: Icon(Icons.keyboard_arrow_down, color: Colors.white60, size: 16),
+                    child: Icon(Icons.keyboard_arrow_down, color: EllaColors.textTertiary, size: 16),
                   ),
                 ],
               ),
@@ -225,12 +225,12 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                   children: [
                     Text(
                       context.l10n.omiAppName,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 16),
                     ),
                     selectedApp == null
                         ? const SizedBox(
                             width: 24,
-                            child: Icon(Icons.check, color: Colors.white60, size: 16),
+                            child: Icon(Icons.check, color: EllaColors.textTertiary, size: 16),
                           )
                         : const SizedBox.shrink(),
                   ],
@@ -258,13 +258,13 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                       child: Text(
                         overflow: TextOverflow.fade,
                         app.getName(),
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+                        style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 16),
                       ),
                     ),
                     selectedApp?.id == app.id
                         ? const SizedBox(
                             width: 24,
-                            child: Icon(Icons.check, color: Colors.white60, size: 16),
+                            child: Icon(Icons.check, color: EllaColors.textTertiary, size: 16),
                           )
                         : const SizedBox.shrink(),
                   ],
@@ -313,7 +313,7 @@ class ChatAppsDropdownWidget extends StatelessWidget {
           children: [
             const SizedBox(
               width: 24,
-              child: Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+              child: Icon(Icons.arrow_forward_ios, color: EllaColors.textPrimary, size: 16),
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -322,10 +322,10 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                   mainAxisSize: MainAxisSize.max,
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(context.l10n.enableApps, style: const TextStyle(color: Colors.white, fontSize: 16)),
+                    Text(context.l10n.enableApps, style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16)),
                     const SizedBox(
                       width: 24,
-                      child: Icon(Icons.apps, color: Colors.white60, size: 16),
+                      child: Icon(Icons.apps, color: EllaColors.textTertiary, size: 16),
                     ),
                   ],
                 ),
@@ -353,12 +353,12 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                   children: [
                     Text(
                       context.l10n.omiAppName,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 16),
                     ),
                     selectedApp == null
                         ? const SizedBox(
                             width: 24,
-                            child: Icon(Icons.check, color: Colors.white60, size: 16),
+                            child: Icon(Icons.check, color: EllaColors.textTertiary, size: 16),
                           )
                         : const SizedBox.shrink(),
                   ],
@@ -386,13 +386,13 @@ class ChatAppsDropdownWidget extends StatelessWidget {
                       child: Text(
                         overflow: TextOverflow.fade,
                         app.getName(),
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 16),
+                        style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 16),
                       ),
                     ),
                     selectedApp?.id == app.id
                         ? const SizedBox(
                             width: 24,
-                            child: Icon(Icons.check, color: Colors.white60, size: 16),
+                            child: Icon(Icons.check, color: EllaColors.textTertiary, size: 16),
                           )
                         : const SizedBox.shrink(),
                   ],
