@@ -19,6 +19,7 @@ import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/device_widget.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/pages/conversations/sync_page.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'firmware_update.dart';
 import 'omiglass_ota_update.dart';
 
@@ -127,7 +128,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             child: Text(
               title,
               style: TextStyle(
-                color: titleColor ?? Colors.white,
+                color: titleColor ?? EllaColors.textPrimary,
                 fontSize: 17,
                 fontWeight: FontWeight.w400,
               ),
@@ -143,7 +144,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               child: Text(
                 chipValue,
                 style: TextStyle(
-                  color: chipTextColor ?? Colors.white,
+                  color: chipTextColor ?? EllaColors.textPrimary,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                 ),
@@ -154,7 +155,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
           if (showChevron)
             const Icon(
               Icons.chevron_right,
-              color: Color(0xFF3C3C43),
+              color: EllaColors.bgTertiary,
               size: 20,
             ),
         ],
@@ -177,7 +178,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   Widget _buildBatterySection(DeviceProvider provider) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Padding(
@@ -201,7 +202,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               child: Text(
                 context.l10n.batteryLevel,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 17,
                   fontWeight: FontWeight.w400,
                 ),
@@ -210,13 +211,13 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: const Color(0xFF2A2A2E),
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(100),
               ),
               child: Text(
                 '${provider.batteryLevel}%',
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                 ),
@@ -234,7 +235,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
@@ -284,7 +285,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
           ),
           // SD Card Sync
           if (provider.isDeviceStorageSupport) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             _buildProfileStyleItem(
               icon: FontAwesomeIcons.sdCard,
               title: context.l10n.sdCardSync,
@@ -301,7 +302,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             ),
           ],
           // Charging Issues
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           GestureDetector(
             onTap: () async {
               if (PlatformService.isIntercomSupported) {
@@ -331,7 +332,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                     height: 24,
                     child: Padding(
                       padding: EdgeInsets.only(left: 2, top: 1),
-                      child: FaIcon(FontAwesomeIcons.circleQuestion, color: Color(0xFF8E8E93), size: 20),
+                      child: FaIcon(FontAwesomeIcons.circleQuestion, color: EllaColors.textTertiary, size: 20),
                     ),
                   ),
                   const SizedBox(width: 16),
@@ -339,7 +340,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                     child: Text(
                       context.l10n.chargingIssues,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 17,
                         fontWeight: FontWeight.w400,
                       ),
@@ -347,7 +348,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                   ),
                   const Icon(
                     Icons.chevron_right,
-                    color: Color(0xFF3C3C43),
+                    color: EllaColors.bgTertiary,
                     size: 20,
                   ),
                 ],
@@ -355,7 +356,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             ),
           ),
           // Disconnect
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           GestureDetector(
             onTap: () async {
               await SharedPreferencesUtil().btDeviceSet(BtDevice(id: '', name: '', type: DeviceType.omi, rssi: 0));
@@ -398,7 +399,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
           ),
           // Unpair Device - only for Limitless devices
           if (provider.connectedDevice?.type == DeviceType.limitless) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             GestureDetector(
               onTap: () async {
                 showDialog(
@@ -483,7 +484,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Column(
@@ -495,7 +496,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             copyValue: deviceName,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.hashtag,
             title: context.l10n.modelNumber,
@@ -503,7 +504,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             copyValue: modelNumber,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.industry,
             title: context.l10n.manufacturer,
@@ -511,7 +512,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             copyValue: manufacturer,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.code,
             title: context.l10n.firmware,
@@ -519,7 +520,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             copyValue: firmware,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.fingerprint,
             title: context.l10n.deviceId,
@@ -527,7 +528,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             copyValue: deviceId,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.barcode,
             title: context.l10n.serialNumber,
@@ -544,9 +545,9 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   Widget build(BuildContext context) {
     return Consumer2<DeviceProvider, CaptureProvider>(builder: (context, provider, captureProvider, child) {
       return Scaffold(
-        backgroundColor: const Color(0xFF0D0D0D),
+        backgroundColor: EllaColors.bgPrimary,
         appBar: AppBar(
-          backgroundColor: const Color(0xFF0D0D0D),
+          backgroundColor: EllaColors.bgPrimary,
           elevation: 0,
           leading: IconButton(
             icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
@@ -564,7 +565,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                   Text(
                     provider.pairedDevice?.name ?? context.l10n.unknownDevice,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 32,
                       fontWeight: FontWeight.bold,
                     ),
