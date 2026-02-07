@@ -132,6 +132,12 @@ def register_ella_extensions(app) -> None:
     except ImportError:
         ELLA_COMPAT_ENABLED = False
 
+    from ella.config import ELLA_CONFIG
+
+    _debug_labels = {0: "production", 1: "ACK", 2: "Grok LLM", 3: "n8n callback"}
+    _dl = ELLA_CONFIG.debug_level
+    _dl_label = _debug_labels.get(_dl, f"unknown({_dl})")
+
     print("🏥 Ella Extensions Status:", flush=True)
     print(f"   • Compat Layer:   {'✅ ON' if ELLA_COMPAT_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • n8n Summary:    {'✅ ON' if ELLA_SUMMARY_ENABLED else '❌ OFF'}", flush=True)
@@ -140,6 +146,7 @@ def register_ella_extensions(app) -> None:
     print(f"   • Notifications:  {'✅ ON' if ELLA_NOTIFICATIONS_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Voice V2:       {'✅ ON' if ELLA_VOICE_V2_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Testing:        {'✅ ON' if ELLA_TESTING_ENABLED else '❌ OFF'}", flush=True)
+    print(f"   • Chat Debug:     Level {_dl} ({_dl_label})", flush=True)
     print("", flush=True)
     print(f"🏥 n8n Base URL: {ELLA_N8N_BASE_URL}", flush=True)
     print(f"🏥 Grok Proxy:   {GROK_V2V_PROXY_URL}", flush=True)
