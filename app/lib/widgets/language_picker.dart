@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/locale_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -13,18 +14,19 @@ class LanguagePickerTile extends StatelessWidget {
     return Consumer<LocaleProvider>(
       builder: (context, localeProvider, child) {
         final currentLocale = localeProvider.locale;
-        final displayName = currentLocale != null ? LocaleProvider.getDisplayName(currentLocale) : context.l10n.systemDefault;
+        final displayName =
+            currentLocale != null ? LocaleProvider.getDisplayName(currentLocale) : context.l10n.systemDefault;
 
         return ListTile(
           title: Text(
             context.l10n.language,
-            style: const TextStyle(color: Colors.white),
+            style: const TextStyle(color: EllaColors.textPrimary),
           ),
           subtitle: Text(
             displayName,
-            style: TextStyle(color: Colors.grey.shade400),
+            style: const TextStyle(color: EllaColors.textSecondary),
           ),
-          trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+          trailing: const Icon(Icons.chevron_right, color: EllaColors.textTertiary),
           onTap: () => _showLanguagePicker(context, localeProvider),
         );
       },
@@ -37,7 +39,7 @@ class LanguagePickerTile extends StatelessWidget {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -51,14 +53,14 @@ class LanguagePickerTile extends StatelessWidget {
                 width: 36,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF3C3C43),
+                  color: EllaColors.textDisabled,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
               Text(
                 context.l10n.selectLanguage,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 17,
                   fontWeight: FontWeight.w600,
                 ),
@@ -76,11 +78,11 @@ class LanguagePickerTile extends StatelessWidget {
                       title: Text(
                         LocaleProvider.getDisplayName(locale),
                         style: TextStyle(
-                          color: isSelected ? Colors.white : const Color(0xFF8E8E93),
+                          color: isSelected ? EllaColors.textPrimary : EllaColors.textTertiary,
                           fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
                         ),
                       ),
-                      trailing: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                      trailing: isSelected ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                       onTap: () {
                         localeProvider.setLocale(locale);
                         Navigator.pop(context);
