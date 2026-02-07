@@ -17,6 +17,7 @@ import 'package:omi/services/services.dart';
 import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -164,11 +165,11 @@ class _DeviceSettingsState extends State<DeviceSettings> {
         children: [
           Text(
             title,
-            style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w600),
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 20, fontWeight: FontWeight.w600),
           ),
           if (subtitle != null) ...[
             const SizedBox(height: 6),
-            Text(subtitle, style: TextStyle(color: Colors.grey.shade400, fontSize: 14)),
+            Text(subtitle, style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14)),
           ],
         ],
       ),
@@ -187,26 +188,26 @@ class _DeviceSettingsState extends State<DeviceSettings> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
       child: Row(
         children: [
-          SizedBox(width: 24, height: 24, child: FaIcon(icon, color: const Color(0xFF8E8E93), size: 20)),
+          SizedBox(width: 24, height: 24, child: FaIcon(icon, color: EllaColors.textTertiary, size: 20)),
           const SizedBox(width: 16),
           Expanded(
             child: Text(
               title,
-              style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w400),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w400),
             ),
           ),
           if (chipValue != null) ...[
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(color: const Color(0xFF2A2A2E), borderRadius: BorderRadius.circular(100)),
+              decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(100)),
               child: Text(
                 chipValue,
-                style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                style: const TextStyle(color: EllaColors.textPrimary, fontSize: 13, fontWeight: FontWeight.w500),
               ),
             ),
             if (showChevron) const SizedBox(width: 8),
           ],
-          if (showChevron) const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
+          if (showChevron) const Icon(Icons.chevron_right, color: EllaColors.textTertiary, size: 20),
         ],
       ),
     );
@@ -241,7 +242,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     }
 
     return Container(
-      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(20)),
       child: Column(
         children: [
           _buildProfileStyleItem(
@@ -251,7 +252,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             copyValue: deviceName,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.fingerprint,
             title: context.l10n.deviceId,
@@ -259,14 +260,14 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             copyValue: deviceId,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.download,
             title: context.l10n.firmware,
             chipValue: device?.firmwareRevision ?? '1.0.2',
             onTap: () => routeToPage(context, FirmwareUpdate(device: device)),
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.sdCard,
             title: context.l10n.sdCardSync,
@@ -300,7 +301,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     final manufacturer = device?.manufacturerName ?? 'Based Hardware';
 
     return Container(
-      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(20)),
       child: Column(
         children: [
           _buildProfileStyleItem(
@@ -310,7 +311,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             copyValue: hardwareRevision,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.hashtag,
             title: context.l10n.modelNumber,
@@ -318,7 +319,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             copyValue: modelNumber,
             showChevron: false,
           ),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           _buildProfileStyleItem(
             icon: FontAwesomeIcons.industry,
             title: context.l10n.manufacturer,
@@ -349,7 +350,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (sheetContext) {
         return StatefulBuilder(
@@ -362,19 +363,19 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                     margin: const EdgeInsets.only(top: 12, bottom: 16),
                     width: 36,
                     height: 4,
-                    decoration: BoxDecoration(color: const Color(0xFF3C3C43), borderRadius: BorderRadius.circular(2)),
+                    decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(2)),
                   ),
                   Text(
                     context.l10n.doubleTapAction,
-                    style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 16),
                   ListTile(
                     title: Text(
                       context.l10n.endAndProcess,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w400),
                     ),
-                    trailing: currentAction == 0 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    trailing: currentAction == 0 ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                     onTap: () {
                       setState(() => SharedPreferencesUtil().doubleTapAction = 0);
                       Navigator.pop(sheetContext);
@@ -383,9 +384,9 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                   ListTile(
                     title: Text(
                       context.l10n.pauseResumeRecording,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w400),
                     ),
-                    trailing: currentAction == 1 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    trailing: currentAction == 1 ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                     onTap: () {
                       setState(() => SharedPreferencesUtil().doubleTapAction = 1);
                       Navigator.pop(sheetContext);
@@ -394,9 +395,9 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                   ListTile(
                     title: Text(
                       context.l10n.starOngoing,
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w400),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w400),
                     ),
-                    trailing: currentAction == 2 ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                    trailing: currentAction == 2 ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                     onTap: () {
                       setState(() => SharedPreferencesUtil().doubleTapAction = 2);
                       Navigator.pop(sheetContext);
@@ -415,7 +416,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
   void _showBrightnessSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (sheetContext) {
         return StatefulBuilder(
@@ -430,28 +431,30 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       margin: const EdgeInsets.only(bottom: 16),
                       width: 36,
                       height: 4,
-                      decoration: BoxDecoration(color: const Color(0xFF3C3C43), borderRadius: BorderRadius.circular(2)),
+                      decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(2)),
                     ),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
                           context.l10n.ledBrightness,
-                          style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                          style:
+                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
                         ),
                         Text(
                           '${_dimRatio.round()}%',
-                          style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                          style:
+                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
                         ),
                       ],
                     ),
                     const SizedBox(height: 24),
                     SliderTheme(
                       data: SliderThemeData(
-                        activeTrackColor: Colors.white,
-                        inactiveTrackColor: Colors.grey.shade800,
-                        thumbColor: Colors.white,
-                        overlayColor: Colors.white.withOpacity(0.1),
+                        activeTrackColor: EllaColors.primary,
+                        inactiveTrackColor: EllaColors.bgTertiary,
+                        thumbColor: EllaColors.primary,
+                        overlayColor: EllaColors.primary.withOpacity(0.1),
                         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 12, elevation: 2),
                         overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
                         trackHeight: 6,
@@ -482,8 +485,8 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(context.l10n.off, style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
-                        Text(context.l10n.max, style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                        Text(context.l10n.off, style: const TextStyle(color: EllaColors.textTertiary, fontSize: 12)),
+                        Text(context.l10n.max, style: const TextStyle(color: EllaColors.textTertiary, fontSize: 12)),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -500,7 +503,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
   void _showMicGainSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (sheetContext) {
         return StatefulBuilder(
@@ -537,30 +540,33 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                       margin: const EdgeInsets.only(bottom: 16),
                       width: 36,
                       height: 4,
-                      decoration: BoxDecoration(color: const Color(0xFF3C3C43), borderRadius: BorderRadius.circular(2)),
+                      decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(2)),
                     ),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
                           context.l10n.micGain,
-                          style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                          style:
+                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
                         ),
                         Text(
                           getGainLabel(currentLevel),
-                          style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+                          style:
+                              const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w600),
                         ),
                       ],
                     ),
                     const SizedBox(height: 8),
-                    Text(getGainDescription(currentLevel), style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
+                    Text(getGainDescription(currentLevel),
+                        style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13)),
                     const SizedBox(height: 24),
                     SliderTheme(
                       data: SliderThemeData(
-                        activeTrackColor: Colors.white,
-                        inactiveTrackColor: Colors.grey.shade800,
-                        thumbColor: Colors.white,
-                        overlayColor: Colors.white.withOpacity(0.1),
+                        activeTrackColor: EllaColors.primary,
+                        inactiveTrackColor: EllaColors.bgTertiary,
+                        thumbColor: EllaColors.primary,
+                        overlayColor: EllaColors.primary.withOpacity(0.1),
                         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 12, elevation: 2),
                         overlayShape: const RoundSliderOverlayShape(overlayRadius: 24),
                         trackHeight: 6,
@@ -591,8 +597,8 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(context.l10n.mute, style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
-                        Text(context.l10n.max, style: TextStyle(color: Colors.grey.shade500, fontSize: 12)),
+                        Text(context.l10n.mute, style: const TextStyle(color: EllaColors.textTertiary, fontSize: 12)),
+                        Text(context.l10n.max, style: const TextStyle(color: EllaColors.textTertiary, fontSize: 12)),
                       ],
                     ),
                     const SizedBox(height: 20),
@@ -641,9 +647,9 @@ class _DeviceSettingsState extends State<DeviceSettings> {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.white.withOpacity(0.1) : const Color(0xFF2A2A2E),
+          color: isSelected ? EllaColors.primary.withOpacity(0.15) : EllaColors.bgTertiary,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: isSelected ? Colors.white.withOpacity(0.5) : Colors.transparent, width: 1),
+          border: Border.all(color: isSelected ? EllaColors.primary : Colors.transparent, width: 1),
         ),
         child: Center(
           child: Text(
@@ -651,7 +657,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
             style: TextStyle(
               fontSize: 13,
               fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-              color: isSelected ? Colors.white : Colors.grey.shade400,
+              color: isSelected ? EllaColors.primary : EllaColors.textSecondary,
             ),
           ),
         ),
@@ -668,7 +674,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     final doubleTapAction = SharedPreferencesUtil().doubleTapAction;
 
     return Container(
-      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(20)),
       child: Column(
         children: [
           // Double Tap
@@ -680,7 +686,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           ),
           // LED Brightness
           if (_isDimRatioLoaded && _hasDimmingFeature == true) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             _buildProfileStyleItem(
               icon: FontAwesomeIcons.lightbulb,
               title: context.l10n.ledBrightness,
@@ -690,7 +696,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           ],
           // Mic Gain
           if (_isMicGainLoaded && _hasMicGainFeature == true) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             _buildProfileStyleItem(
               icon: FontAwesomeIcons.microphone,
               title: context.l10n.micGain,
@@ -700,7 +706,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           ],
           // WiFi Sync
           if (_isWifiSupported) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             _buildProfileStyleItem(
               icon: FontAwesomeIcons.wifi,
               title: context.l10n.wifiSync,
@@ -715,7 +721,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
 
   Widget _buildActionsSection(DeviceProvider provider) {
     return Container(
-      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(20)),
       child: Column(
         children: [
           // Charging Help
@@ -747,22 +753,22 @@ class _DeviceSettingsState extends State<DeviceSettings> {
                   const SizedBox(
                     width: 24,
                     height: 24,
-                    child: FaIcon(FontAwesomeIcons.circleQuestion, color: Color(0xFF8E8E93), size: 20),
+                    child: FaIcon(FontAwesomeIcons.circleQuestion, color: EllaColors.textTertiary, size: 20),
                   ),
                   const SizedBox(width: 16),
                   Expanded(
                     child: Text(
                       context.l10n.chargingIssues,
-                      style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w400),
+                      style: const TextStyle(color: EllaColors.textPrimary, fontSize: 17, fontWeight: FontWeight.w400),
                     ),
                   ),
-                  const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
+                  const Icon(Icons.chevron_right, color: EllaColors.textTertiary, size: 20),
                 ],
               ),
             ),
           ),
           if (provider.isConnected) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             // Disconnect
             GestureDetector(
               onTap: () async {
@@ -803,7 +809,7 @@ class _DeviceSettingsState extends State<DeviceSettings> {
           ],
           // Unpair Device - only for Limitless devices
           if (provider.isConnected && provider.connectedDevice?.type == DeviceType.limitless) ...[
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             GestureDetector(
               onTap: () async {
                 showDialog(
@@ -867,26 +873,26 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(32),
-      decoration: BoxDecoration(color: const Color(0xFF1C1C1E), borderRadius: BorderRadius.circular(14)),
+      decoration: BoxDecoration(color: EllaColors.bgSecondary, borderRadius: BorderRadius.circular(14)),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 64,
             height: 64,
-            decoration: BoxDecoration(color: const Color(0xFF2A2A2E), borderRadius: BorderRadius.circular(16)),
-            child: Center(child: FaIcon(FontAwesomeIcons.linkSlash, color: Colors.grey.shade500, size: 24)),
+            decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(16)),
+            child: const Center(child: FaIcon(FontAwesomeIcons.linkSlash, color: EllaColors.textTertiary, size: 24)),
           ),
           const SizedBox(height: 20),
           Text(
             context.l10n.deviceNotConnected,
-            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 8),
           Text(
             context.l10n.connectDeviceMessage,
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.grey.shade500, fontSize: 14, height: 1.4),
+            style: const TextStyle(color: EllaColors.textTertiary, fontSize: 14, height: 1.4),
           ),
         ],
       ),
@@ -898,17 +904,17 @@ class _DeviceSettingsState extends State<DeviceSettings> {
     return Consumer<DeviceProvider>(
       builder: (context, provider, child) {
         return Scaffold(
-          backgroundColor: const Color(0xFF0D0D0D),
+          backgroundColor: EllaColors.bgPrimary,
           appBar: AppBar(
-            backgroundColor: const Color(0xFF0D0D0D),
+            backgroundColor: EllaColors.bgPrimary,
             elevation: 0,
             leading: IconButton(
-              icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+              icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18, color: EllaColors.textPrimary),
               onPressed: () => Navigator.of(context).pop(),
             ),
             title: Text(
               context.l10n.deviceSettings,
-              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600),
             ),
             centerTitle: true,
           ),
