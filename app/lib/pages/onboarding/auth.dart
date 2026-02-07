@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/auth_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/widgets/consent_bottom_sheet.dart';
 
 class AuthComponent extends StatefulWidget {
@@ -39,7 +40,7 @@ class _AuthComponentState extends State<AuthComponent> {
               width: double.infinity,
               padding: EdgeInsets.fromLTRB(32, 26, 32, MediaQuery.of(context).padding.bottom + 8),
               decoration: const BoxDecoration(
-                color: Colors.black,
+                color: EllaColors.bgSecondary,
                 borderRadius: BorderRadius.only(
                   topLeft: Radius.circular(40),
                   topRight: Radius.circular(40),
@@ -56,7 +57,7 @@ class _AuthComponentState extends State<AuthComponent> {
                       child: provider.loading
                           ? const Center(
                               child: CircularProgressIndicator(
-                                valueColor: AlwaysStoppedAnimation(Colors.white),
+                                valueColor: AlwaysStoppedAnimation(EllaColors.primary),
                               ),
                             )
                           : null,
@@ -66,7 +67,7 @@ class _AuthComponentState extends State<AuthComponent> {
                     Text(
                       context.l10n.speakTranscribeSummarize,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 32,
                         fontWeight: FontWeight.bold,
                         height: 1.2,
@@ -104,8 +105,8 @@ class _AuthComponentState extends State<AuthComponent> {
                             );
                           },
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.black,
+                            backgroundColor: EllaColors.bgPrimary,
+                            foregroundColor: EllaColors.textPrimary,
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(28),
                             ),
@@ -156,8 +157,8 @@ class _AuthComponentState extends State<AuthComponent> {
                           );
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.black,
+                          backgroundColor: EllaColors.bgPrimary,
+                          foregroundColor: EllaColors.textPrimary,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(28),
                           ),
@@ -187,7 +188,7 @@ class _AuthComponentState extends State<AuthComponent> {
                       textAlign: TextAlign.center,
                       text: TextSpan(
                         style: TextStyle(
-                          color: Colors.white.withOpacity(0.6),
+                          color: EllaColors.textTertiary,
                           fontSize: 11,
                           fontFamily: 'Manrope',
                         ),
