@@ -153,7 +153,43 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               icon: Icons.person,
               title: context.l10n.ellaSettingsProfile,
               subtitle: userName,
-              onTap: () {},
+              onTap: () async {
+                final controller = TextEditingController(text: SharedPreferencesUtil().givenName);
+                final result = await showDialog<String>(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    backgroundColor: EllaColors.bgSecondary,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
+                    title: const Text(
+                      'Edit Name',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
+                    ),
+                    content: TextField(
+                      controller: controller,
+                      autofocus: true,
+                      style: const TextStyle(fontSize: 18, color: EllaColors.textPrimary),
+                      decoration: const InputDecoration(
+                        hintText: 'Your name',
+                        hintStyle: TextStyle(fontSize: 18, color: EllaColors.textDisabled),
+                      ),
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancel', style: TextStyle(fontSize: 18, color: EllaColors.textTertiary)),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, controller.text.trim()),
+                        child: const Text('Save', style: TextStyle(fontSize: 18, color: EllaColors.primary)),
+                      ),
+                    ],
+                  ),
+                );
+                if (result != null && result.isNotEmpty) {
+                  SharedPreferencesUtil().givenName = result;
+                  setState(() {});
+                }
+              },
             ),
 
             // CARE TEAM section
