@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EmptyConversationsWidget extends StatefulWidget {
@@ -40,7 +41,7 @@ class _EmptyConversationsWidgetState extends State<EmptyConversationsWidget> {
             const SizedBox(height: 16),
             Text(
               context.l10n.noStarredConversations,
-              style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 8),
             Padding(
