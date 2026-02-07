@@ -26,11 +26,11 @@ class ResponsiveHelper {
     _isLargeScreen = _screenWidth >= 1400;
   }
 
-  // Premium color system inspired by sophisticated dark interfaces
-  static const Color backgroundPrimary = Color(0xFF0F0F0F); // Deep black
-  static const Color backgroundSecondary = Color(0xFF1A1A1A); // Elevated surface
-  static const Color backgroundTertiary = Color(0xFF252525); // Cards and components
-  static const Color backgroundQuaternary = Color(0xFF2A2A2A); // Hover states
+  // Light-mode color system matching Ella theme
+  static const Color backgroundPrimary = Color(0xFFFAFAF8); // Warm off-white (EllaColors.bgPrimary)
+  static const Color backgroundSecondary = Color(0xFFF0EDE9); // Light warm beige (EllaColors.bgSecondary)
+  static const Color backgroundTertiary = Color(0xFFE8E4DF); // Medium warm grey (EllaColors.bgTertiary)
+  static const Color backgroundQuaternary = Color(0xFFE0DCD7); // Hover states
 
   // Premium purple gradient system
   static const Color purplePrimary = Color(0xFF8B5CF6); // Main purple
@@ -38,11 +38,11 @@ class ResponsiveHelper {
   static const Color purpleAccent = Color(0xFF7C3AED); // Darker purple
   static const Color purpleLight = Color(0xFFD946EF); // Pink-purple
 
-  // Sophisticated text colors
-  static const Color textPrimary = Color(0xFFFFFFFF); // Pure white for headers
-  static const Color textSecondary = Color(0xFFE5E5E5); // Light gray for body
-  static const Color textTertiary = Color(0xFFB0B0B0); // Medium gray for meta
-  static const Color textQuaternary = Color(0xFF888888); // Dark gray for disabled
+  // Light-mode text colors matching Ella theme
+  static const Color textPrimary = Color(0xFF1A1A1A); // Near-black (EllaColors.textPrimary)
+  static const Color textSecondary = Color(0xFF4A4A4A); // Dark grey (EllaColors.textSecondary)
+  static const Color textTertiary = Color(0xFF7A7A7A); // Medium grey (EllaColors.textTertiary)
+  static const Color textQuaternary = Color(0xFFB0B0B0); // Light grey (EllaColors.textDisabled)
 
   // Accent colors
   static const Color successColor = Color(0xFF10B981); // Green
