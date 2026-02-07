@@ -511,7 +511,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                             ),
                             child: Text(
                               _getConversationDuration(context),
-                              style: const TextStyle(color: Colors.white, fontSize: 11),
+                              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 11),
                               maxLines: 1,
                             ),
                           ),
