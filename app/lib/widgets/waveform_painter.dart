@@ -3,6 +3,8 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import 'package:omi/ella/ella_theme.dart';
+
 class WaveformPainter extends CustomPainter {
   final bool isPlaying;
   final List<double>? waveformData;
@@ -22,7 +24,7 @@ class WaveformPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round;
 
     final activePaint = Paint()
-      ..color = Colors.white
+      ..color = EllaColors.primary
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round;
 
