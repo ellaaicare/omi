@@ -12,7 +12,6 @@ import 'package:omi/providers/folder_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/folders/folder_icon_mapper.dart';
 import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/responsive/responsive_helper.dart';
 import 'package:omi/ella/ella_theme.dart';
 
 class FolderTabs extends StatefulWidget {
@@ -467,7 +466,7 @@ class _DeleteFolderSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
-        color: ResponsiveHelper.backgroundSecondary,
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Consumer<FolderProvider>(
@@ -508,7 +507,7 @@ class _DeleteFolderSheet extends StatelessWidget {
                             style: const TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.w600,
-                              color: ResponsiveHelper.textPrimary,
+                              color: EllaColors.textPrimary,
                             ),
                           ),
                           const SizedBox(height: 4),
@@ -516,7 +515,7 @@ class _DeleteFolderSheet extends StatelessWidget {
                             context.l10n.moveConversationsTo(folder.conversationCount),
                             style: const TextStyle(
                               fontSize: 13,
-                              color: ResponsiveHelper.textTertiary,
+                              color: EllaColors.textTertiary,
                             ),
                           ),
                         ],
@@ -524,7 +523,7 @@ class _DeleteFolderSheet extends StatelessWidget {
                     ),
                     GestureDetector(
                       onTap: () => Navigator.pop(context),
-                      child: const Icon(Icons.close, color: ResponsiveHelper.textTertiary, size: 24),
+                      child: const Icon(Icons.close, color: EllaColors.textTertiary, size: 24),
                     ),
                   ],
                 ),
@@ -590,9 +589,9 @@ class _MoveOption extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
-        color: ResponsiveHelper.backgroundTertiary,
+        color: EllaColors.bgTertiary,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: ResponsiveHelper.backgroundTertiary, width: 1),
+        border: Border.all(color: EllaColors.bgTertiary, width: 1),
       ),
       child: Material(
         color: Colors.transparent,
@@ -628,7 +627,7 @@ class _MoveOption extends StatelessWidget {
                         style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w500,
-                          color: ResponsiveHelper.textPrimary,
+                          color: EllaColors.textPrimary,
                         ),
                       ),
                       if (description != null && description!.isNotEmpty)
@@ -640,7 +639,7 @@ class _MoveOption extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 12,
-                              color: ResponsiveHelper.textTertiary,
+                              color: EllaColors.textTertiary,
                             ),
                           ),
                         ),
