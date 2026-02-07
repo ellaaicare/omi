@@ -71,12 +71,12 @@ class SpeechProfileCardWidget extends StatelessWidget {
                                   const SizedBox(width: 16),
                                   Text(
                                     context.l10n.teachOmiYourVoice,
-                                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                                   ),
                                 ],
                               ),
                             ),
-                            const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+                            const Icon(Icons.arrow_forward_ios, color: EllaColors.textPrimary, size: 16),
                           ],
                         ),
                       ),
@@ -140,12 +140,12 @@ class UpdateFirmwareCardWidget extends StatelessWidget {
                           const SizedBox(width: 16),
                           Text(
                             isOmiGlass ? 'Update OmiGlass Firmware' : context.l10n.updateOmiFirmware,
-                            style: const TextStyle(color: Colors.white, fontSize: 16),
+                            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                           ),
                         ],
                       ),
                     ),
-                    const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+                    const Icon(Icons.arrow_forward_ios, color: EllaColors.textPrimary, size: 16),
                   ],
                 ),
               ),
@@ -214,7 +214,7 @@ getTranscriptWidget(
   if (conversationCreating) {
     return const Padding(
       padding: EdgeInsets.only(top: 80),
-      child: Center(child: CircularProgressIndicator(color: Colors.white)),
+      child: Center(child: CircularProgressIndicator(color: EllaColors.primary)),
     );
   }
 
