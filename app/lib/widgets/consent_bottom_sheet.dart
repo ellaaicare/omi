@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/auth_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -21,7 +22,7 @@ class ConsentBottomSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(
-        color: Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
@@ -33,7 +34,7 @@ class ConsentBottomSheet extends StatelessWidget {
             width: 36,
             height: 4,
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.3),
+              color: EllaColors.textDisabled,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -47,7 +48,7 @@ class ConsentBottomSheet extends StatelessWidget {
                 Text(
                   context.l10n.dataAndPrivacy,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                     fontSize: 24,
                     fontWeight: FontWeight.bold,
                   ),
@@ -61,12 +62,12 @@ class ConsentBottomSheet extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: authMethod == 'apple' ? Colors.white : const Color(0xFF4285F4),
+                        color: authMethod == 'apple' ? EllaColors.textPrimary : const Color(0xFF4285F4),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Icon(
                         authMethod == 'apple' ? FontAwesomeIcons.apple : FontAwesomeIcons.google,
-                        color: authMethod == 'apple' ? Colors.black : Colors.white,
+                        color: Colors.white,
                         size: 18,
                       ),
                     ),
@@ -74,7 +75,7 @@ class ConsentBottomSheet extends StatelessWidget {
                     Text(
                       authMethod == 'apple' ? context.l10n.signInWithApple : context.l10n.signInWithGoogle,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 16,
                         fontWeight: FontWeight.w500,
                       ),
@@ -88,7 +89,7 @@ class ConsentBottomSheet extends StatelessWidget {
                 Text(
                   context.l10n.consentDataMessage,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                     fontSize: 16,
                     height: 1.4,
                   ),
@@ -100,7 +101,7 @@ class ConsentBottomSheet extends StatelessWidget {
                 RichText(
                   text: TextSpan(
                     style: const TextStyle(
-                      color: Colors.white70,
+                      color: EllaColors.textSecondary,
                       fontSize: 14,
                       height: 1.4,
                     ),
@@ -109,7 +110,7 @@ class ConsentBottomSheet extends StatelessWidget {
                       TextSpan(
                         text: context.l10n.privacyPolicy,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.primary,
                           decoration: TextDecoration.underline,
                         ),
                         recognizer: TapGestureRecognizer()
@@ -121,7 +122,7 @@ class ConsentBottomSheet extends StatelessWidget {
                       TextSpan(
                         text: context.l10n.termsOfService,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.primary,
                           decoration: TextDecoration.underline,
                         ),
                         recognizer: TapGestureRecognizer()
@@ -149,8 +150,8 @@ class ConsentBottomSheet extends StatelessWidget {
                           onContinue();
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.black,
+                          backgroundColor: EllaColors.primary,
+                          foregroundColor: Colors.white,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
@@ -177,7 +178,7 @@ class ConsentBottomSheet extends StatelessWidget {
                           Navigator.of(context).pop();
                         },
                         style: TextButton.styleFrom(
-                          foregroundColor: Colors.white.withOpacity(0.7),
+                          foregroundColor: EllaColors.textSecondary,
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
