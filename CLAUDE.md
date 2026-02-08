@@ -106,6 +106,23 @@ After making changes, always run the appropriate test script to verify your chan
 - **Backend changes**: Run `backend/test.sh`
 - **App changes**: Run `app/test.sh`
 
+## Ella Chat Architecture (MUST READ)
+
+**Full documentation**: `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md`
+
+Quick summary of the chat data flow:
+```
+App (Flutter) → /v2/messages → OMI Backend (graph chat + LangChain) → LLM Proxy (:8100) → OpenClaw/Letta
+```
+
+- **App stays stock** — sends to `/v2/messages`, parses OMI SSE protocol (`data:`, `done:`, `think:`)
+- **OMI Backend stays stock** — uses LangChain `ChatOpenAI`, routed by `ELLA_LLM_BASE_URL` env var
+- **Ella proxy patch** (`backend/utils/llm/clients.py`) injects `user=ella:{uid}:{task}` into all LLM calls
+- **LLM Proxy** (`ella-ai/services/llm-proxy/main.py`) converts Letta/OpenClaw SSE → OpenAI SSE
+- **Config switch** in `/root/omi/backend/.env`: uncomment `ELLA_LLM_BASE_URL=http://localhost:8100/v1` to route through proxy
+
+When debugging chat issues, start with the architecture doc. Do NOT try to modify the app's SSE parser or the OMI backend's streaming code — push complexity to the LLM proxy layer.
+
 ## Ella Session State
 
 **IMPORTANT**: On every new session, read `ELLA_SESSION_STATE.md` in the repo root FIRST before doing anything else. It contains the current work-in-progress, team status, decisions made, and what to do next. Update it whenever significant progress is made or the session ends.
