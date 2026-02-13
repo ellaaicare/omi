@@ -1,6 +1,6 @@
 # Ella Session State
 
-**Last Updated**: 2026-02-06 9:10am PST
+**Last Updated**: 2026-02-12 (n8n workflows deployed + E2E verified, DB migration applied)
 **Branch**: `feature/ella-v2-fresh`
 **Team**: ella-dev (use TeamCreate to respawn)
 
@@ -16,7 +16,7 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 - **OpenClaw production**: Running on letta-iMac (`ssh letta@100.75.8.74`, `~/clawd/`)
 - **OpenClaw dev**: Setting up on admin-macbookair1 (`ssh admin@100.67.113.120`)
 - **Production**: `https://api.ella-ai-care.com`, VPS at `ssh root@100.101.168.91`
-- **n8n**: `n8n.ella-ai-care.com` (admin/N8nAdmin2025Secure!)
+- **n8n**: `n8n.ella-ai-care.com` (creds in ella-ai/.env)
 
 ---
 
@@ -106,9 +106,14 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 ### Product
 - [x] `backend/ella/docs/MVP_FEATURE_SPECS.md` -- 4 MVP specs
 
-### n8n Workflows (Created, Not Yet Deployed to n8n)
-- [x] `ella-ai/services/n8n-workflows/cron-daily-summary-v1.json` -- Hourly cron, timezone-aware
-- [x] `ella-ai/services/n8n-workflows/callback-daily-summary-v1.json` -- On-demand webhook
+### n8n Workflows (DEPLOYED + E2E VERIFIED)
+- [x] `ella-ai/services/n8n-workflows/cron-daily-summary-v1.json` -- Hourly cron, timezone-aware (not deployed yet)
+- [x] `ella-ai/services/n8n-workflows/callback-daily-summary-v1.json` -- On-demand webhook (not deployed yet)
+- [x] **7 caregiver workflows** deployed to n8n.ella-ai-care.com and ACTIVE (see IDs below)
+- [x] **1 provisioning workflow** deployed but INACTIVE (needs ELLA_PROVISION_API_KEY)
+- [x] **1 Omi→OpenClaw routing** deployed but INACTIVE (needs OpenClaw agent provisioning)
+- [x] **Prisma DB migration** applied directly to ella-postgres (ALTER TABLE for missing columns + indexes)
+- [x] Full E2E smoke test: invite→list→set-emergency→get-emergency→permissions→resend→remove all passing
 
 ### Infrastructure
 - [x] VPS OPENAI_API_KEY and GOOGLE_APPLICATION_CREDENTIALS verified set
@@ -126,9 +131,10 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 | ~~Caregiver invite flow implementation~~ | DONE - see completed work below |
 | Wire native splash integration | `ella_splash.png` generated but needs `flutter_native_splash` package config to replace the storyboard-based splash |
 | Wire dashboard token URL into email template | The "View Full Dashboard" button in daily summary email needs tokenized URL |
+| ~~Deploy n8n caregiver workflows~~ | **DONE** — 9 workflows deployed, 7 active, 2 inactive. Full E2E verified. |
 | Deploy n8n daily summary workflows | Import to n8n -- BLOCKED on credentials (see below) |
 | Set XAI_API_KEY on VPS | Needed for Grok chat streaming endpoint to work in production |
-| Wire OpenClaw chat endpoint | **Architecture documented** in `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md`. Proxy running on VPS (:8100). Need to: (1) update proxy to route to OpenClaw instead of Letta, (2) uncomment `ELLA_LLM_BASE_URL=http://localhost:8100/v1` in backend .env, (3) create n8n user-lookup webhook or bypass it. See doc for full details. |
+| ~~Wire OpenClaw chat endpoint~~ | **DONE + E2E VERIFIED**. Full chain: App→VPS Backend→LLM Proxy (`:8100`)→OpenClaw webhook (macbookair1 `:8090`)→Kimi K2.5. Response: "moonshotai/kimi-k2.5". See `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md`. |
 | Register Ella chat apps in backend | Create two "apps" (Ella Quick Chat + Ella AI Companion) selectable in chat UI |
 | Physical device testing | Test emergency button, notifications, BLE on real iPhone |
 | Fix Xcode code signing for watch companion | Needed for `flutter run` hot reload (Team "9536L8KLMP") |
@@ -136,7 +142,8 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 ### Needs Greg
 | Task | Notes |
 |------|-------|
-| n8n Gmail OAuth2 credential | Log into n8n.ella-ai-care.com, create Gmail OAuth2 credential in UI |
+| ~~n8n Gmail/SMTP credential~~ | **DONE** — Greg refreshed Gmail OAuth2 credential (ID: hlKJHF9C8NL7Blua). Wired into Invite + Resend workflows. E2E verified. |
+| ~~ELLA_PROVISION_API_KEY in n8n~~ | **DONE** — Added to /opt/n8n/.env + docker-compose.yml. Both provisioning workflows now ACTIVE. |
 | OMI_BACKEND_URL for n8n | Set in n8n container env (probably `http://localhost:8000` or `http://host.docker.internal:8000`) |
 | OMI_MCP_SERVICE_KEY for n8n | Service key for authenticated OMI API calls |
 | Twilio account setup | For SMS/voice calls in emergency alerts + caregiver notifications |
@@ -146,19 +153,68 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 ### In Progress
 | Task | Notes |
 |------|-------|
-| Auth 401 investigation | ALL API calls return 401. Backend agent investigating Firebase token validation, VPS config. Blocks everything. |
-| Simulator verification | iOS agent building and verifying all 27 design overhaul commits on simulator. |
-| **OpenClaw chat integration** | **ACTIVE** — LLM proxy v2.0 deployed, OpenClaw `/webhook/chat` endpoint live, backend routing enabled. E2E verified from VPS curl. Needs app-level testing with real Firebase auth. See `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md`. |
+| ~~**n8n caregiver webhooks**~~ | **DONE + DEPLOYED** — 9 workflows on n8n.ella-ai-care.com. 7 caregiver ACTIVE, 2 provisioning INACTIVE. Full E2E smoke test passing. DB migration applied to ella-postgres. |
+| **OpenClaw agent migration** | APPROVED — Issue #55 has full spec from OpenClaw team (2-agent model: user + caregiver with shared folder). Provisioning script done on letta-iMac. |
+| ~~**Role-based dashboard**~~ | **DONE** — 5 access levels (admin/elevated_family/doctor/family/limited) with 10-permission matrix. Family views at `/family`, workspace viewer, token auth. Issue #56 on ella-ai repo. |
+| ~~**Web onboarding flow**~~ | **DONE** — 4-step wizard at `/onboarding`. Firebase auth + form → ella-provision-user webhook. Elder-friendly sizing (18px/48dp). |
 
-### Recently Completed (This Session - OpenClaw Chat Integration)
+### Recently Completed (This Session — Integration Layer)
 | Task | Notes |
 |------|-------|
-| Chat flow architecture doc | `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md` — full documentation of App→Backend→LLM Proxy→OpenClaw flow, SSE protocols, config switches |
-| LLM Proxy v2.0 | Updated `ella-ai/services/llm-proxy/main.py` — added `ella-enhanced` (OpenClaw), `ella-grok` (direct xAI) routing. Deployed to VPS at `:8100`. |
-| OpenClaw `/webhook/chat` endpoint | Added to admin-macbookair1 webhook receiver. Calls OpenClaw agent via CLI, returns JSON. E2E tested. |
-| VPS backend config | Set `ELLA_LLM_BASE_URL=http://localhost:8100/v1`, `ELLA_LLM_MODEL=ella-enhanced` in `/root/omi/backend/.env`. Graph chat now routes through proxy. |
-| VPS LLM proxy config | Updated `/opt/ella/llm-proxy/.env` with OpenClaw URL, webhook secret, XAI key. |
-| CLAUDE.md + session state | Added permanent Ella Chat Architecture reference to CLAUDE.md so future sessions don't lose context. |
+| **Prisma schema migration** | `agentServerUrl`, `conditions`, `medications` on User. `inviteCode`, `accessLevel`, `isEmergencyContact` on Caregiver. `updatedAt` on Caregiver + AgentCluster. AgentCluster.agents JSONB documented for OpenClaw format. Migration SQL ready. |
+| **8 n8n workflow JSONs** | 7 caregiver webhooks + 1 provisioning. Match iOS caregiver_api.dart contract exactly. SQL input sanitization in Code nodes. |
+| **Role-based dashboard** | `src/lib/roles.ts` (5 levels, 10 permissions), `RoleGate` component, `/family` route group, workspace viewer, token auth (HMAC-SHA256, 30-day expiry). |
+| **Web onboarding** | `/onboarding` route: Welcome→Account→PersonalInfo→Success. Firebase email+Google auth. Calls ella-provision-user webhook. |
+| **Code review + fixes** | Fixed: updated_at on caregivers/agent_clusters, SQL injection sanitization, OpenClaw agent ID support in workspace API, hardcoded token secret removed, token expiry→30 days, date_of_birth in provisioning. |
+| **GitHub Issue #56** | Full summary posted to ellaaicare/ella-ai for OpenClaw team review. |
+| **iOS handoff PRD** | `docs/IOS_INTEGRATION_HANDOFF.md` — model updates needed for invite_code, access_level, is_emergency_contact. |
+
+### Architecture Decisions (New — 2026-02-12)
+| Decision | Rationale |
+|----------|-----------|
+| **Keep existing Postgres** | 18 Prisma models, n8n connections, dashboard queries already wired. Evolve schema with new OpenClaw tables, don't create new DB. |
+| **2-agent model approved** | User agent + caregiver agent (with shared folder). Replaces 5-agent Letta clusters. Caregivers get isolated sessions via `dmScope: per-channel-peer`. |
+| **Prod = ellas-mac-mini-1** | M4 Mac Mini at 100.76.138.56. NOT letta-iMac (legacy). Dev/test = admin-MacBookAir1 (100.67.113.120). |
+| **Web onboarding parallel to iOS** | Faster iteration on UX, then mirror to iOS when finalized. |
+
+### Recently Completed (This Session — n8n Deployment)
+| Task | Notes |
+|------|-------|
+| **9 n8n workflows deployed** | ALL 9 ACTIVE. 7 caregiver + 1 provisioning + 1 Omi routing. ELLA_PROVISION_API_KEY added to n8n container. |
+| **Gmail email on invite** | Both Invite and Resend-Invite workflows now send teal-themed HTML email via Gmail (credential hlKJHF9C8NL7Blua). Fire-and-forget (continueOnFail=true). E2E verified: threadId returned, labelIds=['SENT']. |
+| **OpenClaw branch merged** | `feature/openclaw-integration` merged to main on ella-ai repo. Pushed to origin. Prisma schema + migration + routing sync + templates all in main now. |
+| **Docker network fix** | n8n compose was using wrong ella-network name (docker_ella-network vs ella-ai_ella-network). Fixed in docker-compose.yml and reconnected container. |
+| **DB schema reconciled** | Fixed conditions/medications to TEXT[] (was TEXT), invite_code to VARCHAR(6), access_level to VARCHAR(20), timestamps to TIMESTAMP(3). Partial indexes recreated. |
+| **Prisma DB migration applied** | ALTER TABLE on ella-postgres: users (agent_server_url, conditions, medications), caregivers (invite_code, invite_code_expiry, invite_attempts, last_attempt_at, access_level, is_emergency_contact, updated_at), agent_clusters (updated_at). 3 indexes created. |
+| **Full E2E smoke test** | invite(201)→list(200)→set-emergency(200)→get-emergency(200)→permissions(200)→resend(200)→remove(200). All passing. |
+| **n8n workflow pattern** | Resolved 5 critical n8n issues: Postgres v2.4 vs v2.5, Webhook v2 body nesting, empty result handling, IF node v2 unreliability, JSONB path conflicts. Documented in session state for future reference. |
+| **Gmail credential discovery** | Confirmed no Gmail/SMTP/email credential exists in n8n (97 workflows scanned). Still needed for invite emails. |
+
+### Recently Completed (This Session — Architecture Cleanup)
+| Task | Notes |
+|------|-------|
+| **Removed caregiver endpoints from OMI backend** | All `/v1/ella/caregivers/*` endpoints deleted from `callbacks.py`. OMI repo is OMI-only. |
+| **iOS caregiver API → n8n webhooks** | `caregiver_api.dart` now calls `n8n.ella-ai-care.com/webhook/caregiver-*` instead of OMI backend. Uses `http` package directly (no Firebase auth needed for n8n). |
+| **Caregiver sign-on PRD** | Full PRD at `ella-ai/docs/caregiver-onboarding/ELLA_CAREGIVER_SIGNON_PRD.md`. |
+| **iOS invite UX** | Email required (primary), phone optional. Invite code display (36px monospace, tap to copy), share button, removed auto-pop. |
+| **Join page + email templates** | 9 production-ready files moved to `ella-ai/docs/caregiver-onboarding/`. |
+| **OpenClaw migration issue** | GitHub Issue #55: full schema docs, migration plan, questions for OpenClaw team. |
+| **Session handoff doc** | `backend/docs/ELLA_SESSION_HANDOFF_2026_02_12.md` — complete state for new session. |
+
+### Recently Completed (This Session - OpenClaw Chat E2E)
+| Task | Notes |
+|------|-------|
+| **Simplified chat architecture** | Abandoned complex LLM Proxy + graph chat. Now: App → `/v1/ella/chat/stream` (debug level 4) → OpenClaw Gateway `:19001` → Pony model. Single message, single response. |
+| Debug level 4 (OpenClaw) | Added `_stream_level_4_openclaw()` to `backend/ella/routers/chat.py`. Calls gateway's OpenAI-compatible `/v1/chat/completions`. Deployed to VPS. |
+| VPS config for OpenClaw | Set `ELLA_DEBUG_LEVEL=4`, `OPENCLAW_URL=http://100.67.113.120:19001`, `OPENCLAW_GATEWAY_TOKEN` in VPS `.env`. Backend restarted, E2E verified with curl. |
+| Flutter Ella chat wiring | Added `sendEllaMessageStream()` in `messages.dart` — calls `/v1/ella/chat/stream`, parses OMI SSE format. Provider routes to it when `isEllaApp=true`. |
+| SSE format fix (thinking bug) | Changed backend from OpenAI SSE (`data: {"choices":[...]}`) to OMI-compatible format (`data: <raw text>` + `done: <base64 JSON>`). Fixes 1024-byte buffer splitting in `makeStreamingApiCall`. |
+| **SSE keep-alive (30s timeout fix)** | Backend sends `: keepalive\n\n` every 5s while waiting for OpenClaw. App's `sendEllaMessageStream()` skips SSE comments (lines starting with `:`). Caddy gets `flush_interval -1`. Tested: 24s response stays alive. |
+| **EllaThinkingIndicator** | Animated widget: pulsing teal dot, animated dots ("Ella is thinking..."), elapsed timer after 5s, text changes at 8s/15s. Replaces static `ShimmerWithTimeout`. |
+| API docs | `backend/ella/docs/ELLA_CHAT_API_SPEC.md` + `OPENCLAW_SESSIONS_GUIDE.md` |
+| Test suite | `test_chat_chain.py` — 4-node test suite (OpenClaw local/remote, proxy, backend). 5/5 backend tests pass. |
+| Chat flow architecture doc | `backend/ella/docs/CHAT_FLOW_ARCHITECTURE.md` — full documentation |
+| LLM Proxy v2.0 | Built but no longer in critical path — Ella uses direct OpenClaw gateway call now |
 
 ### Previously Completed (Design Overhaul)
 | Task | Notes |
@@ -270,9 +326,16 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 
 ## OpenClaw Infrastructure
 
-### Production (letta-iMac, 100.75.8.74)
+### Production (ellas-mac-mini-1, 100.76.138.56)
+- M4 Mac Mini — production OpenClaw target
+- NOT letta-iMac (that's legacy, being phased out)
+- Needs OpenClaw gateway setup (pending provisioning script)
+
+### Legacy (letta-iMac, 100.75.8.74)
 - OpenClaw v2026.2.3 CLI, v2026.1.30 service
-- Agent: "Ella" with Kimi K2.5 model
+- Agent: "Ella" with Kimi K2.5 model — Greg's personal agent
+- Has `ella-routing-sync.py` at `~/.openclaw/workspace/scripts/` (routing only, not full provisioning yet)
+- Workspace templates: SOUL.md, USER.md, AGENTS.md, IDENTITY.md, MEMORY.md (personalized for Greg, not templatized)
 - Port: 18789 (override from base 42858)
 - 5 cron jobs: sleeptime-learning, dreamtime, daily-wakeup, morning-x-snapshot, afternoon-brief
 - SearXNG search on localhost:8888
@@ -287,9 +350,9 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 - Workspace: `/home/plato/ella-dev/`
 - Identity: "Ella (Dev)" -- headless, no Telegram
 - Model: Kimi K2.5 (NVIDIA, free), Heartbeat: Nemotron Nano 9B
-- Webhook secret: `ac457e73af9ff635eccc0dd04320485a3490d7e895c3a939e345a0d174d14f61`
-- Gateway token: `72c00bd34f87d6277ca6e11037a8f206312940fdd29db74d`
-- Tailscale ACL: `tag:vps` -> `tag:workstation:8090`
+- Webhook secret: (see ella-ai/.env)
+- Gateway token: (see ella-ai/.env)
+- Tailscale ACL: `tag:vps` -> `tag:workstation:8090,19001`
 - SSH: `ssh plato@admin-macbookair1` or `ssh plato@100.67.113.120`
 - NOTE: Tailscale netfilter disabled, iptables/nftables flushed -- revisit security later
 
@@ -297,6 +360,7 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 | Endpoint | Method | Backend | Latency | Notes |
 |----------|--------|---------|---------|-------|
 | `/webhook/health` | GET | -- | <100ms | No auth required |
+| `/webhook/chat` | POST | OpenClaw agent (Kimi K2.5) | 10-30s | Interactive chat. Body: `{uid, message, conversation_id, source}`. Returns `{reply, uid, session_id}`. E2E verified from VPS via LLM proxy. |
 | `/webhook/scanner` | POST | NVIDIA Kimi K2.5 direct API | 10-25s | Urgency classification (EMERGENCY/URGENT/QUESTION/ROUTINE) |
 | `/webhook/summary` | POST | OpenClaw agent (Kimi K2.5) | 15-25s | Structured JSON summary with title, overview, action_items, mood, topics |
 | `/webhook/memory` | POST | OpenClaw agent (Kimi K2.5) | 20-30s | Memory extraction with content, category, importance |
@@ -310,11 +374,33 @@ Elder care AI companion built on the OMI open-source wearable platform. Alzheime
 ## n8n Details (for workflow deployment)
 
 - **URL**: n8n.ella-ai-care.com (port 5678 on VPS)
-- **Auth**: Basic auth -- admin / N8nAdmin2025Secure!
-- **Current state**: 0 workflows, 0 credentials (empty instance)
-- **Postgres**: Running alongside n8n in docker-compose
-- **Missing env vars**: OMI_BACKEND_URL, OMI_MCP_SERVICE_KEY
-- **Missing credentials**: Gmail OAuth2, Postgres connection, Twilio (low priority)
+- **Auth**: Basic auth (creds in ella-ai/.env)
+- **API Key**: (in ella-ai/.env)
+- **Current state**: 9 Ella workflows deployed (7 active, 2 inactive), ~97 total workflows
+- **Postgres credential**: ID `tFirqSRMiRXJWDvc` / name "Postgres account" — connects to `ella_ai` database
+- **Missing env vars**: OMI_BACKEND_URL, OMI_MCP_SERVICE_KEY, ELLA_PROVISION_API_KEY
+- **Missing credentials**: Gmail/SMTP (does NOT exist — user thought it did but it doesn't), Twilio (low priority)
+
+### Deployed Ella Workflow IDs
+| Workflow | n8n ID | Status | Webhook Path |
+|----------|--------|--------|--------------|
+| Provision User v1.1 | Wcre1vvxTPnv8oqf | ACTIVE | `/webhook/ella-provision-user` |
+| Caregiver Invite v1.1 | aZ2PMP2El1oxWbb3 | ACTIVE | `/webhook/caregiver-invite` |
+| Caregiver List v1.1 | viQbSPhkGPJoZidk | ACTIVE | `/webhook/caregiver-list` |
+| Caregiver Remove v1.1 | JCCO4oGaB0MxB4Cy | ACTIVE | `/webhook/caregiver-remove` |
+| Caregiver Permissions v1.1 | OcQALaX6j0bKVnnv | ACTIVE | `/webhook/caregiver-permissions` |
+| Caregiver Resend Invite v1.1 | YcRZmnbytANT2rKD | ACTIVE | `/webhook/caregiver-resend-invite` |
+| Caregiver Set Emergency v1.1 | gc4twPZbk0FLqSg4 | ACTIVE | `/webhook/caregiver-set-emergency` |
+| Caregiver Get Emergency v1.1 | RX4Mxyhs2LqxMuPi | ACTIVE | `/webhook/caregiver-get-emergency` |
+| Omi to OpenClaw Routing v1.0 | YIP2PaRPET8ejIzp | ACTIVE | `/webhook/omi-openclaw-webhook` |
+
+### n8n Workflow Development Notes (CRITICAL for future edits)
+- **Postgres node**: MUST use typeVersion 2.4 (NOT 2.5) with `=` prefix on query strings: `"query": "={{ $json._sql }}"`
+- **Webhook v2**: Body is at `$json.body`, not flat. Code nodes must do `$input.first().json.body || $input.first().json`
+- **Empty results**: Add `alwaysOutputData: true` on ALL Postgres nodes + Code node to handle 0-row results
+- **IF node v2**: `isNotEmpty` is unreliable on Postgres output. Use Code node to set a boolean, then IF on the boolean
+- **JSONB paths**: PostgreSQL `'{key}'` conflicts with n8n `{{ }}`. Build entire SQL in Code node, pass as `$json._sql`
+- **SQL injection**: All user input escaped via `esc()`: `String(val).replace(/'/g, "''")`
 
 ---
 
