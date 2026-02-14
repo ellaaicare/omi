@@ -16,7 +16,9 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 # JWT handling
@@ -44,8 +46,10 @@ SESSION_EXPIRY_HOURS = int(os.getenv("ELLA_SESSION_EXPIRY_HOURS", "1"))
 # Request/Response Models
 # ============================================================================
 
+
 class VoiceSessionResponse(BaseModel):
     """Response containing session token and connection details."""
+
     session_token: str
     voice_endpoint: str
     expires_in: int  # seconds
@@ -54,6 +58,7 @@ class VoiceSessionResponse(BaseModel):
 
 class VoiceConfigResponse(BaseModel):
     """Voice configuration for iOS client."""
+
     sample_rate: int = 24000
     channels: int = 1
     encoding: str = "pcm_int16"
@@ -64,11 +69,8 @@ class VoiceConfigResponse(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def create_session_token(
-    uid: str,
-    firebase_uid: str,
-    display_name: Optional[str] = None
-) -> str:
+
+def create_session_token(uid: str, firebase_uid: str, display_name: Optional[str] = None) -> str:
     """
     Create a JWT session token for Ella Voice connection.
 
@@ -95,7 +97,7 @@ def create_session_token(
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
         "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
         "iat": datetime.utcnow(),
-        "iss": "omi-backend"
+        "iss": "omi-backend",
     }
 
     return jwt.encode(payload, ELLA_SESSION_SECRET, algorithm="HS256")
@@ -104,6 +106,7 @@ def create_session_token(
 # ============================================================================
 # Endpoints
 # ============================================================================
+
 
 @router.post("/session", response_model=VoiceSessionResponse)
 async def create_voice_session(
@@ -134,19 +137,14 @@ async def create_voice_session(
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,  # In production, get from auth
-            display_name=None  # In production, get from user profile
+            display_name=None,  # In production, get from user profile
         )
 
         return VoiceSessionResponse(
             session_token=token,
             voice_endpoint=ELLA_VOICE_ENDPOINT,
             expires_in=SESSION_EXPIRY_HOURS * 3600,
-            audio_format={
-                "sample_rate": 24000,
-                "channels": 1,
-                "encoding": "pcm_int16",
-                "byte_order": "little_endian"
-            }
+            audio_format={"sample_rate": 24000, "channels": 1, "encoding": "pcm_int16", "byte_order": "little_endian"},
         )
 
     except Exception as e:
@@ -165,12 +163,62 @@ async def get_voice_config():
     - PCM Int16 encoding
     - Little-endian byte order
     """
-    return VoiceConfigResponse(
-        sample_rate=24000,
-        channels=1,
-        encoding="pcm_int16",
-        byte_order="little_endian"
-    )
+    return VoiceConfigResponse(sample_rate=24000, channels=1, encoding="pcm_int16", byte_order="little_endian")
+
+
+class TtsRequest(BaseModel):
+    """Request for text-to-speech synthesis."""
+
+    text: str
+    voice_id: str = "pFZP5JQG7iQjIQuC4Bku"  # Lily voice
+
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+
+
+@router.post("/tts")
+async def synthesize_speech(request: TtsRequest):
+    """
+    Synthesize speech from text via ElevenLabs.
+
+    Proxies TTS requests so the API key stays server-side.
+    Returns audio/mpeg bytes directly.
+    """
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
+
+    text = request.text[:500]  # Cap at 500 chars for v1
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{request.voice_id}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/mpeg",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                },
+                timeout=30.0,
+            )
+
+        if response.status_code != 200:
+            logger.error(f"[Voice TTS] ElevenLabs returned {response.status_code}: {response.text[:200]}")
+            raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
+
+        return Response(content=response.content, media_type="audio/mpeg")
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="ElevenLabs TTS timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Voice TTS] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/health")
@@ -180,5 +228,6 @@ async def voice_health():
         "status": "ok",
         "service": "ella-voice",
         "voice_endpoint": ELLA_VOICE_ENDPOINT,
-        "session_secret_configured": bool(ELLA_SESSION_SECRET)
+        "session_secret_configured": bool(ELLA_SESSION_SECRET),
+        "tts_configured": bool(ELEVENLABS_API_KEY),
     }
