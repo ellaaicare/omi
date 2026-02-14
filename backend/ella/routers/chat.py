@@ -6,6 +6,7 @@ Provides a streaming chat endpoint with configurable debug levels:
   Level 1 (ACK):        Hardcoded acknowledgment response. No LLM call. For UI testing.
   Level 2 (Grok LLM):   Direct Grok API call. For testing LLM without n8n/OpenClaw.
   Level 3 (n8n):         Route through n8n webhook for full pipeline testing.
+  Level 4 (OpenClaw):    Direct to OpenClaw gateway's OpenAI-compatible endpoint.
 
 Debug level is set via:
   - Environment variable: ELLA_DEBUG_LEVEL=0 (default)
@@ -15,10 +16,14 @@ Endpoints:
 - POST /v1/ella/chat/stream - Stream a chat response with debug level routing
 """
 
+import asyncio
+import base64
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Header
@@ -34,6 +39,9 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-chat"])
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_BASE_URL = "https://api.x.ai/v1"
 XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
+
+OPENCLAW_URL = os.getenv("OPENCLAW_URL", "http://100.67.113.120:19001")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -55,7 +63,7 @@ def _resolve_debug_level(header_value: str = None) -> int:
     if header_value is not None:
         try:
             level = int(header_value)
-            if 0 <= level <= 3:
+            if 0 <= level <= 4:
                 return level
             logger.warning(f"[Ella Chat] Invalid debug level in header: {header_value}, using config default")
         except (ValueError, TypeError):
@@ -162,6 +170,98 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
             yield f"data: {error_data}\n\n"
 
 
+async def _stream_level_4_openclaw(user_message: str, uid: str):
+    """Level 4: Direct to OpenClaw gateway's OpenAI-compatible endpoint.
+
+    Emits OMI-compatible SSE format:
+      data: <text chunk>          (streaming content, can be multiple)
+      done: <base64 ServerMessage JSON>  (final message)
+
+    Sends SSE keep-alive comments (: keepalive) every 5s while waiting
+    for OpenClaw to prevent proxy/client idle timeouts.
+    """
+    if not OPENCLAW_GATEWAY_TOKEN:
+        yield "data: Error: OPENCLAW_GATEWAY_TOKEN not configured\n\n"
+        return
+
+    # Use asyncio.Task so we can yield keep-alives while waiting
+    async def _call_openclaw():
+        async with httpx.AsyncClient() as client:
+            return await client.post(
+                f"{OPENCLAW_URL}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+                    "Content-Type": "application/json",
+                    "x-openclaw-session-key": f"agent:main:omi:{uid}",
+                },
+                json={
+                    "model": "openclaw:main",
+                    "messages": [
+                        {"role": "user", "content": user_message},
+                    ],
+                    "stream": False,
+                    "user": f"ella:{uid}",
+                },
+                timeout=90.0,
+            )
+
+    task = asyncio.create_task(_call_openclaw())
+
+    # Send SSE keep-alive comments every 5s while OpenClaw is processing
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except asyncio.TimeoutError:
+            # Task still running — send a keep-alive comment (SSE spec: lines starting with ':')
+            yield ": keepalive\n\n"
+
+    try:
+        response = task.result()
+
+        if response.status_code != 200:
+            yield f"data: Error: OpenClaw returned {response.status_code}\n\n"
+            return
+
+        result = response.json()
+        choices = result.get("choices", [])
+        reply = choices[0]["message"]["content"] if choices else "No response from OpenClaw"
+
+        # Strip <think>...</think> blocks that some reasoning models include
+        reply = re.sub(r'<think>.*?</think>\s*', '', reply, flags=re.DOTALL).strip()
+
+        logger.info(f"[Ella Chat] OpenClaw reply for uid={uid}: {reply[:100]}...")
+
+        # Emit in OMI format: data: <text> then done: <base64 json>
+        # Replace newlines with __CRLF__ as OMI protocol expects
+        # Chunk into <900 byte pieces to avoid Dart's 1024-byte buffer merging lines
+        encoded_reply = reply.replace(chr(10), '__CRLF__')
+        chunk_size = 800  # well under 1024 to account for "data: " prefix + overhead
+        for i in range(0, len(encoded_reply), chunk_size):
+            yield f"data: {encoded_reply[i:i+chunk_size]}\n\n"
+
+        # Build the final ServerMessage JSON matching OMI schema
+        msg = {
+            "id": str(uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": reply,
+            "sender": "ai",
+            "type": "text",
+            "plugin_id": None,
+            "from_integration": False,
+            "memories": [],
+            "files": [],
+            "ask_for_nps": False,
+        }
+        done_b64 = base64.b64encode(json.dumps(msg).encode()).decode()
+        yield f"done: {done_b64}\n\n"
+
+    except httpx.TimeoutException:
+        yield "data: Error: OpenClaw request timed out\n\n"
+    except Exception as e:
+        logger.error(f"[Ella Chat] OpenClaw error: {e}")
+        yield f"data: Error: {str(e)}\n\n"
+
+
 @router.post("/chat/stream")
 async def ella_chat_stream(
     request: EllaChatRequest,
@@ -196,6 +296,12 @@ async def ella_chat_stream(
     if debug_level == 3:
         return StreamingResponse(
             _stream_level_3_n8n(request.message, request.uid, request.conversation_id),
+            media_type="text/event-stream",
+        )
+
+    if debug_level == 4:
+        return StreamingResponse(
+            _stream_level_4_openclaw(request.message, request.uid),
             media_type="text/event-stream",
         )
 
