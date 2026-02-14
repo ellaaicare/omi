@@ -48,6 +48,9 @@ post_install do |installer|
         # dart: PermissionGroup.notification
         'PERMISSION_NOTIFICATIONS=1',
 
+        # dart: PermissionGroup.microphone
+        'PERMISSION_MICROPHONE=1',
+
         # dart: PermissionGroup.bluetooth
         'PERMISSION_BLUETOOTH=1',
         
@@ -59,6 +62,9 @@ post_install do |installer|
         'PERMISSION_LOCATION=1',
         'PERMISSION_LOCATION_WHENINUSE=1',
         'PERMISSION_LOCATION_ALWAYS=1',
+
+        # dart: PermissionGroup.speech
+        'PERMISSION_SPEECH_RECOGNIZER=1',
 
         ## dart: PermissionGroup.calendarFullAccess
         'PERMISSION_EVENTS_FULL_ACCESS=1',
