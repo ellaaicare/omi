@@ -33,7 +33,7 @@ Future<String> getAuthHeader() async {
     SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
   }
 
-  if (!hasAuthToken) {
+  if (SharedPreferencesUtil().authToken.isEmpty) {
     if (AuthService.instance.isSignedIn()) {
       // should only throw if the user is signed in but the token is not found
       // if the user is not signed in, the token will always be empty
