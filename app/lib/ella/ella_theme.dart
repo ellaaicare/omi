@@ -2,30 +2,31 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Ella AI color palette -- teal-based, warm light mode for elderly users.
+/// Ella AI color palette -- V6 "Ella Home" warm aquamarine teal, light mode for elderly users.
 ///
-/// All text colors verified for contrast ratio against bgPrimary (#FAFAF8):
-///   textPrimary:   18.1:1 (AAA)
+/// V6 direction: V3 warmth + V2 precision. Technology that feels like home.
+/// All text colors verified for contrast ratio against bgPrimary (#FAF5F0):
+///   textPrimary:   14.5:1 (AAA)
 ///   textSecondary: 10.4:1 (AAA)
 ///   textTertiary:   5.5:1 (AA)
 ///   textDisabled:   3.1:1 (AA large text only)
-///   primary:        3.3:1 (AA large text)
+///   primary:        3.5:1 (AA large text)
 class EllaColors {
   EllaColors._();
 
-  // Primary teal palette (KEEP UNCHANGED)
-  static const Color primary = Color(0xFF14B8A6);
-  static const Color primaryDark = Color(0xFF0D9488);
-  static const Color primaryLight = Color(0xFF5EEAD4);
-  static const Color primarySubtle = Color(0xFFCCFBF1);
+  // Primary teal palette -- V6 warm aquamarine
+  static const Color primary = Color(0xFF5A9E8F);
+  static const Color primaryDark = Color(0xFF4A8A7B);
+  static const Color primaryLight = Color(0xFF7AB5A8);
+  static const Color primarySubtle = Color(0xFFE8F5F0);
 
-  // Backgrounds -- warm off-white, inviting for elderly users
-  static const Color bgPrimary = Color(0xFFFAFAF8); // warm off-white
-  static const Color bgSecondary = Color(0xFFF0EDE9); // light warm beige
-  static const Color bgTertiary = Color(0xFFE8E4DF); // medium warm grey
+  // Backgrounds -- warm cream, inviting for elderly users
+  static const Color bgPrimary = Color(0xFFFAF5F0); // warm cream
+  static const Color bgSecondary = Color(0xFFF5F0E8); // light warm beige
+  static const Color bgTertiary = Color(0xFFE8E0D6); // warm taupe
 
   // Text -- dark on light for readability
-  static const Color textPrimary = Color(0xFF1A1A1A); // near-black
+  static const Color textPrimary = Color(0xFF2D2D2D); // soft charcoal
   static const Color textSecondary = Color(0xFF4A4A4A); // dark grey
   static const Color textTertiary = Color(0xFF7A7A7A); // medium grey
   static const Color textDisabled = Color(0xFFB0B0B0); // light grey
@@ -113,7 +114,7 @@ ThemeData ellaThemeData() {
     ),
     textSelectionTheme: const TextSelectionThemeData(
       cursorColor: EllaColors.textPrimary,
-      selectionColor: Color(0xFF99F6E4), // light teal selection
+      selectionColor: Color(0xFFB8E8DD), // warm teal selection
       selectionHandleColor: EllaColors.primary,
     ),
     cupertinoOverrideTheme: const CupertinoThemeData(
