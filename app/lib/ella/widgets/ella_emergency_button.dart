@@ -42,13 +42,13 @@ class _EllaEmergencyButtonState extends State<EllaEmergencyButton> with SingleTi
       vsync: this,
     )..repeat(reverse: true);
 
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.02).animate(
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.005).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
-    _shadowOpacityAnimation = Tween<double>(begin: 0.3, end: 0.5).animate(
+    _shadowOpacityAnimation = Tween<double>(begin: 0.15, end: 0.25).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
-    _shadowBlurAnimation = Tween<double>(begin: 12.0, end: 18.0).animate(
+    _shadowBlurAnimation = Tween<double>(begin: 8.0, end: 12.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
   }
@@ -187,7 +187,7 @@ class _EllaEmergencyButtonState extends State<EllaEmergencyButton> with SingleTi
       padding: const EdgeInsets.symmetric(horizontal: EllaSizes.spacingM, vertical: EllaSizes.spacingS),
       child: Semantics(
         button: true,
-        label: 'Emergency. Tap to get help and notify your emergency contacts.',
+        label: 'Get Help. Tap to notify your emergency contacts.',
         hint: 'Double tap to activate',
         child: AnimatedBuilder(
           animation: _pulseController,
@@ -235,10 +235,10 @@ class _EllaEmergencyButtonState extends State<EllaEmergencyButton> with SingleTi
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: isIdle
                           ? [
-                              const Icon(Icons.warning_rounded, size: EllaSizes.iconLarge, color: Colors.white),
+                              const Icon(Icons.health_and_safety_rounded, size: EllaSizes.iconLarge, color: Colors.white),
                               const SizedBox(width: 12),
                               const Text(
-                                'Emergency - Get Help',
+                                'Get Help',
                                 style: TextStyle(
                                   fontSize: 20,
                                   fontWeight: FontWeight.w600,
@@ -254,7 +254,7 @@ class _EllaEmergencyButtonState extends State<EllaEmergencyButton> with SingleTi
                               ),
                               const SizedBox(width: 12),
                               const Text(
-                                'Alerting...',
+                                'Contacting help...',
                                 style: TextStyle(
                                   fontSize: 20,
                                   color: EllaColors.textDisabled,
