@@ -30,9 +30,63 @@ class _AuthComponentState extends State<AuthComponent> {
       builder: (context, provider, child) {
         return Column(
           children: [
-            // Background image area - takes remaining space
+            // Ella branding area
             Expanded(
-              child: Container(), // Just takes up space for background image
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Ella logo orb
+                    Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            EllaColors.primaryLight,
+                            EllaColors.primary,
+                            EllaColors.primaryDark,
+                          ],
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: EllaColors.primary.withOpacity(0.3),
+                            blurRadius: 30,
+                            offset: const Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: const Center(
+                        child: Text(
+                          'e',
+                          style: TextStyle(
+                            fontSize: 48,
+                            fontWeight: FontWeight.w300,
+                            color: Colors.white,
+                            fontFamily: 'Manrope',
+                            height: 1.1,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    // Ella wordmark
+                    const Text(
+                      'ella',
+                      style: TextStyle(
+                        fontSize: 40,
+                        fontWeight: FontWeight.w600,
+                        color: EllaColors.textPrimary,
+                        fontFamily: 'Manrope',
+                        letterSpacing: 2,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
 
             // Bottom drawer card - wraps content
@@ -63,14 +117,14 @@ class _AuthComponentState extends State<AuthComponent> {
                           : null,
                     ),
 
-                    // Title text
-                    Text(
-                      context.l10n.speakTranscribeSummarize,
-                      style: const TextStyle(
-                        color: EllaColors.textPrimary,
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        height: 1.2,
+                    // Welcome text
+                    const Text(
+                      'Your AI companion\nfor daily life',
+                      style: TextStyle(
+                        color: EllaColors.textSecondary,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w500,
+                        height: 1.4,
                         fontFamily: 'Manrope',
                       ),
                       textAlign: TextAlign.center,
