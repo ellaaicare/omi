@@ -214,15 +214,19 @@ flutter:
         - asset: assets/fonts/SFPRODISPLAYBLACKITALIC.OTF
           weight: 900
           style: italic
+    - family: "Manrope"
+      fonts:
+        - asset: assets/fonts/Manrope-VariableFont_wght.ttf
 
 flutter_gen:
   output: lib/gen/
 
 flutter_native_splash:
-  background_image: "assets/images/splash.png"
+  background_image: "assets/images/ella_splash.png"
+  color: "#FAF5F0"
   android_12:
-    image: assets/images/splash_icon.png
-    color: "#000000" # TODO: improve hero banner on android12
+    image: assets/images/ella_splash.png
+    color: "#FAF5F0"
 
   android: true
   ios: true

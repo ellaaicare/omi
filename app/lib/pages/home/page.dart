@@ -639,12 +639,44 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           const BatteryInfoWidget(),
-          const Text(
-            'Ella',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w600,
-            ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
+                  ),
+                ),
+                child: const Center(
+                  child: Text(
+                    'e',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w300,
+                      color: Colors.white,
+                      fontFamily: 'Manrope',
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                'ella',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                  fontFamily: 'Manrope',
+                  letterSpacing: 1,
+                ),
+              ),
+            ],
           ),
           const SizedBox(width: 48),
         ],
