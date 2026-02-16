@@ -56,6 +56,11 @@ from utils.notifications import send_notification
 from utils.other.hume import get_hume, HumeJobCallbackModel, HumeJobModelPredictionResponseModel
 from utils.retrieval.rag import retrieve_rag_conversation_context
 from utils.webhooks import conversation_created_webhook
+
+try:
+    from ella.hooks.conversation_completed import notify_conversation_ready
+except ImportError:
+    notify_conversation_ready = None
 from utils.notifications import send_action_item_data_message
 
 
@@ -558,6 +563,10 @@ def process_conversation(
         threading.Thread(target=update_personas_async, args=(uid,)).start()
 
     # TODO: trigger external integrations here too
+
+    # Notify external agents that conversation is ready for enhancement (#35)
+    if not is_reprocess and notify_conversation_ready:
+        notify_conversation_ready(uid, conversation.id)
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation
