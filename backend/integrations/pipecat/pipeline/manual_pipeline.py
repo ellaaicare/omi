@@ -128,6 +128,16 @@ class ManualVoicePipeline:
         elif self.config.tts.provider == "elevenlabs":
             print(f"⚠️ ElevenLabs requested but not available (installed={ELEVENLABS_AVAILABLE}, key_set={bool(self.config.tts.elevenlabs_api_key)})", flush=True)
 
+        # Initialize local TTS client if configured
+        if self.config.tts.provider == "local":
+            self.local_tts_client = httpx.AsyncClient(
+                base_url=self.config.tts.local_tts_url,
+                timeout=10.0,
+            )
+            print(f"✅ Local TTS initialized (url: {self.config.tts.local_tts_url})", flush=True)
+        else:
+            self.local_tts_client = None
+
         # Initialize HTTP client for Deepgram and Groq
         self.http_client = httpx.AsyncClient(timeout=30.0)
 
@@ -649,8 +659,11 @@ class ManualVoicePipeline:
         """Generate TTS audio with timing metrics. Routes to appropriate provider."""
         provider = self.config.tts.provider.lower()
 
+        # Route to local TTS (Kokoro on Mac Mini) if configured
+        if provider == "local":
+            await self._speak_response_local(text, t_tts_start, timings, t_total_start)
         # Route to ElevenLabs if configured and available
-        if provider == "elevenlabs" and self.elevenlabs_client:
+        elif provider == "elevenlabs" and self.elevenlabs_client:
             await self._speak_response_elevenlabs(text, t_tts_start, timings, t_total_start)
         # Route to OpenAI streaming or blocking based on config
         elif self.config.tts.streaming:
@@ -837,6 +850,114 @@ class ManualVoicePipeline:
             print(f"❌ [BLOCKING] TTS error: {e}", flush=True)
         finally:
             self.is_speaking_tts = False  # AI done speaking
+
+    async def _speak_response_local(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
+        """
+        LOCAL TTS - Kokoro on Mac Mini via Tailscale.
+
+        Calls the local TTS API which returns PCM16 24kHz audio.
+        Falls back to configured fallback provider if unreachable.
+
+        Expected TTFB: ~400-700ms (generation + Tailscale hop)
+        """
+        try:
+            self.is_speaking_tts = True
+            self.barge_in_detected = False
+
+            t_gen_start = time.time()
+
+            sample_rate = self.audio_preferences.get('tts_sample_rate', 24000)
+            voice = self.config.tts.voice or "nova"
+
+            print(f"🔊 [LOCAL] Generating TTS (voice: {voice}, rate: {sample_rate}Hz)...", flush=True)
+
+            # Lazy-init client if needed (e.g., provider switched at runtime)
+            if self.local_tts_client is None:
+                self.local_tts_client = httpx.AsyncClient(
+                    base_url=self.config.tts.local_tts_url,
+                    timeout=10.0,
+                )
+
+            response = await self.local_tts_client.post(
+                "/v1/audio/speech",
+                json={
+                    "input": text,
+                    "voice": voice,
+                    "response_format": "pcm",
+                    "speed": self.config.tts.speed,
+                },
+            )
+            response.raise_for_status()
+
+            pcm_data = response.content
+            t_first_chunk = time.time()
+            ttfb_ms = (t_first_chunk - t_gen_start) * 1000
+
+            print(f"⚡ [LOCAL] Got {len(pcm_data)} bytes, TTFB: {ttfb_ms:.0f}ms", flush=True)
+
+            # Send PCM data in chunks to allow barge-in detection
+            chunk_size = 4800  # 100ms at 24kHz 16-bit mono
+            bytes_sent = 0
+
+            for i in range(0, len(pcm_data), chunk_size):
+                if self.barge_in_detected:
+                    print(f"🛑 Barge-in detected! Stopping TTS at {bytes_sent} bytes", flush=True)
+                    break
+
+                chunk = pcm_data[i:i + chunk_size]
+                try:
+                    await self.websocket.send_bytes(chunk)
+                    bytes_sent += len(chunk)
+                    await asyncio.sleep(0.005)
+                except Exception as e:
+                    print(f"⚠️ Failed to send audio chunk: {e}", flush=True)
+                    break
+
+            t_end = time.time()
+            tts_total_ms = (t_end - t_gen_start) * 1000
+
+            if timings is not None:
+                timings['tts_gen'] = ttfb_ms
+                timings['tts_send'] = tts_total_ms - ttfb_ms
+                timings['tts_total'] = tts_total_ms
+                timings['tts_provider'] = 'local'
+
+            # Parse server-reported metrics from headers
+            server_rtf = response.headers.get('x-real-time-factor', '?')
+            server_duration = response.headers.get('x-audio-duration', '?')
+
+            print(f"✅ [LOCAL] Sent {bytes_sent} bytes, TTFB={ttfb_ms:.0f}ms, total={tts_total_ms:.0f}ms, server_rtf={server_rtf}x, audio={server_duration}s", flush=True)
+
+            if timings is not None and t_total_start is not None:
+                total_ms = (time.time() - t_total_start) * 1000
+                actual_ttfb = timings.get('stt', 0) + timings.get('pause', 0) + timings.get('llm', 0) + ttfb_ms
+                print(f"\n{'='*50}", flush=True)
+                print(f"📊 LATENCY BREAKDOWN [LOCAL] (Turn #{len(self.turns)//2})", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   STT (Deepgram):    {timings.get('stt', 0):>6.0f}ms", flush=True)
+                print(f"   Thinking pause:    {timings.get('pause', 0):>6.0f}ms", flush=True)
+                print(f"   LLM (Groq):        {timings.get('llm', 0):>6.0f}ms", flush=True)
+                print(f"   TTS TTFB:          {ttfb_ms:>6.0f}ms 🏠 Local Kokoro", flush=True)
+                print(f"   TTS streaming:     {timings.get('tts_send', 0):>6.0f}ms", flush=True)
+                print(f"{'='*50}", flush=True)
+                print(f"   TOTAL:             {total_ms:>6.0f}ms", flush=True)
+                print(f"   TIME TO FIRST BYTE:{actual_ttfb:>6.0f}ms 🏠", flush=True)
+                print(f"{'='*50}\n", flush=True)
+
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+            print(f"❌ [LOCAL] TTS unreachable: {e}", flush=True)
+            fallback = self.config.tts.local_tts_fallback
+            print(f"🔄 Falling back to {fallback} TTS...", flush=True)
+            if fallback == "elevenlabs" and self.elevenlabs_client:
+                await self._speak_response_elevenlabs(text, t_tts_start, timings, t_total_start)
+            else:
+                await self._speak_response_streaming(text, t_tts_start, timings, t_total_start)
+        except Exception as e:
+            print(f"❌ [LOCAL] TTS error: {e}", flush=True)
+            print(f"🔄 Falling back to OpenAI TTS...", flush=True)
+            await self._speak_response_streaming(text, t_tts_start, timings, t_total_start)
+        finally:
+            self.is_speaking_tts = False
 
     async def _speak_response_elevenlabs(self, text: str, t_tts_start: float = None, timings: dict = None, t_total_start: float = None):
         """

@@ -33,13 +33,16 @@ class STTConfig:
 class TTSConfig:
     """Text-to-Speech configuration."""
 
-    provider: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "openai"))  # openai, elevenlabs, deepgram
+    provider: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "openai"))  # openai, elevenlabs, deepgram, local
     voice: str = "nova"
     speed: float = 1.0
     streaming: bool = field(default_factory=lambda: os.getenv("TTS_STREAMING", "true").lower() == "true")  # Enable streaming TTS
     api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     elevenlabs_api_key: str = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY", ""))
     elevenlabs_voice_id: str = field(default_factory=lambda: os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"))  # Rachel
+    # Local TTS (Kokoro on Mac Mini via Tailscale)
+    local_tts_url: str = field(default_factory=lambda: os.getenv("LOCAL_TTS_URL", "http://100.76.138.56:8930"))
+    local_tts_fallback: str = field(default_factory=lambda: os.getenv("LOCAL_TTS_FALLBACK", "openai"))  # Fallback if local TTS unreachable
 
 
 @dataclass
