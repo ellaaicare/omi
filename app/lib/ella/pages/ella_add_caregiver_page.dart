@@ -28,6 +28,7 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
   bool _dailySummary = true;
   bool _sending = false;
   String? _nameError;
+  String? _emailError;
   String? _phoneError;
 
   @override
@@ -50,17 +51,32 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
   }
 
   bool get _isValid {
-    return _nameController.text.trim().isNotEmpty && _phoneDigits.length >= 7 && _selectedRelationship != null;
+    final email = _emailController.text.trim();
+    return _nameController.text.trim().isNotEmpty &&
+        email.isNotEmpty &&
+        email.contains('@') &&
+        _selectedRelationship != null;
   }
 
   String get _phoneDigits => _phoneController.text.replaceAll(RegExp(r'[^\d]'), '');
 
+  bool _isValidEmail(String email) {
+    return email.contains('@') && email.contains('.') && email.length >= 5;
+  }
+
   bool _validate() {
+    final email = _emailController.text.trim();
+    final phone = _phoneController.text.trim();
     setState(() {
-      _nameError = _nameController.text.trim().isEmpty ? 'Name is required' : null;
-      _phoneError = _phoneDigits.length < 7 ? context.l10n.ellaInviteErrorInvalidPhone : null;
+      _nameError = _nameController.text.trim().isEmpty ? context.l10n.ellaAddCaregiverErrorNameRequired : null;
+      _emailError = email.isEmpty
+          ? context.l10n.ellaAddCaregiverErrorEmailRequired
+          : !_isValidEmail(email)
+              ? context.l10n.ellaAddCaregiverErrorEmailInvalid
+              : null;
+      _phoneError = phone.isNotEmpty && _phoneDigits.length < 7 ? context.l10n.ellaInviteErrorInvalidPhone : null;
     });
-    return _nameError == null && _phoneError == null && _selectedRelationship != null;
+    return _nameError == null && _emailError == null && _phoneError == null && _selectedRelationship != null;
   }
 
   Future<void> _sendInvite() async {
@@ -69,10 +85,10 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
     setState(() => _sending = true);
 
     try {
-      await caregiver_api.sendCaregiverInvite(
+      final inviteResponse = await caregiver_api.sendCaregiverInvite(
         name: _nameController.text.trim(),
-        phone: _phoneController.text.trim(),
-        email: _emailController.text.trim().isNotEmpty ? _emailController.text.trim() : null,
+        phone: _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
+        email: _emailController.text.trim(),
         relationship: _selectedRelationship!,
         dailySummary: _dailySummary,
       );
@@ -84,7 +100,9 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
         MaterialPageRoute(
           builder: (context) => EllaInviteSentScreen(
             name: _nameController.text.trim(),
-            phone: _phoneController.text.trim(),
+            email: _emailController.text.trim(),
+            phone: _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
+            inviteCode: inviteResponse.inviteCode,
           ),
         ),
       );
@@ -171,27 +189,12 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
               keyboardType: TextInputType.name,
               textInputAction: TextInputAction.next,
               error: _nameError,
-              onSubmitted: (_) => _phoneFocus.requestFocus(),
-            ),
-
-            const SizedBox(height: 20),
-
-            // Phone field
-            _buildFieldLabel(context.l10n.ellaAddCaregiverPhone),
-            const SizedBox(height: 8),
-            _buildTextField(
-              controller: _phoneController,
-              focusNode: _phoneFocus,
-              placeholder: context.l10n.ellaAddCaregiverPhonePlaceholder,
-              keyboardType: TextInputType.phone,
-              textInputAction: TextInputAction.next,
-              error: _phoneError,
               onSubmitted: (_) => _emailFocus.requestFocus(),
             ),
 
             const SizedBox(height: 20),
 
-            // Email field
+            // Email field (required — primary invite channel)
             _buildFieldLabel(context.l10n.ellaAddCaregiverEmail),
             const SizedBox(height: 8),
             _buildTextField(
@@ -199,7 +202,23 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
               focusNode: _emailFocus,
               placeholder: context.l10n.ellaAddCaregiverEmailPlaceholder,
               keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              error: _emailError,
+              onSubmitted: (_) => _phoneFocus.requestFocus(),
+            ),
+
+            const SizedBox(height: 20),
+
+            // Phone field (optional)
+            _buildFieldLabel(context.l10n.ellaAddCaregiverPhone),
+            const SizedBox(height: 8),
+            _buildTextField(
+              controller: _phoneController,
+              focusNode: _phoneFocus,
+              placeholder: context.l10n.ellaAddCaregiverPhonePlaceholder,
+              keyboardType: TextInputType.phone,
               textInputAction: TextInputAction.done,
+              error: _phoneError,
               onSubmitted: (_) => primaryFocus?.unfocus(),
             ),
 
@@ -347,6 +366,7 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
             onSubmitted: onSubmitted,
             onChanged: (_) => setState(() {
               _nameError = null;
+              _emailError = null;
               _phoneError = null;
             }),
             style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
