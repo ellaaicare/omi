@@ -57,23 +57,23 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
     return showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C1E),
+        backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(context.l10n.privacyNotice,
-            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
               context.l10n.recordingsMayCaptureOthers,
-              style: TextStyle(color: Colors.grey.shade400, fontSize: 14, height: 1.4),
+              style: TextStyle(color: EllaColors.textTertiary, fontSize: 14, height: 1.4),
             ),
           ],
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: Text(context.l10n.cancel, style: TextStyle(color: Colors.grey.shade500)),
+            child: Text(context.l10n.cancel, style: TextStyle(color: EllaColors.textTertiary)),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
@@ -85,7 +85,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
     );
   }
 
-  Widget _buildFaIcon(IconData icon, {double size = 18, Color color = const Color(0xFF8E8E93)}) {
+  Widget _buildFaIcon(IconData icon, {double size = 18, Color color = EllaColors.textTertiary}) {
     return Padding(
       padding: const EdgeInsets.only(left: 2, top: 1),
       child: FaIcon(icon, size: size, color: color),
@@ -97,16 +97,16 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
     final isEnabled = SharedPreferencesUtil().unlimitedLocalStorageEnabled;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0D0D0D),
+        backgroundColor: EllaColors.bgPrimary,
         elevation: 0,
         leading: IconButton(
-          icon: _buildFaIcon(FontAwesomeIcons.chevronLeft, size: 18, color: Colors.white),
+          icon: _buildFaIcon(FontAwesomeIcons.chevronLeft, size: 18, color: EllaColors.textPrimary),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: Text(context.l10n.storeAudioOnPhone,
-            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+            style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
         centerTitle: true,
       ),
       body: SingleChildScrollView(
@@ -117,7 +117,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: const Color(0xFF1C1C1E),
+                color: Colors.white,
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Column(
@@ -131,7 +131,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                         child: Text(
                           context.l10n.storeAudioOnPhone,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             fontSize: 18,
                             fontWeight: FontWeight.w600,
                           ),
@@ -140,13 +140,13 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
-                          color: isEnabled ? Colors.green.withOpacity(0.2) : const Color(0xFF2A2A2E),
+                          color: isEnabled ? Colors.green.withOpacity(0.2) : EllaColors.bgTertiary,
                           borderRadius: BorderRadius.circular(100),
                         ),
                         child: Text(
                           isEnabled ? context.l10n.on : context.l10n.off,
                           style: TextStyle(
-                            color: isEnabled ? Colors.green : Colors.white,
+                            color: isEnabled ? Colors.green : EllaColors.textPrimary,
                             fontSize: 13,
                             fontWeight: FontWeight.w500,
                           ),
@@ -158,13 +158,13 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                   Text(
                     context.l10n.storeAudioDescription,
                     style: TextStyle(
-                      color: Colors.grey.shade400,
+                      color: EllaColors.textTertiary,
                       fontSize: 14,
                       height: 1.5,
                     ),
                   ),
                   const SizedBox(height: 24),
-                  const Divider(height: 1, color: Color(0xFF3C3C43)),
+                  const Divider(height: 1, color: EllaColors.bgTertiary),
                   const SizedBox(height: 20),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -172,7 +172,7 @@ class _LocalStoragePageState extends State<LocalStoragePage> {
                       Text(
                         context.l10n.enableLocalStorage,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
                         ),

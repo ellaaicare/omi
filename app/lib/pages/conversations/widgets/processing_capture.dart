@@ -202,7 +202,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Text(
               context.l10n.waitingForDevice,
-              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white),
+              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: EllaColors.textPrimary),
               maxLines: 1,
             ),
           ),
@@ -223,7 +223,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Text(
               (isHavingTranscript || isHavingPhotos) ? context.l10n.inProgress : context.l10n.saySomething,
-              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white),
+              style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: EllaColors.textPrimary),
               maxLines: 1,
             ),
           ),
@@ -265,7 +265,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
             children: [
               Text(
                 stateText,
-                style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                style: TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -331,7 +331,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                 Text(
                   statusText,
                   style: const TextStyle(
-                    color: Color(0xFFC9CBCF),
+                    color: EllaColors.textSecondary,
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
                   ),
@@ -393,13 +393,13 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                   const FaIcon(
                     FontAwesomeIcons.camera,
                     size: 12,
-                    color: Color(0xFFC9CBCF),
+                    color: EllaColors.textSecondary,
                   ),
                   const SizedBox(width: 6),
                   Text(
                     '${provider.photos.length}',
                     style: const TextStyle(
-                      color: Color(0xFFC9CBCF),
+                      color: EllaColors.textSecondary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                     ),
@@ -415,7 +415,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
                 child: Text(
                   '... ${provider.segments.last.text} ...',
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                  style: TextStyle(color: EllaColors.textTertiary, fontSize: 13),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -451,7 +451,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                   color: isPaused
                       ? isDeviceRecording
                           ? const Color(0xFFFE5D50)
-                          : const Color(0xFF7C3AED)
+                          : EllaColors.primary
                       : isDeviceRecording
                           ? EllaColors.bgTertiary
                           : const Color(0xFFFF9500),
@@ -654,7 +654,7 @@ getPhoneMicRecordingButton(BuildContext context, VoidCallback toggleRecordingCb,
         width: 24,
         height: 24,
         decoration: const BoxDecoration(
-          color: Color(0xFF7C3AED), // Deep purple
+          color: EllaColors.primary,
           shape: BoxShape.circle,
         ),
         child: const Center(
@@ -678,7 +678,10 @@ getPhoneMicRecordingButton(BuildContext context, VoidCallback toggleRecordingCb,
         const SizedBox(width: 4),
         Text(
           text,
-          style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white, fontWeight: FontWeight.w500),
+          style: Theme.of(context)
+              .textTheme
+              .bodyMedium!
+              .copyWith(color: EllaColors.textPrimary, fontWeight: FontWeight.w500),
         ),
         const SizedBox(width: 4),
       ],
@@ -746,7 +749,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
                       width: 24,
                       height: 24,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF2A2A32),
+                        color: EllaColors.bgTertiary,
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
@@ -761,7 +764,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
                       child: Text(
                         context.l10n.processing,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
@@ -773,7 +776,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
                       width: 50,
                       height: 14,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF2A2A32),
+                        color: EllaColors.bgTertiary,
                         borderRadius: BorderRadius.circular(4),
                       ),
                     ),
@@ -785,7 +788,7 @@ class _ProcessingConversationWidgetState extends State<ProcessingConversationWid
                   width: double.maxFinite,
                   height: 16,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF2A2A32),
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(4),
                   ),
                 ),

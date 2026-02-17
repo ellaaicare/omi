@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/pages/conversations/widgets/merge_confirmation_dialog.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MergeActionBar extends StatefulWidget {
   const MergeActionBar({super.key});
@@ -60,11 +61,11 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
             position: _slideAnimation,
             child: Container(
               decoration: BoxDecoration(
-                color: const Color(0xFF1A1A1C),
+                color: EllaColors.bgPrimary,
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.5),
+                    color: Colors.black.withValues(alpha: 0.08),
                     blurRadius: 20,
                     offset: const Offset(0, -4),
                   ),
@@ -87,7 +88,7 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
                           child: Text(
                             context.l10n.cancel,
                             style: const TextStyle(
-                              color: Color(0xFF8E8E93),
+                              color: EllaColors.textTertiary,
                               fontSize: 17,
                               fontWeight: FontWeight.w500,
                             ),
@@ -104,7 +105,7 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
                           context.l10n.selectedCount(count, ''),
                           key: ValueKey(count),
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             fontSize: 17,
                             fontWeight: FontWeight.w600,
                           ),
@@ -120,7 +121,7 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
                           duration: const Duration(milliseconds: 200),
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                           decoration: BoxDecoration(
-                            color: canMerge ? const Color(0xFF7C3AED) : const Color(0xFF2C2C2E),
+                            color: canMerge ? EllaColors.primary : EllaColors.bgTertiary,
                             borderRadius: BorderRadius.circular(22),
                           ),
                           child: Row(
@@ -129,13 +130,13 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
                               Icon(
                                 Icons.merge_rounded,
                                 size: 18,
-                                color: canMerge ? Colors.white : const Color(0xFF636366),
+                                color: canMerge ? Colors.white : EllaColors.textDisabled,
                               ),
                               const SizedBox(width: 8),
                               Text(
                                 context.l10n.merge,
                                 style: TextStyle(
-                                  color: canMerge ? Colors.white : const Color(0xFF636366),
+                                  color: canMerge ? Colors.white : EllaColors.textDisabled,
                                   fontSize: 15,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -174,7 +175,7 @@ class _MergeActionBarState extends State<MergeActionBar> with SingleTickerProvid
               content: Text(
                 context.l10n.mergingInBackground,
               ),
-              backgroundColor: const Color(0xFF2C2C2E),
+              backgroundColor: EllaColors.textPrimary,
               behavior: SnackBarBehavior.floating,
               margin: const EdgeInsets.all(16),
               shape: RoundedRectangleBorder(

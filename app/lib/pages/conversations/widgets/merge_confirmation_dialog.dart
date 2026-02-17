@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class MergeConfirmationDialog extends StatelessWidget {
   final int count;
@@ -60,14 +61,14 @@ class MergeConfirmationDialog extends StatelessWidget {
     }
 
     return AlertDialog(
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: Colors.white,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(14),
       ),
       title: Text(
         context.l10n.mergeConversations,
         style: const TextStyle(
-          color: Colors.white,
+          color: EllaColors.textPrimary,
           fontSize: 17,
           fontWeight: FontWeight.w600,
         ),
@@ -79,7 +80,7 @@ class MergeConfirmationDialog extends StatelessWidget {
           Text(
             context.l10n.mergeConversationsMessage(count),
             style: const TextStyle(
-              color: Color(0xFF8E8E93),
+              color: EllaColors.textTertiary,
               fontSize: 15,
             ),
           ),
@@ -120,7 +121,7 @@ class MergeConfirmationDialog extends StatelessWidget {
           child: Text(
             context.l10n.cancel,
             style: const TextStyle(
-              color: Color(0xFF8E8E93),
+              color: EllaColors.textTertiary,
               fontSize: 17,
             ),
           ),
@@ -130,7 +131,7 @@ class MergeConfirmationDialog extends StatelessWidget {
           child: Text(
             context.l10n.merge,
             style: const TextStyle(
-              color: Color(0xFF7C3AED),
+              color: EllaColors.primary,
               fontSize: 17,
               fontWeight: FontWeight.w600,
             ),
