@@ -34,6 +34,7 @@
 		CF2F518D2EC08EA60025B331 /* Base.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = CF2F518C2EC08EA60025B331 /* Base.xcconfig */; };
 		EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = FG12345678901234567890FG /* WifiNetworkPlugin.swift */; };
 		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
+		ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -124,6 +125,7 @@
 		E7A9F5F37DDF9FA87AC8A5CD /* GoogleService-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = "GoogleService-Info.plist"; path = "Runner/GoogleService-Info.plist"; sourceTree = "<group>"; };
 		EDFF6508A941E8259906DDE2 /* Pods-Runner.debug-dev.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug-dev.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug-dev.xcconfig"; sourceTree = "<group>"; };
 		EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = file.storyboard; name = devLaunchScreen.storyboard; path = Runner/devLaunchScreen.storyboard; sourceTree = "<group>"; };
+		ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = EllaLaunchScreen.storyboard; path = Runner/Base.lproj/EllaLaunchScreen.storyboard; sourceTree = "<group>"; };
 		FG12345678901234567890FG /* WifiNetworkPlugin.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WifiNetworkPlugin.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -218,6 +220,7 @@
 				20C35A59F6DEFF5646F302D3 /* Frameworks */,
 				ACE7BEFB9654B6DF5B9E1790 /* prodLaunchScreen.storyboard */,
 				EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */,
+				ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */,
 				E7A9F5F37DDF9FA87AC8A5CD /* GoogleService-Info.plist */,
 			);
 			sourceTree = "<group>";
@@ -373,6 +376,7 @@
 				29B635C199B3BDE0F2BE8EC5 /* devRelease.xcconfig in Resources */,
 				CE7B938264FB7372447F8E21 /* prodLaunchScreen.storyboard in Resources */,
 				FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */,
+				ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */,
 				16935068EFFE77C62C493C3C /* GoogleService-Info.plist in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
