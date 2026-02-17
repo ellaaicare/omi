@@ -187,12 +187,14 @@ async def _stream_level_4_openclaw(user_message: str, uid: str):
     # Use asyncio.Task so we can yield keep-alives while waiting
     async def _call_openclaw():
         async with httpx.AsyncClient() as client:
+            # Use same user field format as LLM proxy's stream_openclaw_response()
+            # which sends "user": f"ella:{uid}" — no suffix.
+            # This ensures voice and text chat share the same OpenClaw session.
             return await client.post(
                 f"{OPENCLAW_URL}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
                     "Content-Type": "application/json",
-                    "x-openclaw-session-key": f"agent:main:omi:{uid}",
                 },
                 json={
                     "model": "openclaw:main",

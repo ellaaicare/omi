@@ -14,12 +14,8 @@ Endpoints:
 - GET    /v1/ella/emergency-contacts/{uid}             - List all contacts for a user
 - PUT    /v1/ella/emergency-contact/{contact_id}       - Update a contact
 - DELETE /v1/ella/emergency-contact/{contact_id}       - Remove a contact
-- POST   /v1/ella/caregivers/invite                    - Invite a caregiver
-- GET    /v1/ella/caregivers                           - List caregivers for a user
-- DELETE /v1/ella/caregivers/{caregiver_id}            - Remove a caregiver
-- PUT    /v1/ella/caregivers/{caregiver_id}/permissions - Update caregiver permissions
-- POST   /v1/ella/caregivers/resend-invite             - Resend caregiver invite
 - POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
+NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n webhooks directly.
 - GET    /v1/ella/health                               - Health check
 """
 
@@ -41,13 +37,8 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
-from database.ella_caregivers import (
-    create_caregiver,
-    delete_caregiver,
-    get_caregiver,
-    get_caregivers,
-    update_caregiver,
-)
+
+
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
 from utils.notifications import send_notification
@@ -168,11 +159,7 @@ async def ella_health():
             "/v1/ella/daily-summary",
             "/v1/ella/caregiver-dashboard-data",
             "/v1/ella/generate-dashboard-token",
-            "/v1/ella/caregivers/invite",
-            "/v1/ella/caregivers",
-            "/v1/ella/caregivers/{caregiver_id}",
-            "/v1/ella/caregivers/{caregiver_id}/permissions",
-            "/v1/ella/caregivers/resend-invite",
+            "# Caregiver CRUD: n8n.ella-ai-care.com/webhook/caregiver-*",
             "/v1/ella/chat/stream",
             "/v1/ella/health",
         ],
@@ -762,204 +749,8 @@ async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
 
 
 # ============================================================================
-# Caregiver Invite Models
+# Caregiver CRUD — MOVED to n8n (ella-ai-care repo)
+# iOS app calls n8n.ella-ai-care.com webhooks directly for all caregiver ops.
+# All caregiver data in ella-ai-care Postgres, not OMI Firestore.
+# See: https://github.com/ellaaicare/ella-ai/issues/55
 # ============================================================================
-
-MAX_CAREGIVERS_PER_USER = 5
-
-VALID_RELATIONSHIPS = {"daughter", "son", "spouse", "sibling", "friend", "doctor", "other"}
-
-
-class CaregiverPermissions(BaseModel):
-    receive_emergency_alerts: bool = True
-    receive_daily_summary: bool = False
-    emergency_sms: bool = True
-    emergency_phone_call: bool = True
-    daily_summary_email: bool = False
-
-
-class CaregiverInviteRequest(BaseModel):
-    uid: str
-    name: str = Field(..., min_length=1, max_length=200)
-    phone: str = Field(..., min_length=1, max_length=20)
-    email: Optional[str] = Field(default=None, max_length=254)
-    relationship: str = Field(default="other", max_length=100)
-    permissions: CaregiverPermissions = CaregiverPermissions()
-
-
-class CaregiverOut(BaseModel):
-    id: str
-    name: str
-    phone: str
-    email: Optional[str] = None
-    relationship: str = "other"
-    status: str = "invited"
-    invited_at: Optional[str] = None
-    joined_at: Optional[str] = None
-    permissions: CaregiverPermissions = CaregiverPermissions()
-
-
-class CaregiverInviteResponse(BaseModel):
-    invite_id: str
-    invite_code: str
-    status: str
-    expires_at: str
-
-
-class CaregiverListResponse(BaseModel):
-    caregivers: List[CaregiverOut]
-
-
-class CaregiverPermissionsUpdate(BaseModel):
-    receive_daily_summary: bool
-
-
-class ResendInviteRequest(BaseModel):
-    uid: str
-    caregiver_id: str
-
-
-# ============================================================================
-# Caregiver Invite Endpoints
-# ============================================================================
-
-
-@router.post("/caregivers/invite", response_model=CaregiverInviteResponse, status_code=201)
-async def invite_caregiver(request: CaregiverInviteRequest):
-    """
-    Invite a caregiver. Creates caregiver record in Firestore with a 6-digit
-    invite code valid for 7 days. Max 5 caregivers per user.
-    """
-    existing = get_caregivers(request.uid)
-
-    if len(existing) >= MAX_CAREGIVERS_PER_USER:
-        raise HTTPException(status_code=400, detail=f"Maximum of {MAX_CAREGIVERS_PER_USER} caregivers reached")
-
-    for cg in existing:
-        if cg.get('phone') == request.phone:
-            raise HTTPException(status_code=409, detail="A caregiver with this phone number already exists")
-
-    if request.relationship not in VALID_RELATIONSHIPS:
-        raise HTTPException(
-            status_code=422, detail=f"Invalid relationship. Must be one of: {sorted(VALID_RELATIONSHIPS)}"
-        )
-
-    data = request.model_dump()
-    data['permissions'] = request.permissions.model_dump()
-    # Force emergency alerts on
-    data['permissions']['receive_emergency_alerts'] = True
-    data['permissions']['emergency_sms'] = True
-    data['permissions']['emergency_phone_call'] = True
-
-    result = create_caregiver(request.uid, data)
-
-    logger.info(f"[Ella] Caregiver invited: uid={request.uid}, caregiver_id={result['id']}, name={request.name}")
-
-    return CaregiverInviteResponse(
-        invite_id=result['id'],
-        invite_code=result['invite_code'],
-        status=result['status'],
-        expires_at=result['invite_expires_at'],
-    )
-
-
-@router.get("/caregivers", response_model=CaregiverListResponse)
-async def list_caregivers(uid: str):
-    """
-    List all caregivers for a user.
-
-    Example: GET /v1/ella/caregivers?uid=abc123
-    """
-    if not uid:
-        raise HTTPException(status_code=422, detail="uid query parameter is required")
-
-    caregivers = get_caregivers(uid)
-    logger.info(f"[Ella] Caregivers listed: uid={uid}, count={len(caregivers)}")
-
-    return CaregiverListResponse(
-        caregivers=[CaregiverOut(**cg) for cg in caregivers],
-    )
-
-
-@router.delete("/caregivers/{caregiver_id}", status_code=204)
-async def remove_caregiver(caregiver_id: str, uid: str = ""):
-    """
-    Remove a caregiver.
-
-    Example: DELETE /v1/ella/caregivers/{caregiver_id}?uid=abc123
-    """
-    if not uid:
-        raise HTTPException(status_code=422, detail="uid query parameter is required")
-
-    deleted = delete_caregiver(uid, caregiver_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Caregiver not found")
-
-    logger.info(f"[Ella] Caregiver removed: uid={uid}, caregiver_id={caregiver_id}")
-
-
-@router.put("/caregivers/{caregiver_id}/permissions")
-async def update_caregiver_permissions(caregiver_id: str, request: CaregiverPermissionsUpdate, uid: str = ""):
-    """
-    Update notification permissions for a caregiver. Emergency alerts always stay on.
-
-    Example: PUT /v1/ella/caregivers/{caregiver_id}/permissions?uid=abc123
-    """
-    if not uid:
-        raise HTTPException(status_code=422, detail="uid query parameter is required")
-
-    existing = get_caregiver(uid, caregiver_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Caregiver not found")
-
-    permissions = existing.get('permissions', {})
-    permissions['receive_daily_summary'] = request.receive_daily_summary
-    permissions['daily_summary_email'] = request.receive_daily_summary
-    # Emergency alerts always stay on
-    permissions['receive_emergency_alerts'] = True
-    permissions['emergency_sms'] = True
-    permissions['emergency_phone_call'] = True
-
-    result = update_caregiver(uid, caregiver_id, {'permissions': permissions})
-
-    logger.info(
-        f"[Ella] Caregiver permissions updated: uid={uid}, caregiver_id={caregiver_id}, "
-        f"daily_summary={request.receive_daily_summary}"
-    )
-
-    return CaregiverOut(**result)
-
-
-@router.post("/caregivers/resend-invite", response_model=CaregiverInviteResponse)
-async def resend_caregiver_invite(request: ResendInviteRequest):
-    """
-    Resend invite for an existing invited caregiver. Generates a new 6-digit
-    invite code with a fresh 7-day expiry.
-    """
-    existing = get_caregiver(request.uid, request.caregiver_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Caregiver not found")
-
-    if existing.get('status') != 'invited':
-        raise HTTPException(status_code=400, detail="Caregiver has already joined; cannot resend invite")
-
-    new_code = ''.join(secrets.choice(string.digits) for _ in range(6))
-    new_expiry = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-
-    result = update_caregiver(
-        request.uid,
-        request.caregiver_id,
-        {
-            'invite_code': new_code,
-            'invite_expires_at': new_expiry,
-        },
-    )
-
-    logger.info(f"[Ella] Caregiver invite resent: uid={request.uid}, caregiver_id={request.caregiver_id}")
-
-    return CaregiverInviteResponse(
-        invite_id=result['id'],
-        invite_code=result['invite_code'],
-        status=result['status'],
-        expires_at=result['invite_expires_at'],
-    )
