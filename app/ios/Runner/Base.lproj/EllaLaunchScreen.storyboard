@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="22505" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" colorMatched="YES" initialViewController="ella-vc-001">
+    <device id="retina6_12" orientation="portrait" appearance="light"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="22504"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="ella-scene-001">
+            <objects>
+                <viewController id="ella-vc-001" sceneMemberID="viewController">
+                    <layoutGuides>
+                        <viewControllerLayoutGuide type="top" id="ella-top-001"/>
+                        <viewControllerLayoutGuide type="bottom" id="ella-bot-001"/>
+                    </layoutGuides>
+                    <view key="view" contentMode="scaleToFill" id="ella-view-001">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleToFill" image="LaunchBackground" translatesAutoresizingMaskIntoConstraints="NO" id="ella-img-001">
+                                <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                            </imageView>
+                        </subviews>
+                        <color key="backgroundColor" red="0.98039215686274506" green="0.96078431372549022" blue="0.94117647058823528" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <constraints>
+                            <constraint firstItem="ella-img-001" firstAttribute="bottom" secondItem="ella-view-001" secondAttribute="bottom" id="ella-c1"/>
+                            <constraint firstItem="ella-img-001" firstAttribute="top" secondItem="ella-view-001" secondAttribute="top" id="ella-c2"/>
+                            <constraint firstAttribute="trailing" secondItem="ella-img-001" secondAttribute="trailing" id="ella-c3"/>
+                            <constraint firstItem="ella-img-001" firstAttribute="leading" secondItem="ella-view-001" secondAttribute="leading" id="ella-c4"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="ella-fr-001" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="80" y="264"/>
+        </scene>
+    </scenes>
+    <resources>
+        <image name="LaunchBackground" width="390" height="844"/>
+    </resources>
+</document>
