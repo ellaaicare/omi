@@ -185,7 +185,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
       }
 
       // Build the share link and message
-      final shareLink = 'https://h.omi.me/conversations/${widget.conversation.id}';
+      final shareLink = 'https://ella-ai-care.com/conversations/${widget.conversation.id}';
       final message = context.l10n.heresWhatWeDiscussed(shareLink);
 
       // Build recipients string (comma-separated phone numbers)
