@@ -749,7 +749,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                       });
                                       return;
                                     }
-                                    String content = 'https://h.omi.me/memories/${provider.conversation.id}';
+                                    String content = 'https://ella-ai-care.com/conversations/${provider.conversation.id}';
                                     // Track share event
                                     MixpanelManager().conversationShared(
                                       conversation: provider.conversation,

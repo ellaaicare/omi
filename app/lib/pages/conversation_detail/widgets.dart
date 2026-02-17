@@ -1153,7 +1153,7 @@ class _GetShareOptionsState extends State<GetShareOptions> {
                 return;
               }
               String content =
-                  '''https://h.omi.me/conversations/${widget.conversation.id}'''.replaceAll('  ', '').trim();
+                  '''https://ella-ai-care.com/conversations/${widget.conversation.id}'''.replaceAll('  ', '').trim();
               print(content);
               final RenderBox? box = _shareUrlKey.currentContext?.findRenderObject() as RenderBox?;
               if (box != null) {

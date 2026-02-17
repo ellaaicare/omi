@@ -214,7 +214,7 @@ void showShareBottomSheet(
                               );
                               return;
                             }
-                            Clipboard.setData(ClipboardData(text: 'https://h.omi.me/conversations/${conversation.id}'));
+                            Clipboard.setData(ClipboardData(text: 'https://ella-ai-care.com/conversations/${conversation.id}'));
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(content: Text(context.l10n.urlCopiedToClipboard)),
                             );
