@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
@@ -10,8 +11,10 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
+import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
+import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -148,49 +151,38 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
           padding: const EdgeInsets.symmetric(horizontal: 16),
           children: [
             const SizedBox(height: 8),
-            // Profile row
+            // Profile row — navigates to full profile page
             EllaSettingsRow(
               icon: Icons.person,
               title: context.l10n.ellaSettingsProfile,
-              subtitle: userName,
+              subtitle: _profileSubtitle(userName),
               onTap: () async {
-                final controller = TextEditingController(text: SharedPreferencesUtil().givenName);
-                final result = await showDialog<String>(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    backgroundColor: EllaColors.bgSecondary,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
-                    title: const Text(
-                      'Edit Name',
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
-                    ),
-                    content: TextField(
-                      controller: controller,
-                      autofocus: true,
-                      style: const TextStyle(fontSize: 18, color: EllaColors.textPrimary),
-                      decoration: const InputDecoration(
-                        hintText: 'Your name',
-                        hintStyle: TextStyle(fontSize: 18, color: EllaColors.textDisabled),
-                      ),
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('Cancel', style: TextStyle(fontSize: 18, color: EllaColors.textTertiary)),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, controller.text.trim()),
-                        child: const Text('Save', style: TextStyle(fontSize: 18, color: EllaColors.primary)),
-                      ),
-                    ],
-                  ),
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const EllaProfilePage()),
                 );
-                if (result != null && result.isNotEmpty) {
-                  SharedPreferencesUtil().givenName = result;
-                  setState(() {});
-                }
+                setState(() {}); // refresh after profile edits
               },
             ),
+
+            // Ella Key (for cross-device linking)
+            if (SharedPreferencesUtil().ellaKey.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              EllaSettingsRow(
+                icon: Icons.key,
+                title: 'Ella Key',
+                subtitle: SharedPreferencesUtil().ellaKey,
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: SharedPreferencesUtil().ellaKey));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Ella Key copied to clipboard'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                },
+              ),
+            ],
 
             // CARE TEAM section
             _buildSectionHeader(context.l10n.ellaCareTeamSection),
@@ -228,7 +220,12 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               icon: Icons.bluetooth_connected,
               title: context.l10n.ellaSettingsDevice,
               subtitle: deviceName,
-              onTap: () {},
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const ConnectDevicePage()),
+                );
+              },
             ),
 
             // ABOUT section
@@ -268,6 +265,14 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
         ),
       ),
     );
+  }
+
+  String _profileSubtitle(String name) {
+    final email = SharedPreferencesUtil().email;
+    if (name.isNotEmpty && email.isNotEmpty) return '$name \u00B7 $email';
+    if (name.isNotEmpty) return name;
+    if (email.isNotEmpty) return email;
+    return '';
   }
 
   Widget _buildSectionHeader(String text) {
