@@ -228,7 +228,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
       onTap: () => FocusScope.of(context).unfocus(),
       child: Container(
         decoration: const BoxDecoration(
-          color: Color(0xFF0F0F14),
+          color: EllaColors.bgPrimary,
           borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
@@ -240,7 +240,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
               height: 4,
               margin: const EdgeInsets.only(top: 12),
               decoration: BoxDecoration(
-                color: Colors.grey.shade700,
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -254,7 +254,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
                       gradient: const LinearGradient(
-                        colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+                        colors: [EllaColors.primary, EllaColors.primaryDark],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
@@ -271,7 +271,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                     child: Text(
                       context.l10n.createCustomTemplate,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 18,
                         fontWeight: FontWeight.w600,
                       ),
@@ -281,7 +281,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                     onPressed: _isCreating ? null : () => Navigator.pop(context),
                     icon: Icon(
                       Icons.close,
-                      color: Colors.grey.shade500,
+                      color: EllaColors.textTertiary,
                     ),
                   ),
                 ],
@@ -307,7 +307,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                       Text(
                         context.l10n.templateName,
                         style: TextStyle(
-                          color: Colors.grey.shade300,
+                          color: EllaColors.textSecondary,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
@@ -316,10 +316,10 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                       TextFormField(
                         controller: _nameController,
                         enabled: !_isCreating,
-                        style: const TextStyle(color: Colors.white),
+                        style: const TextStyle(color: EllaColors.textPrimary),
                         decoration: InputDecoration(
                           hintText: context.l10n.templateNameHint,
-                          hintStyle: TextStyle(color: Colors.grey.shade600),
+                          hintStyle: TextStyle(color: EllaColors.textDisabled),
                           filled: true,
                           fillColor: EllaColors.bgSecondary,
                           border: OutlineInputBorder(
@@ -345,7 +345,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                       Text(
                         context.l10n.conversationPrompt,
                         style: TextStyle(
-                          color: Colors.grey.shade300,
+                          color: EllaColors.textSecondary,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
@@ -354,11 +354,11 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                       TextFormField(
                         controller: _promptController,
                         enabled: !_isCreating,
-                        style: const TextStyle(color: Colors.white),
+                        style: const TextStyle(color: EllaColors.textPrimary),
                         maxLines: 4,
                         decoration: InputDecoration(
                           hintText: context.l10n.conversationPromptHint,
-                          hintStyle: TextStyle(color: Colors.grey.shade600),
+                          hintStyle: TextStyle(color: EllaColors.textDisabled),
                           filled: true,
                           fillColor: EllaColors.bgSecondary,
                           border: OutlineInputBorder(
@@ -393,13 +393,13 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                               width: 40,
                               height: 40,
                               decoration: BoxDecoration(
-                                color: const Color(0xFF2A2A2E),
+                                color: EllaColors.bgTertiary,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Center(
                                 child: FaIcon(
                                   _isPublic ? FontAwesomeIcons.globe : FontAwesomeIcons.lock,
-                                  color: Colors.grey.shade400,
+                                  color: EllaColors.textTertiary,
                                   size: 16,
                                 ),
                               ),
@@ -412,7 +412,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                                   Text(
                                     context.l10n.makePublic,
                                     style: const TextStyle(
-                                      color: Colors.white,
+                                      color: EllaColors.textPrimary,
                                       fontSize: 16,
                                       fontWeight: FontWeight.w500,
                                     ),
@@ -423,7 +423,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                                         ? context.l10n.anyoneCanDiscoverTemplate
                                         : context.l10n.onlyYouCanUseTemplate,
                                     style: TextStyle(
-                                      color: Colors.grey.shade500,
+                                      color: EllaColors.textTertiary,
                                       fontSize: 13,
                                     ),
                                   ),
@@ -439,7 +439,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                                         _isPublic = value;
                                       });
                                     },
-                              activeColor: const Color(0xFF6366F1),
+                              activeColor: EllaColors.primary,
                             ),
                           ],
                         ),
@@ -455,8 +455,8 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                           child: ElevatedButton(
                             onPressed: _isCreating ? null : _createTemplate,
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: _isCreating ? const Color(0xFF2A2A2E) : Colors.white,
-                              foregroundColor: Colors.black,
+                              backgroundColor: _isCreating ? EllaColors.bgTertiary : EllaColors.primary,
+                              foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(vertical: 16),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
@@ -467,7 +467,7 @@ class _CreateTemplateBottomSheetState extends State<CreateTemplateBottomSheet> {
                                 ? Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      const SizedBox(
+                                      SizedBox(
                                         width: 18,
                                         height: 18,
                                         child: CircularProgressIndicator(

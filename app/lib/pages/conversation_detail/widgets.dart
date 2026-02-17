@@ -200,7 +200,7 @@ class GetSummaryWidgets extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: folder != null ? folder.colorValue.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+          color: folder != null ? folder.colorValue.withOpacity(0.2) : EllaColors.bgTertiary.withOpacity(0.5),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -211,14 +211,14 @@ class GetSummaryWidgets extends StatelessWidget {
               child: FaIcon(
                 folderIconToFa(folder?.icon),
                 size: 12,
-                color: folder != null ? folder.colorValue : Colors.grey.shade300,
+                color: folder != null ? folder.colorValue : EllaColors.textTertiary,
               ),
             ),
             const SizedBox(width: 6),
             Text(
               folder?.name ?? context.l10n.noFolder,
               style: TextStyle(
-                color: folder != null ? folder.colorValue : Colors.grey.shade300,
+                color: folder != null ? folder.colorValue : EllaColors.textTertiary,
                 fontSize: 13,
                 fontWeight: FontWeight.w500,
               ),
@@ -227,7 +227,7 @@ class GetSummaryWidgets extends StatelessWidget {
             Icon(
               Icons.arrow_drop_down,
               size: 16,
-              color: folder != null ? folder.colorValue : Colors.grey.shade300,
+              color: folder != null ? folder.colorValue : EllaColors.textTertiary,
             ),
           ],
         ),
@@ -239,7 +239,7 @@ class GetSummaryWidgets extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.grey.withValues(alpha: 0.2),
+        color: EllaColors.bgTertiary.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
@@ -248,13 +248,13 @@ class GetSummaryWidgets extends StatelessWidget {
           Icon(
             icon,
             size: 14,
-            color: Colors.grey.shade300,
+            color: EllaColors.textTertiary,
           ),
           const SizedBox(width: 6),
           Text(
             label,
-            style: TextStyle(
-              color: Colors.grey.shade300,
+            style: const TextStyle(
+              color: EllaColors.textTertiary,
               fontSize: 13,
               fontWeight: FontWeight.w500,
             ),
@@ -278,14 +278,24 @@ class GetSummaryWidgets extends StatelessWidget {
             conversation.discarded
                 ? Text(
                     context.l10n.discardedConversation,
-                    style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 32),
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w600,
+                      color: EllaColors.textSecondary,
+                      height: 1.3,
+                    ),
                   )
                 : GetEditTextField(
                     conversationId: conversation.id,
                     focusNode: data.item3,
                     controller: data.item2,
                     content: conversation.structured.title.decodeString,
-                    style: Theme.of(context).textTheme.titleLarge!.copyWith(fontSize: 32, color: Colors.white),
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w600,
+                      color: EllaColors.textPrimary,
+                      height: 1.3,
+                    ),
                   ),
             const SizedBox(height: 16),
             _buildInfoChips(context, conversation),
@@ -327,7 +337,7 @@ class ActionItemsListWidget extends StatelessWidget {
                         ));
                         MixpanelManager().copiedConversationDetails(provider.conversation, source: 'Action Items');
                       },
-                      icon: const Icon(Icons.copy_rounded, color: Colors.white, size: 20),
+                      icon: const Icon(Icons.copy_rounded, color: EllaColors.textSecondary, size: 20),
                     )
                   ],
                 )
@@ -407,7 +417,7 @@ class ActionItemsListWidget extends StatelessWidget {
                         child: SelectionArea(
                           child: Text(
                             item.description.decodeString,
-                            style: TextStyle(color: Colors.grey.shade300, fontSize: 16, height: 1.3),
+                            style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16, height: 1.3),
                           ),
                         ),
                       ),
@@ -454,6 +464,7 @@ class _GetEditTextFieldState extends State<GetEditTextField> {
       decoration: const InputDecoration(
         border: OutlineInputBorder(borderSide: BorderSide.none),
         contentPadding: EdgeInsets.all(0),
+        filled: false,
       ),
       controller: widget.controller,
       enabled: true,
@@ -477,14 +488,14 @@ class ReprocessDiscardedWidget extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const CircularProgressIndicator(
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                  valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                 ),
                 const SizedBox(width: 16),
                 Text(
                   provider.conversation.discarded
                       ? context.l10n.summarizingConversation
                       : context.l10n.resummarizingConversation,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                 ),
               ],
             ),
@@ -524,7 +535,8 @@ class ReprocessDiscardedWidget extends StatelessWidget {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-                      child: Text(context.l10n.summarize, style: const TextStyle(color: Colors.white, fontSize: 16))),
+                      child: Text(context.l10n.summarize,
+                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16))),
                 ),
               ),
             ],

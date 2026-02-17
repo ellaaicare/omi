@@ -623,7 +623,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                     Navigator.pop(context);
                   }
                 },
-                icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: Colors.white),
+                icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: EllaColors.textPrimary),
               ),
             ),
             title: Align(
@@ -633,7 +633,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                 child: Text(
                   _getTabTitle(context, selectedTab),
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                     fontSize: 18,
                     fontWeight: FontWeight.w600,
                   ),
@@ -714,7 +714,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                               : FaIcon(
                                   provider.conversation.starred ? FontAwesomeIcons.solidStar : FontAwesomeIcons.star,
                                   size: 16.0,
-                                  color: provider.conversation.starred ? Colors.amber : Colors.white,
+                                  color: provider.conversation.starred ? Colors.amber : EllaColors.textPrimary,
                                 ),
                         ),
                       ),
@@ -790,7 +790,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                     valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                                   ),
                                 )
-                              : const FaIcon(FontAwesomeIcons.arrowUpFromBracket, size: 16.0, color: Colors.white),
+                              : const FaIcon(FontAwesomeIcons.arrowUpFromBracket,
+                                  size: 16.0, color: EllaColors.textPrimary),
                         ),
                       ),
                       // Search button (second) - only show on transcript and summary tabs
@@ -821,7 +822,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                               });
                               HapticFeedback.mediumImpact();
                             },
-                            icon: const FaIcon(FontAwesomeIcons.magnifyingGlass, size: 16.0, color: Colors.white),
+                            icon: const FaIcon(FontAwesomeIcons.magnifyingGlass,
+                                size: 16.0, color: EllaColors.textPrimary),
                           ),
                         ),
                       // Developer Tools button (third) - iOS style pull-down menu
@@ -887,7 +889,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                 shape: BoxShape.circle,
                               ),
                               child: const Center(
-                                child: FaIcon(FontAwesomeIcons.ellipsisVertical, size: 16.0, color: Colors.white),
+                                child: FaIcon(FontAwesomeIcons.ellipsisVertical,
+                                    size: 16.0, color: EllaColors.textPrimary),
                               ),
                             ),
                           ),
@@ -1165,11 +1168,11 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                             child: TextField(
                               controller: _searchController,
                               focusNode: _searchFocusNode,
-                              style: const TextStyle(color: Colors.white),
+                              style: const TextStyle(color: EllaColors.textPrimary),
                               decoration: InputDecoration(
                                 hintText: context.l10n.searchTranscriptOrSummary,
-                                hintStyle: TextStyle(color: Colors.grey[400]),
-                                prefixIcon: const Icon(Icons.search, color: Colors.white70),
+                                hintStyle: const TextStyle(color: EllaColors.textTertiary),
+                                prefixIcon: const Icon(Icons.search, color: EllaColors.textSecondary),
                                 suffixIcon: _searchQuery.isNotEmpty
                                     ? Container(
                                         width: _searchQuery.isNotEmpty ? 150 : 40,
@@ -1187,7 +1190,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                 child: Text(
                                                   '$_currentSearchIndex/$_totalSearchResults',
                                                   style: const TextStyle(
-                                                      color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500),
+                                                      color: EllaColors.textPrimary,
+                                                      fontSize: 11,
+                                                      fontWeight: FontWeight.w500),
                                                 ),
                                               ),
                                               const SizedBox(width: 4),
@@ -1203,8 +1208,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                       borderRadius: BorderRadius.circular(18),
                                                     ),
                                                     child: Icon(Icons.keyboard_arrow_up,
-                                                        color:
-                                                            _totalSearchResults > 0 ? Colors.white70 : Colors.white30,
+                                                        color: _totalSearchResults > 0
+                                                            ? EllaColors.textSecondary
+                                                            : EllaColors.textDisabled,
                                                         size: 22),
                                                   ),
                                                 ),
@@ -1221,8 +1227,9 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                       borderRadius: BorderRadius.circular(18),
                                                     ),
                                                     child: Icon(Icons.keyboard_arrow_down,
-                                                        color:
-                                                            _totalSearchResults > 0 ? Colors.white70 : Colors.white30,
+                                                        color: _totalSearchResults > 0
+                                                            ? EllaColors.textSecondary
+                                                            : EllaColors.textDisabled,
                                                         size: 22),
                                                   ),
                                                 ),
@@ -1247,7 +1254,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                                   decoration: BoxDecoration(
                                                     borderRadius: BorderRadius.circular(16),
                                                   ),
-                                                  child: const Icon(Icons.clear, color: Colors.white70, size: 22),
+                                                  child: const Icon(Icons.clear,
+                                                      color: EllaColors.textSecondary, size: 22),
                                                 ),
                                               ),
                                             ),
@@ -1256,7 +1264,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                       )
                                     : null,
                                 filled: true,
-                                fillColor: const Color(0xFF1C1C1E).withOpacity(0.95),
+                                fillColor: EllaColors.bgSecondary,
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(12),
                                   borderSide: BorderSide.none,
@@ -1411,8 +1419,8 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                   child: ExpandableTextWidget(
                     text: (provider.conversation.externalIntegration?.text ?? '').decodeString,
                     maxLines: 1000,
-                    linkColor: Colors.grey.shade300,
-                    style: TextStyle(color: Colors.grey.shade300, fontSize: 15, height: 1.3),
+                    linkColor: EllaColors.primary,
+                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 15, height: 1.3),
                     toggleExpand: () {
                       provider.toggleIsTranscriptExpanded();
                     },
@@ -1444,7 +1452,7 @@ class _TranscriptWidgetsState extends State<TranscriptWidgets> with AutomaticKee
                   showModalBottomSheet(
                     context: context,
                     isScrollControlled: true,
-                    backgroundColor: Colors.black,
+                    backgroundColor: EllaColors.bgPrimary,
                     shape: const RoundedRectangleBorder(
                       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
                     ),
@@ -1540,11 +1548,11 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
           duration: const Duration(milliseconds: 300),
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.grey[900],
+              color: EllaColors.bgSecondary,
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.1),
+                  color: Colors.black.withValues(alpha: 0.05),
                   blurRadius: 4,
                   offset: const Offset(0, 2),
                 ),
@@ -1597,7 +1605,7 @@ class _ActionItemDetailWidgetState extends State<ActionItemDetailWidget> {
                         child: Text(
                           actionItem.description,
                           style: TextStyle(
-                            color: isCompleted ? Colors.grey : Colors.white,
+                            color: isCompleted ? EllaColors.textDisabled : EllaColors.textPrimary,
                             decoration: isCompleted ? TextDecoration.lineThrough : null,
                             decorationColor: Colors.grey,
                             fontSize: 15,
@@ -1701,7 +1709,7 @@ class ActionItemsTab extends StatelessWidget {
                       const Text(
                         'To-Do',
                         style: TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 20,
                           fontWeight: FontWeight.w600,
                         ),
@@ -1710,13 +1718,13 @@ class ActionItemsTab extends StatelessWidget {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color: Colors.grey[800],
+                          color: EllaColors.bgTertiary,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
                           '${incompleteItems.length}',
                           style: const TextStyle(
-                            color: Colors.grey,
+                            color: EllaColors.textTertiary,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                           ),
@@ -1754,14 +1762,14 @@ class ActionItemsTab extends StatelessWidget {
                 child: Container(
                   height: 52,
                   decoration: BoxDecoration(
-                    color: Colors.grey[900],
+                    color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Center(
+                  child: const Center(
                     child: Text(
                       'No pending action items',
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textTertiary,
                         fontSize: 14,
                       ),
                     ),
@@ -1785,7 +1793,7 @@ class ActionItemsTab extends StatelessWidget {
                           const Text(
                             'Completed',
                             style: TextStyle(
-                              color: Colors.white,
+                              color: EllaColors.textPrimary,
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
                             ),
@@ -1794,13 +1802,13 @@ class ActionItemsTab extends StatelessWidget {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                             decoration: BoxDecoration(
-                              color: Colors.grey[800],
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
                               '${completedItems.length}',
                               style: const TextStyle(
-                                color: Colors.grey,
+                                color: EllaColors.textTertiary,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w500,
                               ),
@@ -1839,14 +1847,14 @@ class ActionItemsTab extends StatelessWidget {
                 child: Container(
                   height: 52,
                   decoration: BoxDecoration(
-                    color: Colors.grey[900],
+                    color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Center(
+                  child: const Center(
                     child: Text(
                       'No completed items yet',
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textTertiary,
                         fontSize: 14,
                       ),
                     ),
@@ -1868,26 +1876,26 @@ class ActionItemsTab extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
+            const Icon(
               Icons.check_circle_outline,
               size: 72,
-              color: Colors.grey.shade400,
+              color: EllaColors.textDisabled,
             ),
             const SizedBox(height: 24),
             Text(
               'No Action Items',
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                     fontWeight: FontWeight.bold,
                   ),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
-            Text(
+            const Text(
               'Tasks and to-dos from this conversation will appear here once they are created.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                color: Colors.grey.shade400,
+                color: EllaColors.textTertiary,
                 fontSize: 16,
                 height: 1.5,
               ),
