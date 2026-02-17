@@ -10,12 +10,16 @@ import 'package:provider/provider.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+import 'package:uuid/uuid.dart';
+
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/home_provider.dart';
+import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
 
 /// Voice-to-voice chat page for Ella.
@@ -32,7 +36,7 @@ class EllaVoiceChatPage extends StatefulWidget {
 class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKeepAliveClientMixin {
   VoiceOrbState _orbState = VoiceOrbState.idle;
   double _audioLevel = 0.0;
-  String _statusText = 'Tap to Start';
+  String _statusText = 'Tap to Pause';
   String _lastUserText = '';
   String _lastEllaText = '';
 
@@ -50,12 +54,40 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// Guard against concurrent _startListening() calls
   bool _isRestarting = false;
 
+  /// ScrollController for the transcript area
+  final ScrollController _transcriptScrollController = ScrollController();
+
+  /// Typewriter effect state
+  String _ellaDisplayText = '';
+  Timer? _typewriterTimer;
+
+  /// Track tab visibility
+  bool _wasOnVoiceTab = false;
+
+  /// Regex to strip emojis from text before sending to TTS
+  static final _emojiRegex = RegExp(
+    r'[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|'
+    r'[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|'
+    r'[\u{FE00}-\u{FE0F}]|[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|'
+    r'[\u{1FA70}-\u{1FAFF}]|[\u{200D}]|[\u{20E3}]|[\u{E0020}-\u{E007F}]|'
+    r'[\u{2328}]|[\u{23CF}]|[\u{23E9}-\u{23F3}]|[\u{23F8}-\u{23FA}]|'
+    r'[\u{1F004}]|[\u{1F0CF}]|[\u{1F18E}]|[\u{1F191}-\u{1F19A}]|'
+    r'[\u{1F201}-\u{1F251}]|[\u{203C}]|[\u{2049}]|[\u{2122}]|[\u{2139}]|'
+    r'[\u{2194}-\u{21AA}]|[\u{231A}-\u{231B}]|[\u{25AA}-\u{25AB}]|'
+    r'[\u{25B6}]|[\u{25C0}]|[\u{25FB}-\u{25FE}]|[\u{2614}-\u{2615}]|'
+    r'[\u{2648}-\u{2653}]|[\u{267F}]|[\u{2693}]|[\u{26A1}]|[\u{26AA}-\u{26AB}]|'
+    r'[\u{26BD}-\u{26BE}]|[\u{26C4}-\u{26C5}]|[\u{26CE}]|[\u{26D4}]|'
+    r'[\u{26EA}]|[\u{26F2}-\u{26F3}]|[\u{26F5}]|[\u{26FA}]|[\u{26FD}]',
+    unicode: true,
+  );
+
   @override
   bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
+    // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
         // Immediately transition out of speaking to prevent duplicate triggers
@@ -71,16 +103,40 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _initSpeech();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Auto-start listening when user navigates TO the Voice tab (index 2)
+    try {
+      final homeProvider = Provider.of<HomeProvider>(context);
+      final isOnVoiceTab = homeProvider.selectedIndex == 2;
+      if (isOnVoiceTab && !_wasOnVoiceTab && !_voiceModeActive) {
+        debugPrint('[VoiceChat] Voice tab became active, auto-starting');
+        _voiceModeActive = true;
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted && _orbState == VoiceOrbState.idle) {
+            _startListening();
+          }
+        });
+      } else if (!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive) {
+        // Navigated away — pause voice mode
+        debugPrint('[VoiceChat] Left voice tab, pausing');
+        _pauseVoiceMode();
+      }
+      _wasOnVoiceTab = isOnVoiceTab;
+    } catch (_) {
+      // HomeProvider not available
+    }
+  }
+
   Future<void> _initSpeech() async {
     _speechAvailable = await _speech.initialize(
       onError: (error) {
         debugPrint('[VoiceChat] Speech error: ${error.errorMsg}');
-        // "error_no_match" means silence detected — treat as end of speech
         if (error.errorMsg == 'error_no_match' && _orbState == VoiceOrbState.listening) {
           if (_currentWords.isNotEmpty) {
             _processTranscript(_currentWords);
           } else if (_voiceModeActive) {
-            // Silence with no words — restart listening
             debugPrint('[VoiceChat] No match, restarting listening');
             _startListening();
           } else {
@@ -90,12 +146,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       },
       onStatus: (status) {
         debugPrint('[VoiceChat] Speech status: $status');
-        // "notListening" means recognition stopped (silence timeout)
         if (status == 'notListening' && _orbState == VoiceOrbState.listening) {
           if (_currentWords.isNotEmpty) {
             _processTranscript(_currentWords);
           } else if (_voiceModeActive) {
-            // Silence timeout with no words — restart listening
             debugPrint('[VoiceChat] Silence timeout, restarting listening');
             _startListening();
           }
@@ -108,8 +162,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void dispose() {
     _voiceModeActive = false;
+    _typewriterTimer?.cancel();
     _playerSub?.cancel();
     _audioPlayer.dispose();
+    _transcriptScrollController.dispose();
     if (_speech.isListening) {
       _speech.stop();
     }
@@ -119,14 +175,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _returnToIdle() {
     if (!mounted) return;
     if (_voiceModeActive) {
-      // Continuous mode — restart listening instead of going idle
       debugPrint('[VoiceChat] Voice mode active, restarting listening');
       _startListening();
       return;
     }
     setState(() {
       _orbState = VoiceOrbState.idle;
-      _statusText = 'Tap to Start';
+      _statusText = 'Paused — Tap to Resume';
       _audioLevel = 0.0;
     });
   }
@@ -136,48 +191,46 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     HapticFeedback.mediumImpact();
 
     if (!_voiceModeActive) {
-      // Start voice mode
+      // Resume voice mode
       _voiceModeActive = true;
       await _startListening();
       return;
     }
 
-    // Voice mode is active — tap means stop
+    // Voice mode is active — tap means pause
     switch (_orbState) {
       case VoiceOrbState.idle:
-        // Shouldn't normally be idle when voice mode is active, but handle it
-        _stopVoiceMode();
+        _pauseVoiceMode();
         break;
       case VoiceOrbState.listening:
-        // Tap while listening: send what we have, then stop after response
         await _speech.stop();
         if (_currentWords.isNotEmpty) {
           _processTranscript(_currentWords);
         }
-        _stopVoiceMode();
+        _pauseVoiceMode();
         break;
       case VoiceOrbState.speaking:
-        // Interrupt playback and stop voice mode
         await _audioPlayer.stop();
-        _stopVoiceMode();
+        await ElevenLabsTts.stopOnDevice();
+        _pauseVoiceMode();
         break;
       case VoiceOrbState.processing:
-        // Let it finish, but stop after
-        _stopVoiceMode();
+        _pauseVoiceMode();
         break;
     }
   }
 
-  void _stopVoiceMode() {
-    debugPrint('[VoiceChat] Stopping voice mode');
+  void _pauseVoiceMode() {
+    debugPrint('[VoiceChat] Pausing voice mode');
     _voiceModeActive = false;
+    _typewriterTimer?.cancel();
     if (_speech.isListening) {
       _speech.stop();
     }
     if (!mounted) return;
     setState(() {
       _orbState = VoiceOrbState.idle;
-      _statusText = 'Tap to Start';
+      _statusText = 'Paused — Tap to Resume';
       _audioLevel = 0.0;
     });
   }
@@ -185,7 +238,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Future<void> _startListening() async {
     debugPrint('[VoiceChat] _startListening called');
 
-    // Prevent concurrent restart attempts
     if (_isRestarting) {
       debugPrint('[VoiceChat] Already restarting, skipping');
       return;
@@ -200,7 +252,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startListeningInner() async {
-    // Check permissions
     final micStatus = await Permission.microphone.request();
     if (!micStatus.isGranted) {
       if (!mounted) return;
@@ -287,9 +338,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (!mounted || !_voiceModeActive) return;
 
     _currentWords = '';
+    _typewriterTimer?.cancel();
     setState(() {
       _orbState = VoiceOrbState.listening;
       _statusText = 'Listening...';
+      _lastEllaText = '';
+      _lastUserText = '';
+      _ellaDisplayText = '';
     });
 
     debugPrint('[VoiceChat] Starting speech recognition');
@@ -298,7 +353,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         onResult: _onSpeechResult,
         onSoundLevelChange: (level) {
           if (!mounted || _orbState != VoiceOrbState.listening) return;
-          // speech_to_text levels are in dB, normalize to 0-1
           final normalized = ((level + 2) / 12).clamp(0.0, 1.0);
           setState(() {
             _audioLevel = normalized;
@@ -313,7 +367,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       debugPrint('[VoiceChat] speech.listen() started');
     } catch (e) {
       debugPrint('[VoiceChat] speech.listen() failed: $e — retrying in 500ms');
-      // Retry once after a longer delay
       await Future.delayed(const Duration(milliseconds: 500));
       if (!mounted || !_voiceModeActive) return;
       try {
@@ -353,13 +406,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _currentWords = result.recognizedWords;
 
     if (result.finalResult && _currentWords.isNotEmpty) {
-      // Speech recognition finished (silence detected) — process
       _processTranscript(_currentWords);
     } else {
-      // Partial result — update UI to show what's being heard
       setState(() {
         _lastUserText = _currentWords;
       });
+      _scrollToBottom();
     }
   }
 
@@ -376,7 +428,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     });
 
     try {
-      // Send to Ella chat (streaming) and collect full reply
+      // Send via Ella's chat endpoint
       debugPrint('[VoiceChat] Sending to Ella chat...');
       final replyBuffer = StringBuffer();
       await for (var chunk in sendEllaMessageStream(transcript)) {
@@ -403,20 +455,30 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         return;
       }
 
+      // Inject both messages into chat history so Chat tab shows them
+      _injectVoiceMessages(transcript, fullReply);
+
+      // Store full reply and start typewriter reveal
+      _lastEllaText = fullReply;
+      _startTypewriter(fullReply);
+
       setState(() {
-        _lastEllaText = fullReply;
         _statusText = 'Ella is speaking...';
         _orbState = VoiceOrbState.speaking;
       });
 
-      // TTS — cap at 500 chars for speech
-      final ttsText = fullReply.length > 500 ? fullReply.substring(0, 500) : fullReply;
+      // Strip emojis before TTS — prevents the TTS engine from reading emoji names aloud
+      final ttsText = _stripEmojis(fullReply.length > 500 ? fullReply.substring(0, 500) : fullReply);
       debugPrint('[VoiceChat] Synthesizing TTS (${ttsText.length} chars)...');
       final audioPath = await ElevenLabsTts.synthesize(ttsText);
       debugPrint('[VoiceChat] TTS result: $audioPath');
 
       if (!mounted) return;
       if (audioPath == null) {
+        // Backend unavailable — fall back to on-device TTS
+        debugPrint('[VoiceChat] Backend TTS unavailable, using on-device TTS');
+        await ElevenLabsTts.speakOnDevice(ttsText);
+        if (!mounted) return;
         if (_voiceModeActive) {
           _startListening();
         } else {
@@ -426,7 +488,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       }
 
       // Play audio
-      debugPrint('[VoiceChat] Playing audio...');
+      debugPrint('[VoiceChat] Playing audio: $audioPath');
       await _audioPlayer.setFilePath(audioPath);
       await _audioPlayer.play();
       // playerStateStream listener handles return to idle on completion
@@ -434,7 +496,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       debugPrint('[VoiceChat] Error in voice flow: $e\n$st');
       if (mounted) {
         if (_voiceModeActive) {
-          // Error but voice mode still on — restart listening
           debugPrint('[VoiceChat] Error, but restarting listening');
           _startListening();
         } else {
@@ -447,31 +508,102 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
-  Widget _buildTranscriptText() {
-    // While listening — show live transcription
+  /// Strip emojis from text so TTS doesn't read them aloud.
+  String _stripEmojis(String text) {
+    return text.replaceAll(_emojiRegex, '').replaceAll(RegExp(r'  +'), ' ').trim();
+  }
+
+  /// Inject voice exchange into MessageProvider so Chat tab shows it.
+  void _injectVoiceMessages(String userText, String ellaReply) {
+    try {
+      final msgProvider = Provider.of<MessageProvider>(context, listen: false);
+      final now = DateTime.now();
+
+      final userMsg = ServerMessage(
+        const Uuid().v4(),
+        now,
+        userText,
+        MessageSender.human,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        fromVoice: true,
+      );
+      msgProvider.addMessage(userMsg);
+
+      final aiMsg = ServerMessage(
+        const Uuid().v4(),
+        now.add(const Duration(milliseconds: 100)),
+        ellaReply,
+        MessageSender.ai,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        fromVoice: true,
+      );
+      msgProvider.addMessage(aiMsg);
+      debugPrint('[VoiceChat] Injected voice messages into chat history');
+    } catch (e) {
+      debugPrint('[VoiceChat] Failed to inject messages: $e');
+    }
+  }
+
+  /// Progressively reveals text with a typewriter effect.
+  void _startTypewriter(String fullText) {
+    _typewriterTimer?.cancel();
+    _ellaDisplayText = '';
+    int charIndex = 0;
+    _typewriterTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
+      if (!mounted || charIndex >= fullText.length) {
+        timer.cancel();
+        if (mounted) {
+          setState(() {
+            _ellaDisplayText = fullText;
+          });
+        }
+        return;
+      }
+      charIndex++;
+      setState(() {
+        _ellaDisplayText = fullText.substring(0, charIndex);
+      });
+      _scrollToBottom();
+    });
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_transcriptScrollController.hasClients) {
+        _transcriptScrollController.animateTo(
+          _transcriptScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  String get _transcriptContent {
     if (_orbState == VoiceOrbState.listening && _currentWords.isNotEmpty) {
-      return Text(
-        _currentWords,
-        style: TextStyle(fontSize: 16, color: EllaColors.textTertiary.withOpacity(0.7)),
-        textAlign: TextAlign.center,
-      );
+      return _currentWords;
     }
-    // While processing/speaking/idle — show last exchange
-    if (_lastEllaText.isNotEmpty) {
-      return Text(
-        _lastEllaText,
-        style: const TextStyle(fontSize: 16, color: EllaColors.textSecondary),
-        textAlign: TextAlign.center,
-      );
+    if (_ellaDisplayText.isNotEmpty) return _ellaDisplayText;
+    if (_lastUserText.isNotEmpty) return _lastUserText;
+    return '';
+  }
+
+  Color get _transcriptColor {
+    if (_orbState == VoiceOrbState.listening && _currentWords.isNotEmpty) {
+      return EllaColors.textTertiary.withOpacity(0.7);
     }
-    if (_lastUserText.isNotEmpty) {
-      return Text(
-        _lastUserText,
-        style: TextStyle(fontSize: 16, color: EllaColors.textTertiary.withOpacity(0.7)),
-        textAlign: TextAlign.center,
-      );
-    }
-    return const SizedBox.shrink();
+    if (_ellaDisplayText.isNotEmpty) return EllaColors.textSecondary;
+    return EllaColors.textTertiary.withOpacity(0.7);
   }
 
   @override
@@ -491,19 +623,20 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         centerTitle: true,
       ),
       body: SafeArea(
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Voice orb
-              EllaVoiceOrb(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Spacer(flex: 2),
+            Center(
+              child: EllaVoiceOrb(
                 state: _orbState,
                 audioLevel: _audioLevel,
                 onTap: _onOrbTap,
               ),
-              const SizedBox(height: 24),
-              // Status text in capsule
-              Container(
+            ),
+            const SizedBox(height: 24),
+            Center(
+              child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 decoration: BoxDecoration(
                   color: EllaColors.bgSecondary,
@@ -520,21 +653,27 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                   textAlign: TextAlign.center,
                 ),
               ),
-              const SizedBox(height: 16),
-              // Transcript area — shows live speech OR last exchange, same location
-              Padding(
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 100,
+              width: double.infinity,
+              child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 100),
-                  child: SingleChildScrollView(
-                    reverse: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    child: _buildTranscriptText(),
-                  ),
-                ),
+                child: _transcriptContent.isEmpty
+                    ? const SizedBox.shrink()
+                    : SingleChildScrollView(
+                        controller: _transcriptScrollController,
+                        child: Text(
+                          _transcriptContent,
+                          style: TextStyle(fontSize: 16, color: _transcriptColor),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
               ),
-            ],
-          ),
+            ),
+            const Spacer(flex: 3),
+          ],
         ),
       ),
     );
