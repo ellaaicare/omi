@@ -180,11 +180,11 @@ class AuthenticationProvider extends BaseProvider {
   }
 
   void openTermsOfService() {
-    _launchUrl('https://www.omi.me/pages/terms-of-service');
+    _launchUrl('https://ella-ai-care.com/terms');
   }
 
   void openPrivacyPolicy() {
-    _launchUrl('https://www.omi.me/pages/privacy');
+    _launchUrl('https://ella-ai-care.com/privacy');
   }
 
   void _launchUrl(String url) async {
