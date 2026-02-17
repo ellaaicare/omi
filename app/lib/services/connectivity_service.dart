@@ -18,7 +18,7 @@ class ConnectivityService {
         timeout: const Duration(seconds: 3),
       ),
       InternetCheckOption(
-        uri: Uri.parse('https://api.omi.me/v1/health'),
+        uri: Uri.parse('https://api.ella-ai-care.com/v1/health'),
         timeout: const Duration(seconds: 3),
         responseStatusFn: (response) {
           return response.statusCode < 500;
