@@ -10,6 +10,9 @@ import 'package:upgrader/upgrader.dart';
 
 import 'package:uuid/uuid.dart';
 
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
+
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -28,6 +31,7 @@ import 'package:omi/pages/settings/data_privacy_page.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
+import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
@@ -103,7 +107,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver, TickerProviderStateMixin {
   ForegroundUtil foregroundUtil = ForegroundUtil();
-  List<Widget> screens = [Container(), const SizedBox(), const SizedBox()];
+  List<Widget> screens = [Container(), const SizedBox(), const SizedBox(), const SizedBox()];
 
   final _upgrader = MyUpgrader(debugLogging: false, debugDisplayOnce: false);
   bool scriptsInProgress = false;
@@ -181,6 +185,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _pages = [
       ConversationsPage(key: _conversationsPageKey),
       const ChatPage(isPivotBottom: true),
+      const EllaVoiceChatPage(),
       const EllaSettingsPage(),
     ];
     SharedPreferencesUtil().onboardingCompleted = true;
@@ -207,8 +212,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         case "chat":
           homePageIdx = 1;
           break;
-        case "settings":
+        case "voice":
           homePageIdx = 2;
+          break;
+        case "settings":
+          homePageIdx = 3;
           break;
       }
     }
@@ -391,10 +399,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _listenToMessagesFromNotification();
     _listenToFreemiumThreshold();
     _checkForAnnouncements();
+    _provisionEllaIfNeeded();
     super.initState();
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+  }
+
+  void _provisionEllaIfNeeded() async {
+    if (SharedPreferencesUtil().ellaUserId.isNotEmpty) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final timezone = await FlutterTimezone.getLocalTimezone();
+    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
+    provisionEllaUser(
+      firebaseUid: user.uid,
+      email: user.email ?? '',
+      name: name.isNotEmpty ? name : (user.displayName ?? ''),
+      timezone: timezone,
+    );
   }
 
   void _checkForAnnouncements() {
@@ -564,7 +587,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
               resizeToAvoidBottomInset: false,
               appBar: homeProvider.selectedIndex == 0 ? _buildAppBar(context) : null,
               body: DefaultTabController(
-                length: 3,
+                length: 4,
                 initialIndex: homeProvider.selectedIndex,
                 child: GestureDetector(
                   onTap: () {
@@ -583,11 +606,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                             ),
                           ),
                           // Bottom padding to account for emergency button + BottomNavBar overlay
-                          SizedBox(
-                              height: EllaSizes.emergencyButtonHeight +
-                                  EllaSizes.navBarHeight +
-                                  MediaQuery.of(context).padding.bottom +
-                                  32),
+                          // Skip for chat (index 1) and voice (index 2) — they handle their own padding
+                          if (context.watch<HomeProvider>().selectedIndex != 1 &&
+                              context.watch<HomeProvider>().selectedIndex != 2)
+                            SizedBox(
+                                height: EllaSizes.emergencyButtonHeight +
+                                    EllaSizes.navBarHeight +
+                                    MediaQuery.of(context).padding.bottom +
+                                    32),
                         ],
                       ),
                       // Emergency button -- positioned above the nav bar
@@ -634,55 +660,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     return AppBar(
       automaticallyImplyLeading: false,
       backgroundColor: Theme.of(context).colorScheme.primary,
+      leading: const Padding(
+        padding: EdgeInsets.only(left: 8),
+        child: Center(child: BatteryInfoWidget()),
+      ),
+      leadingWidth: 140,
       title: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: CrossAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const BatteryInfoWidget(),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
-                  ),
-                ),
-                child: const Center(
-                  child: Text(
-                    'e',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w300,
-                      color: Colors.white,
-                      fontFamily: 'Manrope',
-                      height: 1.1,
-                    ),
-                  ),
-                ),
+          Container(
+            width: 28,
+            height: 28,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
               ),
-              const SizedBox(width: 8),
-              const Text(
-                'ella',
+            ),
+            child: const Center(
+              child: Text(
+                'e',
                 style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w300,
+                  color: Colors.white,
                   fontFamily: 'Manrope',
-                  letterSpacing: 1,
+                  height: 1.1,
                 ),
               ),
-            ],
+            ),
           ),
-          const SizedBox(width: 48),
+          const SizedBox(width: 8),
+          const Text(
+            'ella',
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              fontFamily: 'Manrope',
+              letterSpacing: 1,
+            ),
+          ),
         ],
       ),
-      elevation: 0,
       centerTitle: true,
+      elevation: 0,
     );
   }
 
