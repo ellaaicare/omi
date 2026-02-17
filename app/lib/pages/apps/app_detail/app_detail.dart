@@ -791,13 +791,13 @@ class _AppDetailPageState extends State<AppDetailPage> {
 
                             if (app.isNotPersona()) {
                               await Share.share(
-                                'https://h.omi.me/apps/${app.id}',
+                                'https://ella-ai-care.com/apps/${app.id}',
                                 subject: app.name,
                                 sharePositionOrigin: sharePositionOrigin,
                               );
                             } else {
                               await Share.share(
-                                'Check out this Persona on Omi AI: ${app.name} by ${app.author} \n\n${app.description.decodeString}\n\n\nhttps://personas.omi.me/u/${app.username}',
+                                'Check out this Persona on Ella AI: ${app.name} by ${app.author} \n\n${app.description.decodeString}\n\n\nhttps://ella-ai-care.com/personas/${app.username}',
                                 subject: app.name,
                                 sharePositionOrigin: sharePositionOrigin,
                               );
