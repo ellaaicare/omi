@@ -9941,9 +9941,9 @@
   "ellaAddCaregiverTitle": "Add Family Member",
   "ellaAddCaregiverName": "Their name",
   "ellaAddCaregiverNamePlaceholder": "e.g., Jane",
-  "ellaAddCaregiverPhone": "Their phone number",
+  "ellaAddCaregiverPhone": "Their phone number (optional)",
   "ellaAddCaregiverPhonePlaceholder": "e.g., (555) 123-4567",
-  "ellaAddCaregiverEmail": "Their email (optional)",
+  "ellaAddCaregiverEmail": "Their email",
   "ellaAddCaregiverEmailPlaceholder": "e.g., jane@email.com",
   "ellaAddCaregiverRelationship": "Relationship",
   "ellaAddCaregiverRelationshipSelect": "Select...",
@@ -9968,8 +9968,9 @@
       }
     }
   },
-  "ellaInviteSentDescription": "We sent a text message to {phone} with instructions to join your care team.",
+  "ellaInviteSentDescription": "We sent an invite to {phone} with instructions to join your care team.",
   "@ellaInviteSentDescription": {
+    "description": "Invite sent description",
     "placeholders": {
       "phone": {
         "type": "String"
@@ -10041,5 +10042,55 @@
         "type": "String"
       }
     }
-  }
+  },
+  "ellaInviteCodeLabel": "Their invite code",
+  "ellaInviteCodeCopied": "Code copied to clipboard",
+  "ellaShareInvite": "Share Invite",
+  "voiceTab": "Voice",
+  "@voiceTab": {
+    "description": "Voice tab label in bottom navigation"
+  },
+  "voiceTapToTalk": "Tap to Talk",
+  "@voiceTapToTalk": {
+    "description": "Voice chat idle status"
+  },
+  "voiceListening": "Listening...",
+  "@voiceListening": {
+    "description": "Voice chat listening status"
+  },
+  "voiceProcessing": "Processing...",
+  "@voiceProcessing": {
+    "description": "Voice chat processing status"
+  },
+  "voiceEllaThinking": "Ella is thinking...",
+  "@voiceEllaThinking": {
+    "description": "Voice chat thinking status"
+  },
+  "voiceEllaSpeaking": "Ella is speaking...",
+  "@voiceEllaSpeaking": {
+    "description": "Voice chat speaking status"
+  },
+  "voiceError": "Something went wrong. Tap to try again.",
+  "@voiceError": {
+    "description": "Voice chat error status"
+  },
+  "voiceChatTitle": "Voice Chat",
+  "@voiceChatTitle": {
+    "description": "Voice chat page title"
+  },
+  "voiceMicPermissionRequired": "Microphone permission is required for voice chat",
+  "@voiceMicPermissionRequired": {
+    "description": "Microphone permission error message"
+  },
+  "ellaAddCaregiverErrorNameRequired": "Name is required",
+  "ellaAddCaregiverErrorEmailRequired": "Email is required",
+  "ellaAddCaregiverErrorEmailInvalid": "Please enter a valid email",
+  "ellaNotYou": "Not you?",
+  "ellaProfileTitle": "My Profile",
+  "ellaProfileEmail": "Email",
+  "ellaProfilePhone": "Phone",
+  "ellaProfileName": "Name",
+  "ellaProfileNotSet": "Not set",
+  "ellaProfileSave": "Save",
+  "ellaProfileSaved": "Profile saved"
 }
