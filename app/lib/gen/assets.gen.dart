@@ -137,6 +137,22 @@ class $AssetsImagesGen {
   /// File path: assets/images/clone.png
   AssetGenImage get clone => const AssetGenImage('assets/images/clone.png');
 
+  /// File path: assets/images/ella_onboarding_1.png
+  AssetGenImage get ellaOnboarding1 =>
+      const AssetGenImage('assets/images/ella_onboarding_1.png');
+
+  /// File path: assets/images/ella_onboarding_2.png
+  AssetGenImage get ellaOnboarding2 =>
+      const AssetGenImage('assets/images/ella_onboarding_2.png');
+
+  /// File path: assets/images/ella_onboarding_3.png
+  AssetGenImage get ellaOnboarding3 =>
+      const AssetGenImage('assets/images/ella_onboarding_3.png');
+
+  /// File path: assets/images/ella_splash.png
+  AssetGenImage get ellaSplash =>
+      const AssetGenImage('assets/images/ella_splash.png');
+
   /// File path: assets/images/email_logo.png
   AssetGenImage get emailLogo =>
       const AssetGenImage('assets/images/email_logo.png');
@@ -361,6 +377,10 @@ class $AssetsImagesGen {
     calendarLogo,
     checkbox,
     clone,
+    ellaOnboarding1,
+    ellaOnboarding2,
+    ellaOnboarding3,
+    ellaSplash,
     emailLogo,
     emotionalFeedback1,
     facebookLogo,
