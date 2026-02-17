@@ -1602,7 +1602,7 @@ abstract class AppLocalizations {
   /// Share stats base message
   ///
   /// In en, this message translates to:
-  /// **'Sharing my Omi stats! (omi.me - your always-on AI assistant)'**
+  /// **'Sharing my Ella stats! (ella-ai-care.com - your always-on AI assistant)'**
   String get shareStatsMessage;
 
   /// Share stats period: Today
@@ -8508,7 +8508,7 @@ abstract class AppLocalizations {
   /// Link text to learn more about training
   ///
   /// In en, this message translates to:
-  /// **'Learn more at omi.me/training'**
+  /// **'Learn more at ella-ai-care.com/training'**
   String get learnMoreAtOmiTraining;
 
   /// Checkbox label for agreeing to contribute data
@@ -10296,7 +10296,7 @@ abstract class AppLocalizations {
   /// Text shared when sharing wrapped images
   ///
   /// In en, this message translates to:
-  /// **'My 2025, remembered by Omi ✨ omi.me/wrapped'**
+  /// **'My 2025, remembered by Ella ✨ ella-ai-care.com/wrapped'**
   String get wrappedShareText;
 
   /// Error message when sharing fails

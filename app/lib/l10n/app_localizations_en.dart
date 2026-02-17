@@ -756,7 +756,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get shareStatsMessage => 'Sharing my Omi stats! (omi.me - your always-on AI assistant)';
+  String get shareStatsMessage => 'Sharing my Ella stats! (ella-ai-care.com - your always-on AI assistant)';
 
   @override
   String get sharePeriodToday => 'Today, omi has:';
@@ -4480,7 +4480,7 @@ class AppLocalizationsEn extends AppLocalizations {
       '• Your data helps improve AI models\n• Only non-sensitive data is shared\n• Fully transparent process';
 
   @override
-  String get learnMoreAtOmiTraining => 'Learn more at omi.me/training';
+  String get learnMoreAtOmiTraining => 'Learn more at ella-ai-care.com/training';
 
   @override
   String get agreeToContributeData => 'I understand and agree to contribute my data for AI training';
@@ -5448,7 +5448,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get wrappedSwipeUpToBegin => 'Swipe up to begin';
 
   @override
-  String get wrappedShareText => 'My 2025, remembered by Omi ✨ omi.me/wrapped';
+  String get wrappedShareText => 'My 2025, remembered by Ella ✨ ella-ai-care.com/wrapped';
 
   @override
   String get wrappedFailedToShare => 'Failed to share. Please try again.';
