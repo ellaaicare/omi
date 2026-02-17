@@ -25,6 +25,7 @@ class EllaInviteSentScreen extends StatefulWidget {
 }
 
 class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with SingleTickerProviderStateMixin {
+  final GlobalKey _shareButtonKey = GlobalKey();
   late AnimationController _scaleController;
   late Animation<double> _scaleAnimation;
 
@@ -191,17 +192,27 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
                         : '$elderName invited you to join their Ella care team!\n\n'
                             'Download Ella: https://ella-ai-care.com';
                     try {
-                      await Share.share(shareText);
+                      final RenderBox? box = _shareButtonKey.currentContext?.findRenderObject() as RenderBox?;
+                      Rect? sharePositionOrigin;
+                      if (box != null) {
+                        final position = box.localToGlobal(Offset.zero);
+                        sharePositionOrigin = Rect.fromLTWH(position.dx, position.dy, box.size.width, box.size.height);
+                      }
+                      await Share.share(
+                        shareText,
+                        sharePositionOrigin: sharePositionOrigin,
+                      );
                     } catch (e) {
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Could not open share sheet')),
+                          SnackBar(content: Text('Could not open share sheet: $e')),
                         );
                       }
                     }
                   },
                   borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
                   child: Container(
+                    key: _shareButtonKey,
                     height: 64,
                     width: double.infinity,
                     decoration: BoxDecoration(
