@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
@@ -93,6 +94,31 @@ Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, 
     url: url,
     body: jsonEncode({'text': text, 'file_ids': filesId}),
   )) {
+    var messageChunk = parseMessageChunk(line, messageId);
+    if (messageChunk != null) {
+      yield messageChunk;
+    } else {
+      yield ServerMessageChunk.failedMessage();
+      return;
+    }
+  }
+}
+
+/// Send a chat message via the Ella endpoint (/v1/ella/chat/stream).
+/// Backend emits OMI-compatible format (data:/done:), so we reuse parseMessageChunk.
+/// SSE comment lines (starting with ':') are used as keep-alives and are skipped.
+Stream<ServerMessageChunk> sendEllaMessageStream(String text) async* {
+  var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
+  var uid = SharedPreferencesUtil().uid;
+  var messageId = "1000";
+
+  await for (var line in makeStreamingApiCall(
+    url: url,
+    body: jsonEncode({'uid': uid, 'message': text, 'conversation_id': ''}),
+  )) {
+    // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
+    if (line.startsWith(':')) continue;
+
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
       yield messageChunk;
