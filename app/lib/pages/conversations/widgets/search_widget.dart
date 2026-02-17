@@ -121,7 +121,7 @@ class _SearchWidgetState extends State<SearchWidget> {
                         child: Text(
                           hasExistingFilter ? context.l10n.removeFilter : context.l10n.cancel,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             fontSize: 16,
                           ),
                         ),
@@ -201,7 +201,7 @@ class _SearchWidgetState extends State<SearchWidget> {
               },
               decoration: InputDecoration(
                 hintText: context.l10n.searchConversations,
-                hintStyle: const TextStyle(color: Colors.white60, fontSize: 14),
+                hintStyle: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                 filled: true,
                 fillColor: EllaColors.bgSecondary,
                 border: OutlineInputBorder(
@@ -218,7 +218,7 @@ class _SearchWidgetState extends State<SearchWidget> {
                 ),
                 prefixIcon: const Icon(
                   Icons.search,
-                  color: Colors.white60,
+                  color: EllaColors.textTertiary,
                 ),
                 suffixIcon: showClearButton
                     ? GestureDetector(
@@ -234,13 +234,13 @@ class _SearchWidgetState extends State<SearchWidget> {
                         },
                         child: const Icon(
                           Icons.close,
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                         ),
                       )
                     : null,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 12),
               ),
-              style: const TextStyle(color: Colors.white),
+              style: const TextStyle(color: EllaColors.textPrimary),
             ),
           ),
           const SizedBox(width: 8),
@@ -261,7 +261,7 @@ class _SearchWidgetState extends State<SearchWidget> {
                   icon: Icon(
                     convoProvider.selectedDate != null ? FontAwesomeIcons.calendarDay : FontAwesomeIcons.calendarDays,
                     size: 18,
-                    color: convoProvider.selectedDate != null ? Colors.white : Colors.white70,
+                    color: convoProvider.selectedDate != null ? Colors.white : EllaColors.textSecondary,
                   ),
                   onPressed: () async {
                     HapticFeedback.mediumImpact();
