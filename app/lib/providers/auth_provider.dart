@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart' as path_provider;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -90,8 +93,19 @@ class AuthenticationProvider extends BaseProvider {
           AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.authFailedToSignInWithGoogle ??
               'Failed to sign in with Google, please try again.');
         }
-      } catch (e) {
+      } catch (e, stackTrace) {
         Logger.debug('OAuth Google sign in error: $e');
+        // Write error to file for debugging (can't see Dart stdout in xcodebuild)
+        try {
+          final dir = await path_provider.getApplicationDocumentsDirectory();
+          final file = File('${dir.path}/auth_error.txt');
+          await file.writeAsString(
+            'Time: ${DateTime.now()}\n'
+            'Error type: ${e.runtimeType}\n'
+            'Error: $e\n'
+            'Stack: $stackTrace\n',
+          );
+        } catch (_) {}
         AppSnackbar.showSnackbarError(
             MyApp.navigatorKey.currentContext?.l10n.authenticationFailed ?? 'Authentication failed. Please try again.');
       }
