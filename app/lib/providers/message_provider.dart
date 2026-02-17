@@ -373,10 +373,18 @@ class MessageProvider extends ChangeNotifier {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
     }
+    // Preserve locally-injected voice messages before server fetch
+    final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
     messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
     if (messages.isEmpty) {
       messages = SharedPreferencesUtil().cachedMessages;
     } else {
+      // Merge back voice messages that aren't on server yet
+      for (final vm in localVoiceMessages) {
+        if (messages.firstWhereOrNull((m) => m.id == vm.id) == null) {
+          messages.add(vm);
+        }
+      }
       SharedPreferencesUtil().cachedMessages = messages;
       setHasCachedMessages(true);
     }
@@ -463,6 +471,8 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
     messages.add(message);
+    // Persist to cache so voice messages survive tab switches / refreshes
+    SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
   }
 
@@ -588,7 +598,12 @@ class MessageProvider extends ChangeNotifier {
     }
 
     try {
-      await for (var chunk in sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds)) {
+      // Ella uses its own simple chat endpoint; OMI uses the graph chat
+      const isEllaApp = true; // TODO: replace with flavor check
+      var stream = isEllaApp
+          ? sendEllaMessageStream(text)
+          : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
+      await for (var chunk in stream) {
         if (chunk.type == MessageChunkType.think) {
           flushBuffer();
           message.thinkings.add(chunk.text);
