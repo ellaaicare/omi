@@ -199,6 +199,9 @@ class ServerMessage {
   /// User rating for this message: 1 = thumbs up, -1 = thumbs down, null = no rating
   int? rating;
 
+  /// Whether this message originated from voice chat (client-side only, not persisted)
+  bool fromVoice;
+
   List<String> thinkings = [];
   ChartData? chartData;
 
@@ -216,6 +219,7 @@ class ServerMessage {
     this.askForNps = true,
     this.rating,
     this.chartData,
+    this.fromVoice = false,
   });
 
   static ServerMessage fromJson(Map<String, dynamic> json) {
@@ -233,6 +237,7 @@ class ServerMessage {
       askForNps: json['ask_for_nps'] ?? true,
       rating: json['rating'],
       chartData: json['chart_data'] != null ? ChartData.fromJson(json['chart_data']) : null,
+      fromVoice: json['from_voice'] ?? false,
     );
   }
 
@@ -250,6 +255,7 @@ class ServerMessage {
       'ask_for_nps': askForNps,
       'rating': rating,
       'chart_data': chartData?.toJson(),
+      'from_voice': fromVoice,
     };
   }
 
