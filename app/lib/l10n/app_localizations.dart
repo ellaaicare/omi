@@ -15312,7 +15312,7 @@ abstract class AppLocalizations {
   /// No description provided for @ellaAddCaregiverPhone.
   ///
   /// In en, this message translates to:
-  /// **'Their phone number'**
+  /// **'Their phone number (optional)'**
   String get ellaAddCaregiverPhone;
 
   /// No description provided for @ellaAddCaregiverPhonePlaceholder.
@@ -15324,7 +15324,7 @@ abstract class AppLocalizations {
   /// No description provided for @ellaAddCaregiverEmail.
   ///
   /// In en, this message translates to:
-  /// **'Their email (optional)'**
+  /// **'Their email'**
   String get ellaAddCaregiverEmail;
 
   /// No description provided for @ellaAddCaregiverEmailPlaceholder.
@@ -15429,10 +15429,10 @@ abstract class AppLocalizations {
   /// **'{name} has been invited!'**
   String ellaInviteSentTitle(String name);
 
-  /// No description provided for @ellaInviteSentDescription.
+  /// Invite sent description
   ///
   /// In en, this message translates to:
-  /// **'We sent a text message to {phone} with instructions to join your care team.'**
+  /// **'We sent an invite to {phone} with instructions to join your care team.'**
   String ellaInviteSentDescription(String phone);
 
   /// No description provided for @ellaInviteExpiry.
@@ -15578,6 +15578,144 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Invited {date}'**
   String ellaInvitedDate(String date);
+
+  /// No description provided for @ellaInviteCodeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Their invite code'**
+  String get ellaInviteCodeLabel;
+
+  /// No description provided for @ellaInviteCodeCopied.
+  ///
+  /// In en, this message translates to:
+  /// **'Code copied to clipboard'**
+  String get ellaInviteCodeCopied;
+
+  /// No description provided for @ellaShareInvite.
+  ///
+  /// In en, this message translates to:
+  /// **'Share Invite'**
+  String get ellaShareInvite;
+
+  /// Voice tab label in bottom navigation
+  ///
+  /// In en, this message translates to:
+  /// **'Voice'**
+  String get voiceTab;
+
+  /// Voice chat idle status
+  ///
+  /// In en, this message translates to:
+  /// **'Tap to Talk'**
+  String get voiceTapToTalk;
+
+  /// Voice chat listening status
+  ///
+  /// In en, this message translates to:
+  /// **'Listening...'**
+  String get voiceListening;
+
+  /// Voice chat processing status
+  ///
+  /// In en, this message translates to:
+  /// **'Processing...'**
+  String get voiceProcessing;
+
+  /// Voice chat thinking status
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is thinking...'**
+  String get voiceEllaThinking;
+
+  /// Voice chat speaking status
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is speaking...'**
+  String get voiceEllaSpeaking;
+
+  /// Voice chat error status
+  ///
+  /// In en, this message translates to:
+  /// **'Something went wrong. Tap to try again.'**
+  String get voiceError;
+
+  /// Voice chat page title
+  ///
+  /// In en, this message translates to:
+  /// **'Voice Chat'**
+  String get voiceChatTitle;
+
+  /// Microphone permission error message
+  ///
+  /// In en, this message translates to:
+  /// **'Microphone permission is required for voice chat'**
+  String get voiceMicPermissionRequired;
+
+  /// No description provided for @ellaAddCaregiverErrorNameRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Name is required'**
+  String get ellaAddCaregiverErrorNameRequired;
+
+  /// No description provided for @ellaAddCaregiverErrorEmailRequired.
+  ///
+  /// In en, this message translates to:
+  /// **'Email is required'**
+  String get ellaAddCaregiverErrorEmailRequired;
+
+  /// No description provided for @ellaAddCaregiverErrorEmailInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Please enter a valid email'**
+  String get ellaAddCaregiverErrorEmailInvalid;
+
+  /// No description provided for @ellaNotYou.
+  ///
+  /// In en, this message translates to:
+  /// **'Not you?'**
+  String get ellaNotYou;
+
+  /// No description provided for @ellaProfileTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'My Profile'**
+  String get ellaProfileTitle;
+
+  /// No description provided for @ellaProfileEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'Email'**
+  String get ellaProfileEmail;
+
+  /// No description provided for @ellaProfilePhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Phone'**
+  String get ellaProfilePhone;
+
+  /// No description provided for @ellaProfileName.
+  ///
+  /// In en, this message translates to:
+  /// **'Name'**
+  String get ellaProfileName;
+
+  /// No description provided for @ellaProfileNotSet.
+  ///
+  /// In en, this message translates to:
+  /// **'Not set'**
+  String get ellaProfileNotSet;
+
+  /// No description provided for @ellaProfileSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get ellaProfileSave;
+
+  /// No description provided for @ellaProfileSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Profile saved'**
+  String get ellaProfileSaved;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

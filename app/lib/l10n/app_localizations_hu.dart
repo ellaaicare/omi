@@ -8240,13 +8240,13 @@ class AppLocalizationsHu extends AppLocalizations {
   String get ellaAddCaregiverNamePlaceholder => 'e.g., Jane';
 
   @override
-  String get ellaAddCaregiverPhone => 'Their phone number';
+  String get ellaAddCaregiverPhone => 'Their phone number (optional)';
 
   @override
   String get ellaAddCaregiverPhonePlaceholder => 'e.g., (555) 123-4567';
 
   @override
-  String get ellaAddCaregiverEmail => 'Their email (optional)';
+  String get ellaAddCaregiverEmail => 'Their email';
 
   @override
   String get ellaAddCaregiverEmailPlaceholder => 'e.g., jane@email.com';
@@ -8303,7 +8303,7 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String ellaInviteSentDescription(String phone) {
-    return 'We sent a text message to $phone with instructions to join your care team.';
+    return 'We sent an invite to $phone with instructions to join your care team.';
   }
 
   @override
@@ -8389,4 +8389,73 @@ class AppLocalizationsHu extends AppLocalizations {
   String ellaInvitedDate(String date) {
     return 'Invited $date';
   }
+
+  @override
+  String get ellaInviteCodeLabel => 'Their invite code';
+
+  @override
+  String get ellaInviteCodeCopied => 'Code copied to clipboard';
+
+  @override
+  String get ellaShareInvite => 'Share Invite';
+
+  @override
+  String get voiceTab => 'Voice';
+
+  @override
+  String get voiceTapToTalk => 'Tap to Talk';
+
+  @override
+  String get voiceListening => 'Listening...';
+
+  @override
+  String get voiceProcessing => 'Processing...';
+
+  @override
+  String get voiceEllaThinking => 'Ella is thinking...';
+
+  @override
+  String get voiceEllaSpeaking => 'Ella is speaking...';
+
+  @override
+  String get voiceError => 'Something went wrong. Tap to try again.';
+
+  @override
+  String get voiceChatTitle => 'Voice Chat';
+
+  @override
+  String get voiceMicPermissionRequired => 'Microphone permission is required for voice chat';
+
+  @override
+  String get ellaAddCaregiverErrorNameRequired => 'Name is required';
+
+  @override
+  String get ellaAddCaregiverErrorEmailRequired => 'Email is required';
+
+  @override
+  String get ellaAddCaregiverErrorEmailInvalid => 'Please enter a valid email';
+
+  @override
+  String get ellaNotYou => 'Not you?';
+
+  @override
+  String get ellaProfileTitle => 'My Profile';
+
+  @override
+  String get ellaProfileEmail => 'Email';
+
+  @override
+  String get ellaProfilePhone => 'Phone';
+
+  @override
+  String get ellaProfileName => 'Name';
+
+  @override
+  String get ellaProfileNotSet => 'Not set';
+
+  @override
+  String get ellaProfileSave => 'Save';
+
+  @override
+  String get ellaProfileSaved => 'Profile saved';
 }
