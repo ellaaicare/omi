@@ -584,6 +584,10 @@ class SharedPreferencesUtil {
 
   String get fullName => '$givenName $familyName'.trim();
 
+  String get phoneNumber => getString('phoneNumber');
+
+  set phoneNumber(String value) => saveString('phoneNumber', value);
+
   String get foundOmiSource => getString('foundOmiSource');
 
   set foundOmiSource(String value) => saveString('foundOmiSource', value);
@@ -619,6 +623,14 @@ class SharedPreferencesUtil {
       saveString('lastAnnouncementCheckTime', value.toUtc().toIso8601String());
     }
   }
+
+  //------------------------- Ella Dashboard ---------------------------------//
+
+  String get ellaUserId => getString('ellaUserId');
+  set ellaUserId(String value) => saveString('ellaUserId', value);
+
+  String get ellaKey => getString('ellaKey');
+  set ellaKey(String value) => saveString('ellaKey', value);
 
   //--------------------------- Emergency Contact ----------------------------//
 
