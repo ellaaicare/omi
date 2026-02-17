@@ -16,6 +16,7 @@ import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart'
 import 'package:omi/pages/conversation_detail/widgets/summarized_apps_sheet.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 enum ConversationBottomBarMode {
   recording, // During active recording (no summary icon)
@@ -338,7 +339,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
         width: 180,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: const Color(0xFF1A0B2E),
+          color: EllaColors.bgTertiary,
           borderRadius: BorderRadius.circular(28),
           boxShadow: [
             BoxShadow(
@@ -443,7 +444,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF6B46C1),
+        color: EllaColors.primary,
         borderRadius: BorderRadius.circular(28),
         boxShadow: [
           BoxShadow(
@@ -477,7 +478,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
       height: 56,
       width: 56,
       decoration: BoxDecoration(
-        color: isSelected ? const Color(0xFF6B46C1) : const Color(0xFF2D1B4E),
+        color: isSelected ? EllaColors.primary : EllaColors.bgTertiary,
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
@@ -500,7 +501,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
           child: Center(
             child: FaIcon(
               icon,
-              color: isSelected ? Colors.white : Colors.grey.shade400,
+              color: isSelected ? Colors.white : EllaColors.textTertiary,
               size: 22,
             ),
           ),
@@ -528,14 +529,8 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
 
     void handleTap() {
       HapticFeedback.mediumImpact();
-      if (widget.selectedTab == ConversationTab.summary) {
-        showModalBottomSheet(
-          context: context,
-          isScrollControlled: true,
-          backgroundColor: Colors.transparent,
-          builder: (context) => const SummarizedAppsBottomSheet(),
-        );
-      } else {
+      // Always navigate to summary tab; template marketplace disabled for Ella
+      if (widget.selectedTab != ConversationTab.summary) {
         widget.onTabSelected(ConversationTab.summary);
       }
     }
@@ -568,7 +563,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF6B46C1),
+        color: EllaColors.primary,
         borderRadius: BorderRadius.circular(28),
         boxShadow: [
           BoxShadow(
@@ -604,12 +599,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
                   ),
                 ),
               ),
-              // Dropdown arrow
-              const Icon(
-                Icons.keyboard_arrow_down,
-                color: Colors.white,
-                size: 18,
-              ),
+              const SizedBox(width: 4),
             ],
           ),
         ),
@@ -678,7 +668,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
             ),
             child: Icon(
               isPlaying ? Icons.pause : Icons.play_arrow,
-              color: const Color(0xFF6B46C1),
+              color: EllaColors.primary,
               size: 20,
             ),
           ),
@@ -836,7 +826,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
         height: 56,
         width: 56,
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF6B46C1) : const Color(0xFF2D1B4E),
+          color: isSelected ? EllaColors.primary : EllaColors.bgTertiary,
           shape: BoxShape.circle,
           boxShadow: [
             BoxShadow(
@@ -859,7 +849,7 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
             child: Center(
               child: FaIcon(
                 icon,
-                color: isSelected ? Colors.white : Colors.grey.shade400,
+                color: isSelected ? Colors.white : EllaColors.textTertiary,
                 size: 22,
               ),
             ),

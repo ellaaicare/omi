@@ -85,7 +85,13 @@ class AppReviewService {
   }
 
   // Shows the review prompt if conditions are met
+  // Disabled for Ella -- not relevant to elder care product
   Future<bool> showReviewPromptIfNeeded(BuildContext context, {bool isProcessingFirstConversation = false}) async {
+    return false;
+  }
+
+  // Original implementation preserved for reference
+  Future<bool> _showReviewPromptIfNeededOriginal(BuildContext context, {bool isProcessingFirstConversation = false}) async {
     final hasCompleted = await hasCompletedFirstActionItem();
     final isFirst = await isFirstConversation();
 
