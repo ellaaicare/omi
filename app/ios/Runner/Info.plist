@@ -74,7 +74,7 @@
 				<key>CFBundleTypeRole</key>
 				<string>Editor</string>
 				<key>CFBundleURLName</key>
-				<string>h.omi.me</string>
+				<string>ella-ai-care.com</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
 					<string>https</string>
@@ -84,7 +84,7 @@
 				<key>CFBundleTypeRole</key>
 				<string>Editor</string>
 				<key>CFBundleURLName</key>
-				<string>h.omi.me</string>
+				<string>ella-ai-care.com</string>
 				<key>CFBundleURLSchemes</key>
 				<array>
 					<string>$(GOOGLE_REVERSE_CLIENT_ID)</string>
