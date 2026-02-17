@@ -36,8 +36,9 @@ def clear_ella_context():
 
 
 def _apply_ella_llm_patch():
-    """Patch ChatOpenAI._generate to inject user ID into all API calls."""
+    """Patch ChatOpenAI._generate and _stream to inject user ID into all API calls."""
     _original_generate = ChatOpenAI._generate
+    _original_stream = ChatOpenAI._stream
 
     def _patched_generate(self, messages, stop=None, run_manager=None, **kwargs):
         ctx = get_ella_context()
@@ -46,7 +47,15 @@ def _apply_ella_llm_patch():
             kwargs['user'] = f"ella:{ctx['uid']}:{task}"
         return _original_generate(self, messages, stop, run_manager, **kwargs)
 
+    def _patched_stream(self, messages, stop=None, run_manager=None, **kwargs):
+        ctx = get_ella_context()
+        if ctx.get('uid'):
+            task = ctx.get('task', 'unknown')
+            kwargs['user'] = f"ella:{ctx['uid']}:{task}"
+        return _original_stream(self, messages, stop, run_manager, **kwargs)
+
     ChatOpenAI._generate = _patched_generate
+    ChatOpenAI._stream = _patched_stream
 
 
 _apply_ella_llm_patch()
@@ -64,13 +73,15 @@ _default_medium = os.getenv('OMI_LLM_MEDIUM', 'grok-4-1-fast-non-reasoning')
 _default_large = os.getenv('OMI_LLM_LARGE', 'grok-4-1-fast-reasoning')
 _ella_model = os.getenv('ELLA_LLM_MODEL', 'ella-enhanced')
 
-if _ella_base_url:
-    llm_mini = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url)
-    llm_mini_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
-    llm_medium = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url)
+if _ella_base_url and _xai_api_key:
+    # Hybrid: internal calls (mini, large) use Grok direct for structured output / reasoning.
+    # Only chat response (medium_stream) routes through Ella proxy to OpenClaw.
+    llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
+    llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
+    llm_medium = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_medium_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
-    llm_large = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url)
-    llm_large_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
+    llm_large = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url)
+    llm_large_stream = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
 elif _xai_api_key:
     llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
