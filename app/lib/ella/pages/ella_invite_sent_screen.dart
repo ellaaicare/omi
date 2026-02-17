@@ -1,19 +1,23 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaInviteSentScreen extends StatefulWidget {
   final String name;
-  final String phone;
+  final String? phone;
+  final String email;
+  final String? inviteCode;
 
   const EllaInviteSentScreen({
     super.key,
     required this.name,
-    required this.phone,
+    this.phone,
+    required this.email,
+    this.inviteCode,
   });
 
   @override
@@ -23,7 +27,6 @@ class EllaInviteSentScreen extends StatefulWidget {
 class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with SingleTickerProviderStateMixin {
   late AnimationController _scaleController;
   late Animation<double> _scaleAnimation;
-  Timer? _autoPopTimer;
 
   @override
   void initState() {
@@ -41,18 +44,11 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
       HapticFeedback.mediumImpact();
       _scaleController.forward();
     });
-
-    _autoPopTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) {
-        Navigator.of(context).pop();
-      }
-    });
   }
 
   @override
   void dispose() {
     _scaleController.dispose();
-    _autoPopTimer?.cancel();
     super.dispose();
   }
 
@@ -99,7 +95,7 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
 
               // Description
               Text(
-                context.l10n.ellaInviteSentDescription(widget.phone),
+                context.l10n.ellaInviteSentDescription(widget.email),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 18,
@@ -108,6 +104,60 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
                   height: 1.5,
                 ),
               ),
+
+              // Invite code display
+              if (widget.inviteCode != null && widget.inviteCode!.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: EllaColors.bgTertiary,
+                    borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        context.l10n.ellaInviteCodeLabel,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          color: EllaColors.textTertiary,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: widget.inviteCode!));
+                          HapticFeedback.lightImpact();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(context.l10n.ellaInviteCodeCopied),
+                              duration: const Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              widget.inviteCode!,
+                              style: const TextStyle(
+                                fontSize: 36,
+                                fontWeight: FontWeight.w700,
+                                color: EllaColors.textPrimary,
+                                letterSpacing: 8,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            const Icon(Icons.copy, size: 20, color: EllaColors.textTertiary),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
 
               const SizedBox(height: 16),
 
@@ -123,6 +173,65 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
               ),
 
               const Spacer(),
+
+              // Share button -- always show, with or without invite code
+              Semantics(
+                button: true,
+                label: context.l10n.ellaShareInvite,
+                child: InkWell(
+                  onTap: () async {
+                    final elderName = SharedPreferencesUtil().givenName.isNotEmpty
+                        ? SharedPreferencesUtil().givenName
+                        : 'Your loved one';
+                    final hasCode = widget.inviteCode != null && widget.inviteCode!.isNotEmpty;
+                    final shareText = hasCode
+                        ? '$elderName invited you to join their Ella care team!\n\n'
+                            'Your invite code: ${widget.inviteCode}\n\n'
+                            'Join at: https://ella-ai-care.com/join'
+                        : '$elderName invited you to join their Ella care team!\n\n'
+                            'Download Ella: https://ella-ai-care.com';
+                    try {
+                      await SharePlus.instance.share(
+                        ShareParams(text: shareText),
+                      );
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Could not open share sheet')),
+                        );
+                      }
+                    }
+                  },
+                  borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                  child: Container(
+                    height: 64,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: EllaColors.bgTertiary,
+                      borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                      border: Border.all(color: EllaColors.primary, width: 2),
+                    ),
+                    child: Center(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.share, size: 20, color: EllaColors.primary),
+                          const SizedBox(width: 8),
+                          Text(
+                            context.l10n.ellaShareInvite,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w600,
+                              color: EllaColors.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
 
               // Done button
               Semantics(
