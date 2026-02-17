@@ -1011,7 +1011,7 @@
       }
     }
   },
-  "shareStatsMessage": "Sharing my Omi stats! (omi.me - your always-on AI assistant)",
+  "shareStatsMessage": "Sharing my Ella stats! (ella-ai-care.com - your always-on AI assistant)",
   "@shareStatsMessage": {
     "description": "Share stats base message"
   },
@@ -5187,7 +5187,7 @@
   "@trainingDataBullets": {
     "description": "Bullet points explaining training data program benefits"
   },
-  "learnMoreAtOmiTraining": "Learn more at omi.me/training",
+  "learnMoreAtOmiTraining": "Learn more at ella-ai-care.com/training",
   "@learnMoreAtOmiTraining": {
     "description": "Link text to learn more about training"
   },
@@ -6527,7 +6527,7 @@
   "@wrappedSwipeUpToBegin": {
     "description": "Instruction text on intro card"
   },
-  "wrappedShareText": "My 2025, remembered by Omi ✨ omi.me/wrapped",
+  "wrappedShareText": "My 2025, remembered by Ella ✨ ella-ai-care.com/wrapped",
   "@wrappedShareText": {
     "description": "Text shared when sharing wrapped images"
   },
