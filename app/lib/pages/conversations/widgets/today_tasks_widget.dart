@@ -56,7 +56,7 @@ class TodayTasksWidget extends StatelessWidget {
                     Text(
                       context.l10n.today,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 18,
                         fontWeight: FontWeight.w600,
                       ),
@@ -93,7 +93,7 @@ class TodayTasksWidget extends StatelessWidget {
                   child: Text(
                     context.l10n.noTasksForToday,
                     style: TextStyle(
-                      color: Colors.white.withOpacity(0.4),
+                      color: EllaColors.textDisabled,
                       fontSize: 14,
                     ),
                   ),
@@ -163,7 +163,7 @@ class _TaskItem extends StatelessWidget {
               child: Text(
                 task.description,
                 style: TextStyle(
-                  color: task.completed ? Colors.grey.shade600 : Colors.white,
+                  color: task.completed ? EllaColors.textDisabled : EllaColors.textPrimary,
                   fontSize: 15,
                   decoration: task.completed ? TextDecoration.lineThrough : null,
                   height: 1.4,
