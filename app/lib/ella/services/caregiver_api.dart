@@ -1,39 +1,51 @@
 import 'dart:convert';
 
-import 'package:omi/backend/http/shared.dart';
+import 'package:http/http.dart' as http;
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/caregiver.dart';
-import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
-/// GET /v1/ella/caregivers
+/// n8n webhook base URL for caregiver operations.
+/// All caregiver data lives in ella-ai-care Postgres, not OMI Firestore.
+const String _n8nBase = 'https://n8n.ella-ai-care.com/webhook';
+
+String get _uid => SharedPreferencesUtil().uid;
+
+/// GET caregiver list via n8n webhook
 Future<List<Caregiver>> getCaregivers() async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/caregivers',
-    method: 'GET',
-    headers: {},
-    body: '',
-  );
-  if (response == null || response.statusCode != 200) return [];
-  final data = jsonDecode(response.body);
-  return (data['caregivers'] as List).map((c) => Caregiver.fromJson(c as Map<String, dynamic>)).toList();
+  try {
+    final response = await http.post(
+      Uri.parse('$_n8nBase/caregiver-list'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'uid': _uid}),
+    );
+    if (response.statusCode != 200) return [];
+    final data = jsonDecode(response.body);
+    final list = data is List ? data : (data['caregivers'] as List?) ?? [];
+    return list.map((c) => Caregiver.fromJson(c as Map<String, dynamic>)).toList();
+  } catch (e) {
+    Logger.debug('Failed to load caregivers: $e');
+    return [];
+  }
 }
 
-/// POST /v1/ella/caregivers/invite
+/// POST invite caregiver via n8n webhook
 Future<InviteResponse> sendCaregiverInvite({
   required String name,
-  required String phone,
-  String? email,
+  String? phone,
+  required String email,
   required String relationship,
   bool dailySummary = true,
 }) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/caregivers/invite',
-    method: 'POST',
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-invite'),
     headers: {'Content-Type': 'application/json'},
     body: jsonEncode({
+      'uid': _uid,
+      if (SharedPreferencesUtil().ellaUserId.isNotEmpty) 'userId': SharedPreferencesUtil().ellaUserId,
       'name': name,
-      'phone': phone,
-      if (email != null && email.isNotEmpty) 'email': email,
+      if (phone != null && phone.isNotEmpty) 'phone': phone,
+      'email': email,
       'relationship': relationship,
       'permissions': {
         'receive_daily_summary': dailySummary,
@@ -41,96 +53,93 @@ Future<InviteResponse> sendCaregiverInvite({
       },
     }),
   );
-  if (response == null || response.statusCode != 201) {
-    final code = response?.statusCode ?? 0;
-    Logger.debug('Caregiver invite API failed: $code');
+  if (response.statusCode != 200 && response.statusCode != 201) {
+    Logger.debug('Caregiver invite failed: ${response.statusCode} ${response.body}');
     throw CaregiverApiException(
-      statusCode: code,
+      statusCode: response.statusCode,
       message: 'Failed to send invite',
     );
   }
   return InviteResponse.fromJson(jsonDecode(response.body));
 }
 
-/// DELETE /v1/ella/caregivers/{caregiverId}
+/// POST remove caregiver via n8n webhook
 Future<void> removeCaregiver(String caregiverId) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/caregivers/$caregiverId',
-    method: 'DELETE',
-    headers: {},
-    body: '',
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-remove'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'uid': _uid, 'caregiver_id': caregiverId}),
   );
-  if (response == null || (response.statusCode != 204 && response.statusCode != 200)) {
-    final code = response?.statusCode ?? 0;
+  if (response.statusCode != 200 && response.statusCode != 204) {
     throw CaregiverApiException(
-      statusCode: code,
+      statusCode: response.statusCode,
       message: 'Failed to remove caregiver',
     );
   }
 }
 
-/// PUT /v1/ella/caregivers/{caregiverId}/permissions
+/// POST update caregiver permissions via n8n webhook
 Future<void> updateCaregiverPermissions(String caregiverId, {required bool dailySummary}) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/caregivers/$caregiverId/permissions',
-    method: 'PUT',
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-permissions'),
     headers: {'Content-Type': 'application/json'},
     body: jsonEncode({
+      'uid': _uid,
+      'caregiver_id': caregiverId,
       'receive_daily_summary': dailySummary,
     }),
   );
-  if (response == null || response.statusCode != 200) {
-    final code = response?.statusCode ?? 0;
+  if (response.statusCode != 200) {
     throw CaregiverApiException(
-      statusCode: code,
+      statusCode: response.statusCode,
       message: 'Failed to update permissions',
     );
   }
 }
 
-/// POST /v1/ella/caregivers/resend-invite
-Future<void> resendInvite({required String uid, required String caregiverId}) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/caregivers/resend-invite',
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({'uid': uid, 'caregiver_id': caregiverId}),
-  );
-  if (response == null || response.statusCode != 200) {
-    final code = response?.statusCode ?? 0;
-    throw CaregiverApiException(
-      statusCode: code,
-      message: 'Failed to resend invite',
-    );
-  }
-}
-
-/// PUT /v1/ella/emergency-contact
+/// PUT emergency contact (OMI backend — stays in Firestore)
 Future<void> setEmergencyContact(String caregiverId) async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/emergency-contact',
-    method: 'PUT',
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-set-emergency'),
     headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({'caregiver_id': caregiverId}),
+    body: jsonEncode({'uid': _uid, 'caregiver_id': caregiverId}),
   );
-  if (response == null || response.statusCode != 200) {
-    final code = response?.statusCode ?? 0;
+  if (response.statusCode != 200) {
     throw CaregiverApiException(
-      statusCode: code,
+      statusCode: response.statusCode,
       message: 'Failed to set emergency contact',
     );
   }
 }
 
-/// GET /v1/ella/emergency-contact
+/// GET emergency contact ID
 Future<String?> getEmergencyContactId() async {
-  final response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/emergency-contact',
-    method: 'GET',
-    headers: {},
-    body: '',
+  try {
+    final response = await http.post(
+      Uri.parse('$_n8nBase/caregiver-get-emergency'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'uid': _uid}),
+    );
+    if (response.statusCode != 200) return null;
+    final data = jsonDecode(response.body);
+    return data['caregiver_id'] as String?;
+  } catch (e) {
+    Logger.debug('Failed to get emergency contact: $e');
+    return null;
+  }
+}
+
+/// POST resend caregiver invite via n8n webhook
+Future<void> resendInvite({required String uid, required String caregiverId}) async {
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-resend-invite'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'uid': uid, 'caregiver_id': caregiverId}),
   );
-  if (response == null || response.statusCode != 200) return null;
-  final data = jsonDecode(response.body);
-  return data['caregiver_id'] as String?;
+  if (response.statusCode != 200) {
+    throw CaregiverApiException(
+      statusCode: response.statusCode,
+      message: 'Failed to resend invite',
+    );
+  }
 }
