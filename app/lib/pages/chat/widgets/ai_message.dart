@@ -34,6 +34,7 @@ import 'package:omi/widgets/text_selection_controls.dart';
 import 'chart_message_widget.dart';
 import 'markdown_message_widget.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/ella_thinking_indicator.dart';
 
 /// Parse app_id from thinking text (format: "text|app_id:app_id")
 String? parseAppIdFromThinking(String thinkingText) {
@@ -447,29 +448,6 @@ class NormalMessageWidget extends StatefulWidget {
 }
 
 class _NormalMessageWidgetState extends State<NormalMessageWidget> {
-  bool _showDots = true;
-  Timer? _dotsTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.showTypingIndicator && widget.messageText.isEmpty && widget.message.thinkings.isEmpty) {
-      _dotsTimer = Timer(const Duration(milliseconds: 500), () {
-        if (mounted) {
-          setState(() {
-            _showDots = false;
-          });
-        }
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _dotsTimer?.cancel();
-    super.dispose();
-  }
-
   Widget _buildChartShimmer() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
@@ -491,81 +469,27 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
 
   @override
   Widget build(BuildContext context) {
-    var thinkingTextRaw = widget.message.thinkings.isNotEmpty ? widget.message.thinkings.last.decodeString : null;
-
-    // Parse app_id and display text from thinking messages
-    String? currentAppId = thinkingTextRaw != null ? parseAppIdFromThinking(thinkingTextRaw) : null;
-    var thinkingText = thinkingTextRaw != null ? getThinkingDisplayText(thinkingTextRaw) : null;
-
-    // Show "thinking" text if we have thinking text, or if dots timer expired and no thinking text yet
-    bool shouldShowThinking =
-        thinkingText != null || (!_showDots && widget.showTypingIndicator && widget.messageText.isEmpty);
-    String displayThinkingText = thinkingText ?? 'Thinking';
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisAlignment: MainAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         FilesHandlerWidget(message: widget.message),
+        if (widget.message.fromVoice && widget.messageText.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 4, bottom: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FaIcon(FontAwesomeIcons.microphone, size: 10, color: EllaColors.textTertiary.withOpacity(0.5)),
+                const SizedBox(width: 4),
+                Text('voice', style: TextStyle(fontSize: 11, color: EllaColors.textTertiary.withOpacity(0.5))),
+              ],
+            ),
+          ),
         widget.showTypingIndicator && widget.messageText.isEmpty
-            ? Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    shouldShowThinking
-                        ? Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    // Icon stays outside shimmer to preserve colors (app icon or integration logo)
-                                    if (currentAppId != null) ...[
-                                      _buildAppIcon(context, currentAppId, size: 15),
-                                      const SizedBox(width: 6),
-                                    ] else ...[
-                                      _buildThinkingIconWidget(displayThinkingText, size: 15),
-                                      const SizedBox(width: 6),
-                                    ],
-                                    // Shimmer only applies to text
-                                    Flexible(
-                                      child: ShimmerWithTimeout(
-                                        baseColor: EllaColors.textPrimary,
-                                        highlightColor: EllaColors.textTertiary,
-                                        child: Text(
-                                          overflow: TextOverflow.fade,
-                                          maxLines: 1,
-                                          softWrap: false,
-                                          displayThinkingText,
-                                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                )
-                              ],
-                            ),
-                          )
-                        : const TypingIndicator(),
-                  ],
-                ))
+            ? const EllaThinkingIndicator()
             : const SizedBox.shrink(),
-        // !(showTypingIndicator && messageText.isEmpty)
-        //     ? Container(
-        //         margin: const EdgeInsets.only(bottom: 4.0),
-        //         child: Text(
-        //           formatChatTimestamp(createdAt),
-        //           style: TextStyle(
-        //             color: Colors.grey.shade500,
-        //             fontSize: 12,
-        //           ),
-        //         ),
-        //       )
-        //     : const SizedBox.shrink(),
         widget.messageText.isEmpty
             ? const SizedBox.shrink()
             : Padding(
