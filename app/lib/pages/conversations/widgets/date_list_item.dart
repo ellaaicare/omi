@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 
@@ -30,7 +31,7 @@ class DateListItem extends StatelessWidget {
             isYesterday
                 ? context.l10n.yesterday
                 : dateTimeFormat('MMM dd', date, locale: Localizations.localeOf(context).languageCode),
-            style: const TextStyle(color: Colors.white, fontSize: 18),
+            style: const TextStyle(color: EllaColors.textSecondary, fontSize: 18),
           ),
         ],
       ),
