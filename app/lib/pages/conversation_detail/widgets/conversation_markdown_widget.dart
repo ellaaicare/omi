@@ -197,7 +197,7 @@ class _ConversationMarkdownWidgetState extends State<ConversationMarkdownWidget>
   // Custom markdown widget with search functionality
   Widget _getMarkdownWidgetWithSearch(BuildContext context, String content,
       {String searchQuery = '', int currentResultIndex = -1}) {
-    var style = TextStyle(color: Colors.white, fontSize: 16, height: 1.5);
+    var style = const TextStyle(color: EllaColors.textPrimary, fontSize: 16, height: 1.5);
 
     String processedContent = content;
 
@@ -227,7 +227,7 @@ class _ConversationMarkdownWidgetState extends State<ConversationMarkdownWidget>
         pPadding: const EdgeInsets.only(bottom: 12),
         blockquote: style.copyWith(
           backgroundColor: Colors.transparent,
-          color: Colors.white,
+          color: EllaColors.textSecondary,
         ),
         blockquoteDecoration: BoxDecoration(
           color: EllaColors.bgTertiary,
@@ -236,7 +236,7 @@ class _ConversationMarkdownWidgetState extends State<ConversationMarkdownWidget>
         code: style.copyWith(
           backgroundColor: Colors.transparent,
           decoration: TextDecoration.none,
-          color: Colors.white,
+          color: EllaColors.textPrimary,
           fontWeight: FontWeight.w500,
         ),
         strong: style.copyWith(

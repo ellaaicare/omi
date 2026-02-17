@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 enum AudioDownloadState {
   preparing,
@@ -96,11 +97,11 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
       child: Container(
         margin: const EdgeInsets.all(20),
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: EllaColors.bgPrimary,
           borderRadius: BorderRadius.circular(20),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.4),
+              color: Colors.black.withOpacity(0.08),
               blurRadius: 30,
               offset: const Offset(0, 10),
             ),
@@ -176,8 +177,8 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
             child: CircularProgressIndicator(
               value: widget.state == AudioDownloadState.downloading ? widget.progress : null,
               strokeWidth: 3,
-              valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-              backgroundColor: const Color(0xFF3A3A3C),
+              valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
+              backgroundColor: EllaColors.bgTertiary,
             ),
           ),
           if (widget.state == AudioDownloadState.downloading && widget.progress > 0)
@@ -186,7 +187,7 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
               style: const TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
-                color: Colors.white,
+                color: EllaColors.textPrimary,
               ),
             ),
         ],
@@ -223,7 +224,7 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
         style: const TextStyle(
           fontSize: 18,
           fontWeight: FontWeight.w600,
-          color: Colors.white,
+          color: EllaColors.textPrimary,
           letterSpacing: 0.3,
         ),
         textAlign: TextAlign.center,
@@ -239,7 +240,7 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
           widget.errorMessage ?? context.l10n.audioDownloadFailed,
           style: TextStyle(
             fontSize: 14,
-            color: Colors.grey[400],
+            color: EllaColors.textTertiary,
           ),
           textAlign: TextAlign.center,
         ),
@@ -250,8 +251,8 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
               child: OutlinedButton(
                 onPressed: () => Navigator.of(context).pop(),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.grey[300],
-                  side: const BorderSide(color: Color(0xFF3A3A3C)),
+                  foregroundColor: EllaColors.textSecondary,
+                  side: BorderSide(color: EllaColors.bgTertiary),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
@@ -267,8 +268,8 @@ class _AudioDownloadProgressSheetState extends State<AudioDownloadProgressSheet>
                     widget.onRetry?.call();
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: const Color(0xFF1C1C1E),
+                    backgroundColor: EllaColors.primary,
+                    foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

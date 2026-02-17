@@ -233,7 +233,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
       builder: (context, scrollController) {
         return Container(
           decoration: const BoxDecoration(
-            color: Color(0xFF1A1A1A),
+            color: EllaColors.bgPrimary,
             borderRadius: BorderRadius.only(
               topLeft: Radius.circular(20),
               topRight: Radius.circular(20),
@@ -247,7 +247,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade600,
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -265,11 +265,11 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                           style: const TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.close, color: Colors.grey),
+                          icon: const Icon(Icons.close, color: EllaColors.textTertiary),
                           onPressed: () => Navigator.of(context).pop(),
                         ),
                       ],
@@ -279,7 +279,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                       context.l10n.selectContactsToShareSummary,
                       style: TextStyle(
                         fontSize: 14,
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textTertiary,
                       ),
                     ),
                   ],
@@ -291,13 +291,13 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                 child: TextField(
                   controller: _searchController,
                   onChanged: _filterContacts,
-                  style: const TextStyle(color: Colors.white),
+                  style: const TextStyle(color: EllaColors.textPrimary),
                   decoration: InputDecoration(
                     hintText: context.l10n.searchContactsHint,
-                    hintStyle: TextStyle(color: Colors.grey.shade500),
-                    prefixIcon: const Icon(Icons.search, color: Colors.grey),
+                    hintStyle: TextStyle(color: EllaColors.textDisabled),
+                    prefixIcon: const Icon(Icons.search, color: EllaColors.textTertiary),
                     filled: true,
-                    fillColor: const Color(0xFF2A2A2A),
+                    fillColor: EllaColors.bgSecondary,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                       borderSide: BorderSide.none,
@@ -383,7 +383,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                         onPressed: _selectedContacts.isEmpty || _isPreparingShare ? null : _openNativeSms,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: EllaColors.primary,
-                          disabledBackgroundColor: Colors.grey.shade800,
+                          disabledBackgroundColor: EllaColors.bgTertiary,
                           padding: const EdgeInsets.symmetric(vertical: 16),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -407,7 +407,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                                 style: const TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w600,
-                                  color: Colors.white,
+                                  color: Colors.white, // white-on-teal button
                                 ),
                               ),
                       ),
@@ -433,20 +433,20 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.contacts, size: 64, color: Colors.grey.shade600),
+            Icon(Icons.contacts, size: 64, color: EllaColors.textDisabled),
             const SizedBox(height: 16),
             Text(
               context.l10n.contactsPermissionRequired,
               style: TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
-                color: Colors.grey.shade400,
+                color: EllaColors.textTertiary,
               ),
             ),
             const SizedBox(height: 8),
             Text(
               context.l10n.grantContactsPermissionForSms,
-              style: TextStyle(color: Colors.grey.shade500),
+              style: TextStyle(color: EllaColors.textTertiary),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
@@ -474,7 +474,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.search_off, size: 64, color: Colors.grey.shade600),
+            Icon(Icons.search_off, size: 64, color: EllaColors.textDisabled),
             const SizedBox(height: 16),
             Text(
               _searchController.text.isEmpty
@@ -482,7 +482,7 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
                   : context.l10n.noContactsMatchSearch,
               style: TextStyle(
                 fontSize: 16,
-                color: Colors.grey.shade400,
+                color: EllaColors.textTertiary,
               ),
             ),
           ],
@@ -505,28 +505,28 @@ class _ShareToContactsBottomSheetState extends State<ShareToContactsBottomSheet>
     return ListTile(
       onTap: () => _toggleContactSelection(contact),
       leading: CircleAvatar(
-        backgroundColor: contact.isSelected ? EllaColors.primary : Colors.grey.shade800,
+        backgroundColor: contact.isSelected ? EllaColors.primary : EllaColors.bgTertiary,
         child: contact.isSelected
-            ? const Icon(Icons.check, color: Colors.white, size: 20)
+            ? const Icon(Icons.check, color: Colors.white, size: 20) // white-on-teal
             : Text(
                 contact.displayName.isNotEmpty ? contact.displayName[0].toUpperCase() : '?',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.bold),
               ),
       ),
       title: Text(
         contact.displayName,
         style: TextStyle(
-          color: Colors.white,
+          color: EllaColors.textPrimary,
           fontWeight: contact.isSelected ? FontWeight.w600 : FontWeight.normal,
         ),
       ),
       subtitle: Text(
         contact.phoneNumber,
-        style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+        style: TextStyle(color: EllaColors.textTertiary, fontSize: 12),
       ),
       trailing: contact.isSelected
           ? const Icon(Icons.check_circle, color: EllaColors.primary)
-          : Icon(Icons.circle_outlined, color: Colors.grey.shade600),
+          : Icon(Icons.circle_outlined, color: EllaColors.textDisabled),
     );
   }
 }

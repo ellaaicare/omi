@@ -11,6 +11,7 @@ import 'package:omi/pages/settings/people.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/widgets/person_chip.dart';
+import 'package:omi/ella/ella_theme.dart';
 
 class NameSpeakerBottomSheet extends StatefulWidget {
   final int speakerId;
@@ -247,7 +248,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
             hintText: context.l10n.enterPersonsName,
             filled: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            fillColor: Colors.grey[900],
+            fillColor: EllaColors.bgSecondary,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
               borderSide: BorderSide.none,
@@ -265,7 +266,7 @@ class _NameSpeakerBottomSheetState extends State<NameSpeakerBottomSheet> {
               setAllowSave(selectedPerson.isNotEmpty);
             });
           },
-          child: Text(context.l10n.cancel, style: const TextStyle(color: Colors.white)),
+          child: Text(context.l10n.cancel, style: const TextStyle(color: EllaColors.textPrimary)),
         )
       ],
     );

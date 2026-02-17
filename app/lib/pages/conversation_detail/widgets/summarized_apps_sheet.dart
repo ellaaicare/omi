@@ -75,7 +75,7 @@ class _SheetContainer extends StatelessWidget {
     return GestureDetector(
       onTap: () => Navigator.pop(context),
       child: Container(
-        color: Colors.black,
+        color: EllaColors.bgPrimary,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
         child: Column(children: children),
       ),
@@ -96,7 +96,7 @@ class _SheetHeader extends StatelessWidget {
           height: 4,
           margin: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: Colors.grey[600],
+            color: EllaColors.textDisabled,
             borderRadius: BorderRadius.circular(2),
           ),
         ),
@@ -311,7 +311,7 @@ class _AppsListState extends State<_AppsList> {
             child: Text(
               context.l10n.suggestedTemplates,
               style: const TextStyle(
-                color: Colors.grey,
+                color: EllaColors.textTertiary,
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
               ),
@@ -339,7 +339,7 @@ class _AppsListState extends State<_AppsList> {
             child: Text(
               suggestedApps.isNotEmpty ? context.l10n.otherTemplates : context.l10n.availableTemplates,
               style: const TextStyle(
-                color: Colors.grey,
+                color: EllaColors.textTertiary,
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
               ),
@@ -618,7 +618,7 @@ class _AppListItemState extends State<_AppListItem> {
           title: Text(
             widget.app.name.decodeString,
             style: TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontWeight: widget.isSelected ? FontWeight.bold : FontWeight.w500,
               fontSize: 16,
             ),
@@ -743,7 +743,7 @@ class _AppListItemState extends State<_AppListItem> {
         height: 20,
         child: CircularProgressIndicator(
           strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
         ),
       );
     } else if (isProcessing) {
@@ -752,7 +752,7 @@ class _AppListItemState extends State<_AppListItem> {
         height: 20,
         child: CircularProgressIndicator(
           strokeWidth: 2,
-          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
         ),
       );
     } else {
@@ -801,23 +801,23 @@ class _CreateTemplateListItem extends StatelessWidget {
         ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
           leading: const CircleAvatar(
-            backgroundColor: Colors.white,
+            backgroundColor: EllaColors.bgTertiary,
             radius: 16,
             child: Icon(
               FontAwesomeIcons.plus,
-              color: Colors.black,
+              color: EllaColors.textPrimary,
               size: 18,
             ),
           ),
           title: Text(
             context.l10n.createCustomTemplate,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontWeight: FontWeight.w500,
               fontSize: 16,
             ),
           ),
-          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+          trailing: const Icon(Icons.arrow_forward_ios, color: EllaColors.textTertiary, size: 16),
           onTap: () {
             final conversationId = context.read<ConversationDetailProvider>().conversation.id;
             MixpanelManager().summarizedAppCreateTemplateClicked(conversationId: conversationId);
@@ -852,23 +852,23 @@ class _EnableAppsListItem extends StatelessWidget {
         ListTile(
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
           leading: const CircleAvatar(
-            backgroundColor: Colors.white,
+            backgroundColor: EllaColors.bgTertiary,
             radius: 16,
             child: FaIcon(
               FontAwesomeIcons.solidFolderOpen,
-              color: Colors.black,
+              color: EllaColors.textPrimary,
               size: 14,
             ),
           ),
           title: Text(
             context.l10n.allTemplates,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontWeight: FontWeight.w500,
               fontSize: 16,
             ),
           ),
-          trailing: const Icon(Icons.arrow_forward_ios, color: Colors.white, size: 16),
+          trailing: const Icon(Icons.arrow_forward_ios, color: EllaColors.textTertiary, size: 16),
           onTap: () {
             Navigator.pop(context);
             final conversationId = context.read<ConversationDetailProvider>().conversation.id;
