@@ -143,6 +143,29 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     super.initState();
   }
 
+  bool _wasOnChatTab = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Refresh messages when switching TO the Chat tab (picks up voice messages)
+    try {
+      final homeProvider = Provider.of<HomeProvider>(context);
+      final isOnChatTab = homeProvider.selectedIndex == 1;
+      if (isOnChatTab && !_wasOnChatTab) {
+        debugPrint('[Chat] Tab became active, refreshing from server');
+        // Refresh from Firestore — voice messages now go through /v2/messages
+        // so they're persisted in the same store as text chat.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            context.read<MessageProvider>().refreshMessages();
+          }
+        });
+      }
+      _wasOnChatTab = isOnChatTab;
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     textController.dispose();
@@ -188,13 +211,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
           resizeToAvoidBottomInset: widget.isPivotBottom ? true : null,
           backgroundColor: Theme.of(context).colorScheme.primary,
           appBar: _buildAppBar(context, provider),
-          endDrawer: _buildChatAppsEndDrawer(context),
-          onEndDrawerChanged: (isOpened) {
-            if (isOpened) {
-              // Unfocus text field when drawer opens
-              textFieldFocusNode.unfocus();
-            }
-          },
+          // endDrawer hidden — single-app Ella setup
           body: GestureDetector(
             onTap: () {
               // Hide keyboard when tapping outside textfield
@@ -251,58 +268,65 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                       selectionHandleColor: EllaColors.primary,
                                     ),
                                   ),
-                                  child: ListView.builder(
-                                    reverse: true,
-                                    controller: scrollController,
-                                    // With reverse:true, visual bottom=start of list (near input).
-                                    // bottom padding = space between newest message and input bar.
-                                    // top padding = space above oldest message (visual top).
-                                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
-                                    itemCount: provider.messages.length,
-                                    itemBuilder: (context, reverseIndex) {
-                                      // reverse:true renders index 0 at visual bottom (newest)
-                                      final chatIndex = provider.messages.length - 1 - reverseIndex;
-                                      final message = provider.messages[chatIndex];
+                                  child: RefreshIndicator(
+                                    onRefresh: () => provider.refreshMessages(),
+                                    color: EllaColors.primary,
+                                    backgroundColor: EllaColors.bgSecondary,
+                                    child: ListView.builder(
+                                      reverse: true,
+                                      controller: scrollController,
+                                      // With reverse:true, visual bottom=start of list (near input).
+                                      // bottom padding = space between newest message and input bar.
+                                      // top padding = space above oldest message (visual top).
+                                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+                                      itemCount: provider.messages.length,
+                                      itemBuilder: (context, reverseIndex) {
+                                        // reverse:true renders index 0 at visual bottom (newest)
+                                        final chatIndex = provider.messages.length - 1 - reverseIndex;
+                                        final message = provider.messages[chatIndex];
 
-                                      // Space between messages (top in visual terms = higher reverseIndex)
-                                      final double spacing = reverseIndex == provider.messages.length - 1 ? 0 : 12;
+                                        // Space between messages (top in visual terms = higher reverseIndex)
+                                        final double spacing = reverseIndex == provider.messages.length - 1 ? 0 : 12;
 
-                                      return Padding(
-                                        key: ValueKey(message.id),
-                                        // In reverse mode: "top" = visually above this item (toward older msgs)
-                                        padding: EdgeInsets.only(top: spacing),
-                                        child: message.sender == MessageSender.ai
-                                            ? AIMessage(
-                                                showTypingIndicator: provider.showTypingIndicator &&
-                                                    chatIndex == provider.messages.length - 1,
-                                                message: message,
-                                                sendMessage: _sendMessageUtil,
-                                                onAskOmi: (text) {
-                                                  setState(() {
-                                                    _selectedContext = text;
-                                                  });
-                                                  textFieldFocusNode.requestFocus();
-                                                },
-                                                displayOptions: provider.messages.length <= 1 &&
-                                                    provider.messageSenderApp(message.appId)?.isNotPersona() == true,
-                                                appSender: provider.messageSenderApp(message.appId),
-                                                updateConversation: (ServerConversation conversation) {
-                                                  context.read<ConversationProvider>().updateConversation(conversation);
-                                                },
-                                                setMessageNps: (int value, {String? reason}) {
-                                                  provider.setMessageNps(message, value, reason: reason);
-                                                },
-                                              )
-                                            : HumanMessage(
-                                                message: message,
-                                                onAskOmi: (text) {
-                                                  setState(() {
-                                                    _selectedContext = text;
-                                                  });
-                                                  textFieldFocusNode.requestFocus();
-                                                }),
-                                      );
-                                    },
+                                        return Padding(
+                                          key: ValueKey(message.id),
+                                          // In reverse mode: "top" = visually above this item (toward older msgs)
+                                          padding: EdgeInsets.only(top: spacing),
+                                          child: message.sender == MessageSender.ai
+                                              ? AIMessage(
+                                                  showTypingIndicator: provider.showTypingIndicator &&
+                                                      chatIndex == provider.messages.length - 1,
+                                                  message: message,
+                                                  sendMessage: _sendMessageUtil,
+                                                  onAskOmi: (text) {
+                                                    setState(() {
+                                                      _selectedContext = text;
+                                                    });
+                                                    textFieldFocusNode.requestFocus();
+                                                  },
+                                                  displayOptions: provider.messages.length <= 1 &&
+                                                      provider.messageSenderApp(message.appId)?.isNotPersona() == true,
+                                                  appSender: provider.messageSenderApp(message.appId),
+                                                  updateConversation: (ServerConversation conversation) {
+                                                    context
+                                                        .read<ConversationProvider>()
+                                                        .updateConversation(conversation);
+                                                  },
+                                                  setMessageNps: (int value, {String? reason}) {
+                                                    provider.setMessageNps(message, value, reason: reason);
+                                                  },
+                                                )
+                                              : HumanMessage(
+                                                  message: message,
+                                                  onAskOmi: (text) {
+                                                    setState(() {
+                                                      _selectedContext = text;
+                                                    });
+                                                    textFieldFocusNode.requestFocus();
+                                                  }),
+                                        );
+                                      },
+                                    ),
                                   ),
                                 ),
                 ),
@@ -895,30 +919,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
         },
       ),
       centerTitle: true,
-      actions: [
-        Container(
-          width: 36,
-          height: 36,
-          margin: const EdgeInsets.only(right: 8),
-          decoration: const BoxDecoration(
-            color: EllaColors.bgTertiary,
-            shape: BoxShape.circle,
-          ),
-          child: IconButton(
-            padding: EdgeInsets.zero,
-            icon: const Icon(Icons.extension, color: EllaColors.textPrimary, size: 18),
-            onPressed: () {
-              HapticFeedback.mediumImpact();
-              // Dismiss keyboard before opening drawer
-              FocusScope.of(context).unfocus();
-              // Use post-frame callback to ensure scaffold state is ready
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                scaffoldKey.currentState?.openEndDrawer();
-              });
-            },
-          ),
-        ),
-      ],
+      actions: const [], // Chat apps panel hidden — single-app Ella setup
       bottom: provider.isLoadingMessages
           ? PreferredSize(
               preferredSize: const Size.fromHeight(32),
