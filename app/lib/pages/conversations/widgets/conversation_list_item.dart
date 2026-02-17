@@ -381,20 +381,21 @@ class _ConversationListItemState extends State<ConversationListItem> {
                 Row(children: [
                   Icon(
                     Icons.photo_library,
-                    color: Colors.grey.shade400,
+                    color: EllaColors.textTertiary,
                     size: 18,
                   ),
                   const SizedBox(width: 12),
                   Text(
                     context.l10n.conversationPhotosCount(widget.conversation.photos.length),
-                    style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
+                    style:
+                        Theme.of(context).textTheme.bodyMedium!.copyWith(color: EllaColors.textSecondary, height: 1.3),
                   )
                 ]),
                 const SizedBox(height: 4),
               ],
               Text(
                 widget.conversation.getTranscript(maxCount: 100),
-                style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.grey.shade300, height: 1.3),
+                style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: EllaColors.textSecondary, height: 1.3),
               ),
             ],
           ),
@@ -454,7 +455,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                 if (!widget.conversation.discarded)
                   Text(
                     widget.conversation.structured.getEmoji(),
-                    style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w500),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w500),
                   ),
                 if (widget.conversation.structured.category.isNotEmpty && !widget.conversation.discarded)
                   const SizedBox(width: 8),
@@ -619,14 +620,14 @@ class _MergingIndicatorState extends State<MergingIndicator> with SingleTickerPr
         children: [
           const Icon(
             Icons.merge_rounded,
-            color: Colors.white,
+            color: EllaColors.textPrimary,
             size: 18,
           ),
           const SizedBox(width: 8),
           Text(
             context.l10n.mergingStatus,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontSize: 14,
               fontWeight: FontWeight.w600,
             ),
