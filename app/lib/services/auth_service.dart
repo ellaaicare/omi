@@ -63,9 +63,25 @@ class AuthService {
     );
 
     // Once signed in, return the UserCredential
-    var result = await FirebaseAuth.instance.signInWithCredential(credential);
-    await _updateUserPreferences(result, 'google');
-    return result;
+    debugPrint('=== FIREBASE SIGN-IN ATTEMPT ===');
+    debugPrint('accessToken: ${googleAuth.accessToken != null ? "present" : "null"}');
+    debugPrint('idToken: ${googleAuth.idToken != null ? "present (${googleAuth.idToken!.length} chars)" : "null"}');
+    try {
+      var result = await FirebaseAuth.instance.signInWithCredential(credential);
+      debugPrint('Firebase sign-in SUCCESS: uid=${result.user?.uid}');
+      await _updateUserPreferences(result, 'google');
+      return result;
+    } catch (e) {
+      debugPrint('=== FIREBASE SIGN-IN FAILED ===');
+      debugPrint('Error type: ${e.runtimeType}');
+      debugPrint('Error: $e');
+      if (e is FirebaseAuthException) {
+        debugPrint('Firebase code: ${e.code}');
+        debugPrint('Firebase message: ${e.message}');
+      }
+      debugPrint('=== END FIREBASE ERROR ===');
+      rethrow;
+    }
   }
 
   /// Generates a cryptographically secure random nonce, to be included in a
