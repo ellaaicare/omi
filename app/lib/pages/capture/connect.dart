@@ -30,8 +30,12 @@ class _ConnectDevicePageState extends State<ConnectDevicePage> {
   Widget build(BuildContext context) {
     return Scaffold(
         appBar: AppBar(
-          title: Text(context.l10n.connect),
-          backgroundColor: Theme.of(context).colorScheme.primary,
+          title: Text(
+            context.l10n.connect,
+            style: const TextStyle(color: Color(0xFF2D2D2D)),
+          ),
+          backgroundColor: const Color(0xFFFAF5F0),
+          iconTheme: const IconThemeData(color: Color(0xFF2D2D2D)),
           actions: [
             IconButton(
               onPressed: () {
@@ -45,7 +49,7 @@ class _ConnectDevicePageState extends State<ConnectDevicePage> {
             )
           ],
         ),
-        backgroundColor: Theme.of(context).colorScheme.primary,
+        backgroundColor: const Color(0xFFFAF5F0),
         body: ListView(
           children: [
             Consumer<OnboardingProvider>(

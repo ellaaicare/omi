@@ -237,7 +237,7 @@ class _FoundDevicesState extends State<FoundDevices> {
                     style: const TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 14,
-                      color: Color(0x66FFFFFF),
+                      color: Color(0x99453B30),
                     ),
                   )
                 : Text(
@@ -245,7 +245,7 @@ class _FoundDevicesState extends State<FoundDevices> {
                     style: const TextStyle(
                       fontWeight: FontWeight.w400,
                       fontSize: 12,
-                      color: Color(0x66FFFFFF),
+                      color: Color(0x99453B30),
                     ),
                   ),
             if (provider.deviceList.isNotEmpty) const SizedBox(height: 16),
@@ -262,7 +262,7 @@ class _FoundDevicesState extends State<FoundDevices> {
                 style: const TextStyle(
                   fontWeight: FontWeight.w500,
                   fontSize: 18,
-                  color: Color(0xCCFFFFFF),
+                  color: Color(0xCC2D2D2D),
                 ),
               ),
             if (provider.isConnected && provider.batteryPercentage > 0)
