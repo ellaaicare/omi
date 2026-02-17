@@ -191,9 +191,7 @@ class _EllaInviteSentScreenState extends State<EllaInviteSentScreen> with Single
                         : '$elderName invited you to join their Ella care team!\n\n'
                             'Download Ella: https://ella-ai-care.com';
                     try {
-                      await SharePlus.instance.share(
-                        ShareParams(text: shareText),
-                      );
+                      await Share.share(shareText);
                     } catch (e) {
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
