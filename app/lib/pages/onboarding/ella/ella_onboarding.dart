@@ -1,6 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
+
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
@@ -57,8 +60,22 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
+      _provisionElla();
     }
     routeToPage(context, const HomePageWrapper(), replace: true);
+  }
+
+  void _provisionElla() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final timezone = await FlutterTimezone.getLocalTimezone();
+    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
+    provisionEllaUser(
+      firebaseUid: user.uid,
+      email: user.email ?? '',
+      name: name.isNotEmpty ? name : (user.displayName ?? ''),
+      timezone: timezone,
+    );
   }
 
   @override
@@ -87,7 +104,10 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
             physics: const NeverScrollableScrollPhysics(),
             onPageChanged: (page) => setState(() => _currentPage = page),
             children: [
-              EllaWelcome(onNext: () => _goToPage(1)),
+              EllaWelcome(
+                onNext: () => _goToPage(1),
+                onSignOut: () => setState(() => _isSignedIn = false),
+              ),
               EllaConnect(
                 onNext: () => _goToPage(2),
                 onSkip: () => _goToPage(2),

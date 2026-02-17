@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/ella_relationship_picker.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -22,16 +23,22 @@ class EllaEmergency extends StatefulWidget {
 class _EllaEmergencyState extends State<EllaEmergency> {
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
+  final _emailController = TextEditingController();
+  String? _selectedRelationship;
   bool _isSubmitting = false;
 
   @override
   void dispose() {
     _nameController.dispose();
     _phoneController.dispose();
+    _emailController.dispose();
     super.dispose();
   }
 
-  bool get _isValid => _nameController.text.trim().isNotEmpty && _phoneController.text.trim().isNotEmpty;
+  bool get _isValid =>
+      _nameController.text.trim().isNotEmpty &&
+      _phoneController.text.trim().isNotEmpty &&
+      _selectedRelationship != null;
 
   Future<void> _submit() async {
     if (!_isValid || _isSubmitting) return;
@@ -44,7 +51,8 @@ class _EllaEmergencyState extends State<EllaEmergency> {
         'uid': SharedPreferencesUtil().uid,
         'name': _nameController.text.trim(),
         'phone': _phoneController.text.trim(),
-        'relationship': 'other',
+        if (_emailController.text.trim().isNotEmpty) 'email': _emailController.text.trim(),
+        'relationship': _selectedRelationship ?? 'other',
       }),
       method: 'POST',
     );
@@ -52,6 +60,28 @@ class _EllaEmergencyState extends State<EllaEmergency> {
     if (mounted) {
       setState(() => _isSubmitting = false);
       widget.onComplete();
+    }
+  }
+
+  String _relationshipDisplayName(BuildContext context) {
+    if (_selectedRelationship == null) return context.l10n.ellaAddCaregiverRelationshipSelect;
+    switch (_selectedRelationship) {
+      case 'daughter':
+        return context.l10n.ellaRelationshipDaughter;
+      case 'son':
+        return context.l10n.ellaRelationshipSon;
+      case 'spouse':
+        return context.l10n.ellaRelationshipSpouse;
+      case 'sibling':
+        return context.l10n.ellaRelationshipSibling;
+      case 'friend':
+        return context.l10n.ellaRelationshipFriend;
+      case 'doctor':
+        return context.l10n.ellaRelationshipDoctor;
+      case 'other':
+        return context.l10n.ellaRelationshipOther;
+      default:
+        return _selectedRelationship!;
     }
   }
 
@@ -171,7 +201,44 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                       onChanged: (_) => setState(() {}),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
+                  // Relationship picker
+                  Text(
+                    context.l10n.ellaAddCaregiverRelationship,
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
+                  ),
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: () async {
+                      final result = await EllaRelationshipPicker.show(context, current: _selectedRelationship);
+                      if (result != null) setState(() => _selectedRelationship = result);
+                    },
+                    borderRadius: BorderRadius.circular(16),
+                    child: Container(
+                      height: 56,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: EllaColors.bgTertiary),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _relationshipDisplayName(context),
+                              style: TextStyle(
+                                fontSize: 20,
+                                color: _selectedRelationship != null ? EllaColors.textPrimary : EllaColors.textDisabled,
+                              ),
+                            ),
+                          ),
+                          const Icon(Icons.keyboard_arrow_down, size: 24, color: EllaColors.textTertiary),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
                   Text(
                     context.l10n.ellaEmergencyPhoneLabel,
                     style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
@@ -202,8 +269,43 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                         ),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                       ),
-                      textInputAction: TextInputAction.done,
+                      textInputAction: TextInputAction.next,
                       onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  // Email field (optional)
+                  Text(
+                    context.l10n.ellaAddCaregiverEmail,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 56,
+                    child: TextField(
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      style: const TextStyle(fontSize: 20, color: EllaColors.textPrimary),
+                      decoration: InputDecoration(
+                        hintText: context.l10n.ellaAddCaregiverEmailPlaceholder,
+                        hintStyle: const TextStyle(fontSize: 20, color: EllaColors.textDisabled),
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.bgTertiary),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(color: EllaColors.primary, width: 1.5),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      ),
+                      textInputAction: TextInputAction.done,
                       onSubmitted: (_) => _submit(),
                     ),
                   ),
