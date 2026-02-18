@@ -389,7 +389,7 @@ class LocalWalSyncImpl implements LocalWalSync {
           }
         }
       } catch (e) {
-        Logger.debug('Local WAL sync failed: $e');
+        Logger.debug('Local WAL sync batch failed: $e, continuing with remaining files');
         for (var j = left; j <= right; j++) {
           if (j < wals.length) {
             wals[j].isSyncing = false;
@@ -397,7 +397,7 @@ class LocalWalSyncImpl implements LocalWalSync {
             wals[j].syncEtaSeconds = null;
           }
         }
-        rethrow;
+        continue;
       }
 
       await _saveWalsToFile();
