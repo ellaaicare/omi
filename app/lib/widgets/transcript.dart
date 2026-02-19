@@ -8,6 +8,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/gen/assets.gen.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -104,10 +105,10 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
 
   Widget _getSpeakerAvatar(int speakerId, bool isUser, Person? person) {
     if (speakerId == omiSpeakerId) {
-      return Image.asset(
-        Assets.images.herologo.path,
-        height: 16,
-        width: 16,
+      return const Icon(
+        Icons.favorite,
+        color: EllaColors.primary,
+        size: 16,
       );
     }
     if (isUser) {
