@@ -1241,24 +1241,16 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
   Widget _getOmiAvatar() {
     return Container(
-      decoration: BoxDecoration(
-        image: DecorationImage(
-          image: AssetImage(Assets.images.background.path),
-          fit: BoxFit.cover,
-        ),
-        borderRadius: const BorderRadius.all(Radius.circular(16.0)),
-      ),
       height: 24,
       width: 24,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          Image.asset(
-            Assets.images.herologo.path,
-            height: 16,
-            width: 16,
-          ),
-        ],
+      decoration: const BoxDecoration(
+        color: EllaColors.primary,
+        borderRadius: BorderRadius.all(Radius.circular(12.0)),
+      ),
+      child: const Icon(
+        Icons.favorite,
+        color: Colors.white,
+        size: 14,
       ),
     );
   }
