@@ -551,9 +551,6 @@ class _ConversationBottomBarState extends State<ConversationBottomBar> {
     if (isReprocessing) {
       if (reprocessingApp != null) {
         appImageUrl = reprocessingApp.getImageUrl();
-      } else {
-        appImageUrl = Assets.images.herologo.path;
-        isLocalAsset = true;
       }
     } else if (app != null) {
       appImageUrl = app.getImageUrl();
