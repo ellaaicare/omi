@@ -74,6 +74,17 @@ class AgoraService {
         _currentUid = null;
         _onLeaveChannelController.add(stats);
       },
+      onAudioVolumeIndication: (connection, speakers, speakerNumber, totalVolume) {
+        if (speakers.isNotEmpty) {
+          debugPrint("[AgoraService] Audio volume: ${speakers[0].volume}");
+        }
+      },
+      onFirstRemoteAudioFrame: (connection, userId, elapsed) {
+        debugPrint("[AgoraService] First remote audio frame from user: $userId");
+      },
+      onFirstLocalAudioFrame: (connection, elapsed) {
+        debugPrint("[AgoraService] First local audio frame sent (${elapsed}ms)");
+      },
       onError: (err, msg) {
         debugPrint('[AgoraService] Error: \$err - \$msg');
         _onErrorController.add(err);
