@@ -6,8 +6,12 @@ class AgoraService {
 
   RtcEngine? _engine;
   bool _isInCall = false;
+  bool _isInitialized = false;
 
-  Future<void> initialize() async {
+  /// Initialize Agora engine lazily (only when needed)
+  Future<void> _ensureInitialized() async {
+    if (_isInitialized) return;
+
     await [Permission.microphone].request();
 
     _engine = createAgoraRtcEngine();
@@ -36,12 +40,13 @@ class AgoraService {
         },
       ),
     );
+
+    _isInitialized = true;
   }
 
   Future<void> joinChannel(String channelName, String token, int uid) async {
-    if (_engine == null) {
-      throw Exception('Agora engine not initialized');
-    }
+    // Ensure Agora is initialized before joining
+    await _ensureInitialized();
 
     await _engine!.joinChannel(
       token: token,
@@ -62,6 +67,7 @@ class AgoraService {
     await _engine?.leaveChannel();
     await _engine?.release();
     _engine = null;
+    _isInitialized = false;
   }
 
   bool get isInCall => _isInCall;

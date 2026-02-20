@@ -410,8 +410,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
 
-    // Initialize Agora service
-    _agoraService.initialize();
   }
 
   void _provisionEllaIfNeeded() async {
