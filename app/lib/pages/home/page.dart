@@ -125,6 +125,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   final FreemiumSwitchHandler _freemiumHandler = FreemiumSwitchHandler();
 
   CaptureProvider? _captureProvider;
+  AgoraService? _debugAgoraService;
 
   void _initiateApps() {
     context.read<AppProvider>().getApps();
@@ -755,8 +756,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         final token = data['token'] as String;
         final userUid = data['user_uid'] as int;
 
-        final agoraService = AgoraService();
-        await agoraService.joinChannel(
+        _debugAgoraService = AgoraService();
+        await _debugAgoraService!.joinChannel(
           channelName: channelName,
           token: token,
           uid: userUid,
@@ -791,6 +792,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Remove foreground task callback to prevent memory leak
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     ForegroundUtil.stopForegroundTask();
+    // Clean up debug Agora service to prevent resource leak
+    if (_debugAgoraService != null) {
+      _debugAgoraService!.leaveChannel();
+    }
     super.dispose();
   }
 }
