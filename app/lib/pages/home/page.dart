@@ -772,7 +772,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   }
 
   @override
-  void dispose() {
+  Future<void> dispose() async {
     WidgetsBinding.instance.removeObserver(this);
     // Cancel stream subscription to prevent memory leak
     _notificationStreamSubscription?.cancel();
@@ -794,7 +794,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     ForegroundUtil.stopForegroundTask();
     // Clean up debug Agora service to prevent resource leak
     if (_debugAgoraService != null) {
-      _debugAgoraService!.leaveChannel();
+      await _debugAgoraService!.dispose();
+      _debugAgoraService = null;
     }
     super.dispose();
   }
