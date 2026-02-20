@@ -727,7 +727,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   Future<void> _startTestCall() async {
     // Hardcoded test values
     const String channelName = 'test-ella-mvp';
-    const String token = ''; // Will generate via curl first
+    const String token = '007eJxTYJjE4fL72dYIPbuq63EZaXIh52fvvCcZtD_au32K0BnphZwKDKamKSmWxmlJaWkmliZmKeZJyUCmWZpZalJyaqqJmVHMvemZDYGMDJKljEyMDIwMLEB8R39mJhOYZAaTLGCSl6EktbhENzUnJ1E3t6yAmcHS0hIAxZMqlw==';
     const int uid = 999;
 
     try {
