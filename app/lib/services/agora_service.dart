@@ -98,6 +98,13 @@ class AgoraService {
       scenario: AudioScenarioType.audioScenarioChatroom,
     );
 
+    // Enable volume indication for monitoring audio levels
+    await _engine!.enableAudioVolumeIndication(
+      interval: 200,
+      smooth: 3,
+      reportVad: true,
+    );
+
     _isInitialized = true;
     debugPrint('[AgoraService] Agora RTC Engine initialized successfully');
   }
