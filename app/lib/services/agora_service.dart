@@ -48,7 +48,7 @@ class AgoraService {
     // Create and initialize engine
     _engine = createAgoraRtcEngine();
     await _engine!.initialize(const RtcEngineContext(
-      appId: 'YOUR_AGORA_APP_ID', // Will be configured via environment/config
+      appId: '55dd93fbff4946d7bcbff6f6ebcee462', // Will be configured via environment/config
       channelProfile: ChannelProfileType.channelProfileCommunication,
     ));
 
@@ -142,7 +142,7 @@ class AgoraService {
   Future<void> muteLocalAudio(bool muted) async {
     if (!_isInitialized) return;
     await _engine!.muteLocalAudioStream(muted);
-    debugPrint('[AgoraService] Local audio \${muted ? 'muted' : 'unmuted'}');
+    debugPrint('[AgoraService] Local audio ${muted ? "muted" : "unmuted"}');
   }
 
   /// Dispose and clean up resources
