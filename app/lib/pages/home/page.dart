@@ -628,6 +628,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           },
                         ),
                       ),
+                      // Agora test button (development) - positioned above emergency button
+                      Positioned(
+                        bottom: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + EllaSizes.emergencyButtonHeight + 32,
+                        left: 0,
+                        right: 0,
+                        child: Consumer<HomeProvider>(
+                          builder: (context, home, _) {
+                            if (home.selectedIndex != 0) return const SizedBox.shrink();
+                            return const Center(child: AgoraTestButton());
+                          },
+                        ),
+                      ),
                       Consumer<HomeProvider>(
                         builder: (context, home, child) {
                           if (home.isChatFieldFocused) {
