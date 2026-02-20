@@ -82,9 +82,6 @@ class AgoraService {
       onFirstRemoteAudioFrame: (connection, userId, elapsed) {
         debugPrint("[AgoraService] First remote audio frame from user: $userId");
       },
-      onFirstLocalAudioFrame: (connection, elapsed) {
-        debugPrint("[AgoraService] First local audio frame sent (${elapsed}ms)");
-      },
       onError: (err, msg) {
         debugPrint('[AgoraService] Error: \$err - \$msg');
         _onErrorController.add(err);
@@ -141,6 +138,10 @@ class AgoraService {
       uid: uid,
       options: options,
     );
+
+    // CRITICAL FIX for SDK 6.2.3+ bug: Explicitly unmute local audio
+    // GitHub Issue: https://github.com/AgoraIO-Extensions/Agora-Flutter-SDK/issues/1432
+    await _engine!.muteLocalAudioStream(false);
 
     debugPrint('[AgoraService] Join channel request sent');
   }
