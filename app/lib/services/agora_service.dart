@@ -57,12 +57,6 @@ class AgoraService {
       onJoinChannelSuccess: (connection, elapsed) {
         debugPrint('[AgoraService] Successfully joined channel: \${connection.channelId}');
         _isInChannel = true;
-
-        // CRITICAL FIX for SDK 6.2.3+ bug: Explicitly unmute local audio AFTER join succeeds
-        // GitHub Issue: https://github.com/AgoraIO-Extensions/Agora-Flutter-SDK/issues/1432
-        _engine!.muteLocalAudioStream(false);
-        debugPrint('[AgoraService] Local audio stream unmuted');
-
         _onJoinChannelSuccessController.add(connection);
       },
       onUserJoined: (connection, remoteUid, elapsed) {
@@ -87,6 +81,15 @@ class AgoraService {
       },
       onFirstRemoteAudioFrame: (connection, userId, elapsed) {
         debugPrint("[AgoraService] First remote audio frame from user: $userId");
+      },
+      onLocalAudioStateChanged: (connection, state, error) {
+        debugPrint('[AgoraService] Local audio state: $state, error: $error');
+        // State STOPPED(0) + Error OK(0) = not configured to publish
+        // State FAILED(3) + Error RECORD_FAILURE(4) or DEVICE_BUSY(6) = hardware busy
+      },
+      onLocalAudioStats: (connection, stats) {
+        debugPrint('[AgoraService] Local audio stats: sampleRate=${stats.sentSampleRate}, bitrate=${stats.sentBitrate}');
+        // sentSampleRate = 0 means mic not capturing
       },
       onError: (err, msg) {
         debugPrint('[AgoraService] Error: \$err - \$msg');
@@ -139,6 +142,9 @@ class AgoraService {
       clientRoleType: ClientRoleType.clientRoleBroadcaster,
       autoSubscribeAudio: true,
       publishMicrophoneTrack: true,
+      publishCameraTrack: false,
+      // CRITICAL: SDK 6.x requires this flag to enable internal audio engine
+      enableAudioRecordingOrPlayout: true,
     );
 
     await _engine!.joinChannel(
