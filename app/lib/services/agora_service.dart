@@ -57,6 +57,12 @@ class AgoraService {
       onJoinChannelSuccess: (connection, elapsed) {
         debugPrint('[AgoraService] Successfully joined channel: \${connection.channelId}');
         _isInChannel = true;
+
+        // CRITICAL FIX for SDK 6.2.3+ bug: Explicitly unmute local audio AFTER join succeeds
+        // GitHub Issue: https://github.com/AgoraIO-Extensions/Agora-Flutter-SDK/issues/1432
+        _engine!.muteLocalAudioStream(false);
+        debugPrint('[AgoraService] Local audio stream unmuted');
+
         _onJoinChannelSuccessController.add(connection);
       },
       onUserJoined: (connection, remoteUid, elapsed) {
@@ -94,6 +100,9 @@ class AgoraService {
       profile: AudioProfileType.audioProfileDefault,
       scenario: AudioScenarioType.audioScenarioChatroom,
     );
+
+    // Enable local audio capture (microphone)
+    await _engine!.enableLocalAudio(true);
 
     // Enable volume indication for monitoring audio levels
     await _engine!.enableAudioVolumeIndication(
@@ -138,10 +147,6 @@ class AgoraService {
       uid: uid,
       options: options,
     );
-
-    // CRITICAL FIX for SDK 6.2.3+ bug: Explicitly unmute local audio
-    // GitHub Issue: https://github.com/AgoraIO-Extensions/Agora-Flutter-SDK/issues/1432
-    await _engine!.muteLocalAudioStream(false);
 
     debugPrint('[AgoraService] Join channel request sent');
   }
