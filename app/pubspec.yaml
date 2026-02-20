@@ -47,6 +47,7 @@ dependencies:
   firebase_messaging: 15.2.5
   firebase_crashlytics: 4.3.2
 
+
   # Auth
   google_sign_in: 6.2.2
   sign_in_with_apple: ^6.1.1
