@@ -55,6 +55,7 @@ import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_emergency_button.dart';
 import 'widgets/battery_info_widget.dart';
+import 'package:omi/services/agora_service.dart';
 
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
@@ -120,6 +121,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   final FreemiumSwitchHandler _freemiumHandler = FreemiumSwitchHandler();
 
   CaptureProvider? _captureProvider;
+
+  // Agora test call
+  final AgoraService _agoraService = AgoraService();
+  bool _isTestCallActive = false;
 
   void _initiateApps() {
     context.read<AppProvider>().getApps();
@@ -404,6 +409,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+
+    // Initialize Agora service
+    _agoraService.initialize();
   }
 
   void _provisionEllaIfNeeded() async {
@@ -649,6 +657,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                   ),
                 ),
               ),
+              floatingActionButton: FloatingActionButton.extended(
+                onPressed: _isTestCallActive ? _endTestCall : _startTestCall,
+                icon: Icon(_isTestCallActive ? Icons.call_end : Icons.call),
+                label: Text(_isTestCallActive ? 'End Test Call' : 'Test Agora Call'),
+                backgroundColor: _isTestCallActive ? Colors.red : Colors.blue,
+              ),
             );
           },
         ),
@@ -709,6 +723,54 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     );
   }
 
+
+  Future<void> _startTestCall() async {
+    // Hardcoded test values
+    const String channelName = 'test-ella-mvp';
+    const String token = ''; // Will generate via curl first
+    const int uid = 999;
+
+    try {
+      await _agoraService.joinChannel(channelName, token, uid);
+      setState(() {
+        _isTestCallActive = true;
+      });
+
+      // Show snackbar
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Joined Agora channel. Speak now!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('[HomePageState] Failed to join channel: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to join: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _endTestCall() async {
+    await _agoraService.leaveChannel();
+    setState(() {
+      _isTestCallActive = false;
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Left channel')),
+      );
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -730,6 +792,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Remove foreground task callback to prevent memory leak
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     ForegroundUtil.stopForegroundTask();
+    // Dispose Agora service
+    _agoraService.dispose();
     super.dispose();
   }
 }
