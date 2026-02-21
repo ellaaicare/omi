@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:agora_rtc_engine/agora_rtc_engine.dart';
-import 'package:permission_handler/permission_handler.dart';
+// REMOVED: import 'package:permission_handler/permission_handler.dart';
+// Let Agora SDK request microphone permission natively via enableLocalAudio()
 import 'package:flutter/foundation.dart';
 
 /// Agora RTC voice service with lazy initialization
@@ -38,12 +39,11 @@ class AgoraService {
 
     debugPrint('[AgoraService] Initializing Agora RTC Engine...');
 
-    // Request microphone permission
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) {
-      debugPrint('[AgoraService] Microphone permission denied');
-      throw Exception('Microphone permission required for Agora calls');
-    }
+    // NOTE: Removed permission_handler check - let Agora SDK request permission
+    // natively when enableLocalAudio() is called. iOS will show the system
+    // permission dialog using NSMicrophoneUsageDescription from Info.plist.
+    // This fixes the "permanentlyDenied" issue where permission_handler was
+    // blocking the native dialog from appearing.
 
     // Create and initialize engine
     _engine = createAgoraRtcEngine();
