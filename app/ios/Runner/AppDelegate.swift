@@ -343,12 +343,100 @@ extension AppDelegate: PKPushRegistryDelegate {
         print("AppDelegate: Received incoming VoIP push for type: \(type.rawValue)")
         print("AppDelegate: VoIP push payload: \(payload.dictionaryPayload)")
         
-        // TODO: Handle VoIP push based on type
-        // - For whisper mode (Task 3): Extract audio URL and auto-play
-        // - For call mode (Task 4): Present CallKit UI and establish Twilio call
+        // Extract action from payload
+        if let data = payload.dictionaryPayload["data"] as? [String: Any],
+           let action = data["action"] as? String {
+            
+            print("AppDelegate: VoIP push action: \(action)")
+            
+            // Handle play_audio action
+            if action == "play_audio", let audioUrl = data["audio_url"] as? String {
+                print("AppDelegate: Playing audio from URL: \(audioUrl)")
+                playAudioMessage(from: audioUrl)
+            }
+        }
         
-        // For now, just log and complete
         completion()
+    }
+    
+    // MARK: - Audio Playback
+    
+    /// Download and play audio message from URL
+    private func playAudioMessage(from urlString: String) {
+        print("AppDelegate: playAudioMessage called with URL: \(urlString)")
+        
+        guard let url = URL(string: urlString) else {
+            print("AppDelegate: Invalid audio URL: \(urlString)")
+            return
+        }
+        
+        // Download audio file
+        let downloadTask = URLSession.shared.downloadTask(with: url) { [weak self] localUrl, response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                print("AppDelegate: Audio download failed: \(error.localizedDescription)")
+                return
+            }
+            
+            guard let localUrl = localUrl else {
+                print("AppDelegate: No local URL after download")
+                return
+            }
+            
+            // Verify HTTP response
+            if let httpResponse = response as? HTTPURLResponse {
+                print("AppDelegate: Audio download response code: \(httpResponse.statusCode)")
+                
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    print("AppDelegate: Audio download failed with HTTP status: \(httpResponse.statusCode)")
+                    return
+                }
+            }
+            
+            // Play the downloaded audio
+            self.playDownloadedAudio(at: localUrl)
+        }
+        
+        downloadTask.resume()
+        print("AppDelegate: Audio download started")
+    }
+    
+    /// Play audio file from local URL
+    private func playDownloadedAudio(at localUrl: URL) {
+        print("AppDelegate: playDownloadedAudio called with path: \(localUrl.path)")
+        
+        do {
+            // Configure audio session for playback
+            let audioSession = AVAudioSession.sharedInstance()
+            
+            // Set category to playback with voice prompt mode
+            // This ensures audio routes to Bluetooth/speaker and mixes with other audio
+            try audioSession.setCategory(.playback, mode: .voicePrompt, options: [.mixWithOthers, .duckOthers])
+            
+            // Activate the audio session
+            try audioSession.setActive(true)
+            
+            print("AppDelegate: Audio session configured - category: playback, mode: voicePrompt")
+            
+            // Create audio player
+            let audioPlayer = try AVAudioPlayer(contentsOf: localUrl)
+            
+            // Keep a strong reference to prevent deallocation during playback
+            objc_setAssociatedObject(self, "currentAudioPlayer", audioPlayer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            
+            audioPlayer.prepareToPlay()
+            let success = audioPlayer.play()
+            
+            if success {
+                print("AppDelegate: Audio playback started successfully - duration: \(audioPlayer.duration)s")
+            } else {
+                print("AppDelegate: Audio playback failed to start")
+            }
+            
+        } catch {
+            print("AppDelegate: Audio playback error: \(error.localizedDescription)")
+        }
     }
 }
 
