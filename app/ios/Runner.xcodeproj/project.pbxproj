@@ -17,8 +17,12 @@
 		422906C92E75B0A100F49E67 /* FlutterCommunicator.g.swift in Sources */ = {isa = PBXBuildFile; fileRef = 422906C82E75B0A100F49E67 /* FlutterCommunicator.g.swift */; };
 		4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4255287C2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift */; };
 		426B89AD2C46919D00E24442 /* Config in Resources */ = {isa = PBXBuildFile; fileRef = 426B89AC2C46919D00E24442 /* Config */; };
-		42A7BA3E2E788BD400138969 /* omiWatchApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 42A7BA342E788BD300138969 /* omiWatchApp.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); platformFilter = iphoneos; }; };
 		42A7BA4C2E788F0100138969 /* WatchConnectivity.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 42A7BA4B2E788F0100138969 /* WatchConnectivity.framework */; };
+		5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5934827E2F4ADC6400888317 /* CallKitProvider.swift */; };
+		593482822F4ADC9300888317 /* TwilioVoiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482812F4ADC9300888317 /* TwilioVoiceManager.swift */; };
+		593482832F4ADC9300888317 /* AccessTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482802F4ADC9300888317 /* AccessTokenManager.swift */; };
+		593482852F4ADCAA00888317 /* VoIPPushHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482842F4ADCAA00888317 /* VoIPPushHandler.swift */; };
+		593482872F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482862F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift */; };
 		6436409A27A31CD800820AF7 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6436409C27A31CD800820AF7 /* InfoPlist.strings */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
@@ -33,8 +37,8 @@
 		CF0FE6152D61FDC10072C10D /* Custom.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = CF0FE6142D61FDC10072C10D /* Custom.xcconfig */; };
 		CF2F518D2EC08EA60025B331 /* Base.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = CF2F518C2EC08EA60025B331 /* Base.xcconfig */; };
 		EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = FG12345678901234567890FG /* WifiNetworkPlugin.swift */; };
-		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
 		ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */; };
+		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -46,17 +50,6 @@
 			files = (
 			);
 			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		422906722E75A21E00F49E67 /* Embed Watch Content */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 8;
-			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
-			dstSubfolderSpec = 16;
-			files = (
-				42A7BA3E2E788BD400138969 /* omiWatchApp.app in Embed Watch Content */,
-			);
-			name = "Embed Watch Content";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		9705A1C41CF9048500538489 /* Embed Frameworks */ = {
@@ -91,6 +84,11 @@
 		42A7BA4B2E788F0100138969 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
 		4B5B6E291EA70190D1771F2D /* Pods-Runner.release-dev.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release-dev.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release-dev.xcconfig"; sourceTree = "<group>"; };
 		556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = devProfile.xcconfig; path = Flutter/devProfile.xcconfig; sourceTree = "<group>"; };
+		5934827E2F4ADC6400888317 /* CallKitProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = CallKitProvider.swift; path = Runner/CallKit/CallKitProvider.swift; sourceTree = "<group>"; };
+		593482802F4ADC9300888317 /* AccessTokenManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccessTokenManager.swift; path = Runner/Twilio/AccessTokenManager.swift; sourceTree = "<group>"; };
+		593482812F4ADC9300888317 /* TwilioVoiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TwilioVoiceManager.swift; path = Runner/Twilio/TwilioVoiceManager.swift; sourceTree = "<group>"; };
+		593482842F4ADCAA00888317 /* VoIPPushHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoIPPushHandler.swift; path = Runner/VoIP/VoIPPushHandler.swift; sourceTree = "<group>"; };
+		593482862F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TwilioVoiceMethodChannel.swift; path = Runner/Flutter/TwilioVoiceMethodChannel.swift; sourceTree = "<group>"; };
 		5F7FD4162BF1232500923839 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		5FCEB2FA2C27586C00B17EE8 /* RunnerDebug-prod.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "RunnerDebug-prod.entitlements"; sourceTree = "<group>"; };
 		5FCEB2FB2C27587100B17EE8 /* RunnerProfile-prod.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "RunnerProfile-prod.entitlements"; sourceTree = "<group>"; };
@@ -211,6 +209,11 @@
 		97C146E51CF9000F007C117D = {
 			isa = PBXGroup;
 			children = (
+				593482862F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift */,
+				593482842F4ADCAA00888317 /* VoIPPushHandler.swift */,
+				593482802F4ADC9300888317 /* AccessTokenManager.swift */,
+				593482812F4ADC9300888317 /* TwilioVoiceManager.swift */,
+				5934827E2F4ADC6400888317 /* CallKitProvider.swift */,
 				426B89AC2C46919D00E24442 /* Config */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
@@ -505,11 +508,16 @@
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				AB12345678901234567890AB /* AppleRemindersService.swift in Sources */,
+				593482822F4ADC9300888317 /* TwilioVoiceManager.swift in Sources */,
+				593482832F4ADC9300888317 /* AccessTokenManager.swift in Sources */,
+				593482852F4ADCAA00888317 /* VoIPPushHandler.swift in Sources */,
+				593482872F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift in Sources */,
 				AB12345678901234567890AC /* AppleHealthService.swift in Sources */,
 				EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */,
 				422906C92E75B0A100F49E67 /* FlutterCommunicator.g.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */,
+				5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
