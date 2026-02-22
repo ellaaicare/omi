@@ -93,8 +93,15 @@ extension FlutterError: Error {}
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
 
+    // MARK: - Push Notification Authorization
+    requestNotificationAuthorization()
+
     // MARK: - VoIP Push Registration
     registerForVoIPPushes()
+
+    // MARK: - CallKit Provider Initialization
+    CallKitProvider.shared.setup()
+    print("AppDelegate: CallKit provider initialized")
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -110,6 +117,30 @@ extension FlutterError: Error {}
     voipRegistry?.desiredPushTypes = [.voIP]
     
     print("AppDelegate: VoIP push registration initiated")
+  }
+
+  // MARK: - Notification Authorization
+
+  /// Request push notification permissions
+  private func requestNotificationAuthorization() {
+    print("AppDelegate: Requesting notification authorization")
+    
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+      if let error = error {
+        print("AppDelegate: Notification authorization error: \(error.localizedDescription)")
+        return
+      }
+      
+      if granted {
+        print("AppDelegate: Notification authorization granted")
+        DispatchQueue.main.async {
+          UIApplication.shared.registerForRemoteNotifications()
+        }
+      } else {
+        print("AppDelegate: Notification authorization denied")
+      }
+    }
   }
 
   private func handleMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
