@@ -75,4 +75,19 @@ extension CallKitProvider: CXProviderDelegate {
         // For now, just fulfill the action
         action.fulfill()
     }
+
+    func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+        print("CallKitProvider: Audio session activated")
+
+        // Configure audio session for VoIP
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .voiceChat, options: [])
+            try audioSession.setActive(true)
+            print("CallKitProvider: Audio session configured for VoIP")
+        } catch {
+            print("CallKitProvider: ERROR configuring audio session: \(error.localizedDescription)")
+        }
+
+        // TODO: Notify TwilioVoiceManager that audio is ready
+    }
 }
