@@ -30,6 +30,9 @@ extension FlutterError: Error {}
 
   // VoIP Push Registry
   private var voipRegistry: PKPushRegistry?
+  // Twilio Voice MethodChannel
+  private var twilioVoiceChannel: TwilioVoiceMethodChannel?
+
 
   override func application(
     _ application: UIApplication,
@@ -106,6 +109,13 @@ extension FlutterError: Error {}
     // Initialize Twilio Voice SDK
     TwilioVoiceManager.shared.initialize()
     print("AppDelegate: Twilio Voice SDK initialized")
+
+    // Initialize Twilio Voice MethodChannel
+    if let controller = window?.rootViewController as? FlutterViewController {
+        twilioVoiceChannel = TwilioVoiceMethodChannel(messenger: controller.binaryMessenger)
+        print("AppDelegate: Twilio Voice MethodChannel registered")
+    }
+
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
