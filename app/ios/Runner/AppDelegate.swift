@@ -337,6 +337,12 @@ extension AppDelegate: PKPushRegistryDelegate {
         
         // TODO: Notify backend that token is invalid (Task 2)
     }
+
+    /// Called when VoIP push registration fails
+    func pushRegistry(_ registry: PKPushRegistry, didFailToReceiveRegistrationWithError error: Error, for type: PKPushType) {
+        print("AppDelegate: VoIP push registration FAILED for type: \(type.rawValue)")
+        print("AppDelegate: Registration error: \(error.localizedDescription)")
+    }
     
     /// Called when an incoming VoIP push notification is received
     func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
