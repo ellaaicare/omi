@@ -59,4 +59,12 @@ extension CallKitProvider: CXProviderDelegate {
         // For now, just fulfill the action
         action.fulfill()
     }
+
+    func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+        print("CallKitProvider: User ended call \(action.callUUID)")
+
+        // TODO: Notify TwilioVoiceManager to end the call
+        // For now, just fulfill the action
+        action.fulfill()
+    }
 }
