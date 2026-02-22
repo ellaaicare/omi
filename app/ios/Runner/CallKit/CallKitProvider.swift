@@ -26,6 +26,24 @@ class CallKitProvider: NSObject {
         // Placeholder for initialization
         print("CallKitProvider: setup called")
     }
+
+    func reportIncomingCall(uuid: UUID, caller: String, completion: @escaping (Error?) -> Void) {
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: caller)
+        update.hasVideo = false
+        update.localizedCallerName = caller
+
+        print("CallKitProvider: reporting incoming call from \(caller)")
+
+        provider.reportNewIncomingCall(with: uuid, update: update) { error in
+            if let error = error {
+                print("CallKitProvider: ERROR reporting call: \(error.localizedDescription)")
+            } else {
+                print("CallKitProvider: Successfully reported incoming call")
+            }
+            completion(error)
+        }
+    }
 }
 
 // MARK: - CXProviderDelegate
