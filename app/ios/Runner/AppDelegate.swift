@@ -391,24 +391,28 @@ extension AppDelegate: PKPushRegistryDelegate {
     
     /// Called when an incoming VoIP push notification is received
     func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
-        print("AppDelegate: Received incoming VoIP push for type: \(type.rawValue)")
-        print("AppDelegate: VoIP push payload: \(payload.dictionaryPayload)")
-        
-        // Extract action from payload
-        if let data = payload.dictionaryPayload["data"] as? [String: Any],
-           let action = data["action"] as? String {
-            
-            print("AppDelegate: VoIP push action: \(action)")
-            
-            // Handle play_audio action
-            if action == "play_audio", let audioUrl = data["audio_url"] as? String {
-                print("AppDelegate: Playing audio from URL: \(audioUrl)")
-                playAudioMessage(from: audioUrl)
+        print("AppDelegate: Received VoIP push notification")
+
+        // Request background execution time
+        let backgroundTask = UIApplication.shared.beginBackgroundTask {
+            print("AppDelegate: Background task expiring")
+        }
+
+        // Handle the push with VoIPPushHandler
+        VoIPPushHandler.shared.handleIncomingPush(payload: payload) { success in
+            if success {
+                print("AppDelegate: VoIP push handled successfully")
+            } else {
+                print("AppDelegate: VoIP push handling failed")
             }
+
+            // End background task
+            UIApplication.shared.endBackgroundTask(backgroundTask)
         }
         
         completion()
     }
+
     
     // MARK: - Audio Playback
     
