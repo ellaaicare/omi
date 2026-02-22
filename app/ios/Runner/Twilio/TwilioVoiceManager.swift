@@ -16,7 +16,9 @@ class TwilioVoiceManager: NSObject {
 
         // Initialize audio device
         audioDevice = DefaultAudioDevice()
-        TwilioVoiceSDK.audioDevice = audioDevice
+        if let audioDevice = audioDevice {
+            TwilioVoiceSDK.audioDevice = audioDevice
+        }
 
         print("TwilioVoiceManager: Initialization complete")
     }
