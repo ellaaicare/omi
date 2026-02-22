@@ -6,6 +6,7 @@ import WatchConnectivity
 import AVFoundation
 import Speech
 import EventKit
+import PushKit
 
 extension FlutterError: Error {}
 
@@ -26,6 +27,9 @@ extension FlutterError: Error {}
   private var audioChunks: [Int: (Data, Double)] = [:] // (audioData, sampleRate)
   private var nextExpectedChunkIndex: Int = 0
   private var isRecordingActive: Bool = false // Track recording state to handle app restarts
+
+  // VoIP Push Registry
+  private var voipRegistry: PKPushRegistry?
 
   override func application(
     _ application: UIApplication,
@@ -89,7 +93,23 @@ extension FlutterError: Error {}
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
 
+    // MARK: - VoIP Push Registration
+    registerForVoIPPushes()
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // MARK: - VoIP Push Registration
+
+  /// Register for VoIP push notifications
+  private func registerForVoIPPushes() {
+    print("AppDelegate: Registering for VoIP push notifications")
+    
+    voipRegistry = PKPushRegistry(queue: DispatchQueue.main)
+    voipRegistry?.delegate = self
+    voipRegistry?.desiredPushTypes = [.voIP]
+    
+    print("AppDelegate: VoIP push registration initiated")
   }
 
   private func handleMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -290,6 +310,45 @@ extension FlutterError: Error {}
 
         audioChunks.removeAll()
         nextExpectedChunkIndex = 0
+    }
+}
+
+// MARK: - PKPushRegistryDelegate
+
+extension AppDelegate: PKPushRegistryDelegate {
+    
+    /// Called when VoIP push credentials are updated
+    func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
+        print("AppDelegate: VoIP push credentials updated for type: \(type.rawValue)")
+        
+        // Convert token to hex string for logging and backend registration
+        let tokenParts = pushCredentials.token.map { String(format: "%02.2hhx", $0) }
+        let token = tokenParts.joined()
+        
+        print("AppDelegate: VoIP push token: \(token)")
+        
+        // TODO: Send token to backend for registration (Task 2)
+        // For now, just log it
+    }
+    
+    /// Called when VoIP push token is invalidated
+    func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+        print("AppDelegate: VoIP push token invalidated for type: \(type.rawValue)")
+        
+        // TODO: Notify backend that token is invalid (Task 2)
+    }
+    
+    /// Called when an incoming VoIP push notification is received
+    func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
+        print("AppDelegate: Received incoming VoIP push for type: \(type.rawValue)")
+        print("AppDelegate: VoIP push payload: \(payload.dictionaryPayload)")
+        
+        // TODO: Handle VoIP push based on type
+        // - For whisper mode (Task 3): Extract audio URL and auto-play
+        // - For call mode (Task 4): Present CallKit UI and establish Twilio call
+        
+        // For now, just log and complete
+        completion()
     }
 }
 
