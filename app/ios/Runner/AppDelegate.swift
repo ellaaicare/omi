@@ -103,6 +103,10 @@ extension FlutterError: Error {}
     CallKitProvider.shared.setup()
     print("AppDelegate: CallKit provider initialized")
 
+    // Initialize Twilio Voice SDK
+    TwilioVoiceManager.shared.initialize()
+    print("AppDelegate: Twilio Voice SDK initialized")
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
