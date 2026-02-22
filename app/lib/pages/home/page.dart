@@ -29,7 +29,6 @@ import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/conversations/conversations_page.dart';
 import 'package:omi/pages/memories/page.dart';
 import 'package:omi/pages/settings/daily_summary_detail_page.dart';
-import 'package:omi/pages/home/widgets/agora_test_button.dart';
 import 'package:omi/pages/settings/data_privacy_page.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
@@ -46,7 +45,6 @@ import 'package:omi/providers/message_provider.dart';
 import 'package:omi/services/announcement_service.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
-import 'package:omi/services/agora_service.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/enums.dart';
@@ -125,7 +123,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   final FreemiumSwitchHandler _freemiumHandler = FreemiumSwitchHandler();
 
   CaptureProvider? _captureProvider;
-  AgoraService? _debugAgoraService;
 
   void _initiateApps() {
     context.read<AppProvider>().getApps();
@@ -407,16 +404,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _checkForAnnouncements();
     _provisionEllaIfNeeded();
 
-    // Debug auto-call: trigger Agora call after 2 seconds
-    const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
-    if (debugAutoCall) {
-      debugPrint('[Debug] Auto-starting Agora call in 2 seconds');
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          _startDebugAgoraCall();
-        }
-      });
-    }
     super.initState();
 
     // After init
@@ -645,7 +632,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           },
                         ),
                       ),
-                      // Agora test button (development) - positioned above emergency button
                       Positioned(
                         bottom: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + EllaSizes.emergencyButtonHeight + 32,
                         left: 0,
@@ -653,7 +639,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                         child: Consumer<HomeProvider>(
                           builder: (context, home, _) {
                             if (home.selectedIndex != 0) return const SizedBox.shrink();
-                            return Center(child: AgoraTestButton());
+                            return Container();
                           },
                         ),
                       ),
@@ -738,38 +724,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     );
   }
 
-  Future<void> _startDebugAgoraCall() async {
-    debugPrint('[Debug] Starting Agora call');
-    try {
-      final response = await http.post(
-        Uri.parse('https://voice.ella-ai-care.com/v2/call/start'),
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'user_id': 'debug_auto_${DateTime.now().millisecondsSinceEpoch}',
-          'direction': 'outbound',
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final channelName = data['channel_name'] as String;
-        final token = data['token'] as String;
-        final userUid = data['user_uid'] as int;
-
-        _debugAgoraService = AgoraService();
-        await _debugAgoraService!.joinChannel(
-          channelName: channelName,
-          token: token,
-          uid: userUid,
-        );
-        debugPrint('[Debug] Successfully joined Agora channel: $channelName');
-      } else {
-        debugPrint('[Debug] Failed to start call: ${response.statusCode}');
-      }
-    } catch (e) {
-      debugPrint('[Debug] Error starting Agora call: $e');
-    }
-  }
 
   @override
   Future<void> dispose() async {
@@ -792,11 +746,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Remove foreground task callback to prevent memory leak
     FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     ForegroundUtil.stopForegroundTask();
-    // Clean up debug Agora service to prevent resource leak
-    if (_debugAgoraService != null) {
-      await _debugAgoraService!.dispose();
-      _debugAgoraService = null;
-    }
     super.dispose();
   }
 }
