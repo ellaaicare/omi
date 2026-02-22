@@ -20,6 +20,31 @@ class TwilioVoiceManager: NSObject {
 
         print("TwilioVoiceManager: Initialization complete")
     }
+
+    func acceptCall(uuid: UUID, accessToken: String) {
+        print("TwilioVoiceManager: Accepting incoming call with UUID \(uuid)")
+
+        let connectOptions = ConnectOptions(accessToken: accessToken) { builder in
+            builder.uuid = uuid
+        }
+
+        let call = TwilioVoiceSDK.connect(options: connectOptions, delegate: self)
+        activeCall = call
+
+        print("TwilioVoiceManager: Call connection initiated")
+    }
+
+    func endCall(uuid: UUID) {
+        print("TwilioVoiceManager: Ending call with UUID \(uuid)")
+
+        guard let call = activeCall, call.uuid == uuid else {
+            print("TwilioVoiceManager: No active call found with UUID \(uuid)")
+            return
+        }
+
+        call.disconnect()
+        print("TwilioVoiceManager: Call disconnect requested")
+    }
 }
 
 // MARK: - CallDelegate
