@@ -55,10 +55,19 @@ extension CallKitProvider: CXProviderDelegate {
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         print("CallKitProvider: User answered call \(action.callUUID)")
 
-        // TODO: Notify TwilioVoiceManager to accept the call
-        // For now, just fulfill the action
+        // Retrieve the access token stored when VoIP push arrived
+        guard let accessToken = VoIPPushHandler.shared.retrieveToken(for: action.callUUID) else {
+            print("CallKitProvider: ERROR - No access token found for call")
+            action.fail()
+            return
+        }
+
+        // Accept the call via Twilio
+        TwilioVoiceManager.shared.acceptCall(uuid: action.callUUID, accessToken: accessToken)
+
         action.fulfill()
     }
+
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         print("CallKitProvider: User ended call \(action.callUUID)")
