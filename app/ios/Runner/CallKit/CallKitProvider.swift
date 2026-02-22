@@ -67,4 +67,12 @@ extension CallKitProvider: CXProviderDelegate {
         // For now, just fulfill the action
         action.fulfill()
     }
+
+    func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+        print("CallKitProvider: User set mute to \(action.isMuted) for call \(action.callUUID)")
+
+        // TODO: Notify TwilioVoiceManager to mute/unmute
+        // For now, just fulfill the action
+        action.fulfill()
+    }
 }
