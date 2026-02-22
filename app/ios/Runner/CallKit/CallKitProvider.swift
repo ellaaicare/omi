@@ -51,4 +51,12 @@ extension CallKitProvider: CXProviderDelegate {
     func providerDidReset(_ provider: CXProvider) {
         print("CallKitProvider: provider did reset")
     }
+
+    func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+        print("CallKitProvider: User answered call \(action.callUUID)")
+
+        // TODO: Notify TwilioVoiceManager to accept the call
+        // For now, just fulfill the action
+        action.fulfill()
+    }
 }
