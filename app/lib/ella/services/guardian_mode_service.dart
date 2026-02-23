@@ -118,11 +118,13 @@ class GuardianModeService {
       await _tts.setSpeechRate(0.5);
       await _tts.setVolume(1.0);
 
-      // Generate audio file
-      final tempDir = await getTemporaryDirectory();
-      final audioPath = '${tempDir.path}/guardian_test_$clipNumber.wav';
+      // Generate audio file - flutter_tts only accepts filename, saves to Documents
+      final fileName = 'guardian_test_$clipNumber.wav';
+      await _tts.synthesizeToFile(text, fileName);
 
-      await _tts.synthesizeToFile(text, audioPath);
+      // Get the actual path where flutter_tts saved it (Documents directory)
+      final documentsDir = await getApplicationDocumentsDirectory();
+      final audioPath = '${documentsDir.path}/$fileName';
       print('GuardianMode: Generated TTS file: $audioPath');
 
       // Validate that TTS file was created successfully
