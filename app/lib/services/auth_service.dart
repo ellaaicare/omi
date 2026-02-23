@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -19,6 +20,16 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+
+/// Detects if the app is running in an iOS simulator
+/// Used for automated testing to bypass authentication
+bool isSimulator() {
+  if (!Platform.isIOS) return false;
+
+  // Check for simulator environment variables
+  return Platform.environment['SIMULATOR_DEVICE_NAME'] != null ||
+         Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
+}
 
 class AuthService {
   static final AuthService _instance = AuthService._internal();
