@@ -85,7 +85,7 @@ class GuardianModeService {
     _testClipCounter = 0;
     _testAudioTimer?.cancel();
 
-    _testAudioTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
+    _testAudioTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       _testClipCounter++;
       await _generateAndInjectTestClip(_testClipCounter);
     });
