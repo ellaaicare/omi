@@ -148,20 +148,29 @@ class GuardianModeManager: NSObject {
 
             // Create player item from remote URL
             let audioItem = AVPlayerItem(url: audioURL)
+            
+            // Local cancellables set to avoid threading issues and memory growth
+            var injectionObservers = Set<AnyCancellable>()
+            
+            // Fix race condition: Check immediate status for fast-loading items
+            if audioItem.status == .readyToPlay {
+                print("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+            } else if audioItem.status == .failed {
+                print("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
+            }
 
-            // Observe when item is ready to play (injection complete)
+            // Also observe future status changes (for items still loading)
             audioItem.publisher(for: \.status)
-                .sink { [weak self, eventId] status in
+                .sink { status in
                     if status == .readyToPlay {
                         print("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     } else if status == .failed {
                         print("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
                     }
                 }
-                .store(in: &self.cancellables)
+                .store(in: &injectionObservers)
 
             // Insert to play NEXT (after currently playing item)
-            // This puts it at position 2 in the queue
             if player.canInsert(audioItem, after: player.currentItem) {
                 player.insert(audioItem, after: player.currentItem)
                 print("GuardianMode: Remote audio queued at position 2")
@@ -170,12 +179,17 @@ class GuardianModeManager: NSObject {
                 NotificationCenter.default
                     .publisher(for: .AVPlayerItemNewAccessLogEntry, object: audioItem)
                     .first()
-                    .sink { [eventId] _ in
+                    .sink { _ in
                         print("PLAYBACK_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     }
-                    .store(in: &self.cancellables)
+                    .store(in: &injectionObservers)
             } else {
                 print("GuardianMode: ERROR - Cannot insert audio item")
+            }
+            
+            // Thread-safe: Move observers to main cancellables on main queue
+            DispatchQueue.main.async { [weak self] in
+                self?.cancellables.formUnion(injectionObservers)
             }
         }
     }
