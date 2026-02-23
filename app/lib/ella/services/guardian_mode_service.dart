@@ -139,7 +139,7 @@ class GuardianModeService {
   /// Note: This is a singleton, so dispose() is not appropriate.
   /// Resources are cleaned up when stop() is called instead.
   void _cleanup() {
-    _stateController?.close();
-    _stateController = null;
+    //     _stateController?.close();
+    //     _stateController = null;
   }
 }
