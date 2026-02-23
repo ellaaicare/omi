@@ -19,7 +19,7 @@ class GuardianModePollingService {
 
     // Configuration
     var pollInterval: TimeInterval = 3.0
-    var backendURL: String = "http://localhost:3000"
+    var backendURL: String = "http://100.67.113.120:3000"  // admin-MacBookAir1 via Tailscale
 
     // Response model
     struct PollResponse: Codable {
