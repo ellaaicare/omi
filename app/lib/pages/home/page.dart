@@ -615,32 +615,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           if (context.watch<HomeProvider>().selectedIndex != 1 &&
                               context.watch<HomeProvider>().selectedIndex != 2)
                             SizedBox(
-                                height: EllaSizes.emergencyButtonHeight +
+                                height: EllaSizes.guardianButtonHeight +
+                                    EllaSizes.emergencyButtonHeight +
                                     EllaSizes.navBarHeight +
-                                    MediaQuery.of(context).padding.bottom +
-                                    32),
+                                    (EllaSizes.buttonStackSpacing * 2) +
+                                    MediaQuery.of(context).padding.bottom),
                         ],
                       ),
-                      // Emergency button -- positioned above the nav bar
+                      // Action buttons stack (Guardian + Emergency) - consolidated for self-adjusting layout
                       Positioned(
-                        bottom: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 16,
+                        bottom: 0,
                         left: 0,
                         right: 0,
                         child: Consumer<HomeProvider>(
                           builder: (context, home, _) {
-                            if (home.selectedIndex != 0) return const SizedBox.shrink();
-                            return const Center(child: EllaEmergencyButton());
-                          },
-                        ),
-                      ),
-                      Positioned(
-                        bottom: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + EllaSizes.emergencyButtonHeight + 32,
-                        left: 0,
-                        right: 0,
-                        child: Consumer<HomeProvider>(
-                          builder: (context, home, _) {
-                            if (home.selectedIndex != 0) return const SizedBox.shrink();
-                            return const Center(child: GuardianModeButton());
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Action buttons (only on home screen)
+                                  if (home.selectedIndex == 0) ...[
+                                    const GuardianModeButton(),
+                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
+                                    const EllaEmergencyButton(),
+                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
+                                  ],
+                                  // Always reserve space for nav bar
+                                  SizedBox(height: EllaSizes.navBarHeight),
+                                ],
+                              ),
+                            );
                           },
                         ),
                       ),

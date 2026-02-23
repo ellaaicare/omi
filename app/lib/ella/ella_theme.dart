@@ -52,6 +52,8 @@ class EllaSizes {
   static const double minTouchTarget = 48.0;
   static const double emergencyButtonHeight = 72.0;
   static const double navBarHeight = 80.0;
+  static const double guardianButtonHeight = 106.0;
+  static const double buttonStackSpacing = 16.0;
   static const double listItemMinHeight = 56.0;
   static const double appBarButtonSize = 48.0;
 
