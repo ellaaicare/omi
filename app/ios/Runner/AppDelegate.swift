@@ -755,6 +755,23 @@ extension AppDelegate: WCSessionDelegate {
             let state = GuardianModeManager.shared.getState()
             result(["status": state])
             
+        case "injectRemoteAudioClip":
+            guard let args = call.arguments as? [String: Any],
+                  let audioURLString = args["audioURL"] as? String,
+                  !audioURLString.isEmpty,
+                  let audioURL = URL(string: audioURLString) else {
+                result(FlutterError(
+                    code: "INVALID_ARGS",
+                    message: "Missing or invalid audioURL parameter",
+                    details: nil
+                ))
+                return
+            }
+
+            print("AppDelegate: Injecting remote audio: \(audioURL.absoluteString)")
+            GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL)
+            result(["status": "injected", "url": audioURLString])
+            
         default:
             result(FlutterMethodNotImplemented)
         }
