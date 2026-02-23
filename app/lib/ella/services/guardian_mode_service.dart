@@ -49,7 +49,7 @@ class GuardianModeService {
       _updateState(GuardianModeState.active);
 
       // Start test audio injection timer (every 5 seconds)
-      _startTestAudioTimer();
+      // _startTestAudioTimer(); // Disabled - using polling service instead
     } catch (e) {
       print('GuardianMode: Error starting: $e');
       _updateState(GuardianModeState.error);
