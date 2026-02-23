@@ -729,6 +729,50 @@ extension AppDelegate: WCSessionDelegate {
             }
         }
     }
+
+    // MARK: - Guardian Mode MethodChannel Handler
+
+    private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "start":
+            do {
+                try GuardianModeManager.shared.start()
+                result(["status": "active"])
+            } catch {
+                result(FlutterError(
+                    code: "START_FAILED",
+                    message: "Failed to start Guardian Mode",
+                    details: error.localizedDescription
+                ))
+            }
+            
+        case "stop":
+            GuardianModeManager.shared.stop()
+            result(["status": "idle"])
+            
+        case "injectAudioClip":
+            guard let args = call.arguments as? [String: Any],
+                  let audioPath = args["audioPath"] as? String else {
+                result(FlutterError(
+                    code: "INVALID_ARGS",
+                    message: "Missing audioPath parameter",
+                    details: nil
+                ))
+                return
+            }
+            
+            let audioURL = URL(fileURLWithPath: audioPath)
+            GuardianModeManager.shared.injectAudioClip(audioURL: audioURL)
+            result(nil)
+            
+        case "getState":
+            let state = GuardianModeManager.shared.getState()
+            result(["status": state])
+            
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
 }
 
 class SpeechRecognitionHandler: NSObject {
@@ -799,47 +843,4 @@ class SpeechRecognitionHandler: NSObject {
         }
     }
 
-    // MARK: - Guardian Mode MethodChannel Handler
-
-    private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        switch call.method {
-        case "start":
-            do {
-                try GuardianModeManager.shared.start()
-                result(["status": "active"])
-            } catch {
-                result(FlutterError(
-                    code: "START_FAILED",
-                    message: "Failed to start Guardian Mode",
-                    details: error.localizedDescription
-                ))
-            }
-            
-        case "stop":
-            GuardianModeManager.shared.stop()
-            result(["status": "idle"])
-            
-        case "injectAudioClip":
-            guard let args = call.arguments as? [String: Any],
-                  let audioPath = args["audioPath"] as? String else {
-                result(FlutterError(
-                    code: "INVALID_ARGS",
-                    message: "Missing audioPath parameter",
-                    details: nil
-                ))
-                return
-            }
-            
-            let audioURL = URL(fileURLWithPath: audioPath)
-            GuardianModeManager.shared.injectAudioClip(audioURL: audioURL)
-            result(nil)
-            
-        case "getState":
-            let state = GuardianModeManager.shared.getState()
-            result(["status": state])
-            
-        default:
-            result(FlutterMethodNotImplemented)
-        }
-    }
 }
