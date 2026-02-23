@@ -238,6 +238,7 @@
 		97C146F01CF9000F007C117D /* Runner */ = {
 			isa = PBXGroup;
 			children = (
+				GDGRP00000000000GUARDIAN /* GuardianMode */,
 				4255287C2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift */,
 				422906C82E75B0A100F49E67 /* FlutterCommunicator.g.swift */,
 				5FCEB2FF2C2758C000B17EE8 /* RunnerRelease-dev.entitlements */,
@@ -265,6 +266,15 @@
 			path = Runner;
 			sourceTree = "<group>";
 		};
+		GDGRP00000000000GUARDIAN /* GuardianMode */ = {
+			isa = PBXGroup;
+			children = (
+				8F5D6E82A28E418DA2C0BBD4 /* GuardianModeManager.swift */,
+			);
+			path = GuardianMode;
+			sourceTree = "<group>";
+		};
+
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -514,6 +524,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */,
 				5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */,
+				A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
