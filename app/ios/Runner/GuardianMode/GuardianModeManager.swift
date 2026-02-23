@@ -1,22 +1,23 @@
 import Foundation
 import AVFoundation
+import Combine
 
 class GuardianModeManager: NSObject {
     static let shared = GuardianModeManager()
     
     private var audioPlayer: AVQueuePlayer?
-    private weak var playerLooper: AVPlayerLooper?  // FIX: weak to break retain cycle
     private var isActive = false
-    private let queue = DispatchQueue(label: "com.ella.guardianmode")  // FIX: thread safety
+    private let queue = DispatchQueue(label: "com.ella.guardianmode")
+    private var cancellables = Set<AnyCancellable>()
     
     private override init() {
         super.init()
-        setupInterruptionHandling()  // FIX: handle interruptions
+        setupInterruptionHandling()
     }
     
     /// Start Guardian Mode - begins silent audio loop
     func start() throws {
-        try queue.sync {  // FIX: thread-safe
+        try queue.sync {
             guard !isActive else {
                 print("GuardianMode: Already active, ignoring start()")
                 return
@@ -27,44 +28,42 @@ class GuardianModeManager: NSObject {
             try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try audioSession.setActive(true)
             
-            do {
-                // Load silent audio file
-                guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
-                    throw NSError(domain: "com.ella.GuardianMode", code: 1, userInfo: [NSLocalizedDescriptionKey: "Silent audio file not found"])
-                }
-                
-                let playerItem = AVPlayerItem(url: silenceURL)
-                let queuePlayer = AVQueuePlayer(playerItem: playerItem)
-                
-                // Loop the silent audio infinitely
-                let looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
-                
-                self.audioPlayer = queuePlayer
-                self.playerLooper = looper
-                
-                // Start playback
-                queuePlayer.play()
-                isActive = true
-                
-                print("GuardianMode: Started - silent loop playing")
-            } catch {
-                try? audioSession.setActive(false)  // FIX: cleanup on error
-                throw error
+            // Load silence file
+            guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
+                throw NSError(domain: "GuardianMode", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Silent audio file not found"
+                ])
             }
+            
+            // Pre-queue 50 silence items (NOT using looper)
+            let silenceItems = (0..<50).map { _ in AVPlayerItem(url: silenceURL) }
+            let queuePlayer = AVQueuePlayer(items: silenceItems)
+            
+            self.audioPlayer = queuePlayer
+            self.isActive = true
+            
+            // Setup observer for item endings
+            setupItemEndObserver()
+            
+            queuePlayer.play()
+            
+            print("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
         }
     }
     
     /// Stop Guardian Mode - stops audio and deactivates session
     func stop() {
-        queue.sync {  // FIX: thread-safe
+        queue.sync {
             guard isActive else {
                 print("GuardianMode: Already stopped, ignoring stop()")
                 return
             }
             
             audioPlayer?.pause()
+            audioPlayer?.removeAllItems()
             audioPlayer = nil
-            playerLooper = nil
+            cancellables.removeAll()  // Clean up Combine subscriptions
+            isActive = false
             
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -72,7 +71,6 @@ class GuardianModeManager: NSObject {
                 print("GuardianMode: Error deactivating audio session: \(error)")
             }
             
-            isActive = false
             print("GuardianMode: Stopped")
         }
     }
@@ -119,21 +117,72 @@ class GuardianModeManager: NSObject {
                 return
             }
             
-            let playerItem = AVPlayerItem(url: silenceURL)
-            let looper = AVPlayerLooper(player: player, templateItem: playerItem)
-            self.playerLooper = looper
+            // Re-queue silence items
+            let silenceItems = (0..<50).map { _ in AVPlayerItem(url: silenceURL) }
+            for item in silenceItems {
+                player.insert(item, after: nil)
+            }
             player.play()
+            
+            // Re-setup observer
+            self.setupItemEndObserver()
         }
     }
     
     /// Get current Guardian Mode state
     func getState() -> String {
-        return queue.sync {  // FIX: thread-safe
+        return queue.sync {
             return isActive ? "active" : "idle"
         }
     }
     
-    // FIX: Add interruption handling
+    // MARK: - Queue Management
+    
+    private func setupItemEndObserver() {
+        // Using Combine for modern iOS observation pattern
+        NotificationCenter.default
+            .publisher(for: .AVPlayerItemDidPlayToEndTime, object: audioPlayer?.currentItem)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] notification in
+                self?.handleItemEnd(notification: notification)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func handleItemEnd(notification: Notification) {
+        queue.async { [weak self] in
+            guard let self = self,
+                  let player = self.audioPlayer,
+                  self.isActive else { return }
+            
+            // Check queue depth - keep at least 10 items buffered
+            let queueDepth = player.items().count
+            
+            if queueDepth < 10 {
+                // Queue more silence to maintain buffer
+                self.queueSilence()
+            }
+        }
+    }
+    
+    func queueSilence() {
+        queue.async { [weak self] in
+            guard let self = self,
+                  let player = self.audioPlayer,
+                  let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav"),
+                  self.isActive else { return }
+            
+            let silenceItem = AVPlayerItem(url: silenceURL)
+            
+            // Append to end of queue
+            player.insert(silenceItem, after: nil)
+            
+            print("GuardianMode: Queued silence (queue depth: \(player.items().count))")
+        }
+    }
+    
+    // MARK: - Interruption Handling
+    
     private func setupInterruptionHandling() {
         NotificationCenter.default.addObserver(
             self,
@@ -156,7 +205,6 @@ class GuardianModeManager: NSObject {
         }
     }
     
-    // FIX: Add deinit cleanup
     deinit {
         stop()
         NotificationCenter.default.removeObserver(self)
