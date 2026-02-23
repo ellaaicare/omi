@@ -149,11 +149,31 @@ class GuardianModeManager: NSObject {
             // Create player item from remote URL
             let audioItem = AVPlayerItem(url: audioURL)
 
+            // Observe when item is ready to play (injection complete)
+            audioItem.publisher(for: \.status)
+                .sink { [weak self, eventId] status in
+                    if status == .readyToPlay {
+                        print("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                    } else if status == .failed {
+                        print("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
+                    }
+                }
+                .store(in: &self.cancellables)
+
             // Insert to play NEXT (after currently playing item)
             // This puts it at position 2 in the queue
             if player.canInsert(audioItem, after: player.currentItem) {
                 player.insert(audioItem, after: player.currentItem)
                 print("GuardianMode: Remote audio queued at position 2")
+                
+                // Observe when playback actually starts
+                NotificationCenter.default
+                    .publisher(for: .AVPlayerItemNewAccessLogEntry, object: audioItem)
+                    .first()
+                    .sink { [eventId] _ in
+                        print("PLAYBACK_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                    }
+                    .store(in: &self.cancellables)
             } else {
                 print("GuardianMode: ERROR - Cannot insert audio item")
             }
