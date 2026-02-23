@@ -126,6 +126,31 @@ class GuardianModeManager: NSObject {
             print("GuardianMode: Queued silence (queue depth: \(player.items().count))")
         }
     }
+
+    func injectRemoteAudio(audioURL: URL) {
+        queue.async { [weak self] in
+            guard let self = self,
+                  let player = self.audioPlayer,
+                  self.isActive else {
+                print("GuardianMode: Cannot inject audio - not active")
+                return
+            }
+
+            print("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
+
+            // Create player item from remote URL
+            let audioItem = AVPlayerItem(url: audioURL)
+
+            // Insert to play NEXT (after currently playing item)
+            // This puts it at position 2 in the queue
+            if player.canInsert(audioItem, after: player.currentItem) {
+                player.insert(audioItem, after: player.currentItem)
+                print("GuardianMode: Remote audio queued at position 2")
+            } else {
+                print("GuardianMode: ERROR - Cannot insert audio item")
+            }
+        }
+    }
     
     deinit {
         stop()
