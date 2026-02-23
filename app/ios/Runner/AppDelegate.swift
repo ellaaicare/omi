@@ -1,5 +1,4 @@
 import UIKit
-import UIKit
 import Flutter
 import UserNotifications
 import app_links
@@ -162,7 +161,9 @@ extension FlutterError: Error {}
         name: "com.ellaaicare.omi/guardian_mode",
         binaryMessenger: controller.binaryMessenger
     )
-    guardianModeChannel?.setMethodCallHandler(handleGuardianModeMethodCall)
+    guardianModeChannel?.setMethodCallHandler { [weak self] (call, result) in
+        self?.handleGuardianModeMethodCall(call, result: result)
+    }
     print("AppDelegate: Guardian Mode MethodChannel registered")
 
 
@@ -752,7 +753,8 @@ extension AppDelegate: WCSessionDelegate {
             
         case "injectAudioClip":
             guard let args = call.arguments as? [String: Any],
-                  let audioPath = args["audioPath"] as? String else {
+                  let audioPath = args["audioPath"] as? String,
+                  !audioPath.isEmpty else {
                 result(FlutterError(
                     code: "INVALID_ARGS",
                     message: "Missing audioPath parameter",
@@ -760,10 +762,10 @@ extension AppDelegate: WCSessionDelegate {
                 ))
                 return
             }
-            
+
             let audioURL = URL(fileURLWithPath: audioPath)
             GuardianModeManager.shared.injectAudioClip(audioURL: audioURL)
-            result(nil)
+            result(["status": "injected"])
             
         case "getState":
             let state = GuardianModeManager.shared.getState()
