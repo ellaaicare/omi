@@ -142,17 +142,9 @@ class GuardianModeService {
         return;
       }
 
-      // Inject into native audio queue
+      // Inject into native audio queue (native will delete after playing)
       await _channel.invokeMethod('injectAudioClip', {'audioPath': audioPath});
       print('GuardianMode: Injected clip $clipNumber');
-
-      // Clean up TTS file after successful injection
-      try {
-        await File(audioPath).delete();
-        print('GuardianMode: Cleaned up TTS file: $audioPath');
-      } catch (e) {
-        print('GuardianMode: Warning - failed to delete TTS file: $e');
-      }
     } catch (e) {
       print('GuardianMode: Error generating test clip: $e');
     }
