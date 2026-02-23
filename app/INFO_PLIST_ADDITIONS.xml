@@ -1,0 +1,42 @@
+<!-- Add these entries to your ios/Runner/Info.plist file -->
+<!-- Place them inside the main <dict> tag -->
+
+<!-- Background Modes for Audio -->
+<key>UIBackgroundModes</key>
+<array>
+    <string>audio</string>
+    <string>voip</string>
+    <string>processing</string>
+    <string>fetch</string>
+    <string>remote-notification</string>
+</array>
+
+<!-- Audio Session Category - ensures audio continues in background -->
+<key>UIRequiresPersistentWiFi</key>
+<false/>
+
+<!-- Microphone Permission (if not already present) -->
+<key>NSMicrophoneUsageDescription</key>
+<string>This app needs microphone access to record audio from your device and Apple Watch.</string>
+
+<!-- Speech Recognition Permission (if not already present) -->
+<key>NSSpeechRecognitionUsageDescription</key>
+<string>This app needs speech recognition to transcribe audio recordings.</string>
+
+<!-- Bluetooth Permission for audio routing (if not already present) -->
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>This app needs Bluetooth access to connect to audio devices.</string>
+
+<!-- Health Kit (if not already present) -->
+<key>NSHealthShareUsageDescription</key>
+<string>This app needs to read health data.</string>
+<key>NSHealthUpdateUsageDescription</key>
+<string>This app needs to write health data.</string>
+
+<!-- Reminders (if not already present) -->
+<key>NSRemindersUsageDescription</key>
+<string>This app needs access to reminders to create tasks.</string>
+
+<!-- Ensure app can run audio in background -->
+<key>UIApplicationExitsOnSuspend</key>
+<false/>
