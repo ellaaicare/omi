@@ -536,7 +536,7 @@ extension AppDelegate: PKPushRegistryDelegate {
 // MARK: - Plugin Registration
 
 func registerPlugins(registry: FlutterPluginRegistry) {
-  GeneratedPluginRegistrant.register(withRegistry: registry)
+  GeneratedPluginRegistrant.register(with: registry)
 }
 
 // MARK: - WCSessionDelegate

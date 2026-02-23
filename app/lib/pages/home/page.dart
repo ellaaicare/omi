@@ -56,6 +56,7 @@ import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_emergency_button.dart';
+import 'package:omi/ella/widgets/guardian_mode_button.dart';
 import 'widgets/battery_info_widget.dart';
 
 class HomePageWrapper extends StatefulWidget {
@@ -639,7 +640,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                         child: Consumer<HomeProvider>(
                           builder: (context, home, _) {
                             if (home.selectedIndex != 0) return const SizedBox.shrink();
-                            return Container();
+                            return const Center(child: GuardianModeButton());
                           },
                         ),
                       ),

@@ -7,12 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		0162ECA35ABCBED5D21250E7 /* prodRelease.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 35656BCB5CBAA7C0BB162EE0 /* prodRelease.xcconfig */; };
-		0D1B1F2689256C0895BECAE9 /* prodDebug.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 08E3947A4217EF205E22BD44 /* prodDebug.xcconfig */; };
-		12F9316B94DF72426BF544B4 /* devProfile.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */; };
+		A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F5D6E82A28E418DA2C0BBD4 /* GuardianModeManager.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		16935068EFFE77C62C493C3C /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = E7A9F5F37DDF9FA87AC8A5CD /* GoogleService-Info.plist */; };
-		29B635C199B3BDE0F2BE8EC5 /* devRelease.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 79B00761CB247C7EC7C8983B /* devRelease.xcconfig */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		422906C92E75B0A100F49E67 /* FlutterCommunicator.g.swift in Sources */ = {isa = PBXBuildFile; fileRef = 422906C82E75B0A100F49E67 /* FlutterCommunicator.g.swift */; };
 		4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4255287C2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift */; };
@@ -23,6 +20,8 @@
 		593482832F4ADC9300888317 /* AccessTokenManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482802F4ADC9300888317 /* AccessTokenManager.swift */; };
 		593482852F4ADCAA00888317 /* VoIPPushHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482842F4ADCAA00888317 /* VoIPPushHandler.swift */; };
 		593482872F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593482862F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift */; };
+		593483092F4BD6F700888317 /* QUICK_REFERENCE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 593483082F4BD6F700888317 /* QUICK_REFERENCE.txt */; };
+		5934830B2F4BD7D400888317 /* BUILD_FIX.md in Resources */ = {isa = PBXBuildFile; fileRef = 5934830A2F4BD7D400888317 /* BUILD_FIX.md */; };
 		6436409A27A31CD800820AF7 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 6436409C27A31CD800820AF7 /* InfoPlist.strings */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
@@ -31,11 +30,7 @@
 		9958B35F20EB7136AF2389D8 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF506DE6C24FC5AB2AEFE6DA /* Pods_Runner.framework */; };
 		AB12345678901234567890AB /* AppleRemindersService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD12345678901234567890CD /* AppleRemindersService.swift */; };
 		AB12345678901234567890AC /* AppleHealthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD12345678901234567890CE /* AppleHealthService.swift */; };
-		B017E73914CFF7C22190E0C3 /* prodProfile.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = B52E83A1CC630E163A04DC50 /* prodProfile.xcconfig */; };
-		C6DD8F6A334A31116A75C4EE /* devDebug.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 17DD34CA2CFE6F3845E13C99 /* devDebug.xcconfig */; };
 		CE7B938264FB7372447F8E21 /* prodLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ACE7BEFB9654B6DF5B9E1790 /* prodLaunchScreen.storyboard */; };
-		CF0FE6152D61FDC10072C10D /* Custom.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = CF0FE6142D61FDC10072C10D /* Custom.xcconfig */; };
-		CF2F518D2EC08EA60025B331 /* Base.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = CF2F518C2EC08EA60025B331 /* Base.xcconfig */; };
 		EF12345678901234567890EF /* WifiNetworkPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = FG12345678901234567890FG /* WifiNetworkPlugin.swift */; };
 		ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = ELLA01000000000000000001 /* EllaLaunchScreen.storyboard */; };
 		FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = EF770A936DE2AA63387FD198 /* devLaunchScreen.storyboard */; };
@@ -65,6 +60,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		8F5D6E82A28E418DA2C0BBD4 /* GuardianModeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuardianModeManager.swift; sourceTree = "<group>"; };
 		03BA73541F37D6361DCF18DC /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		08E3947A4217EF205E22BD44 /* prodDebug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = prodDebug.xcconfig; path = Flutter/prodDebug.xcconfig; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
@@ -89,6 +85,8 @@
 		593482812F4ADC9300888317 /* TwilioVoiceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TwilioVoiceManager.swift; path = Runner/Twilio/TwilioVoiceManager.swift; sourceTree = "<group>"; };
 		593482842F4ADCAA00888317 /* VoIPPushHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VoIPPushHandler.swift; path = Runner/VoIP/VoIPPushHandler.swift; sourceTree = "<group>"; };
 		593482862F4ADE8B00888317 /* TwilioVoiceMethodChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TwilioVoiceMethodChannel.swift; path = Runner/Flutter/TwilioVoiceMethodChannel.swift; sourceTree = "<group>"; };
+		593483082F4BD6F700888317 /* QUICK_REFERENCE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = QUICK_REFERENCE.txt; sourceTree = "<group>"; };
+		5934830A2F4BD7D400888317 /* BUILD_FIX.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = BUILD_FIX.md; sourceTree = "<group>"; };
 		5F7FD4162BF1232500923839 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		5FCEB2FA2C27586C00B17EE8 /* RunnerDebug-prod.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "RunnerDebug-prod.entitlements"; sourceTree = "<group>"; };
 		5FCEB2FB2C27587100B17EE8 /* RunnerProfile-prod.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "RunnerProfile-prod.entitlements"; sourceTree = "<group>"; };
@@ -261,6 +259,8 @@
 				FG12345678901234567890FG /* WifiNetworkPlugin.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 				6436409C27A31CD800820AF7 /* InfoPlist.strings */,
+				593483082F4BD6F700888317 /* QUICK_REFERENCE.txt */,
+				5934830A2F4BD7D400888317 /* BUILD_FIX.md */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -319,6 +319,7 @@
 		97C146E61CF9000F007C117D /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
+				BuildIndependentTargetsInParallel = YES;
 				LastSwiftUpdateCheck = 1640;
 				LastUpgradeCheck = 1510;
 				ORGANIZATIONNAME = "";
@@ -364,23 +365,17 @@
 			buildActionMask = 2147483647;
 			files = (
 				97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */,
+				5934830B2F4BD7D400888317 /* BUILD_FIX.md in Resources */,
 				6436409A27A31CD800820AF7 /* InfoPlist.strings in Resources */,
 				3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */,
 				97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */,
-				CF0FE6152D61FDC10072C10D /* Custom.xcconfig in Resources */,
 				97C146FC1CF9000F007C117D /* Main.storyboard in Resources */,
 				426B89AD2C46919D00E24442 /* Config in Resources */,
-				0D1B1F2689256C0895BECAE9 /* prodDebug.xcconfig in Resources */,
-				B017E73914CFF7C22190E0C3 /* prodProfile.xcconfig in Resources */,
-				CF2F518D2EC08EA60025B331 /* Base.xcconfig in Resources */,
-				0162ECA35ABCBED5D21250E7 /* prodRelease.xcconfig in Resources */,
-				C6DD8F6A334A31116A75C4EE /* devDebug.xcconfig in Resources */,
-				12F9316B94DF72426BF544B4 /* devProfile.xcconfig in Resources */,
-				29B635C199B3BDE0F2BE8EC5 /* devRelease.xcconfig in Resources */,
 				CE7B938264FB7372447F8E21 /* prodLaunchScreen.storyboard in Resources */,
 				FAD7504969BE8B6F6D8D0BD1 /* devLaunchScreen.storyboard in Resources */,
 				ELLA01000000000000000002 /* EllaLaunchScreen.storyboard in Resources */,
 				16935068EFFE77C62C493C3C /* GoogleService-Info.plist in Resources */,
+				593483092F4BD6F700888317 /* QUICK_REFERENCE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -499,7 +494,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-			);
+			
+				A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		97C146EA1CF9000F007C117D /* Sources */ = {
@@ -554,7 +550,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = D75F0E14BC0E70ACCB7823C4 /* Pods-Runner.debug-prod.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerDebug-prod.entitlements";
@@ -562,6 +557,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -571,7 +567,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = DFD28BCDA1DA7AEDD064D056 /* Pods-Runner.profile-prod.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerProfile-prod.entitlements";
@@ -581,6 +576,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				TARGETED_DEVICE_FAMILY = 1;
@@ -591,7 +587,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = A3FA3FEE5E944B8E7459BC94 /* Pods-Runner.release-prod.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerRelease-prod.entitlements";
@@ -599,6 +594,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -608,7 +604,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 17DD34CA2CFE6F3845E13C99 /* devDebug.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerDebug-dev.entitlements";
@@ -616,6 +611,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -625,7 +621,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerProfile-dev.entitlements";
@@ -633,6 +628,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -642,7 +638,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 79B00761CB247C7EC7C8983B /* devRelease.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerRelease-dev.entitlements";
@@ -652,6 +647,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Omi;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = Runner;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				TARGETED_DEVICE_FAMILY = 1;
@@ -662,7 +658,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
@@ -704,6 +699,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				TARGETED_DEVICE_FAMILY = 1;
 				VALIDATE_PRODUCT = YES;
@@ -714,7 +710,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
@@ -743,6 +738,7 @@
 				);
 				MARKETING_VERSION = 1.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1245,7 +1241,6 @@
 			baseConfigurationReference = 08E3947A4217EF205E22BD44 /* prodDebug.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1310,6 +1305,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -1322,7 +1318,6 @@
 			baseConfigurationReference = 35656BCB5CBAA7C0BB162EE0 /* prodRelease.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1379,7 +1374,9 @@
 				MTL_ENABLE_DEBUG_INFO = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Owholemodule";
 				SWIFT_VERSION = 5.0;
@@ -1392,7 +1389,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
@@ -1441,6 +1437,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -1450,7 +1447,6 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++0x";
@@ -1492,7 +1488,9 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MTL_ENABLE_DEBUG_INFO = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-Owholemodule";
 				TARGETED_DEVICE_FAMILY = 1;
 				VALIDATE_PRODUCT = YES;
@@ -1503,7 +1501,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
@@ -1531,6 +1528,7 @@
 				);
 				MARKETING_VERSION = 1.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1549,7 +1547,6 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
@@ -1578,6 +1575,7 @@
 				);
 				MARKETING_VERSION = 1.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.omi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -1596,7 +1594,6 @@
 			baseConfigurationReference = 79B00761CB247C7EC7C8983B /* devRelease.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1653,7 +1650,9 @@
 				MTL_ENABLE_DEBUG_INFO = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Owholemodule";
 				SWIFT_VERSION = 5.0;
@@ -1667,7 +1666,6 @@
 			baseConfigurationReference = 556416C8748DD3DD2C06A9DB /* devProfile.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1725,6 +1723,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -1738,7 +1737,6 @@
 			baseConfigurationReference = B52E83A1CC630E163A04DC50 /* prodProfile.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1796,6 +1794,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -1809,7 +1808,6 @@
 			baseConfigurationReference = 17DD34CA2CFE6F3845E13C99 /* devDebug.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ARCHS = $ARCHS_STANDARD_64_BIT;
 				ASSETCATALOG_COMPILER_APPICON_NAME = "$(ASSET_PREFIX)AppIcon";
 				BUILD_LIBRARY_FOR_DISTRIBUTION = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -1874,6 +1872,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
