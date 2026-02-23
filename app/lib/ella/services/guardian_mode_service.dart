@@ -127,9 +127,18 @@ class GuardianModeService {
       final audioPath = '${documentsDir.path}/$fileName';
       print('GuardianMode: Generated TTS file: $audioPath');
 
-      // Validate that TTS file was created successfully
-      if (!await File(audioPath).exists()) {
-        print('GuardianMode: TTS file not created: $audioPath');
+      // Validate that TTS file was created successfully (with retry for async file write)
+      bool fileExists = false;
+      for (int i = 0; i < 10; i++) {
+        if (await File(audioPath).exists()) {
+          fileExists = true;
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      
+      if (!fileExists) {
+        print('GuardianMode: TTS file not created after 1 second: $audioPath');
         return;
       }
 
