@@ -768,8 +768,10 @@ extension AppDelegate: WCSessionDelegate {
                 return
             }
 
+            let eventId = args["eventId"] as? String ?? "manual-\(Int(Date().timeIntervalSince1970))"
+
             print("AppDelegate: Injecting remote audio: \(audioURL.absoluteString)")
-            GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL)
+            GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
             result(["status": "injected", "url": audioURLString])
             
         default:

@@ -134,7 +134,7 @@ class GuardianModeManager: NSObject {
         }
     }
 
-    func injectRemoteAudio(audioURL: URL) {
+    func injectRemoteAudio(audioURL: URL, eventId: String) {
         queue.async { [weak self] in
             guard let self = self,
                   let player = self.audioPlayer,
@@ -143,6 +143,7 @@ class GuardianModeManager: NSObject {
                 return
             }
 
+            print("DOWNLOAD_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
             print("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
 
             // Create player item from remote URL

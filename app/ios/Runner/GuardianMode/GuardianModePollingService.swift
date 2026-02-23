@@ -122,7 +122,7 @@ class GuardianModePollingService {
 
                 // Inject into Guardian Mode queue
                 DispatchQueue.main.async {
-                    GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL)
+                    GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
                 }
             } else {
                 // No new audio - silence continues
