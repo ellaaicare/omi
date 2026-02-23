@@ -554,6 +554,7 @@
 				4255287D2E7C4B8300FD5CFB /* RecorderHostApiImpl.swift in Sources */,
 				5934827F2F4ADC6400888317 /* CallKitProvider.swift in Sources */,
 				A6120CC9725B450B9E342698 /* GuardianModeManager.swift in Sources */,
+				GDPOLL1111111111111111 /* GuardianModePollingService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

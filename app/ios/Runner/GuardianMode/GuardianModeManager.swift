@@ -46,6 +46,10 @@ class GuardianModeManager: NSObject {
             
             queuePlayer.play()
             
+            // Start polling for remote audio
+            GuardianModePollingService.shared.startPolling()
+            print("GuardianMode: Polling started")
+            
             print("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
         }
     }
@@ -53,6 +57,9 @@ class GuardianModeManager: NSObject {
     /// Stop Guardian Mode - stops audio and deactivates session
     func stop() {
         queue.sync {
+            // Stop polling
+            GuardianModePollingService.shared.stopPolling()
+            
             guard isActive else {
                 print("GuardianMode: Already stopped, ignoring stop()")
                 return
