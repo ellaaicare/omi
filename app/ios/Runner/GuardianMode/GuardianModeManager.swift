@@ -12,7 +12,6 @@ class GuardianModeManager: NSObject {
     
     private override init() {
         super.init()
-        setupInterruptionHandling()
     }
     
     /// Start Guardian Mode - begins silent audio loop
@@ -75,60 +74,6 @@ class GuardianModeManager: NSObject {
         }
     }
     
-    /// Inject an audio clip into the playback queue
-    /// - Parameter audioURL: URL to audio file to play
-    func injectAudioClip(audioURL: URL) {
-        queue.async {
-            guard self.isActive, let player = self.audioPlayer else {
-                NSLog("[GuardianMode] Cannot inject - not active")
-                return
-            }
-            
-            NSLog("[GuardianMode] Playing clip: %@", audioURL.lastPathComponent)
-            
-            // Stop current playback
-            player.pause()
-            player.removeAllItems()
-            
-            // Play the TTS clip
-            let clipItem = AVPlayerItem(url: audioURL)
-            player.replaceCurrentItem(with: clipItem)
-            player.play()
-            
-            // Wait 3 seconds for clip to finish, then restart loop and cleanup
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                // Cleanup the file
-                try? FileManager.default.removeItem(at: audioURL)
-                NSLog("[GuardianMode] Cleaned up file")
-                
-                // Restart silent loop
-                self?.restartSilentLoop()
-            }
-        }
-    }
-    
-    private func restartSilentLoop() {
-        queue.async {
-            guard self.isActive, let player = self.audioPlayer else { return }
-            
-            NSLog("[GuardianMode] Restarting loop")
-            
-            guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
-                return
-            }
-            
-            // Re-queue silence items
-            let silenceItems = (0..<50).map { _ in AVPlayerItem(url: silenceURL) }
-            for item in silenceItems {
-                player.insert(item, after: nil)
-            }
-            player.play()
-            
-            // Re-setup observer
-            self.setupItemEndObserver()
-        }
-    }
-    
     /// Get current Guardian Mode state
     func getState() -> String {
         return queue.sync {
@@ -140,8 +85,9 @@ class GuardianModeManager: NSObject {
     
     private func setupItemEndObserver() {
         // Using Combine for modern iOS observation pattern
+        // Watch ALL AVPlayerItem endings (not just the first item)
         NotificationCenter.default
-            .publisher(for: .AVPlayerItemDidPlayToEndTime, object: audioPlayer?.currentItem)
+            .publisher(for: .AVPlayerItemDidPlayToEndTime)
             .receive(on: RunLoop.main)
             .sink { [weak self] notification in
                 self?.handleItemEnd(notification: notification)
@@ -181,32 +127,7 @@ class GuardianModeManager: NSObject {
         }
     }
     
-    // MARK: - Interruption Handling
-    
-    private func setupInterruptionHandling() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleInterruption),
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance()
-        )
-    }
-    
-    @objc private func handleInterruption(notification: Notification) {
-        guard let userInfo = notification.userInfo,
-              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
-            return
-        }
-        
-        if type == .ended, isActive {
-            audioPlayer?.play()
-            print("GuardianMode: Resumed after interruption")
-        }
-    }
-    
     deinit {
         stop()
-        NotificationCenter.default.removeObserver(self)
     }
 }
