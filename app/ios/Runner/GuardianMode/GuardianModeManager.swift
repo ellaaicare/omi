@@ -88,18 +88,22 @@ class GuardianModeManager: NSObject {
             
             NSLog("[GuardianMode] Playing clip: %@", audioURL.lastPathComponent)
             
-            // Stop looper, play clip, restart loop when done
+            // Stop current playback
             player.pause()
+            player.removeAllItems()
+            
+            // Play the TTS clip
             let clipItem = AVPlayerItem(url: audioURL)
             player.replaceCurrentItem(with: clipItem)
             player.play()
             
-            // Restart loop after clip
-            NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemDidPlayToEndTime,
-                object: clipItem,
-                queue: .main
-            ) { [weak self] _ in
+            // Wait 3 seconds for clip to finish, then restart loop and cleanup
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                // Cleanup the file
+                try? FileManager.default.removeItem(at: audioURL)
+                NSLog("[GuardianMode] Cleaned up file")
+                
+                // Restart silent loop
                 self?.restartSilentLoop()
             }
         }
