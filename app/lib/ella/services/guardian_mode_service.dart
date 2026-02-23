@@ -37,8 +37,8 @@ class GuardianModeService {
 
     try {
       // Call iOS native to start silent loop
-      final result = await _channel.invokeMethod('start');
-      print('GuardianMode: Native start result: $result');
+      await _channel.invokeMethod('start');
+      print('GuardianMode: Native started');
 
       _updateState(GuardianModeState.active);
 
@@ -59,6 +59,9 @@ class GuardianModeService {
     }
 
     try {
+      // Stop TTS
+      await _tts.stop();
+      
       // Stop test audio timer
       _stopTestAudioTimer();
 
@@ -67,6 +70,9 @@ class GuardianModeService {
       print('GuardianMode: Stopped');
 
       _updateState(GuardianModeState.idle);
+      
+      // Clean up resources (singleton pattern - no dispose() method)
+      _cleanup();
     } catch (e) {
       print('GuardianMode: Error stopping: $e');
       _updateState(GuardianModeState.error);
@@ -96,6 +102,12 @@ class GuardianModeService {
 
   /// Generate test audio clip using TTS and inject it
   Future<void> _generateAndInjectTestClip(int clipNumber) async {
+    // Check if we're still in active state (prevents race conditions)
+    if (_currentState != GuardianModeState.active) {
+      print('GuardianMode: Skipping clip generation - not in active state');
+      return;
+    }
+
     try {
       final text = 'Guardian test number $clipNumber';
       print('GuardianMode: Generating test clip: $text');
@@ -112,9 +124,23 @@ class GuardianModeService {
       await _tts.synthesizeToFile(text, audioPath);
       print('GuardianMode: Generated TTS file: $audioPath');
 
+      // Validate that TTS file was created successfully
+      if (!await File(audioPath).exists()) {
+        print('GuardianMode: TTS file not created: $audioPath');
+        return;
+      }
+
       // Inject into native audio queue
       await _channel.invokeMethod('injectAudioClip', {'audioPath': audioPath});
       print('GuardianMode: Injected clip $clipNumber');
+
+      // Clean up TTS file after successful injection
+      try {
+        await File(audioPath).delete();
+        print('GuardianMode: Cleaned up TTS file: $audioPath');
+      } catch (e) {
+        print('GuardianMode: Warning - failed to delete TTS file: $e');
+      }
     } catch (e) {
       print('GuardianMode: Error generating test clip: $e');
     }
@@ -126,9 +152,10 @@ class GuardianModeService {
     _stateController.add(newState);
   }
 
-  /// Dispose resources
-  void dispose() {
-    _stopTestAudioTimer();
+  /// Clean up resources
+  /// Note: This is a singleton, so dispose() is not appropriate.
+  /// Resources are cleaned up when stop() is called instead.
+  void _cleanup() {
     _stateController.close();
   }
 }
