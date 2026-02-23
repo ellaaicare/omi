@@ -54,7 +54,7 @@ class GuardianModePollingService {
         isPolling = false
     }
 
-    func pollForNewAudio() async throws -> URL? {
+    func pollForNewAudio() async throws -> (url: URL, id: String)? {
         let endpoint = "\(backendURL)/api/guardian/next-audio?uid=test-uid"
 
         guard let url = URL(string: endpoint) else {
@@ -81,8 +81,10 @@ class GuardianModePollingService {
 
         let pollResponse = try JSONDecoder().decode(PollResponse.self, from: data)
 
-        if let urlString = pollResponse.url, let audioURL = URL(string: urlString) {
-            return audioURL
+        if let urlString = pollResponse.url,
+           let id = pollResponse.id,
+           let audioURL = URL(string: urlString) {
+            return (url: audioURL, id: id)
         }
 
         return nil
@@ -109,7 +111,13 @@ class GuardianModePollingService {
         guard isPolling else { return }
 
         do {
-            if let audioURL = try await pollForNewAudio() {
+            if let result = try await pollForNewAudio() {
+                let audioURL = result.url
+                let eventId = result.id
+
+                // Log poll received with event ID and timestamp
+                print("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+
                 print("GuardianPolling: Found new audio: \(audioURL.absoluteString)")
 
                 // Inject into Guardian Mode queue
