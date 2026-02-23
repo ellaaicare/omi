@@ -80,16 +80,45 @@ class GuardianModeManager: NSObject {
     /// Inject an audio clip into the playback queue
     /// - Parameter audioURL: URL to audio file to play
     func injectAudioClip(audioURL: URL) {
-        queue.sync {  // FIX: thread-safe
-            guard isActive, let player = audioPlayer else {
-                print("GuardianMode: Cannot inject clip - not active")
+        queue.async {
+            guard self.isActive, let player = self.audioPlayer else {
+                NSLog("[GuardianMode] Cannot inject - not active")
                 return
             }
             
-            let clipItem = AVPlayerItem(url: audioURL)
-            player.insert(clipItem, after: player.currentItem)
+            NSLog("[GuardianMode] Playing clip: %@", audioURL.lastPathComponent)
             
-            print("GuardianMode: Injected audio clip: \(audioURL.lastPathComponent)")
+            // Stop looper, play clip, restart loop when done
+            player.pause()
+            let clipItem = AVPlayerItem(url: audioURL)
+            player.replaceCurrentItem(with: clipItem)
+            player.play()
+            
+            // Restart loop after clip
+            NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: clipItem,
+                queue: .main
+            ) { [weak self] _ in
+                self?.restartSilentLoop()
+            }
+        }
+    }
+    
+    private func restartSilentLoop() {
+        queue.async {
+            guard self.isActive, let player = self.audioPlayer else { return }
+            
+            NSLog("[GuardianMode] Restarting loop")
+            
+            guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
+                return
+            }
+            
+            let playerItem = AVPlayerItem(url: silenceURL)
+            let looper = AVPlayerLooper(player: player, templateItem: playerItem)
+            self.playerLooper = looper
+            player.play()
         }
     }
     
