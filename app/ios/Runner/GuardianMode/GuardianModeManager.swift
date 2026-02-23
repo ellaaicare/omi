@@ -35,7 +35,7 @@ class GuardianModeManager: NSObject {
             }
             
             // Pre-queue 50 silence items (NOT using looper)
-            let silenceItems = (0..<50).map { _ in AVPlayerItem(url: silenceURL) }
+            let silenceItems = (0..<20).map { _ in AVPlayerItem(url: silenceURL) }
             let queuePlayer = AVQueuePlayer(items: silenceItems)
             
             self.audioPlayer = queuePlayer
@@ -111,7 +111,7 @@ class GuardianModeManager: NSObject {
             // Check queue depth - keep at least 10 items buffered
             let queueDepth = player.items().count
             
-            if queueDepth < 10 {
+            if queueDepth < 5 {
                 // Queue more silence to maintain buffer
                 self.queueSilence()
             }
