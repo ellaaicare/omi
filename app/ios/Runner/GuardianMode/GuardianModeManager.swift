@@ -29,7 +29,7 @@ class GuardianModeManager: NSObject {
             
             do {
                 // Load silent audio file
-                guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav", subdirectory: "GuardianMode") else {
+                guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
                     throw NSError(domain: "com.ella.GuardianMode", code: 1, userInfo: [NSLocalizedDescriptionKey: "Silent audio file not found"])
                 }
                 
