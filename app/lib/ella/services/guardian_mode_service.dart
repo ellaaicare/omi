@@ -1,9 +1,6 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 
 enum GuardianModeState {
   idle,
@@ -27,7 +24,15 @@ class GuardianModeService {
 
   Timer? _testAudioTimer;
   int _testClipCounter = 0;
-  final FlutterTts _tts = FlutterTts();
+
+  // Bundled MP3 test files (simulating server audio responses)
+  static const List<String> _testAudioFiles = [
+    'test_audio_0.mp3',
+    'test_audio_1.mp3',
+    'test_audio_2.mp3',
+    'test_audio_3.mp3',
+    'test_audio_4.mp3',
+  ];
 
   /// Start Guardian Mode
   Future<void> start() async {
@@ -43,7 +48,7 @@ class GuardianModeService {
 
       _updateState(GuardianModeState.active);
 
-      // Start test audio injection timer (every 30 seconds)
+      // Start test audio injection timer (every 5 seconds)
       _startTestAudioTimer();
     } catch (e) {
       print('GuardianMode: Error starting: $e');
@@ -60,9 +65,6 @@ class GuardianModeService {
     }
 
     try {
-      // Stop TTS
-      await _tts.stop();
-      
       // Stop test audio timer
       _stopTestAudioTimer();
 
@@ -85,13 +87,16 @@ class GuardianModeService {
     _testClipCounter = 0;
     _testAudioTimer?.cancel();
 
-    _testAudioTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      _testClipCounter++;
-      await _generateAndInjectTestClip(_testClipCounter);
+    // Wait 2 seconds before first clip (let silent loop initialize)
+    Future.delayed(const Duration(seconds: 2), () {
+      if (_currentState == GuardianModeState.active) {
+        _injectNextTestClip();
+      }
     });
 
-    // Inject first clip immediately
-    _generateAndInjectTestClip(0);
+    _testAudioTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+      await _injectNextTestClip();
+    });
   }
 
   /// Stop test audio timer
@@ -101,52 +106,26 @@ class GuardianModeService {
     _testClipCounter = 0;
   }
 
-  /// Generate test audio clip using TTS and inject it
-  Future<void> _generateAndInjectTestClip(int clipNumber) async {
+  /// Inject next test audio clip from bundled MP3 files
+  Future<void> _injectNextTestClip() async {
     // Check if we're still in active state (prevents race conditions)
     if (_currentState != GuardianModeState.active) {
-      print('GuardianMode: Skipping clip generation - not in active state');
+      print('GuardianMode: Skipping clip injection - not in active state');
       return;
     }
 
     try {
-      final text = 'Guardian test number $clipNumber';
-      print('GuardianMode: Generating test clip: $text');
+      // Cycle through the test audio files
+      final fileName = _testAudioFiles[_testClipCounter % _testAudioFiles.length];
+      _testClipCounter++;
 
-      // Configure TTS
-      await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.5);
-      await _tts.setVolume(1.0);
+      print('GuardianMode: Injecting bundled test clip $_testClipCounter: $fileName');
 
-      // Generate audio file - flutter_tts only accepts filename, saves to Documents
-      final fileName = 'guardian_test_$clipNumber.wav';
-      await _tts.synthesizeToFile(text, fileName);
-
-      // Get the actual path where flutter_tts saved it (Documents directory)
-      final documentsDir = await getApplicationDocumentsDirectory();
-      final audioPath = '${documentsDir.path}/$fileName';
-      print('GuardianMode: Generated TTS file: $audioPath');
-
-      // Validate that TTS file was created successfully (with retry for async file write)
-      bool fileExists = false;
-      for (int i = 0; i < 10; i++) {
-        if (await File(audioPath).exists()) {
-          fileExists = true;
-          break;
-        }
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-      
-      if (!fileExists) {
-        print('GuardianMode: TTS file not created after 1 second: $audioPath');
-        return;
-      }
-
-      // Inject into native audio queue (native will delete after playing)
-      await _channel.invokeMethod('injectAudioClip', {'audioPath': audioPath});
-      print('GuardianMode: Injected clip $clipNumber');
+      // Pass filename to native side - it will look it up in app bundle
+      await _channel.invokeMethod('injectBundledAudioClip', {'fileName': fileName});
+      print('GuardianMode: Injected clip $_testClipCounter');
     } catch (e) {
-      print('GuardianMode: Error generating test clip: $e');
+      print('GuardianMode: Error injecting test clip: $e');
     }
   }
 

@@ -767,6 +767,32 @@ extension AppDelegate: WCSessionDelegate {
             GuardianModeManager.shared.injectAudioClip(audioURL: audioURL)
             result(["status": "injected"])
             
+
+        case "injectBundledAudioClip":
+            guard let args = call.arguments as? [String: Any],
+                  let fileName = args["fileName"] as? String,
+                  !fileName.isEmpty else {
+                result(FlutterError(
+                    code: "INVALID_ARGS",
+                    message: "Missing fileName parameter",
+                    details: nil
+                ))
+                return
+            }
+
+            // Look up bundled MP3 file at bundle root
+            guard let audioURL = Bundle.main.url(forResource: fileName.replacingOccurrences(of: ".mp3", with: ""), withExtension: "mp3") else {
+                result(FlutterError(
+                    code: "FILE_NOT_FOUND",
+                    message: "Bundled audio file not found: \(fileName)",
+                    details: nil
+                ))
+                return
+            }
+
+            GuardianModeManager.shared.injectAudioClip(audioURL: audioURL)
+            result(["status": "injected"])
+
         case "getState":
             let state = GuardianModeManager.shared.getState()
             result(["status": state])
