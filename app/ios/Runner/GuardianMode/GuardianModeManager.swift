@@ -240,7 +240,7 @@ class GuardianModeManager: NSObject {
     /// Download audio to local cache, then inject into queue
     private func downloadAndInject(remoteURL: URL, eventId: String, attempt: Int) {
         let maxAttempts = 3
-        let localFile = cacheDir.appendingPathComponent("\(eventId).audio")
+        let localFile = cacheDir.appendingPathComponent("\(eventId).mp3")
 
         NSLog("DOWNLOAD_START(\(eventId)) attempt=\(attempt) ts=\(Date().timeIntervalSince1970)")
 
