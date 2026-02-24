@@ -16,7 +16,7 @@ class GuardianModeService {
   static const MethodChannel _channel = MethodChannel('com.ellaaicare.omi/guardian_mode');
 
   StreamController<GuardianModeState>? _stateController;
-  Stream<GuardianModeState> get stateStream => 
+  Stream<GuardianModeState> get stateStream =>
       (_stateController ??= StreamController<GuardianModeState>.broadcast()).stream;
 
   GuardianModeState _currentState = GuardianModeState.idle;
@@ -73,7 +73,7 @@ class GuardianModeService {
       print('GuardianMode: Stopped');
 
       _updateState(GuardianModeState.idle);
-      
+
       // Clean up resources (singleton pattern - no dispose() method)
       _cleanup();
     } catch (e) {
