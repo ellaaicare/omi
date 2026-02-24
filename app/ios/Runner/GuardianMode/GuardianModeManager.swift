@@ -51,9 +51,10 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Verify audio session (configured once in AppDelegate)
+            // Activate audio session (configured in AppDelegate, activated here before playback)
             let audioSession = AVAudioSession.sharedInstance()
-            NSLog("GuardianMode: Using audio session - category: \(audioSession.category.rawValue), mode: \(audioSession.mode.rawValue), active: \(audioSession.isOtherAudioPlaying)")
+            try audioSession.setActive(true)
+            NSLog("GuardianMode: Audio session activated - category: \(audioSession.category.rawValue), mode: \(audioSession.mode.rawValue)")
 
             guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
                 throw NSError(domain: "GuardianMode", code: 1, userInfo: [
