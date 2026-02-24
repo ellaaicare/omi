@@ -604,7 +604,27 @@ def get_transcript_structure(
     tz: str,
     photos: List[ConversationPhoto] = None,
     calendar_meeting_context: 'CalendarMeetingContext' = None,
+    uid: str = None,
+    existing_conversation_id: str = None,
 ) -> Structured:
+    # ====== ELLA SUMMARY ADAPTER HOOK ======
+    try:
+        from utils.ella.summary import call_summary_agent
+        success, result_dict, error = call_summary_agent(
+            uid=uid,
+            conversation_id=existing_conversation_id,
+            transcript=transcript,
+            started_at=started_at,
+        )
+        if success and result_dict:
+            from utils.ella.summary import parse_summary_response
+            parsed = parse_summary_response(result_dict)
+            return Structured(**parsed)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️  Ella summary adapter failed: {e}, falling back to upstream LLM", flush=True)
+    # ====== END ELLA HOOK ======
     conversation_context = _build_conversation_context(transcript, photos, calendar_meeting_context)
     if not conversation_context:
         return Structured()  # Should be caught by discard logic, but as a safeguard.
@@ -686,6 +706,24 @@ def get_reprocess_transcript_structure(
     title: str,
     photos: List[ConversationPhoto] = None,
 ) -> Structured:
+    # ====== ELLA SUMMARY ADAPTER HOOK ======
+    try:
+        from utils.ella.summary import call_summary_agent
+        success, result_dict, error = call_summary_agent(
+            uid=uid,
+            conversation_id=existing_conversation_id,
+            transcript=transcript,
+            started_at=started_at,
+        )
+        if success and result_dict:
+            from utils.ella.summary import parse_summary_response
+            parsed = parse_summary_response(result_dict)
+            return Structured(**parsed)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️  Ella summary adapter failed: {e}, falling back to upstream LLM", flush=True)
+    # ====== END ELLA HOOK ======
     context_parts = []
     if transcript and transcript.strip():
         context_parts.append(f"Transcript: ```{transcript.strip()}```")

@@ -1,8 +1,25 @@
+import contextvars
 import os
 from typing import List
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
+# ====== ELLA CONTEXT (downstream fork) ======
+_ella_context = contextvars.ContextVar("ella_context", default={})
+
+def set_ella_context(uid: str = None, task: str = None):
+    ctx = {}
+    if uid: ctx["uid"] = uid
+    if task: ctx["task"] = task
+    _ella_context.set(ctx)
+
+def get_ella_context() -> dict:
+    return _ella_context.get()
+
+def clear_ella_context():
+    _ella_context.set({})
+# ====== END ELLA CONTEXT ======
 import tiktoken
 
 from models.conversation import Structured

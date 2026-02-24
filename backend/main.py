@@ -138,3 +138,13 @@ paths = ['_temp', '_samples', '_segments', '_speech_profiles']
 for path in paths:
     if not os.path.exists(path):
         os.makedirs(path)
+
+
+# ============================================================================
+# ELLA EXTENSIONS (downstream fork customizations)
+# ============================================================================
+try:
+    from ella import register_ella_extensions
+    register_ella_extensions(app)
+except ImportError:
+    pass  # Running vanilla OMI

@@ -112,6 +112,8 @@ def _get_structured(
                         language_code,
                         tz,
                         calendar_meeting_context=calendar_context,
+                        uid=uid,
+                        existing_conversation_id=getattr(conversation, "id", None),
                     )
                 with track_usage(uid, Features.CONVERSATION_ACTION_ITEMS):
                     structured.action_items = extract_action_items(
@@ -184,6 +186,8 @@ def _get_structured(
                 tz,
                 photos=conversation.photos,
                 calendar_meeting_context=calendar_context,
+                uid=uid,
+                existing_conversation_id=getattr(conversation, "id", None),
             )
         with track_usage(uid, Features.CONVERSATION_ACTION_ITEMS):
             structured.action_items = extract_action_items(
