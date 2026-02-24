@@ -177,7 +177,8 @@ class GuardianModeManager: NSObject {
             
             if player.canInsert(audioItem, after: insertAfter) {
                 player.insert(audioItem, after: insertAfter)
-                let position = items.firstIndex(of: insertAfter).map { $0 + 2 } ?? 2
+                // Calculate position for logging (handle optional insertAfter)
+                let position = insertAfter.flatMap { items.firstIndex(of: $0) }.map { $0 + 2 } ?? 2
                 NSLog("GuardianMode: Remote audio queued at position \(position)")
                 
                 // Observe when playback actually starts
