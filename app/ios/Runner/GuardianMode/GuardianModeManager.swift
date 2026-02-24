@@ -245,76 +245,16 @@ class GuardianModeManager: NSObject {
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
 
-            // Pre-download on background queue, then inject local file
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.downloadAndInject(remoteURL: audioURL, eventId: eventId, seq: seq, filename: filename, attempt: 1)
+            // Inject remote audio directly (no download - progressive streaming)
+            Task {
+                await self.injectRemoteAudioDirect(remoteURL: audioURL, eventId: eventId, seq: seq, filename: filename, attempt: 1)
             }
         }
     }
 
-    /// Download audio to local cache, then inject into queue
-    private func downloadAndInject(remoteURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) {
-        let maxAttempts = 3
-        let localFile = cacheDir.appendingPathComponent("\(eventId).mp3")
-
-        NSLog("DOWNLOAD_START #\(seq) (\(filename)) attempt=\(attempt) ts=\(Date().timeIntervalSince1970)")
-
-        // Download with timeout
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 15
-        let session = URLSession(configuration: config)
-
-        let task = session.downloadTask(with: remoteURL) { [weak self] tempURL, response, error in
-            guard let self = self else { return }
-
-            if let error = error {
-                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) attempt=\(attempt) error=\(error.localizedDescription)")
-                if attempt < maxAttempts {
-                    let delay = Double(attempt) * 0.5 // 0.5s, 1.0s backoff
-                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
-                        self.downloadAndInject(remoteURL: remoteURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
-                    }
-                } else {
-                    NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=download_exhausted")
-                    self.queue.async { self.failedInjections += 1 }
-                }
-                return
-            }
-
-            guard let tempURL = tempURL else {
-                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=no_temp_file")
-                self.queue.async { self.failedInjections += 1 }
-                return
-            }
-
-            // Move to cache
-            do {
-                if FileManager.default.fileExists(atPath: localFile.path) {
-                    try FileManager.default.removeItem(at: localFile)
-                }
-                try FileManager.default.moveItem(at: tempURL, to: localFile)
-            } catch {
-                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=cache_move_error: \(error.localizedDescription)")
-                self.queue.async { self.failedInjections += 1 }
-                return
-            }
-
-            NSLog("DOWNLOAD_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
-
-            // Inject local file into queue (async - waits for readyToPlay)
-            self.queue.async {
-                Task {
-                    await self.injectLocalAudio(localURL: localFile, eventId: eventId, seq: seq, filename: filename, attempt: attempt)
-                }
-            }
-        }
-        task.resume()
-    }
-
-    /// Inject a local audio file into the player queue
+    /// Inject remote audio directly into the player queue (progressive streaming)
     /// WAITS for AVPlayerItem.status == .readyToPlay before insertion (99.9% reliability fix)
-    private func injectLocalAudio(localURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) async {
+    private func injectRemoteAudioDirect(remoteURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) async {
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
@@ -322,11 +262,11 @@ class GuardianModeManager: NSObject {
             return
         }
 
-        let audioItem = AVPlayerItem(url: localURL)
+        let audioItem = AVPlayerItem(url: remoteURL)
 
         // Initial diagnostics
         NSLog("🔍 WAIT_FOR_READY_DETAILS #\(seq) - initial status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
-        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(localURL.absoluteString), tracks: \(audioItem.asset.tracks.count), isPlayable: \(audioItem.asset.isPlayable)")
+        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(remoteURL.absoluteString), tracks: \(audioItem.asset.tracks.count), isPlayable: \(audioItem.asset.isPlayable)")
 
         // CRITICAL FIX: Wait for item to become ready before insertion
         let startTime = Date()
@@ -419,7 +359,7 @@ class GuardianModeManager: NSObject {
                 NSLog("INJECT_RETRY #\(seq) (\(filename)) rebuilding queue")
                 batchQueueSilence(count: batchRefillCount)
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
-                await injectLocalAudio(localURL: localURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
+                await injectRemoteAudioDirect(remoteURL: remoteURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
             }
             return
         }
