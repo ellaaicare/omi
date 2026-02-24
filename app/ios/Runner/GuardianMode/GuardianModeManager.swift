@@ -264,9 +264,9 @@ class GuardianModeManager: NSObject {
 
         let audioItem = AVPlayerItem(url: remoteURL)
 
-        // Initial diagnostics
+        // Initial diagnostics (avoid synchronous asset property access - causes blocking!)
         NSLog("🔍 WAIT_FOR_READY_DETAILS #\(seq) - initial status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
-        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(remoteURL.absoluteString), tracks: \(audioItem.asset.tracks.count), isPlayable: \(audioItem.asset.isPlayable)")
+        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(remoteURL.absoluteString)")
 
         // KEY FIX: Insert into queue FIRST - this triggers AVPlayer to start loading!
         player.insert(audioItem, after: nil)
@@ -294,8 +294,7 @@ class GuardianModeManager: NSObject {
                 NSLog("⏱️ TIMEOUT_DETAILS #\(seq):")
                 NSLog("   Status: \(audioItem.status.rawValue) (0=unknown, 1=ready, 2=failed)")
                 NSLog("   Error: \(audioItem.error?.localizedDescription ?? "nil")")
-                NSLog("   Asset loadable: \(audioItem.asset.isPlayable)")
-                NSLog("   Tracks: \(audioItem.asset.tracks.count)")
+                NSLog("   URL: \(remoteURL.absoluteString)")
                 NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=ready_timeout_10s")
                 await MainActor.run { self.failedInjections += 1 }
                 return
