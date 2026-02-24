@@ -28,7 +28,7 @@ class GuardianModeManager: NSObject {
             try audioSession.setActive(true)
             
             // Load silence file
-            guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
+            guard let silenceURL = Bundle.main.url(forResource: "silence_2s", withExtension: "wav") else {
                 throw NSError(domain: "GuardianMode", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "Silent audio file not found"
                 ])
@@ -122,7 +122,7 @@ class GuardianModeManager: NSObject {
         queue.async { [weak self] in
             guard let self = self,
                   let player = self.audioPlayer,
-                  let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav"),
+                  let silenceURL = Bundle.main.url(forResource: "silence_2s", withExtension: "wav"),
                   self.isActive else { return }
             
             let silenceItem = AVPlayerItem(url: silenceURL)
@@ -170,10 +170,15 @@ class GuardianModeManager: NSObject {
                 }
                 .store(in: &injectionObservers)
 
-            // Insert to play NEXT (after currently playing item)
-            if player.canInsert(audioItem, after: player.currentItem) {
-                player.insert(audioItem, after: player.currentItem)
-                NSLog("GuardianMode: Remote audio queued at position 2")
+            // Insert deeper in queue to avoid race conditions
+            // Get items currently in queue
+            let items = player.items()
+            let insertAfter = items.count >= 2 ? items[1] : player.currentItem
+            
+            if player.canInsert(audioItem, after: insertAfter) {
+                player.insert(audioItem, after: insertAfter)
+                let position = items.firstIndex(of: insertAfter).map { $0 + 2 } ?? 2
+                NSLog("GuardianMode: Remote audio queued at position \(position)")
                 
                 // Observe when playback actually starts
                 NotificationCenter.default
