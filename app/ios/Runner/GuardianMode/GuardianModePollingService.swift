@@ -1,15 +1,12 @@
 import Foundation
 
 class GuardianModePollingService {
-    // Singleton instance
     static let shared = GuardianModePollingService()
 
     private init() {}
 
-    // Timer for polling
     private var pollTimer: DispatchSourceTimer?
 
-    // URLSession for HTTP requests
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10.0
@@ -17,18 +14,16 @@ class GuardianModePollingService {
         return URLSession(configuration: config)
     }()
 
-    // Configuration
     var pollInterval: TimeInterval = 5.0
-    var backendURL: String = "http://100.76.138.56:3000"  // Test server on same machine
+    var backendURL: String = "http://100.76.138.56:3000"
 
-    // Response model
     struct PollResponse: Codable {
         let url: String?
         let id: String?
     }
 
-    // State
     private var isPolling = false
+    private var consecutiveErrors: Int = 0
 
     // MARK: - Public Methods
 
@@ -39,6 +34,7 @@ class GuardianModePollingService {
         }
 
         isPolling = true
+        consecutiveErrors = 0
         NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
 
         createPollTimer()
@@ -62,8 +58,6 @@ class GuardianModePollingService {
                 NSLocalizedDescriptionKey: "Invalid backend URL"
             ])
         }
-
-        NSLog("GuardianPolling: GET \(endpoint)")
 
         let (data, response) = try await session.data(from: url)
 
@@ -115,22 +109,22 @@ class GuardianModePollingService {
                 let audioURL = result.url
                 let eventId = result.id
 
-                // Log poll received with event ID and timestamp
+                consecutiveErrors = 0
                 NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
 
-                NSLog("GuardianPolling: Found new audio: \(audioURL.absoluteString)")
-
-                // Inject into Guardian Mode queue
-                DispatchQueue.main.async {
-                    GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
-                }
-            } else {
-                // No new audio - silence continues
-                NSLog("GuardianPolling: No new audio")
+                // Inject via GuardianModeManager (handles pre-download + retry)
+                GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
             }
         } catch {
-            NSLog("GuardianPolling: Poll error: \(error.localizedDescription)")
-            // Continue polling despite error
+            consecutiveErrors += 1
+            if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
+                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x): \(error.localizedDescription)")
+            }
+        }
+
+        // Periodic cache cleanup every ~60 polls (5 minutes at 5s interval)
+        if Int.random(in: 0..<60) == 0 {
+            GuardianModeManager.shared.cleanCache()
         }
     }
 }
