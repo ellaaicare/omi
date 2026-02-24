@@ -849,7 +849,7 @@ git commit -m "test(guardian): add POC test results for Guardian Mode
 **Step 1: Add test results comment to issue**
 
 ```bash
-GH_TOKEN="***REMOVED_GITHUB_PAT***_ruPI2XUCXyyL476l03xBdKh0iHPeawiF9buY5HnQhlvLWPP6E4QSbofGbTd" gh issue comment 93 --repo ellaaicare/ella-ai --body "## POC Test Results
+GH_TOKEN="***REMOVED_GITHUB_PAT***" gh issue comment 93 --repo ellaaicare/ella-ai --body "## POC Test Results
 
 **Status:** [✅ PASS / ❌ FAIL]
 
