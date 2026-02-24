@@ -19,7 +19,7 @@ class GuardianModePollingService {
 
     // Configuration
     var pollInterval: TimeInterval = 5.0
-    var backendURL: String = "http://localhost:3000"  // Test server on same machine
+    var backendURL: String = "http://100.76.138.56:3000"  // Test server on same machine
 
     // Response model
     struct PollResponse: Codable {
