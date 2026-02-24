@@ -28,6 +28,7 @@ class GuardianModeManager: NSObject {
     private var totalInjections: Int = 0
     private var successfulInjections: Int = 0
     private var failedInjections: Int = 0
+    private var injectionSequence: Int = 0  // Sequential counter for easy log tracking
 
     // Download cache directory
     private lazy var cacheDir: URL = {
@@ -73,6 +74,7 @@ class GuardianModeManager: NSObject {
             self.totalInjections = 0
             self.successfulInjections = 0
             self.failedInjections = 0
+            self.injectionSequence = 0
 
             setupItemEndObserver()
             startHealthMonitor()
@@ -228,21 +230,29 @@ class GuardianModeManager: NSObject {
 
     /// Inject remote audio with pre-download and retry logic
     func injectRemoteAudio(audioURL: URL, eventId: String) {
-        totalInjections += 1
-        NSLog("INJECT_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+        // Increment sequence counter on queue for thread-safety
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.injectionSequence += 1
+            self.totalInjections += 1
+            let seq = self.injectionSequence
+            let filename = audioURL.lastPathComponent
 
-        // Pre-download on background queue, then inject local file
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.downloadAndInject(remoteURL: audioURL, eventId: eventId, attempt: 1)
+            NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
+
+            // Pre-download on background queue, then inject local file
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.downloadAndInject(remoteURL: audioURL, eventId: eventId, seq: seq, filename: filename, attempt: 1)
+            }
         }
     }
 
     /// Download audio to local cache, then inject into queue
-    private func downloadAndInject(remoteURL: URL, eventId: String, attempt: Int) {
+    private func downloadAndInject(remoteURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) {
         let maxAttempts = 3
         let localFile = cacheDir.appendingPathComponent("\(eventId).mp3")
 
-        NSLog("DOWNLOAD_START(\(eventId)) attempt=\(attempt) ts=\(Date().timeIntervalSince1970)")
+        NSLog("DOWNLOAD_START #\(seq) (\(filename)) attempt=\(attempt) ts=\(Date().timeIntervalSince1970)")
 
         // Download with timeout
         let config = URLSessionConfiguration.default
@@ -254,21 +264,21 @@ class GuardianModeManager: NSObject {
             guard let self = self else { return }
 
             if let error = error {
-                NSLog("DOWNLOAD_FAILED(\(eventId)) attempt=\(attempt) error=\(error.localizedDescription)")
+                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) attempt=\(attempt) error=\(error.localizedDescription)")
                 if attempt < maxAttempts {
                     let delay = Double(attempt) * 0.5 // 0.5s, 1.0s backoff
                     DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
-                        self.downloadAndInject(remoteURL: remoteURL, eventId: eventId, attempt: attempt + 1)
+                        self.downloadAndInject(remoteURL: remoteURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
                     }
                 } else {
-                    NSLog("INJECT_FAILED(\(eventId)) reason=download_exhausted")
+                    NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=download_exhausted")
                     self.queue.async { self.failedInjections += 1 }
                 }
                 return
             }
 
             guard let tempURL = tempURL else {
-                NSLog("DOWNLOAD_FAILED(\(eventId)) reason=no_temp_file")
+                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=no_temp_file")
                 self.queue.async { self.failedInjections += 1 }
                 return
             }
@@ -280,26 +290,26 @@ class GuardianModeManager: NSObject {
                 }
                 try FileManager.default.moveItem(at: tempURL, to: localFile)
             } catch {
-                NSLog("DOWNLOAD_FAILED(\(eventId)) reason=cache_move_error: \(error.localizedDescription)")
+                NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=cache_move_error: \(error.localizedDescription)")
                 self.queue.async { self.failedInjections += 1 }
                 return
             }
 
-            NSLog("DOWNLOAD_COMPLETE(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+            NSLog("DOWNLOAD_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
 
             // Inject local file into queue
             self.queue.async {
-                self.injectLocalAudio(localURL: localFile, eventId: eventId, attempt: attempt)
+                self.injectLocalAudio(localURL: localFile, eventId: eventId, seq: seq, filename: filename, attempt: attempt)
             }
         }
         task.resume()
     }
 
     /// Inject a local audio file into the player queue
-    private func injectLocalAudio(localURL: URL, eventId: String, attempt: Int) {
+    private func injectLocalAudio(localURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) {
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else {
-            NSLog("INJECT_FAILED(\(eventId)) reason=not_active")
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
             failedInjections += 1
             return
         }
@@ -311,9 +321,9 @@ class GuardianModeManager: NSObject {
             .sink { [weak self] status in
                 guard let self = self else { return }
                 if status == .readyToPlay {
-                    NSLog("ITEM_READY(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                    NSLog("ITEM_READY #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
                 } else if status == .failed {
-                    NSLog("ITEM_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
+                    NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
                 }
             }
             .store(in: &cancellables)
@@ -324,7 +334,7 @@ class GuardianModeManager: NSObject {
             .first()
             .sink { [weak self] _ in
                 guard let self = self else { return }
-                NSLog("PLAYBACK_COMPLETE(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                NSLog("PLAYBACK_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
                 self.queue.async { self.successfulInjections += 1 }
             }
             .store(in: &cancellables)
@@ -336,23 +346,23 @@ class GuardianModeManager: NSObject {
         if player.canInsert(audioItem, after: afterItem) {
             player.insert(audioItem, after: afterItem)
             let depth = player.items().count
-            NSLog("INJECT_OK(\(eventId)) position=2 depth=\(depth) ts=\(Date().timeIntervalSince1970)")
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=2 depth=\(depth) ts=\(Date().timeIntervalSince1970)")
         } else if player.canInsert(audioItem, after: nil) {
             // Fallback: append to end of queue
             player.insert(audioItem, after: nil)
             let depth = player.items().count
-            NSLog("INJECT_OK(\(eventId)) position=end depth=\(depth) ts=\(Date().timeIntervalSince1970)")
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(depth) ts=\(Date().timeIntervalSince1970)")
         } else {
-            NSLog("INJECT_FAILED(\(eventId)) reason=cannot_insert")
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
             failedInjections += 1
 
             // Retry: rebuild queue and try again
             if attempt <= 2 {
-                NSLog("INJECT_RETRY(\(eventId)) rebuilding queue")
+                NSLog("INJECT_RETRY #\(seq) (\(filename)) rebuilding queue")
                 batchQueueSilence(count: batchRefillCount)
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     self?.queue.async {
-                        self?.injectLocalAudio(localURL: localURL, eventId: eventId, attempt: attempt + 1)
+                        self?.injectLocalAudio(localURL: localURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
                     }
                 }
             }
