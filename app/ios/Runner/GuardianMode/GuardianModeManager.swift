@@ -264,51 +264,34 @@ class GuardianModeManager: NSObject {
 
         let audioItem = AVPlayerItem(url: remoteURL)
 
-        // Initial diagnostics (avoid synchronous asset property access - causes blocking!)
-        NSLog("🔍 WAIT_FOR_READY_DETAILS #\(seq) - initial status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
-        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(remoteURL.absoluteString)")
-
-        // KEY FIX: Insert into queue FIRST - this triggers AVPlayer to start loading!
+        // Insert into queue FIRST - this triggers AVPlayer to start loading!
         player.insert(audioItem, after: nil)
-        let depth = player.items().count
-        NSLog("🔍 INSERTED_TO_QUEUE #\(seq) (\(filename)) position=end depth=\(depth) - will now trigger loading")
 
-        // NOW wait for item to become ready
+        // Wait for item to become ready (production logging - minimal)
         let startTime = Date()
         let timeout: TimeInterval = 10.0
-        var lastStatus = audioItem.status
         var iteration = 0
 
         while audioItem.status == .unknown {
             iteration += 1
 
-            // Check for error during waiting
+            // Check for error
             if let error = audioItem.error {
-                NSLog("❌ ITEM_ERROR #\(seq) - \(error.localizedDescription)")
+                NSLog("❌ ITEM_ERROR #\(seq) (\(filename)) - \(error.localizedDescription)")
                 await MainActor.run { self.failedInjections += 1 }
                 return
             }
 
             // Check timeout
             if Date().timeIntervalSince(startTime) > timeout {
-                NSLog("⏱️ TIMEOUT_DETAILS #\(seq):")
-                NSLog("   Status: \(audioItem.status.rawValue) (0=unknown, 1=ready, 2=failed)")
-                NSLog("   Error: \(audioItem.error?.localizedDescription ?? "nil")")
-                NSLog("   URL: \(remoteURL.absoluteString)")
-                NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=ready_timeout_10s")
+                NSLog("❌ TIMEOUT #\(seq) (\(filename)) after 10s - status: \(audioItem.status.rawValue)")
                 await MainActor.run { self.failedInjections += 1 }
                 return
             }
 
-            // Log status changes
-            if audioItem.status != lastStatus {
-                NSLog("STATUS_CHANGE #\(seq) (\(filename)) \(lastStatus.rawValue)->\(audioItem.status.rawValue)")
-                lastStatus = audioItem.status
-            }
-
-            // Log every second (every 20 iterations at 50ms each)
-            if iteration % 20 == 0 {
-                NSLog("⏳ STILL_WAITING #\(seq) - iteration: \(iteration), status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
+            // Only log if taking unusually long (> 5 seconds)
+            if iteration == 100 {
+                NSLog("⚠️ Slow load #\(seq) (\(filename)) - still waiting after 5s")
             }
 
             // Wait 50ms before checking again
@@ -330,7 +313,14 @@ class GuardianModeManager: NSObject {
         }
 
         let readyTime = Date().timeIntervalSince(startTime)
-        NSLog("✅ ITEM_BECAME_READY #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s - already in queue!")
+
+        // Only log unusual load times (production logging - minimal)
+        if readyTime > 5.0 {
+            NSLog("⚠️ Slow load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
+        } else if readyTime < 0.5 {
+            NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
+        }
+        // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
 
         // Observe when playback completes
         NotificationCenter.default
