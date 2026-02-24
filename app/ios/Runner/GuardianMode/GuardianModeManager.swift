@@ -253,7 +253,7 @@ class GuardianModeManager: NSObject {
     }
 
     /// Inject remote audio directly into the player queue (progressive streaming)
-    /// WAITS for AVPlayerItem.status == .readyToPlay before insertion (99.9% reliability fix)
+    /// KEY: Inserts FIRST (triggers loading), THEN waits for .readyToPlay
     private func injectRemoteAudioDirect(remoteURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) async {
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else {
@@ -268,7 +268,12 @@ class GuardianModeManager: NSObject {
         NSLog("🔍 WAIT_FOR_READY_DETAILS #\(seq) - initial status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
         NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(remoteURL.absoluteString), tracks: \(audioItem.asset.tracks.count), isPlayable: \(audioItem.asset.isPlayable)")
 
-        // CRITICAL FIX: Wait for item to become ready before insertion
+        // KEY FIX: Insert into queue FIRST - this triggers AVPlayer to start loading!
+        player.insert(audioItem, after: nil)
+        let depth = player.items().count
+        NSLog("🔍 INSERTED_TO_QUEUE #\(seq) (\(filename)) position=end depth=\(depth) - will now trigger loading")
+
+        // NOW wait for item to become ready
         let startTime = Date()
         let timeout: TimeInterval = 10.0
         var lastStatus = audioItem.status
@@ -326,7 +331,7 @@ class GuardianModeManager: NSObject {
         }
 
         let readyTime = Date().timeIntervalSince(startTime)
-        NSLog("✅ ITEM_BECAME_READY #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
+        NSLog("✅ ITEM_BECAME_READY #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s - already in queue!")
 
         // Observe when playback completes
         NotificationCenter.default
@@ -338,31 +343,6 @@ class GuardianModeManager: NSObject {
                 self.queue.async { self.successfulInjections += 1 }
             }
             .store(in: &cancellables)
-
-        // Now that item is ready, insert into queue
-        let afterItem = player.currentItem
-        if player.canInsert(audioItem, after: afterItem) {
-            player.insert(audioItem, after: afterItem)
-            let depth = player.items().count
-            NSLog("INJECT_OK #\(seq) (\(filename)) position=2 depth=\(depth) ts=\(Date().timeIntervalSince1970)")
-        } else if player.canInsert(audioItem, after: nil) {
-            // Fallback: append to end of queue
-            player.insert(audioItem, after: nil)
-            let depth = player.items().count
-            NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(depth) ts=\(Date().timeIntervalSince1970)")
-        } else {
-            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
-            await MainActor.run { self.failedInjections += 1 }
-
-            // Retry: rebuild queue and try again
-            if attempt <= 2 {
-                NSLog("INJECT_RETRY #\(seq) (\(filename)) rebuilding queue")
-                batchQueueSilence(count: batchRefillCount)
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
-                await injectRemoteAudioDirect(remoteURL: remoteURL, eventId: eventId, seq: seq, filename: filename, attempt: attempt + 1)
-            }
-            return
-        }
 
         // Ensure player is actually playing
         if player.rate == 0 {
