@@ -54,7 +54,16 @@ class GuardianModeManager: NSObject {
             // Activate audio session (configured in AppDelegate, activated here before playback)
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setActive(true)
-            NSLog("GuardianMode: Audio session activated - category: \(audioSession.category.rawValue), mode: \(audioSession.mode.rawValue)")
+
+            // Detailed audio session diagnostics
+            NSLog("🔊 SESSION_STATE_DETAILED:")
+            NSLog("   Category: \(audioSession.category.rawValue)")
+            NSLog("   Mode: \(audioSession.mode.rawValue)")
+            NSLog("   Options: \(audioSession.categoryOptions.rawValue)")
+            NSLog("   Output: \(audioSession.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", "))")
+            NSLog("   Sample Rate: \(audioSession.sampleRate)")
+            NSLog("   IO Buffer Duration: \(audioSession.ioBufferDuration)")
+            NSLog("   Other audio playing: \(audioSession.isOtherAudioPlaying)")
 
             guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
                 throw NSError(domain: "GuardianMode", code: 1, userInfo: [
@@ -314,29 +323,51 @@ class GuardianModeManager: NSObject {
         }
 
         let audioItem = AVPlayerItem(url: localURL)
-        NSLog("WAIT_FOR_READY #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+
+        // Initial diagnostics
+        NSLog("🔍 WAIT_FOR_READY_DETAILS #\(seq) - initial status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
+        NSLog("🔍 ASSET_DETAILS #\(seq) - URL: \(localURL.absoluteString), tracks: \(audioItem.asset.tracks.count), isPlayable: \(audioItem.asset.isPlayable)")
 
         // CRITICAL FIX: Wait for item to become ready before insertion
-        // This prevents AVQueuePlayer from skipping items that aren't buffered yet
         let startTime = Date()
         let timeout: TimeInterval = 10.0
         var lastStatus = audioItem.status
+        var iteration = 0
 
         while audioItem.status == .unknown {
+            iteration += 1
+
+            // Check for error during waiting
+            if let error = audioItem.error {
+                NSLog("❌ ITEM_ERROR #\(seq) - \(error.localizedDescription)")
+                await MainActor.run { self.failedInjections += 1 }
+                return
+            }
+
             // Check timeout
             if Date().timeIntervalSince(startTime) > timeout {
+                NSLog("⏱️ TIMEOUT_DETAILS #\(seq):")
+                NSLog("   Status: \(audioItem.status.rawValue) (0=unknown, 1=ready, 2=failed)")
+                NSLog("   Error: \(audioItem.error?.localizedDescription ?? "nil")")
+                NSLog("   Asset loadable: \(audioItem.asset.isPlayable)")
+                NSLog("   Tracks: \(audioItem.asset.tracks.count)")
                 NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=ready_timeout_10s")
                 await MainActor.run { self.failedInjections += 1 }
                 return
             }
 
-            // Log status changes for debugging
+            // Log status changes
             if audioItem.status != lastStatus {
                 NSLog("STATUS_CHANGE #\(seq) (\(filename)) \(lastStatus.rawValue)->\(audioItem.status.rawValue)")
                 lastStatus = audioItem.status
             }
 
-            // Wait 50ms before checking again (less aggressive than 100ms)
+            // Log every second (every 20 iterations at 50ms each)
+            if iteration % 20 == 0 {
+                NSLog("⏳ STILL_WAITING #\(seq) - iteration: \(iteration), status: \(audioItem.status.rawValue), error: \(audioItem.error?.localizedDescription ?? "nil")")
+            }
+
+            // Wait 50ms before checking again
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
@@ -354,7 +385,8 @@ class GuardianModeManager: NSObject {
             return
         }
 
-        NSLog("ITEM_READY #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+        let readyTime = Date().timeIntervalSince(startTime)
+        NSLog("✅ ITEM_BECAME_READY #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
 
         // Observe when playback completes
         NotificationCenter.default
