@@ -51,9 +51,9 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Configure audio session for background playback
+            // Configure audio session - match AppDelegate's playAndRecord to avoid conflicts
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
             try audioSession.setActive(true)
 
             guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
