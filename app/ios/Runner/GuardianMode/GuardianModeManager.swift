@@ -18,7 +18,7 @@ class GuardianModeManager: NSObject {
     func start() throws {
         try queue.sync {
             guard !isActive else {
-                print("GuardianMode: Already active, ignoring start()")
+                NSLog("GuardianMode: Already active, ignoring start()")
                 return
             }
             
@@ -48,9 +48,9 @@ class GuardianModeManager: NSObject {
             
             // Start polling for remote audio
             GuardianModePollingService.shared.startPolling()
-            print("GuardianMode: Polling started")
+            NSLog("GuardianMode: Polling started")
             
-            print("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
+            NSLog("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
         }
     }
     
@@ -61,7 +61,7 @@ class GuardianModeManager: NSObject {
             GuardianModePollingService.shared.stopPolling()
             
             guard isActive else {
-                print("GuardianMode: Already stopped, ignoring stop()")
+                NSLog("GuardianMode: Already stopped, ignoring stop()")
                 return
             }
             
@@ -74,10 +74,10 @@ class GuardianModeManager: NSObject {
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
-                print("GuardianMode: Error deactivating audio session: \(error)")
+                NSLog("GuardianMode: Error deactivating audio session: \(error)")
             }
             
-            print("GuardianMode: Stopped")
+            NSLog("GuardianMode: Stopped")
         }
     }
     
@@ -130,7 +130,7 @@ class GuardianModeManager: NSObject {
             // Append to end of queue
             player.insert(silenceItem, after: nil)
             
-            print("GuardianMode: Queued silence (queue depth: \(player.items().count))")
+            NSLog("GuardianMode: Queued silence (queue depth: \(player.items().count))")
         }
     }
 
@@ -139,12 +139,12 @@ class GuardianModeManager: NSObject {
             guard let self = self,
                   let player = self.audioPlayer,
                   self.isActive else {
-                print("GuardianMode: Cannot inject audio - not active")
+                NSLog("GuardianMode: Cannot inject audio - not active")
                 return
             }
 
-            print("DOWNLOAD_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-            print("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
+            NSLog("DOWNLOAD_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+            NSLog("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
 
             // Create player item from remote URL
             let audioItem = AVPlayerItem(url: audioURL)
@@ -154,18 +154,18 @@ class GuardianModeManager: NSObject {
             
             // Fix race condition: Check immediate status for fast-loading items
             if audioItem.status == .readyToPlay {
-                print("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                NSLog("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
             } else if audioItem.status == .failed {
-                print("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
+                NSLog("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
             }
 
             // Also observe future status changes (for items still loading)
             audioItem.publisher(for: \.status)
                 .sink { status in
                     if status == .readyToPlay {
-                        print("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                        NSLog("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     } else if status == .failed {
-                        print("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
+                        NSLog("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
                     }
                 }
                 .store(in: &injectionObservers)
@@ -173,18 +173,18 @@ class GuardianModeManager: NSObject {
             // Insert to play NEXT (after currently playing item)
             if player.canInsert(audioItem, after: player.currentItem) {
                 player.insert(audioItem, after: player.currentItem)
-                print("GuardianMode: Remote audio queued at position 2")
+                NSLog("GuardianMode: Remote audio queued at position 2")
                 
                 // Observe when playback actually starts
                 NotificationCenter.default
                     .publisher(for: .AVPlayerItemNewAccessLogEntry, object: audioItem)
                     .first()
                     .sink { _ in
-                        print("PLAYBACK_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                        NSLog("PLAYBACK_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     }
                     .store(in: &injectionObservers)
             } else {
-                print("GuardianMode: ERROR - Cannot insert audio item")
+                NSLog("GuardianMode: ERROR - Cannot insert audio item")
             }
             
             // Thread-safe: Move observers to main cancellables on main queue

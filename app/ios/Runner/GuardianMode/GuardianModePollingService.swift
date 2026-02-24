@@ -19,7 +19,7 @@ class GuardianModePollingService {
 
     // Configuration
     var pollInterval: TimeInterval = 5.0
-    var backendURL: String = "http://100.67.113.120:3000"  // admin-MacBookAir1 via Tailscale
+    var backendURL: String = "http://localhost:3000"  // Test server on same machine
 
     // Response model
     struct PollResponse: Codable {
@@ -34,12 +34,12 @@ class GuardianModePollingService {
 
     func startPolling() {
         guard !isPolling else {
-            print("GuardianPolling: Already polling")
+            NSLog("GuardianPolling: Already polling")
             return
         }
 
         isPolling = true
-        print("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
+        NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
 
         createPollTimer()
     }
@@ -47,7 +47,7 @@ class GuardianModePollingService {
     func stopPolling() {
         guard isPolling else { return }
 
-        print("GuardianPolling: Stopping poll timer")
+        NSLog("GuardianPolling: Stopping poll timer")
 
         pollTimer?.cancel()
         pollTimer = nil
@@ -63,7 +63,7 @@ class GuardianModePollingService {
             ])
         }
 
-        print("GuardianPolling: GET \(endpoint)")
+        NSLog("GuardianPolling: GET \(endpoint)")
 
         let (data, response) = try await session.data(from: url)
 
@@ -116,9 +116,9 @@ class GuardianModePollingService {
                 let eventId = result.id
 
                 // Log poll received with event ID and timestamp
-                print("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
 
-                print("GuardianPolling: Found new audio: \(audioURL.absoluteString)")
+                NSLog("GuardianPolling: Found new audio: \(audioURL.absoluteString)")
 
                 // Inject into Guardian Mode queue
                 DispatchQueue.main.async {
@@ -126,10 +126,10 @@ class GuardianModePollingService {
                 }
             } else {
                 // No new audio - silence continues
-                print("GuardianPolling: No new audio")
+                NSLog("GuardianPolling: No new audio")
             }
         } catch {
-            print("GuardianPolling: Poll error: \(error.localizedDescription)")
+            NSLog("GuardianPolling: Poll error: \(error.localizedDescription)")
             // Continue polling despite error
         }
     }
