@@ -12,6 +12,7 @@ This implements the hybrid auth approach:
 """
 
 import os
+import time
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -174,20 +175,53 @@ class TtsRequest(BaseModel):
 
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")  # elevenlabs or local
+LOCAL_TTS_URL = os.getenv("LOCAL_TTS_URL", "http://100.76.138.56:8930")  # Mac Mini Kokoro
+LOCAL_TTS_FALLBACK = os.getenv("LOCAL_TTS_FALLBACK", "elevenlabs")
 
 
 @router.post("/tts")
 async def synthesize_speech(request: TtsRequest):
     """
-    Synthesize speech from text via ElevenLabs.
+    Synthesize speech from text.
 
-    Proxies TTS requests so the API key stays server-side.
-    Returns audio/mpeg bytes directly.
+    Routes to local Kokoro (Mac Mini) or ElevenLabs based on TTS_PROVIDER env.
+    Returns audio bytes directly.
     """
+    text = request.text[:500]  # Cap at 500 chars for v1
+    provider = TTS_PROVIDER.lower()
+
+    # Local TTS (Kokoro on Mac Mini via Tailscale)
+    if provider == "local":
+        try:
+            t0 = time.time()
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{LOCAL_TTS_URL}/v1/audio/speech",
+                    json={
+                        "input": text,
+                        "voice": "nova",
+                        "response_format": "pcm",
+                    },
+                )
+            elapsed = (time.time() - t0) * 1000
+            if response.status_code == 200:
+                logger.info(f"[Voice TTS] Local Kokoro: {len(response.content)} bytes, {elapsed:.0f}ms")
+                return Response(content=response.content, media_type="audio/L16;rate=24000")
+            else:
+                logger.warning(f"[Voice TTS] Local Kokoro returned {response.status_code}, falling back to {LOCAL_TTS_FALLBACK}")
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            logger.warning(f"[Voice TTS] Local Kokoro unreachable: {e}, falling back to {LOCAL_TTS_FALLBACK}")
+        except Exception as e:
+            logger.error(f"[Voice TTS] Local Kokoro error: {e}, falling back to {LOCAL_TTS_FALLBACK}")
+
+        # Fallback - only continue to ElevenLabs if fallback is configured
+        if LOCAL_TTS_FALLBACK != "elevenlabs":
+            raise HTTPException(status_code=503, detail="Local TTS unreachable and no fallback configured")
+
+    # ElevenLabs (default or fallback)
     if not ELEVENLABS_API_KEY:
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
-
-    text = request.text[:500]  # Cap at 500 chars for v1
 
     try:
         async with httpx.AsyncClient() as client:
@@ -229,5 +263,7 @@ async def voice_health():
         "service": "ella-voice",
         "voice_endpoint": ELLA_VOICE_ENDPOINT,
         "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_configured": bool(ELEVENLABS_API_KEY),
+        "tts_provider": TTS_PROVIDER,
+        "tts_configured": bool(ELEVENLABS_API_KEY) if TTS_PROVIDER == "elevenlabs" else bool(LOCAL_TTS_URL),
+        "local_tts_url": LOCAL_TTS_URL if TTS_PROVIDER == "local" else None,
     }
