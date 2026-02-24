@@ -51,10 +51,9 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Configure audio session - match AppDelegate's playAndRecord to avoid conflicts
+            // Verify audio session (configured once in AppDelegate)
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-            try audioSession.setActive(true)
+            NSLog("GuardianMode: Using audio session - category: \(audioSession.category.rawValue), mode: \(audioSession.mode.rawValue), active: \(audioSession.isOtherAudioPlaying)")
 
             guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
                 throw NSError(domain: "GuardianMode", code: 1, userInfo: [
@@ -109,11 +108,7 @@ class GuardianModeManager: NSObject {
                 : "N/A"
             NSLog("GuardianMode: Stopped (injections: \(successfulInjections)/\(totalInjections), success rate: \(rate))")
 
-            do {
-                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            } catch {
-                NSLog("GuardianMode: Error deactivating audio session: \(error)")
-            }
+            // Don't deactivate audio session - it's shared with other app components (recording, etc.)
         }
     }
 
