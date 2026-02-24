@@ -28,7 +28,7 @@ class GuardianModeManager: NSObject {
             try audioSession.setActive(true)
             
             // Load silence file
-            guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
+            guard let silenceURL = Bundle.main.url(forResource: "silence_2s", withExtension: "wav") else {
                 throw NSError(domain: "GuardianMode", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "Silent audio file not found"
                 ])
@@ -122,7 +122,7 @@ class GuardianModeManager: NSObject {
         queue.async { [weak self] in
             guard let self = self,
                   let player = self.audioPlayer,
-                  let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav"),
+                  let silenceURL = Bundle.main.url(forResource: "silence_2s", withExtension: "wav"),
                   self.isActive else { return }
             
             let silenceItem = AVPlayerItem(url: silenceURL)

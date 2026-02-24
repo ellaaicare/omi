@@ -170,16 +170,10 @@ class GuardianModeManager: NSObject {
                 }
                 .store(in: &injectionObservers)
 
-            // Insert deeper in queue to avoid race conditions
-            // Get items currently in queue
-            let items = player.items()
-            let insertAfter = items.count >= 2 ? items[1] : player.currentItem
-            
-            if player.canInsert(audioItem, after: insertAfter) {
-                player.insert(audioItem, after: insertAfter)
-                // Calculate position for logging (handle optional insertAfter)
-                let position = insertAfter.flatMap { items.firstIndex(of: $0) }.map { $0 + 2 } ?? 2
-                NSLog("GuardianMode: Remote audio queued at position \(position)")
+            // Insert to play NEXT (after currently playing item)
+            if player.canInsert(audioItem, after: player.currentItem) {
+                player.insert(audioItem, after: player.currentItem)
+                NSLog("GuardianMode: Remote audio queued at position 2")
                 
                 // Observe when playback actually starts
                 NotificationCenter.default

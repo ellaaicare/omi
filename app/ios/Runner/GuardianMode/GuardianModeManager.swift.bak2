@@ -18,7 +18,7 @@ class GuardianModeManager: NSObject {
     func start() throws {
         try queue.sync {
             guard !isActive else {
-                NSLog("GuardianMode: Already active, ignoring start()")
+                print("GuardianMode: Already active, ignoring start()")
                 return
             }
             
@@ -48,9 +48,9 @@ class GuardianModeManager: NSObject {
             
             // Start polling for remote audio
             GuardianModePollingService.shared.startPolling()
-            NSLog("GuardianMode: Polling started")
+            print("GuardianMode: Polling started")
             
-            NSLog("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
+            print("GuardianMode: Started - silent queue playing with \(silenceItems.count) items")
         }
     }
     
@@ -61,7 +61,7 @@ class GuardianModeManager: NSObject {
             GuardianModePollingService.shared.stopPolling()
             
             guard isActive else {
-                NSLog("GuardianMode: Already stopped, ignoring stop()")
+                print("GuardianMode: Already stopped, ignoring stop()")
                 return
             }
             
@@ -74,10 +74,10 @@ class GuardianModeManager: NSObject {
             do {
                 try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
-                NSLog("GuardianMode: Error deactivating audio session: \(error)")
+                print("GuardianMode: Error deactivating audio session: \(error)")
             }
             
-            NSLog("GuardianMode: Stopped")
+            print("GuardianMode: Stopped")
         }
     }
     
@@ -111,7 +111,7 @@ class GuardianModeManager: NSObject {
             // Check queue depth - keep at least 10 items buffered
             let queueDepth = player.items().count
             
-            if queueDepth < 5 {
+            if queueDepth < 10 {
                 // Queue more silence to maintain buffer
                 self.queueSilence()
             }
@@ -130,72 +130,31 @@ class GuardianModeManager: NSObject {
             // Append to end of queue
             player.insert(silenceItem, after: nil)
             
-            NSLog("GuardianMode: Queued silence (queue depth: \(player.items().count))")
+            print("GuardianMode: Queued silence (queue depth: \(player.items().count))")
         }
     }
 
-    func injectRemoteAudio(audioURL: URL, eventId: String) {
+    func injectRemoteAudio(audioURL: URL) {
         queue.async { [weak self] in
             guard let self = self,
                   let player = self.audioPlayer,
                   self.isActive else {
-                NSLog("GuardianMode: Cannot inject audio - not active")
+                print("GuardianMode: Cannot inject audio - not active")
                 return
             }
 
-            NSLog("DOWNLOAD_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-            NSLog("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
+            print("GuardianMode: Injecting remote audio: \(audioURL.absoluteString)")
 
             // Create player item from remote URL
             let audioItem = AVPlayerItem(url: audioURL)
-            
-            // Local cancellables set to avoid threading issues and memory growth
-            var injectionObservers = Set<AnyCancellable>()
-            
-            // Fix race condition: Check immediate status for fast-loading items
-            if audioItem.status == .readyToPlay {
-                NSLog("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-            } else if audioItem.status == .failed {
-                NSLog("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
-            }
 
-            // Also observe future status changes (for items still loading)
-            audioItem.publisher(for: \.status)
-                .sink { status in
-                    if status == .readyToPlay {
-                        NSLog("INJECTION(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-                    } else if status == .failed {
-                        NSLog("INJECTION_FAILED(\(eventId)) error=\(audioItem.error?.localizedDescription ?? "unknown")")
-                    }
-                }
-                .store(in: &injectionObservers)
-
-            // Insert deeper in queue to avoid race conditions
-            // Get items currently in queue
-            let items = player.items()
-            let insertAfter = items.count >= 2 ? items[1] : player.currentItem
-            
-            if player.canInsert(audioItem, after: insertAfter) {
-                player.insert(audioItem, after: insertAfter)
-                // Calculate position for logging (handle optional insertAfter)
-                let position = insertAfter.flatMap { items.firstIndex(of: $0) }.map { $0 + 2 } ?? 2
-                NSLog("GuardianMode: Remote audio queued at position \(position)")
-                
-                // Observe when playback actually starts
-                NotificationCenter.default
-                    .publisher(for: .AVPlayerItemNewAccessLogEntry, object: audioItem)
-                    .first()
-                    .sink { _ in
-                        NSLog("PLAYBACK_START(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-                    }
-                    .store(in: &injectionObservers)
+            // Insert to play NEXT (after currently playing item)
+            // This puts it at position 2 in the queue
+            if player.canInsert(audioItem, after: player.currentItem) {
+                player.insert(audioItem, after: player.currentItem)
+                print("GuardianMode: Remote audio queued at position 2")
             } else {
-                NSLog("GuardianMode: ERROR - Cannot insert audio item")
-            }
-            
-            // Thread-safe: Move observers to main cancellables on main queue
-            DispatchQueue.main.async { [weak self] in
-                self?.cancellables.formUnion(injectionObservers)
+                print("GuardianMode: ERROR - Cannot insert audio item")
             }
         }
     }
