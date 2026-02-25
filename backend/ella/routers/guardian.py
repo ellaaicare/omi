@@ -103,9 +103,9 @@ async def next_audio(uid: str):
             WHERE uid = $1 AND consumed_at IS NULL
             ORDER BY
                 CASE priority
-                    WHEN urgent THEN 0
-                    WHEN normal THEN 1
-                    WHEN scheduled THEN 2
+                    WHEN 'urgent' THEN 0
+                    WHEN 'normal' THEN 1
+                    WHEN 'scheduled' THEN 2
                 END,
                 created_at ASC
             LIMIT 1
@@ -237,9 +237,9 @@ async def view_queue(uid: str):
         WHERE uid = $1 AND consumed_at IS NULL
         ORDER BY
             CASE priority
-                WHEN urgent THEN 0
-                WHEN normal THEN 1
-                WHEN scheduled THEN 2
+                WHEN 'urgent' THEN 0
+                WHEN 'normal' THEN 1
+                WHEN 'scheduled' THEN 2
             END,
             created_at ASC
         """,
