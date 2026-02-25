@@ -595,7 +595,7 @@
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerDebug-prod.entitlements";
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -614,7 +614,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -632,7 +632,7 @@
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerRelease-prod.entitlements";
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -649,7 +649,7 @@
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerDebug-dev.entitlements";
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -666,7 +666,7 @@
 				CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = "Runner/RunnerProfile-dev.entitlements";
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -685,7 +685,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = H6S4582TRM;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
@@ -767,7 +767,7 @@
 					"$(PROJECT_DIR)/Flutter",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -819,7 +819,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER).development";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -874,7 +874,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -928,7 +928,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -981,7 +981,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1036,7 +1036,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1089,7 +1089,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER)";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1142,7 +1142,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER).development";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1196,7 +1196,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER).development";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1249,7 +1249,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "";
 				INFOPLIST_FILE = "omiWatchApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "$(APP_BUNDLE_IDENTIFIER).development";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1557,7 +1557,7 @@
 					"$(PROJECT_DIR)/Flutter",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1604,7 +1604,7 @@
 					"$(PROJECT_DIR)/Flutter",
 				);
 				INFOPLIST_FILE = Runner/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Omi;
+				INFOPLIST_KEY_CFBundleDisplayName = Ella;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
