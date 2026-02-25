@@ -14,8 +14,8 @@ class GuardianModePollingService {
         return URLSession(configuration: config)
     }()
 
-    var pollInterval: TimeInterval = 5.0
-    var backendURL: String = "http://100.76.138.56:3000"
+    var pollInterval: TimeInterval = 3.0
+    var backendURL: String = "https://api.ella-ai-care.com"
 
     struct PollResponse: Codable {
         let url: String?
@@ -51,7 +51,8 @@ class GuardianModePollingService {
     }
 
     func pollForNewAudio() async throws -> (url: URL, id: String)? {
-        let endpoint = "\(backendURL)/api/guardian/next-audio?uid=test-uid"
+        let uid = UserDefaults.standard.string(forKey: "uid") ?? "unknown"
+        let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
 
         guard let url = URL(string: endpoint) else {
             throw NSError(domain: "GuardianPolling", code: 1, userInfo: [
