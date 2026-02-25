@@ -13,7 +13,7 @@ class GuardianModeService {
   factory GuardianModeService() => _instance;
   GuardianModeService._internal();
 
-  static const MethodChannel _channel = MethodChannel('com.ellaaicare.omi/guardian_mode');
+  static const MethodChannel _channel = MethodChannel('com.ellaaicare.ella/guardian_mode');
 
   StreamController<GuardianModeState>? _stateController;
   Stream<GuardianModeState> get stateStream =>
