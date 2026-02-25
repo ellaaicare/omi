@@ -6,7 +6,9 @@ import WatchConnectivity
 import AVFoundation
 import Speech
 import EventKit
+import PushKit
 
+import TwilioVoice
 extension FlutterError: Error {}
 
 @main
@@ -27,69 +29,231 @@ extension FlutterError: Error {}
   private var nextExpectedChunkIndex: Int = 0
   private var isRecordingActive: Bool = false // Track recording state to handle app restarts
 
+  // VoIP Push Registry
+  private var voipRegistry: PKPushRegistry?
+  // Twilio Voice MethodChannel
+  private var twilioVoiceChannel: TwilioVoiceMethodChannel?
+  private var guardianModeChannel: FlutterMethodChannel?
+
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+
+    // Configure audio session for background recording
+    do {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
+        try audioSession.setActive(true, options: [])
+        print("AppDelegate: Audio session configured for background recording")
+        
+        // Observe audio session interruptions
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: audioSession
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioSessionRouteChange),
+            name: AVAudioSession.routeChangeNotification,
+            object: audioSession
+        )
+        
+        // Reactivate audio session when app becomes active
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    } catch {
+        print("AppDelegate: Failed to configure audio session: \(error.localizedDescription)")
+    }
       
+      
+      // Get Flutter view controller
+      guard let controller = window?.rootViewController as? FlutterViewController else {
+          print("AppDelegate: Failed to get FlutterViewController")
+          return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+      }
       
       if WCSession.isSupported() {
           session = WCSession.default
           session?.delegate = self
-          session?.activate();
+          session?.activate()
 
-          let controller = window?.rootViewController as? FlutterViewController
-            flutterWatchAPI = WatchRecorderFlutterAPI(binaryMessenger: controller!.binaryMessenger)
-            let api: WatchRecorderHostAPI = RecorderHostApiImpl(session: session!, flutterWatchAPI: flutterWatchAPI)
-
-            WatchRecorderHostAPISetup.setUp(binaryMessenger: controller!.binaryMessenger, api: api)
+          flutterWatchAPI = WatchRecorderFlutterAPI(binaryMessenger: controller.binaryMessenger)
+          if let session = session {
+              let api: WatchRecorderHostAPI = RecorderHostApiImpl(session: session, flutterWatchAPI: flutterWatchAPI)
+              WatchRecorderHostAPISetup.setUp(binaryMessenger: controller.binaryMessenger, api: api)
+          }
       }
 
       // Retrieve the link from parameters
-    if let url = AppLinks.shared.getLink(launchOptions: launchOptions) {
-      // We have a link, propagate it to your Flutter app or not
-      AppLinks.shared.handleLink(url: url)
-      return true // Returning true will stop the propagation to other packages
-    }
-    //Creates a method channel to handle notifications on kill
-    let controller = window?.rootViewController as? FlutterViewController
-    methodChannel = FlutterMethodChannel(name: "com.friend.ios/notifyOnKill", binaryMessenger: controller!.binaryMessenger)
-    methodChannel?.setMethodCallHandler { [weak self] (call, result) in
-      self?.handleMethodCall(call, result: result)
-    }
-    
-    // Create Apple Reminders method channel
-    appleRemindersChannel = FlutterMethodChannel(name: "com.omi.apple_reminders", binaryMessenger: controller!.binaryMessenger)
-    appleRemindersChannel?.setMethodCallHandler { [weak self] (call, result) in
-      self?.handleAppleRemindersCall(call, result: result)
-    }
+      if let url = AppLinks.shared.getLink(launchOptions: launchOptions) {
+          // We have a link, propagate it to your Flutter app or not
+          AppLinks.shared.handleLink(url: url)
+          return true // Returning true will stop the propagation to other packages
+      }
+      
+      //Creates a method channel to handle notifications on kill
+      methodChannel = FlutterMethodChannel(name: "com.friend.ios/notifyOnKill", binaryMessenger: controller.binaryMessenger)
+      methodChannel?.setMethodCallHandler { [weak self] (call, result) in
+          self?.handleMethodCall(call, result: result)
+      }
+      
+      // Create Apple Reminders method channel
+      appleRemindersChannel = FlutterMethodChannel(name: "com.omi.apple_reminders", binaryMessenger: controller.binaryMessenger)
+      appleRemindersChannel?.setMethodCallHandler { [weak self] (call, result) in
+          self?.handleAppleRemindersCall(call, result: result)
+      }
 
-    // Create Apple Health method channel
-    appleHealthChannel = FlutterMethodChannel(name: "com.omi.apple_health", binaryMessenger: controller!.binaryMessenger)
-    appleHealthChannel?.setMethodCallHandler { [weak self] (call, result) in
-      self?.handleAppleHealthCall(call, result: result)
-    }
+      // Create Apple Health method channel
+      appleHealthChannel = FlutterMethodChannel(name: "com.omi.apple_health", binaryMessenger: controller.binaryMessenger)
+      appleHealthChannel?.setMethodCallHandler { [weak self] (call, result) in
+          self?.handleAppleHealthCall(call, result: result)
+      }
 
-    // Create Speech Recognition method channel
-    let speechChannel = FlutterMethodChannel(name: "com.omi.ios/speech", binaryMessenger: controller!.binaryMessenger)
-    let speechHandler = SpeechRecognitionHandler()
-    speechChannel.setMethodCallHandler { (call, result) in
-        speechHandler.handle(call, result: result)
-    }
+      // Create Speech Recognition method channel
+      let speechChannel = FlutterMethodChannel(name: "com.omi.ios/speech", binaryMessenger: controller.binaryMessenger)
+      let speechHandler = SpeechRecognitionHandler()
+      speechChannel.setMethodCallHandler { (call, result) in
+          speechHandler.handle(call, result: result)
+      }
 
-    // Create WiFi Network plugin for device AP connection
-    _ = WifiNetworkPlugin(messenger: controller!.binaryMessenger)
+      // Create WiFi Network plugin for device AP connection
+      _ = WifiNetworkPlugin(messenger: controller.binaryMessenger)
 
     // here, Without this code the task will not work.
     SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
       GeneratedPluginRegistrant.register(with: registry)
     }
+    
     if #available(iOS 10.0, *) {
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
 
+    // MARK: - Push Notification Authorization
+    requestNotificationAuthorization()
+
+    // MARK: - VoIP Push Registration
+    registerForVoIPPushes()
+
+    // MARK: - CallKit Provider Initialization
+    CallKitProvider.shared.setup()
+    print("AppDelegate: CallKit provider initialized")
+
+    // Initialize Twilio Voice SDK
+    TwilioVoiceManager.shared.initialize()
+    print("AppDelegate: Twilio Voice SDK initialized")
+
+    // Initialize Twilio Voice MethodChannel
+    twilioVoiceChannel = TwilioVoiceMethodChannel(messenger: controller.binaryMessenger)
+    print("AppDelegate: Twilio Voice MethodChannel registered")
+
+    // Guardian Mode MethodChannel
+    guardianModeChannel = FlutterMethodChannel(
+        name: "com.ellaaicare.omi/guardian_mode",
+        binaryMessenger: controller.binaryMessenger
+    )
+    guardianModeChannel?.setMethodCallHandler { [weak self] (call, result) in
+        self?.handleGuardianModeMethodCall(call, result: result)
+    }
+    print("AppDelegate: Guardian Mode MethodChannel registered")
+
+
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // MARK: - VoIP Push Registration
+
+  /// Register for VoIP push notifications
+  private func registerForVoIPPushes() {
+    print("AppDelegate: Registering for VoIP push notifications")
+    
+    voipRegistry = PKPushRegistry(queue: DispatchQueue.main)
+    voipRegistry?.delegate = self
+    voipRegistry?.desiredPushTypes = [.voIP]
+    
+    print("AppDelegate: VoIP push registration initiated")
+  }
+
+  // MARK: - Audio Session Handlers
+  
+  @objc private func handleAudioSessionInterruption(notification: Notification) {
+      guard let userInfo = notification.userInfo,
+            let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+          return
+      }
+      
+      switch type {
+      case .began:
+          print("AppDelegate: Audio session interrupted")
+      case .ended:
+          print("AppDelegate: Audio session interruption ended")
+          // Reactivate audio session
+          do {
+              try AVAudioSession.sharedInstance().setActive(true)
+              print("AppDelegate: Audio session reactivated after interruption")
+          } catch {
+              print("AppDelegate: Failed to reactivate audio session: \(error)")
+          }
+      @unknown default:
+          break
+      }
+  }
+  
+  @objc private func handleAudioSessionRouteChange(notification: Notification) {
+      guard let userInfo = notification.userInfo,
+            let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+            let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+          return
+      }
+      
+      print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
+  }
+  
+  @objc private func handleApplicationDidBecomeActive(notification: Notification) {
+      // Ensure audio session is active when app becomes active
+      do {
+          let audioSession = AVAudioSession.sharedInstance()
+          if !audioSession.isOtherAudioPlaying {
+              try audioSession.setActive(true)
+              print("AppDelegate: Audio session reactivated on app becoming active")
+          }
+      } catch {
+          print("AppDelegate: Failed to reactivate audio session on app active: \(error)")
+      }
+  }
+
+  // MARK: - Notification Authorization
+
+  /// Request push notification permissions
+  private func requestNotificationAuthorization() {
+    print("AppDelegate: Requesting notification authorization")
+    
+    let center = UNUserNotificationCenter.current()
+    center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+      if let error = error {
+        print("AppDelegate: Notification authorization error: \(error.localizedDescription)")
+        return
+      }
+      
+      if granted {
+        print("AppDelegate: Notification authorization granted")
+        DispatchQueue.main.async {
+          UIApplication.shared.registerForRemoteNotifications()
+        }
+      } else {
+        print("AppDelegate: Notification authorization denied")
+      }
+    }
   }
 
   private func handleMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -208,6 +372,11 @@ extension FlutterError: Error {}
   }
 
   override func applicationWillTerminate(_ application: UIApplication) {
+    // Remove audio session observers
+    NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
+    NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)
+    NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
+    
     // If title and body are nil, then we don't need to show notification.
     if notificationTitleOnKill == nil || notificationBodyOnKill == nil {
       return
@@ -293,9 +462,84 @@ extension FlutterError: Error {}
     }
 }
 
+// MARK: - PKPushRegistryDelegate
+
+extension AppDelegate: PKPushRegistryDelegate {
+    
+    /// Called when VoIP push credentials are updated
+    func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
+        print("AppDelegate: VoIP push credentials updated for type: \(type.rawValue)")
+        
+        // Convert token to hex string for logging and backend registration
+        let tokenParts = pushCredentials.token.map { String(format: "%02.2hhx", $0) }
+        let token = tokenParts.joined()
+        
+        print("AppDelegate: VoIP push token: \(token)")
+        
+        // TESTING: Register VoIP token with Twilio SDK
+        // TODO: Replace hardcoded token with backend fetch in production
+        let testAccessToken = "***REMOVED_TWILIO_TOKEN***"
+
+        print("AppDelegate: Clearing old VoIP registrations...")
+        TwilioVoiceSDK.unregister(accessToken: testAccessToken, deviceToken: pushCredentials.token) { error in
+            print("AppDelegate: Old registration cleared")
+
+            print("AppDelegate: Registering VoIP token with Twilio SDK...")
+            TwilioVoiceSDK.register(accessToken: testAccessToken, deviceToken: pushCredentials.token) { error in
+                if let error = error {
+                    print("AppDelegate: ❌ Twilio VoIP registration FAILED: \(error.localizedDescription)")
+                } else {
+                    print("AppDelegate: ✅ Twilio VoIP registration successful!")
+                }
+            }
+        }
+    }
+    
+    /// Called when VoIP push token is invalidated
+    func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+        print("AppDelegate: VoIP push token invalidated for type: \(type.rawValue)")
+        
+        // TODO: Notify backend that token is invalid (Task 2)
+    }
+
+    /// Called when VoIP push registration fails
+    func pushRegistry(_ registry: PKPushRegistry, didFailToReceiveRegistrationWithError error: Error, for type: PKPushType) {
+        print("AppDelegate: VoIP push registration FAILED for type: \(type.rawValue)")
+        print("AppDelegate: Registration error: \(error.localizedDescription)")
+    }
+    
+    /// Called when an incoming VoIP push notification is received
+    func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
+        print("AppDelegate: Received VoIP push notification")
+
+        // Request background execution time
+        let backgroundTask = UIApplication.shared.beginBackgroundTask {
+            print("AppDelegate: Background task expiring")
+        }
+
+        // Handle the push with VoIPPushHandler
+        VoIPPushHandler.shared.handleIncomingPush(payload: payload) { success in
+            if success {
+                print("AppDelegate: VoIP push handled successfully")
+            } else {
+                print("AppDelegate: VoIP push handling failed")
+            }
+
+            // End background task
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+        }
+        
+        completion()
+    }
+}
+
+// MARK: - Plugin Registration
+
 func registerPlugins(registry: FlutterPluginRegistry) {
   GeneratedPluginRegistrant.register(with: registry)
 }
+
+// MARK: - WCSessionDelegate
 
 extension AppDelegate: WCSessionDelegate {
     
@@ -486,9 +730,58 @@ extension AppDelegate: WCSessionDelegate {
             }
         }
     }
+
+    // MARK: - Guardian Mode MethodChannel Handler
+
+    private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "start":
+            do {
+                try GuardianModeManager.shared.start()
+                result(["status": "active"])
+            } catch {
+                result(FlutterError(
+                    code: "START_FAILED",
+                    message: "Failed to start Guardian Mode",
+                    details: error.localizedDescription
+                ))
+            }
+            
+        case "stop":
+            GuardianModeManager.shared.stop()
+            result(["status": "idle"])
+            
+        case "getState":
+            let state = GuardianModeManager.shared.getState()
+            result(["status": state])
+            
+        case "injectRemoteAudioClip":
+            guard let args = call.arguments as? [String: Any],
+                  let audioURLString = args["audioURL"] as? String,
+                  !audioURLString.isEmpty,
+                  let audioURL = URL(string: audioURLString) else {
+                result(FlutterError(
+                    code: "INVALID_ARGS",
+                    message: "Missing or invalid audioURL parameter",
+                    details: nil
+                ))
+                return
+            }
+
+            let eventId = args["eventId"] as? String ?? "manual-\(Int(Date().timeIntervalSince1970))"
+
+            print("AppDelegate: Injecting remote audio: \(audioURL.absoluteString)")
+            GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+            result(["status": "injected", "url": audioURLString])
+            
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
 }
 
 class SpeechRecognitionHandler: NSObject {
+    private var recognitionTask: SFSpeechRecognitionTask?
     
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         if call.method == "transcribe" {
@@ -531,7 +824,9 @@ class SpeechRecognitionHandler: NSObject {
             request.shouldReportPartialResults = false
             request.requiresOnDeviceRecognition = true // Force on-device
             
-            let task = recognizer.recognitionTask(with: request) { (recognitionResult, error) in
+            self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] (recognitionResult, error) in
+                guard let self = self else { return }
+                
                 if let error = error {
                     // Check if it's just "No speech identified" which might happen with silence
                     let nsError = error as NSError
@@ -540,14 +835,17 @@ class SpeechRecognitionHandler: NSObject {
                     } else {
                          result(FlutterError(code: "RECOGNITION_ERROR", message: error.localizedDescription, details: nil))
                     }
+                    self.recognitionTask = nil
                     return
                 }
                 
                 if let recognitionResult = recognitionResult, recognitionResult.isFinal {
                     let text = recognitionResult.bestTranscription.formattedString
                     result(text)
+                    self.recognitionTask = nil
                 }
             }
         }
     }
+
 }

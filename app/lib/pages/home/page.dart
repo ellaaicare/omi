@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/services.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -54,6 +56,7 @@ import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_emergency_button.dart';
+import 'package:omi/ella/widgets/guardian_mode_button.dart';
 import 'widgets/battery_info_widget.dart';
 
 class HomePageWrapper extends StatefulWidget {
@@ -87,6 +90,7 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     });
     _navigateToRoute = widget.navigateToRoute;
     _autoMessage = widget.autoMessage;
+
     super.initState();
   }
 
@@ -400,6 +404,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _listenToFreemiumThreshold();
     _checkForAnnouncements();
     _provisionEllaIfNeeded();
+
     super.initState();
 
     // After init
@@ -610,21 +615,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                           if (context.watch<HomeProvider>().selectedIndex != 1 &&
                               context.watch<HomeProvider>().selectedIndex != 2)
                             SizedBox(
-                                height: EllaSizes.emergencyButtonHeight +
+                                height: EllaSizes.guardianButtonHeight +
+                                    EllaSizes.emergencyButtonHeight +
                                     EllaSizes.navBarHeight +
-                                    MediaQuery.of(context).padding.bottom +
-                                    32),
+                                    (EllaSizes.buttonStackSpacing * 2) +
+                                    MediaQuery.of(context).padding.bottom),
                         ],
                       ),
-                      // Emergency button -- positioned above the nav bar
+                      // Action buttons stack (Guardian + Emergency) - consolidated for self-adjusting layout
                       Positioned(
-                        bottom: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 16,
+                        bottom: 0,
                         left: 0,
                         right: 0,
                         child: Consumer<HomeProvider>(
                           builder: (context, home, _) {
-                            if (home.selectedIndex != 0) return const SizedBox.shrink();
-                            return const Center(child: EllaEmergencyButton());
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Action buttons (only on home screen)
+                                  if (home.selectedIndex == 0) ...[
+                                    const GuardianModeButton(),
+                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
+                                    const EllaEmergencyButton(),
+                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
+                                  ],
+                                  // Always reserve space for nav bar
+                                  SizedBox(height: EllaSizes.navBarHeight),
+                                ],
+                              ),
+                            );
                           },
                         ),
                       ),
@@ -709,8 +730,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     );
   }
 
+
   @override
-  void dispose() {
+  Future<void> dispose() async {
     WidgetsBinding.instance.removeObserver(this);
     // Cancel stream subscription to prevent memory leak
     _notificationStreamSubscription?.cancel();

@@ -18,6 +18,13 @@ class MobileApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
+
+    // Debug mode: bypass auth and go straight to home
+    if (debugAutoCall) {
+      return const HomePageWrapper();
+    }
+
     // Ella app: use simplified onboarding that handles auth internally
     if (_isEllaApp) {
       return Consumer<AuthenticationProvider>(

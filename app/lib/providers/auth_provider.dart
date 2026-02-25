@@ -34,6 +34,13 @@ class AuthenticationProvider extends BaseProvider {
   }
 
   void _initializeAuthListeners() {
+    // Simulator bypass for automated testing
+    if (isSimulator()) {
+      print("AUTH_BYPASS: Running in simulator, setting up test authentication");
+      _setupSimulatorAuth();
+      return;  // Skip normal auth listeners
+    }
+
     // DEBUG: Log initial state
     Logger.debug(
         'DEBUG AuthProvider: Initial currentUser=${_auth.currentUser?.uid}, isAnonymous=${_auth.currentUser?.isAnonymous}');
@@ -67,6 +74,29 @@ class AuthenticationProvider extends BaseProvider {
         notifyListeners();
       });
     });
+  }
+
+
+  /// Sets up fake authentication for simulator testing
+  /// This allows automated tests to run without user interaction
+  Future<void> _setupSimulatorAuth() async {
+    // Set test UID to match test server expectations
+    SharedPreferencesUtil().uid = "test-uid";
+    SharedPreferencesUtil().email = "test@simulator.local";
+    SharedPreferencesUtil().givenName = "Test";
+    SharedPreferencesUtil().onboardingCompleted = true;  // Skip onboarding
+
+    // Try to sign in anonymously for Firebase if needed
+    try {
+      if (_auth.currentUser == null) {
+        await _auth.signInAnonymously();
+        print("AUTH_BYPASS: Signed in anonymously as ${_auth.currentUser?.uid}");
+      }
+    } catch (e) {
+      print("AUTH_BYPASS: Failed to sign in anonymously: $e (continuing anyway)");
+    }
+
+    notifyListeners();
   }
 
   bool isSignedIn() => _auth.currentUser != null && !_auth.currentUser!.isAnonymous;
