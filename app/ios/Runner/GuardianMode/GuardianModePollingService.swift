@@ -51,7 +51,8 @@ class GuardianModePollingService {
     }
 
     func pollForNewAudio() async throws -> (url: URL, id: String)? {
-        let uid = UserDefaults.standard.string(forKey: "uid") ?? "unknown"
+        // Flutter shared_preferences stores with "flutter." prefix on iOS
+        let uid = UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid") ?? "unknown"
         let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
 
         guard let url = URL(string: endpoint) else {
