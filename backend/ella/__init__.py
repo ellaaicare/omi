@@ -32,6 +32,7 @@ ELLA_SCANNER_ENABLED = os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "tru
 ELLA_NOTIFICATIONS_ENABLED = os.getenv("ELLA_NOTIFICATIONS_ENABLED", "true").lower() == "true"
 ELLA_VOICE_V2_ENABLED = os.getenv("ELLA_VOICE_V2_ENABLED", "true").lower() == "true"
 ELLA_TESTING_ENABLED = os.getenv("ELLA_TESTING_ENABLED", "false").lower() == "true"
+ELLA_GUARDIAN_ENABLED = os.getenv("ELLA_GUARDIAN_ENABLED", "true").lower() == "true"
 
 # n8n Configuration
 ELLA_N8N_BASE_URL = os.getenv("ELLA_N8N_BASE_URL", "https://n8n.ella-ai-care.com")
@@ -145,6 +146,7 @@ def register_ella_extensions(app) -> None:
     print(f"   • n8n Scanner:    {'✅ ON' if ELLA_SCANNER_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Notifications:  {'✅ ON' if ELLA_NOTIFICATIONS_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Voice V2:       {'✅ ON' if ELLA_VOICE_V2_ENABLED else '❌ OFF'}", flush=True)
+    print(f"   • Guardian Mode: {'✅ ON' if ELLA_GUARDIAN_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Testing:        {'✅ ON' if ELLA_TESTING_ENABLED else '❌ OFF'}", flush=True)
     print(f"   • Chat Debug:     Level {_dl} ({_dl_label})", flush=True)
     print("", flush=True)
@@ -274,6 +276,17 @@ def _register_routers(app) -> None:
         except ImportError as e:
             print(f"  ⚠️ Voice endpoints not available: {e}", flush=True)
 
+
+    # Guardian Mode (audio queue for iOS)
+    if ELLA_GUARDIAN_ENABLED:
+        try:
+            from ella.routers.guardian import router as guardian_router
+
+            app.include_router(guardian_router, tags=["Guardian Mode"])
+            print("  🌐 /v1/ella/guardian/* - Guardian Mode endpoints", flush=True)
+        except ImportError as e:
+            print(f"  ⚠️ Guardian Mode not available: {e}", flush=True)
+
     # Testing endpoints (dev only)
     if ELLA_TESTING_ENABLED:
         try:
@@ -298,6 +311,7 @@ __all__ = [
     'ELLA_NOTIFICATIONS_ENABLED',
     'ELLA_VOICE_V2_ENABLED',
     'ELLA_TESTING_ENABLED',
+    'ELLA_GUARDIAN_ENABLED',
     'ELLA_N8N_BASE_URL',
     'GROK_V2V_PROXY_URL',
     # Adapter registry
