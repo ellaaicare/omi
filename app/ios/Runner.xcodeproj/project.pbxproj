@@ -599,7 +599,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Debug-prod";
@@ -618,7 +618,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -636,7 +636,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Release-prod";
@@ -653,7 +653,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Debug-dev";
@@ -670,7 +670,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = "Profile-dev";
@@ -689,7 +689,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(APP_BUNDLE_IDENTIFIER)";
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.ellaaicare.ella;
-				PRODUCT_NAME = Runner;
+				PRODUCT_NAME = Ella;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				TARGETED_DEVICE_FAMILY = 1;
 			};
