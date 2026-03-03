@@ -5,6 +5,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/backend/schema/resolved_endpoint.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/string_utils.dart';
 
@@ -219,5 +220,72 @@ Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async 
   } catch (e) {
     Logger.debug('Error transcribing voice message: $e');
     throw Exception('Error transcribing voice message: $e');
+  }
+}
+
+// Cache for resolved endpoint (TTL: 1 hour)
+ResolvedEndpoint? _cachedEndpoint;
+
+/// Resolve the OpenClaw endpoint for the current user
+/// Returns cached endpoint if still valid, otherwise fetches from API
+Future<ResolvedEndpoint> resolveEllaEndpoint() async {
+  // Check cache first (TTL: 1 hour)
+  var cached = _cachedEndpoint;
+  if (cached != null && !cached.isExpired) return cached;
+
+  var uid = SharedPreferencesUtil().uid;
+  var url = '${Env.apiBaseUrl}v1/ella/resolve?uid=$uid';
+  var response = await makeApiCall(
+    url: url,
+    headers: {},
+    method: 'GET',
+    body: '',
+  );
+
+  if (response == null || response.statusCode != 200) {
+    throw Exception('Failed to resolve endpoint for user $uid');
+  }
+
+  var json = jsonDecode(response.body);
+  _cachedEndpoint = ResolvedEndpoint.fromJson(json);
+  Logger.debug('Resolved endpoint for $uid: agent=${_cachedEndpoint!.agentId}, gateway=${_cachedEndpoint!.gatewayUrl}');
+  return _cachedEndpoint!;
+}
+
+/// Send a chat message directly to OpenClaw using Pattern C (resolve + direct SSE)
+/// This bypasses the VPS proxy and routes to the correct per-user agent
+Stream<ServerMessageChunk> sendEllaDirectStream(String text) async* {
+  try {
+    var endpoint = await resolveEllaEndpoint();
+    var url = '${endpoint.gatewayUrl}/v1/chat/completions';
+
+    Logger.debug('Sending to OpenClaw: url=$url, agent=${endpoint.agentId}, session=${endpoint.sessionKey}');
+
+    await for (var line in makeStreamingApiCall(
+      url: url,
+      headers: {
+        'Authorization': 'Bearer ${endpoint.token}',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'model': 'openclaw:${endpoint.agentId}',
+        'messages': [{'role': 'user', 'content': text}],
+        'stream': true,
+        'user': endpoint.sessionKey,
+      }),
+      skipAuth: true,  // Don't add Firebase auth - use gateway token
+    )) {
+      // Skip SSE comment lines (keep-alives)
+      if (line.startsWith(':')) continue;
+
+      var chunk = parseOpenAIStreamChunk(line);
+      if (chunk != null) {
+        yield chunk;
+      }
+    }
+  } catch (e, stackTrace) {
+    Logger.error('Error in sendEllaDirectStream: $e');
+    Logger.error('Stack trace: $stackTrace');
+    yield ServerMessageChunk.failedMessage();
   }
 }

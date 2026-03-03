@@ -431,7 +431,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       // Send via Ella's chat endpoint
       debugPrint('[VoiceChat] Sending to Ella chat...');
       final replyBuffer = StringBuffer();
-      await for (var chunk in sendEllaMessageStream(transcript)) {
+      await for (var chunk in sendEllaDirectStream(transcript)) {
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
         } else if (chunk.type == MessageChunkType.done && chunk.message != null) {

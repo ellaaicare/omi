@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:collection/collection.dart';
 import 'package:uuid/uuid.dart';
 
@@ -334,4 +336,36 @@ class ServerMessageChunk {
       MessageChunkType.error,
     );
   }
+}
+
+/// Parse OpenAI SSE stream chunk
+/// Returns null if line is not a valid SSE data line
+ServerMessageChunk? parseOpenAIStreamChunk(String line) {
+  if (!line.startsWith('data: ')) return null;
+
+  var data = line.substring(6).trim();
+  if (data == '[DONE]') {
+    return ServerMessageChunk(
+      const Uuid().v4(),
+      '',
+      MessageChunkType.done,
+    );
+  }
+
+  try {
+    var json = jsonDecode(data);
+    var content = json['choices']?[0]?['delta']?['content'];
+    if (content != null) {
+      return ServerMessageChunk(
+        const Uuid().v4(),
+        content,
+        MessageChunkType.data,
+      );
+    }
+  } catch (e) {
+    // Invalid JSON or unexpected structure - skip this chunk
+    return null;
+  }
+
+  return null;
 }
