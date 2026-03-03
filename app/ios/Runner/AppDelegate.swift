@@ -48,7 +48,7 @@ extension FlutterError: Error {}
         try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
         try audioSession.setActive(true, options: [])
         print("AppDelegate: Audio session configured for background recording")
-        
+
         // Observe audio session interruptions
         NotificationCenter.default.addObserver(
             self,
@@ -56,14 +56,14 @@ extension FlutterError: Error {}
             name: AVAudioSession.interruptionNotification,
             object: audioSession
         )
-        
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAudioSessionRouteChange),
             name: AVAudioSession.routeChangeNotification,
             object: audioSession
         )
-        
+
         // Reactivate audio session when app becomes active
         NotificationCenter.default.addObserver(
             self,
@@ -74,14 +74,14 @@ extension FlutterError: Error {}
     } catch {
         print("AppDelegate: Failed to configure audio session: \(error.localizedDescription)")
     }
-      
-      
+
+
       // Get Flutter view controller
       guard let controller = window?.rootViewController as? FlutterViewController else {
           print("AppDelegate: Failed to get FlutterViewController")
           return super.application(application, didFinishLaunchingWithOptions: launchOptions)
       }
-      
+
       if WCSession.isSupported() {
           session = WCSession.default
           session?.delegate = self
@@ -100,13 +100,13 @@ extension FlutterError: Error {}
           AppLinks.shared.handleLink(url: url)
           return true // Returning true will stop the propagation to other packages
       }
-      
+
       //Creates a method channel to handle notifications on kill
       methodChannel = FlutterMethodChannel(name: "com.friend.ios/notifyOnKill", binaryMessenger: controller.binaryMessenger)
       methodChannel?.setMethodCallHandler { [weak self] (call, result) in
           self?.handleMethodCall(call, result: result)
       }
-      
+
       // Create Apple Reminders method channel
       appleRemindersChannel = FlutterMethodChannel(name: "com.omi.apple_reminders", binaryMessenger: controller.binaryMessenger)
       appleRemindersChannel?.setMethodCallHandler { [weak self] (call, result) in
@@ -133,7 +133,7 @@ extension FlutterError: Error {}
     SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
       GeneratedPluginRegistrant.register(with: registry)
     }
-    
+
     if #available(iOS 10.0, *) {
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }
@@ -158,7 +158,7 @@ extension FlutterError: Error {}
 
     // Guardian Mode MethodChannel
     guardianModeChannel = FlutterMethodChannel(
-        name: "com.ellaaicare.omi/guardian_mode",
+        name: "com.ellaaicare.ella/guardian_mode",
         binaryMessenger: controller.binaryMessenger
     )
     guardianModeChannel?.setMethodCallHandler { [weak self] (call, result) in
@@ -175,23 +175,23 @@ extension FlutterError: Error {}
   /// Register for VoIP push notifications
   private func registerForVoIPPushes() {
     print("AppDelegate: Registering for VoIP push notifications")
-    
+
     voipRegistry = PKPushRegistry(queue: DispatchQueue.main)
     voipRegistry?.delegate = self
     voipRegistry?.desiredPushTypes = [.voIP]
-    
+
     print("AppDelegate: VoIP push registration initiated")
   }
 
   // MARK: - Audio Session Handlers
-  
+
   @objc private func handleAudioSessionInterruption(notification: Notification) {
       guard let userInfo = notification.userInfo,
             let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
             let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
           return
       }
-      
+
       switch type {
       case .began:
           print("AppDelegate: Audio session interrupted")
@@ -208,17 +208,17 @@ extension FlutterError: Error {}
           break
       }
   }
-  
+
   @objc private func handleAudioSessionRouteChange(notification: Notification) {
       guard let userInfo = notification.userInfo,
             let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
             let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
           return
       }
-      
+
       print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
   }
-  
+
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
       // Ensure audio session is active when app becomes active
       do {
@@ -237,14 +237,14 @@ extension FlutterError: Error {}
   /// Request push notification permissions
   private func requestNotificationAuthorization() {
     print("AppDelegate: Requesting notification authorization")
-    
+
     let center = UNUserNotificationCenter.current()
     center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
       if let error = error {
         print("AppDelegate: Notification authorization error: \(error.localizedDescription)")
         return
       }
-      
+
       if granted {
         print("AppDelegate: Notification authorization granted")
         DispatchQueue.main.async {
@@ -267,14 +267,14 @@ extension FlutterError: Error {}
 
   private func handleSetNotificationOnKillService(call: FlutterMethodCall) {
     NSLog("handleMethodCall: setNotificationOnKillService")
-    
+
     if let args = call.arguments as? Dictionary<String, Any> {
       notificationTitleOnKill = args["title"] as? String
       notificationBodyOnKill = args["description"] as? String
     }
-    
+
   }
-  
+
   private func handleAppleRemindersCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     appleRemindersService.handleMethodCall(call, result: result)
   }
@@ -376,7 +376,7 @@ extension FlutterError: Error {}
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)
     NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification, object: nil)
-    
+
     // If title and body are nil, then we don't need to show notification.
     if notificationTitleOnKill == nil || notificationBodyOnKill == nil {
       return
@@ -465,17 +465,17 @@ extension FlutterError: Error {}
 // MARK: - PKPushRegistryDelegate
 
 extension AppDelegate: PKPushRegistryDelegate {
-    
+
     /// Called when VoIP push credentials are updated
     func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
         print("AppDelegate: VoIP push credentials updated for type: \(type.rawValue)")
-        
+
         // Convert token to hex string for logging and backend registration
         let tokenParts = pushCredentials.token.map { String(format: "%02.2hhx", $0) }
         let token = tokenParts.joined()
-        
+
         print("AppDelegate: VoIP push token: \(token)")
-        
+
         // TESTING: Register VoIP token with Twilio SDK
         // TODO: Replace hardcoded token with backend fetch in production
         let testAccessToken = "***REMOVED_TWILIO_TOKEN***"
@@ -494,11 +494,11 @@ extension AppDelegate: PKPushRegistryDelegate {
             }
         }
     }
-    
+
     /// Called when VoIP push token is invalidated
     func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
         print("AppDelegate: VoIP push token invalidated for type: \(type.rawValue)")
-        
+
         // TODO: Notify backend that token is invalid (Task 2)
     }
 
@@ -507,7 +507,7 @@ extension AppDelegate: PKPushRegistryDelegate {
         print("AppDelegate: VoIP push registration FAILED for type: \(type.rawValue)")
         print("AppDelegate: Registration error: \(error.localizedDescription)")
     }
-    
+
     /// Called when an incoming VoIP push notification is received
     func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
         print("AppDelegate: Received VoIP push notification")
@@ -528,7 +528,7 @@ extension AppDelegate: PKPushRegistryDelegate {
             // End background task
             UIApplication.shared.endBackgroundTask(backgroundTask)
         }
-        
+
         completion()
     }
 }
@@ -542,17 +542,17 @@ func registerPlugins(registry: FlutterPluginRegistry) {
 // MARK: - WCSessionDelegate
 
 extension AppDelegate: WCSessionDelegate {
-    
+
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) { }
-    
+
     func sessionDidBecomeInactive(_ session: WCSession) {
         print("Session Watch Become Inactive")
     }
-    
+
     func sessionDidDeactivate(_ session: WCSession) {
         print("Session Watch Deactivate")
     }
-    
+
     // Receive a message from watch (foreground/active)
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         Task {
@@ -565,7 +565,7 @@ extension AppDelegate: WCSessionDelegate {
                 self.isRecordingActive = true
                 self.audioChunks.removeAll()
                 self.nextExpectedChunkIndex = 0
-                
+
                 DispatchQueue.main.async {
                     self.flutterWatchAPI?.onRecordingStarted() { result in
                         switch result {
@@ -633,7 +633,7 @@ extension AppDelegate: WCSessionDelegate {
                     UserDefaults.standard.set(batteryLevel, forKey: "watch_battery_level")
                     UserDefaults.standard.set(batteryState, forKey: "watch_battery_state")
                     UserDefaults.standard.set(Date(), forKey: "watch_battery_last_updated")
-                    
+
                     DispatchQueue.main.async {
                         self.flutterWatchAPI?.onWatchBatteryUpdate(batteryLevel: batteryLevel, batteryState: Int64(batteryState)) { result in
                             switch result {
@@ -662,16 +662,16 @@ extension AppDelegate: WCSessionDelegate {
             }
         }
     }
-    
+
     // Receive user info from watch (background/offline)
     // Used for 1.5 second audio chunks when screen is off or app is backgrounded
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any]) {
-        
+
         Task {
             guard let method = userInfo["method"] as? String else {
                 return
             }
-            
+
             switch method {
             case "sendAudioChunk":
                 self.handleAudioChunk(userInfo)
@@ -702,7 +702,7 @@ extension AppDelegate: WCSessionDelegate {
                     UserDefaults.standard.set(batteryLevel, forKey: "watch_battery_level")
                     UserDefaults.standard.set(batteryState, forKey: "watch_battery_state")
                     UserDefaults.standard.set(Date(), forKey: "watch_battery_last_updated")
-                    
+
                     DispatchQueue.main.async {
                         self.flutterWatchAPI?.onWatchBatteryUpdate(batteryLevel: batteryLevel, batteryState: Int64(batteryState)) { result in
                             switch result {
@@ -746,15 +746,15 @@ extension AppDelegate: WCSessionDelegate {
                     details: error.localizedDescription
                 ))
             }
-            
+
         case "stop":
             GuardianModeManager.shared.stop()
             result(["status": "idle"])
-            
+
         case "getState":
             let state = GuardianModeManager.shared.getState()
             result(["status": state])
-            
+
         case "injectRemoteAudioClip":
             guard let args = call.arguments as? [String: Any],
                   let audioURLString = args["audioURL"] as? String,
@@ -773,7 +773,7 @@ extension AppDelegate: WCSessionDelegate {
             print("AppDelegate: Injecting remote audio: \(audioURL.absoluteString)")
             GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
             result(["status": "injected", "url": audioURLString])
-            
+
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -782,7 +782,7 @@ extension AppDelegate: WCSessionDelegate {
 
 class SpeechRecognitionHandler: NSObject {
     private var recognitionTask: SFSpeechRecognitionTask?
-    
+
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         if call.method == "transcribe" {
             guard let args = call.arguments as? [String: Any],
@@ -790,14 +790,14 @@ class SpeechRecognitionHandler: NSObject {
                 result(FlutterError(code: "INVALID_ARGS", message: "Missing arguments", details: nil))
                 return
             }
-            
+
             let language = args["language"] as? String ?? "en-US"
             transcribe(filePath: path, language: language, result: result)
         } else {
             result(FlutterMethodNotImplemented)
         }
     }
-    
+
     private func transcribe(filePath: String, language: String, result: @escaping FlutterResult) {
         // Request authorization first
         SFSpeechRecognizer.requestAuthorization { authStatus in
@@ -805,28 +805,28 @@ class SpeechRecognitionHandler: NSObject {
                 result(FlutterError(code: "UNAUTHORIZED", message: "Speech recognition not authorized", details: nil))
                 return
             }
-            
+
             let fileUrl = URL(fileURLWithPath: filePath)
             let localeIdentifier = language.isEmpty ? "en-US" : language
             let locale = Locale(identifier: localeIdentifier)
-            
+
             guard let recognizer = SFSpeechRecognizer(locale: locale) else {
                 result(FlutterError(code: "UNAVAILABLE", message: "Speech recognizer not available for locale \(localeIdentifier)", details: nil))
                 return
             }
-            
+
             if !recognizer.isAvailable {
                 result(FlutterError(code: "UNAVAILABLE", message: "Speech recognizer service is currently unavailable", details: nil))
                 return
             }
-            
+
             let request = SFSpeechURLRecognitionRequest(url: fileUrl)
             request.shouldReportPartialResults = false
             request.requiresOnDeviceRecognition = true // Force on-device
-            
+
             self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] (recognitionResult, error) in
                 guard let self = self else { return }
-                
+
                 if let error = error {
                     // Check if it's just "No speech identified" which might happen with silence
                     let nsError = error as NSError
@@ -838,7 +838,7 @@ class SpeechRecognitionHandler: NSObject {
                     self.recognitionTask = nil
                     return
                 }
-                
+
                 if let recognitionResult = recognitionResult, recognitionResult.isFinal {
                     let text = recognitionResult.bestTranscription.formattedString
                     result(text)
