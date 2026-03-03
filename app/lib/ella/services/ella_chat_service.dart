@@ -9,9 +9,22 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 
 /// Feature flag — set to false to disable direct chat and use proxy fallback.
 const bool _useDirectChat = true;
+
+/// Build Ella-specific debug headers for routing observability (Issue #216).
+/// Backend trace.py captures these to correlate client requests with server routing decisions.
+Map<String, String> _ellaDebugHeaders({required String routeSource}) {
+  final uid = SharedPreferencesUtil().uid;
+  return {
+    'X-Ella-Client': 'ios-app',
+    'X-Ella-Client-Version': PlatformManager.instance.appVersion,
+    'X-Ella-Route-Source': routeSource,
+    'X-Ella-Session-Key': 'ella:$uid',
+  };
+}
 
 /// Cached resolve result with expiry.
 class _ResolvedEndpoint {
@@ -79,7 +92,7 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
   try {
     final response = await makeApiCall(
       url: '${Env.apiBaseUrl}v1/ella/resolve?uid=$uid',
-      headers: {},
+      headers: _ellaDebugHeaders(routeSource: 'resolve'),
       method: 'GET',
       body: '',
       timeout: const Duration(seconds: 5),
@@ -88,6 +101,12 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
     if (response == null || response.statusCode != 200) {
       Logger.debug('[EllaChat] Resolve failed: ${response?.statusCode}');
       return null;
+    }
+
+    // Log trace ID for routing observability (Issue #216)
+    final traceId = response.headers['x-ella-trace-id'];
+    if (traceId != null) {
+      Logger.debug('[EllaChat] Resolve trace: $traceId');
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -156,7 +175,7 @@ ServerMessageChunk? _parseOpenAiSseChunk(String line, String messageId) {
 Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
   // Feature flag — delegate to existing proxy path if disabled
   if (!_useDirectChat) {
-    yield* sendEllaMessageStream(text);
+    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-flag-off'));
     return;
   }
 
@@ -164,7 +183,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
   final endpoint = await _resolveEndpoint();
   if (endpoint == null) {
     Logger.debug('[EllaChat] Resolve unavailable, using proxy fallback');
-    yield* sendEllaMessageStream(text);
+    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-resolve-fail'));
     return;
   }
 
@@ -178,6 +197,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       url: '${endpoint.gatewayUrl}/v1/chat/completions',
       headers: {
         'Authorization': 'Bearer ${endpoint.token}',
+        ..._ellaDebugHeaders(routeSource: 'pattern-c'),
       },
       body: jsonEncode({
         'model': 'openclaw:${endpoint.agentId}',
@@ -205,7 +225,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
     // No text accumulated — invalidate cache and retry via proxy
     if (accumulatedText.isEmpty) {
       _invalidateResolveCache();
-      yield* sendEllaMessageStream(text);
+      yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-gateway-error'));
       return;
     }
     // Partial text accumulated — fall through to synthesize done chunk below
