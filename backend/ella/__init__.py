@@ -266,6 +266,24 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella chat not available: {e}", flush=True)
 
+    # Resolve endpoint (user identity -> agent routing)
+    try:
+        from ella.routers.resolve import router as resolve_router
+
+        app.include_router(resolve_router, tags=["Ella Resolve"])
+        print("  🌐 /v1/ella/resolve - User-to-agent resolution", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella resolve not available: {e}", flush=True)
+
+    # Debug tracing (routing visibility)
+    try:
+        from ella.routers.trace import router as trace_router
+
+        app.include_router(trace_router, tags=["Ella Debug"])
+        print("  🌐 /v1/ella/debug/* - Routing trace & debug", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella trace not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
