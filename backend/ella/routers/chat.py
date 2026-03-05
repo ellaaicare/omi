@@ -26,11 +26,13 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ella.config import ELLA_CONFIG
+from ella.routers.resolve import resolve_user_routing
+from ella.routers.trace import RouteTrace, record_trace
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +172,12 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
             yield f"data: {error_data}\n\n"
 
 
-async def _stream_level_4_openclaw(user_message: str, uid: str):
+async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dict = None):
     """Level 4: Direct to OpenClaw gateway's OpenAI-compatible endpoint.
+
+    Dynamically resolves the user's agent from the database instead of
+    hardcoding 'openclaw:main'. Falls back to 'openclaw:main' if no
+    cluster is provisioned.
 
     Emits OMI-compatible SSE format:
       data: <text chunk>          (streaming content, can be multiple)
@@ -184,25 +190,56 @@ async def _stream_level_4_openclaw(user_message: str, uid: str):
         yield "data: Error: OPENCLAW_GATEWAY_TOKEN not configured\n\n"
         return
 
+    # Dynamic agent resolution with tracing
+    _l4_trace = RouteTrace()
+    _l4_trace.endpoint = "/v1/ella/chat/stream -> Level 4"
+    _l4_trace.uid = uid
+    _l4_trace.debug_level = 4
+    if client_info:
+        _l4_trace.client_type = client_info.get("type", "")
+        _l4_trace.client_version = client_info.get("version", "")
+        _l4_trace.client_ip = client_info.get("ip", "")
+        _l4_trace.client_route = client_info.get("route", "")
+        _l4_trace.client_headers = client_info.get("headers", {})
+    _l4_start = __import__("time").time()
+
+    resolved = await resolve_user_routing(uid)
+    if resolved and resolved.get("routing"):
+        agent_id = resolved["routing"]["agentId"]
+        gateway_url = resolved["routing"]["gatewayUrl"]
+        session_key = resolved["routing"]["sessionKey"]
+        _l4_trace.resolved_agent = agent_id
+        _l4_trace.resolved_gateway = gateway_url
+        _l4_trace.resolved_session_key = session_key
+        _l4_trace.resolve_source = "database"
+        logger.info(f"[Ella Chat] Resolved uid={uid} -> agent={agent_id}, gateway={gateway_url}")
+    else:
+        agent_id = "main"
+        gateway_url = OPENCLAW_URL
+        session_key = f"ella:{uid}"
+        _l4_trace.resolved_agent = "main (FALLBACK)"
+        _l4_trace.resolved_gateway = gateway_url
+        _l4_trace.resolved_session_key = session_key
+        _l4_trace.resolve_source = "fallback"
+        _l4_trace.notes.append("WARNING: No cluster found, using fallback")
+        logger.warning(f"[Ella Chat] No cluster for uid={uid}, falling back to openclaw:main")
+
     # Use asyncio.Task so we can yield keep-alives while waiting
     async def _call_openclaw():
         async with httpx.AsyncClient() as client:
-            # Use same user field format as LLM proxy's stream_openclaw_response()
-            # which sends "user": f"ella:{uid}" — no suffix.
-            # This ensures voice and text chat share the same OpenClaw session.
             return await client.post(
-                f"{OPENCLAW_URL}/v1/chat/completions",
+                f"{gateway_url}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "openclaw:main",
+                    "model": f"openclaw:{agent_id}",
                     "messages": [
                         {"role": "user", "content": user_message},
                     ],
                     "stream": False,
-                    "user": f"ella:{uid}",
+                    "user": session_key,
                 },
                 timeout=90.0,
             )
@@ -214,7 +251,6 @@ async def _stream_level_4_openclaw(user_message: str, uid: str):
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
         except asyncio.TimeoutError:
-            # Task still running — send a keep-alive comment (SSE spec: lines starting with ':')
             yield ": keepalive\n\n"
 
     try:
@@ -231,13 +267,16 @@ async def _stream_level_4_openclaw(user_message: str, uid: str):
         # Strip <think>...</think> blocks that some reasoning models include
         reply = re.sub(r'<think>.*?</think>\s*', '', reply, flags=re.DOTALL).strip()
 
-        logger.info(f"[Ella Chat] OpenClaw reply for uid={uid}: {reply[:100]}...")
+        _l4_trace.openclaw_status = response.status_code
+        _l4_trace.openclaw_latency_ms = int((__import__("time").time() - _l4_start) * 1000)
+        _l4_trace.total_latency_ms = _l4_trace.openclaw_latency_ms
+        _l4_trace.response_status = 200
+        record_trace(_l4_trace)
+        logger.info(f"[Ella Chat] OpenClaw reply for uid={uid} agent={agent_id}: {reply[:100]}...")
 
         # Emit in OMI format: data: <text> then done: <base64 json>
-        # Replace newlines with __CRLF__ as OMI protocol expects
-        # Chunk into <900 byte pieces to avoid Dart's 1024-byte buffer merging lines
         encoded_reply = reply.replace(chr(10), '__CRLF__')
-        chunk_size = 800  # well under 1024 to account for "data: " prefix + overhead
+        chunk_size = 800
         for i in range(0, len(encoded_reply), chunk_size):
             yield f"data: {encoded_reply[i:i+chunk_size]}\n\n"
 
@@ -267,7 +306,11 @@ async def _stream_level_4_openclaw(user_message: str, uid: str):
 @router.post("/chat/stream")
 async def ella_chat_stream(
     request: EllaChatRequest,
+    raw_request: Request,
     x_ella_debug_level: str = Header(None, alias="X-Ella-Debug-Level"),
+    x_ella_client_type: str = Header(None, alias="X-Ella-Client-Type"),
+    x_ella_client_version: str = Header(None, alias="X-Ella-Client-Version"),
+    x_ella_route: str = Header(None, alias="X-Ella-Route"),
 ):
     """
     Stream a chat response from Ella with configurable debug levels.
@@ -277,39 +320,81 @@ async def ella_chat_stream(
       1 = ACK (hardcoded response, no LLM)
       2 = Grok direct (xAI API, no graph routing)
       3 = n8n webhook (full pipeline)
+      4 = OpenClaw (dynamic per-user agent routing)
 
     Set via env ELLA_DEBUG_LEVEL or header X-Ella-Debug-Level.
     """
+    import time as _time
+    _trace_start = _time.time()
+
     debug_level = _resolve_debug_level(x_ella_debug_level)
-    logger.info(f"[Ella Chat] uid={request.uid}, debug_level={debug_level}, " f"message_length={len(request.message)}")
+    logger.info(f"[Ella Chat] uid={request.uid}, debug_level={debug_level}, message_length={len(request.message)}")
+
+    # Create routing trace
+    trace = RouteTrace()
+    trace.endpoint = "/v1/ella/chat/stream"
+    trace.method = "POST"
+    trace.client_ip = raw_request.client.host if raw_request.client else ""
+    trace.client_type = x_ella_client_type or ""
+    trace.client_version = x_ella_client_version or ""
+    trace.client_route = x_ella_route or ""
+    trace.uid = request.uid
+    trace.debug_level = debug_level
+    trace.notes.append(f"message_length={len(request.message)}")
+    # Capture all X-Ella-* headers for debugging
+    trace.client_headers = {
+        k: v for k, v in raw_request.headers.items()
+        if k.lower().startswith("x-ella-")
+    }
 
     if debug_level == 1:
+        trace.resolved_agent = "N/A (ACK)"
+        trace.resolve_source = "level_1_ack"
+        trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
+        record_trace(trace)
         return StreamingResponse(
             _stream_level_1_ack(request.message),
             media_type="text/event-stream",
         )
 
     if debug_level == 2:
+        trace.resolved_agent = "grok-direct"
+        trace.resolve_source = "level_2_grok"
+        trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
+        record_trace(trace)
         return StreamingResponse(
             _stream_level_2_grok(request.message),
             media_type="text/event-stream",
         )
 
     if debug_level == 3:
+        trace.resolved_agent = "n8n-webhook"
+        trace.resolve_source = "level_3_n8n"
+        trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
+        record_trace(trace)
         return StreamingResponse(
             _stream_level_3_n8n(request.message, request.uid, request.conversation_id),
             media_type="text/event-stream",
         )
 
     if debug_level == 4:
+        # L4 traces are recorded inside _stream_level_4_openclaw with full resolution data
         return StreamingResponse(
-            _stream_level_4_openclaw(request.message, request.uid),
+            _stream_level_4_openclaw(request.message, request.uid, {
+                "type": x_ella_client_type or "",
+                "version": x_ella_client_version or "",
+                "ip": raw_request.client.host if raw_request.client else "",
+                "route": x_ella_route or "",
+                "headers": {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")},
+            }),
             media_type="text/event-stream",
         )
 
     # Level 0 (production): Direct Grok call as default production path
-    # In the future this will route through the full OMI graph chat system,
-    # but for now Grok direct is the production path for Ella.
+    trace.resolved_agent = "grok-direct (level 0)"
+    trace.resolve_source = "level_0_production"
+    trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
+    record_trace(trace)
     return StreamingResponse(
         _stream_level_2_grok(request.message),
         media_type="text/event-stream",

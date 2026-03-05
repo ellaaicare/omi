@@ -1,0 +1,199 @@
+"""
+Ella Resolve Router - User identity to OpenClaw agent resolution.
+
+Resolves any user identifier (Firebase UID, email, phone) to the correct
+OpenClaw agent routing info (agentId, sessionKey, gatewayUrl, token).
+
+Endpoints:
+- GET  /v1/ella/resolve?uid={firebase_uid}
+- GET  /v1/ella/resolve?email={email}
+- GET  /v1/ella/resolve?phone={phone}
+
+Used by:
+- iOS Flutter app (Pattern C: resolve + direct SSE)
+- E2E Flow Debugger
+- Any client that needs to discover the correct agent before calling OpenClaw
+"""
+
+import json
+import logging
+import os
+from typing import Optional
+
+import asyncpg
+from fastapi import APIRouter, HTTPException, Query
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/ella", tags=["ella-resolve"])
+
+# Database connection pool (shared with other Ella routers)
+_pool: Optional[asyncpg.Pool] = None
+
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
+
+
+async def _get_pool() -> asyncpg.Pool:
+    """Get or create the asyncpg connection pool."""
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            database="ella_ai",
+            min_size=2,
+            max_size=10,
+        )
+    return _pool
+
+
+async def resolve_user_routing(uid: str) -> Optional[dict]:
+    """Resolve a Firebase UID to OpenClaw routing info.
+
+    Shared helper used by both /resolve endpoint and chat.py dynamic routing.
+    Returns None if user not found.
+    """
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
+               u.conditions, u.medications,
+               ac.agents, ac.status AS cluster_status
+        FROM users u
+        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+        WHERE u.omi_uid = $1
+        """,
+        uid,
+    )
+    if not row:
+        return None
+
+    agents = json.loads(row["agents"]) if row["agents"] else None
+
+    routing = None
+    if agents:
+        gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
+        routing = {
+            "agentId": agents.get("userAgentId"),
+            "caregiverAgentId": agents.get("caregiverAgentId"),
+            "scannerAgentId": agents.get("scannerAgentId"),
+            "summarizerAgentId": agents.get("summarizerAgentId"),
+            "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
+            "gatewayUrl": gateway_url,
+            "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
+            "token": OPENCLAW_GATEWAY_TOKEN,
+            "clusterStatus": row["cluster_status"],
+            "workspace": agents.get("workspace"),
+        }
+
+    return {
+        "user": {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "omiUid": row["omi_uid"],
+            "status": row["status"],
+            "guardianMode": row["guardian_mode"],
+            "timezone": row["timezone"],
+            "conditions": row["conditions"],
+            "medications": row["medications"],
+        },
+        "routing": routing,
+    }
+
+
+@router.get("/resolve")
+async def resolve_endpoint(
+    uid: Optional[str] = Query(None, description="Firebase UID (omiUid)"),
+    email: Optional[str] = Query(None, description="User email"),
+    phone: Optional[str] = Query(None, description="User phone (E.164)"),
+):
+    """Resolve a user identifier to OpenClaw agent routing info.
+
+    Accepts one of: uid, email, phone. Returns the user's agent cluster
+    routing information including agentId, sessionKey, gatewayUrl, and token.
+    """
+    if not uid and not email and not phone:
+        raise HTTPException(
+            status_code=400,
+            detail="One of uid, email, or phone is required",
+        )
+
+    pool = await _get_pool()
+
+    # Build query based on which identifier was provided
+    if uid:
+        row = await pool.fetchrow(
+            """
+            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
+                   u.conditions, u.medications,
+                   ac.agents, ac.status AS cluster_status
+            FROM users u
+            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+            WHERE u.omi_uid = $1
+            """,
+            uid,
+        )
+    elif email:
+        row = await pool.fetchrow(
+            """
+            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
+                   u.conditions, u.medications,
+                   ac.agents, ac.status AS cluster_status
+            FROM users u
+            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+            WHERE u.email = $1
+            """,
+            email,
+        )
+    else:
+        # Phone lookup via identities JSONB
+        row = await pool.fetchrow(
+            """
+            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
+                   u.conditions, u.medications,
+                   ac.agents, ac.status AS cluster_status
+            FROM users u
+            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+            WHERE u.identities->>'phone' = $1
+            """,
+            phone,
+        )
+
+    if not row:
+        identifier = uid or email or phone
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "user_not_found", "identifier": identifier},
+        )
+
+    agents = json.loads(row["agents"]) if row["agents"] else None
+
+    routing = None
+    if agents:
+        gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
+        routing = {
+            "agentId": agents.get("userAgentId"),
+            "caregiverAgentId": agents.get("caregiverAgentId"),
+            "scannerAgentId": agents.get("scannerAgentId"),
+            "summarizerAgentId": agents.get("summarizerAgentId"),
+            "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
+            "gatewayUrl": gateway_url,
+            "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
+            "token": OPENCLAW_GATEWAY_TOKEN,
+            "clusterStatus": row["cluster_status"],
+        }
+
+    return {
+        "user": {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "omiUid": row["omi_uid"],
+            "status": row["status"],
+            "guardianMode": row["guardian_mode"],
+            "timezone": row["timezone"],
+        },
+        "routing": routing,
+    }
