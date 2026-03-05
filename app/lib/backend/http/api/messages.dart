@@ -107,13 +107,14 @@ Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, 
 /// Send a chat message via the Ella endpoint (/v1/ella/chat/stream).
 /// Backend emits OMI-compatible format (data:/done:), so we reuse parseMessageChunk.
 /// SSE comment lines (starting with ':') are used as keep-alives and are skipped.
-Stream<ServerMessageChunk> sendEllaMessageStream(String text) async* {
+Stream<ServerMessageChunk> sendEllaMessageStream(String text, {Map<String, String> headers = const {}}) async* {
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
   var uid = SharedPreferencesUtil().uid;
   var messageId = "1000";
 
   await for (var line in makeStreamingApiCall(
     url: url,
+    headers: headers,
     body: jsonEncode({'uid': uid, 'message': text, 'conversation_id': ''}),
   )) {
     // Skip SSE comment lines (keep-alives from backend while waiting for LLM)

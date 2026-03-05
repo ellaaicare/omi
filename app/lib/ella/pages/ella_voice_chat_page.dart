@@ -13,6 +13,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/messages.dart';
+import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
@@ -431,7 +432,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       // Send via Ella's chat endpoint
       debugPrint('[VoiceChat] Sending to Ella chat...');
       final replyBuffer = StringBuffer();
-      await for (var chunk in sendEllaMessageStream(transcript)) {
+      await for (var chunk in sendEllaChatStream(transcript)) {
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
         } else if (chunk.type == MessageChunkType.done && chunk.message != null) {
