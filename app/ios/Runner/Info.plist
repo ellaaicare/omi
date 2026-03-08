@@ -116,23 +116,6 @@
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
-		<key>NSExceptionDomains</key>
-		<dict>
-			<key>100.67.113.120</key>
-			<dict>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-			</dict>
-			<key>100.76.138.56</key>
-			<dict>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-			</dict>
-		</dict>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Bluetooth permission is required to connect with your Omi.</string>
