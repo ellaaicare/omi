@@ -3,6 +3,7 @@
 # Calls n8n summary agent to generate conversation summaries.
 # Supports both sync (wait for response) and async (callback) modes.
 
+import time
 import requests
 from typing import Optional, Tuple, Any
 from datetime import datetime
@@ -40,6 +41,8 @@ def call_summary_agent(
         - Async: n8n returns {"status": "processing"}, will callback later
     """
     timeout = timeout or ELLA_CONFIG.summary_timeout
+    _start = time.time()
+    conv_short = conversation_id[:8] if conversation_id else "unknown"
 
     payload = {
         "uid": uid,
@@ -50,7 +53,7 @@ def call_summary_agent(
     }
 
     try:
-        print(f"📤 Calling Ella summary agent for uid={uid}, conv={conversation_id[:8]}...", flush=True)
+        print(f"[FLOW:SUMMARY] calling n8n uid={uid} conv={conv_short} url={ELLA_CONFIG.summary_url} timeout={timeout}s transcript_len={len(transcript) if transcript else 0}", flush=True)
 
         resp = requests.post(
             ELLA_CONFIG.summary_url,
@@ -58,40 +61,52 @@ def call_summary_agent(
             timeout=timeout
         )
 
+        _elapsed = int((time.time() - _start) * 1000)
+
         if resp.status_code != 200:
             error = f"HTTP {resp.status_code}: {resp.text[:100]}"
-            print(f"⚠️ Ella summary agent error: {error}", flush=True)
+            print(f"[FLOW:SUMMARY] ERROR n8n status={resp.status_code} uid={uid} conv={conv_short} latency={_elapsed}ms", flush=True)
             return False, None, error
 
         result = resp.json()
 
         # Check for async mode response
         if result.get("status") == "processing":
-            print(f"⏳ Ella summary agent processing async (conv={conversation_id[:8]})", flush=True)
+            print(f"[FLOW:SUMMARY] ASYNC n8n processing uid={uid} conv={conv_short} latency={_elapsed}ms", flush=True)
             return True, None, None  # Async - will receive callback
 
-        # Sync response with summary
-        if result.get("title"):
-            print(f"✅ Ella summary: {result.get('title', 'No title')}", flush=True)
-            return True, result, None
+        # Sync response with summary — accept both flat and nested formats
+        summary_data = result
+        response_format = "flat"
+        if not result.get("title") and isinstance(result.get("summary"), dict):
+            summary_data = result["summary"]
+            response_format = "nested"
+
+        if summary_data.get("title"):
+            title = summary_data.get('title', 'No title')
+            print(f"[FLOW:SUMMARY] OK n8n uid={uid} conv={conv_short} format={response_format} title={title} latency={_elapsed}ms", flush=True)
+            return True, summary_data, None
 
         # Empty or unexpected response
-        print(f"⚠️ Ella summary agent returned unexpected: {result}", flush=True)
+        print(f"[FLOW:SUMMARY] UNEXPECTED n8n uid={uid} conv={conv_short} response_keys={list(result.keys())} latency={_elapsed}ms", flush=True)
         return False, None, "Unexpected response format"
 
     except requests.Timeout:
+        _elapsed = int((time.time() - _start) * 1000)
         error = f"Timeout after {timeout}s"
-        print(f"⚠️ Ella summary agent timeout: {error}", flush=True)
+        print(f"[FLOW:SUMMARY] TIMEOUT n8n uid={uid} conv={conv_short} timeout={timeout}s latency={_elapsed}ms", flush=True)
         return False, None, error
 
     except requests.RequestException as e:
+        _elapsed = int((time.time() - _start) * 1000)
         error = str(e)
-        print(f"⚠️ Ella summary agent request error: {error}", flush=True)
+        print(f"[FLOW:SUMMARY] ERROR n8n uid={uid} conv={conv_short} error={error} latency={_elapsed}ms", flush=True)
         return False, None, error
 
     except Exception as e:
+        _elapsed = int((time.time() - _start) * 1000)
         error = str(e)
-        print(f"⚠️ Ella summary agent error: {error}", flush=True)
+        print(f"[FLOW:SUMMARY] UNEXPECTED uid={uid} conv={conv_short} error={error} latency={_elapsed}ms", flush=True)
         return False, None, error
 
 
@@ -105,11 +120,16 @@ def parse_summary_response(response: dict) -> dict:
     Returns:
         Normalized summary dict with expected fields
     """
+    # Handle both flat and nested response formats
+    data = response
+    if not response.get("title") and isinstance(response.get("summary"), dict):
+        data = response["summary"]
+
     return {
-        "title": response.get("title", "Untitled Conversation"),
-        "overview": response.get("overview", ""),
-        "emoji": response.get("emoji", "💬"),
-        "category": response.get("category", "other"),
-        "action_items": response.get("action_items", []),
-        "events": response.get("events", []),
+        "title": data.get("title", "Untitled Conversation"),
+        "overview": data.get("overview", ""),
+        "emoji": data.get("emoji", "\U0001f4ac"),
+        "category": data.get("category", "other"),
+        "action_items": data.get("action_items", []),
+        "events": data.get("events", []),
     }
