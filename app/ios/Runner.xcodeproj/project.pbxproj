@@ -333,6 +333,7 @@
 				42127D8A2C2839B60005AB40 /* Embed Foundation Extensions */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
+				F1XABC0123456789DEADBEEF /* Fix App.framework MinimumOSVersion */,
 				156D489D40D7128A2BB0A77A /* [CP] Embed Pods Frameworks */,
 				8E98B9C67D5C7FA007E2A8D2 /* [CP] Copy Pods Resources */,
 			);
@@ -524,6 +525,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build\n";
+		};
+		F1XABC0123456789DEADBEEF /* Fix App.framework MinimumOSVersion */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Fix App.framework MinimumOSVersion";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "FRAMEWORK_PLIST=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/App.framework/Info.plist\"\nif [ -f \"$FRAMEWORK_PLIST\" ]; then\n  /usr/libexec/PlistBuddy -c \"Delete :MinimumOSVersion\" \"$FRAMEWORK_PLIST\" 2>/dev/null || true\n  /usr/libexec/PlistBuddy -c \"Add :MinimumOSVersion string ${IPHONEOS_DEPLOYMENT_TARGET}\" \"$FRAMEWORK_PLIST\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
