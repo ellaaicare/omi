@@ -302,6 +302,33 @@ CALENDAR MEETING CONTEXT:
             items_list
         )
 
+    # ====== ELLA CAREGIVER ACTION ITEMS OVERRIDE ======
+    try:
+        from ella.prompts.loader import get_action_items_prompt, should_use_caregiver_prompts
+        if should_use_caregiver_prompts():
+            caregiver_prompt = get_action_items_prompt()
+            if caregiver_prompt:
+                action_items_parser = PydanticOutputParser(pydantic_object=ActionItemsExtraction)
+                chain = caregiver_prompt | llm_medium_experiment | action_items_parser
+                response = chain.invoke({
+                    'full_context': full_context,
+                    'format_instructions': action_items_parser.get_format_instructions(),
+                    'language_code': language_code,
+                    'started_at': started_at.isoformat(),
+                    'tz': tz,
+                    'existing_items_context': existing_items_context,
+                })
+                now = datetime.now(timezone.utc)
+                for action_item in response.action_items or []:
+                    if action_item.created_at is None:
+                        action_item.created_at = now
+                return response.action_items or []
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[FLOW:ACTION-ITEMS] caregiver_override FAILED error={e}, falling back to upstream", flush=True)
+    # ====== END ELLA CAREGIVER OVERRIDE ======
+
     prompt_text = '''You are an expert action item extractor. Your sole purpose is to identify and extract actionable tasks from the provided content.
 
     The content language is {language_code}. Use the same language {language_code} for your response.
@@ -556,6 +583,7 @@ CALENDAR MEETING CONTEXT:
         return []
 
 
+
 def get_transcript_structure(
     transcript: str,
     started_at: datetime,
@@ -569,6 +597,7 @@ def get_transcript_structure(
 ) -> Structured:
     # ====== ELLA SUMMARY ADAPTER HOOK ======
     try:
+        print(f"[FLOW:SUMMARY] adapter_hook entered uid={uid} conv={existing_conversation_id} transcript_len={len(transcript) if transcript else 0}", flush=True)
         from utils.ella.summary import call_summary_agent
 
         success, result_dict, error = call_summary_agent(
@@ -577,13 +606,21 @@ def get_transcript_structure(
             transcript=transcript,
             started_at=started_at,
         )
+        print(f"[FLOW:SUMMARY] adapter_hook result success={success} has_data={result_dict is not None} error={error}", flush=True)
         if success and result_dict:
             from utils.ella.summary import parse_summary_response
 
             parsed = parse_summary_response(result_dict)
+            # Mark as enriched by Ella pipeline (visible in app as emoji prefix)
+            parsed["emoji"] = "🛡️" + parsed.get("emoji", "💬")
+            title_val = parsed.get("title", "no title")
+            emoji_val = parsed.get("emoji", "?")
+            print(f"[FLOW:SUMMARY] ENRICHED via n8n title={title_val} emoji={emoji_val}", flush=True)
             return Structured(**parsed)
-    except ImportError:
-        pass
+        else:
+            print(f"[FLOW:SUMMARY] adapter returned no usable data, falling through to LLM", flush=True)
+    except ImportError as ie:
+        print(f"[FLOW:SUMMARY] ImportError in adapter (silenced): {ie}", flush=True)
     except Exception as e:
         print(f"⚠️  Ella summary adapter failed: {e}, falling back to upstream LLM", flush=True)
     # ====== END ELLA HOOK ======
@@ -622,6 +659,39 @@ CALENDAR MEETING CONTEXT:
         return Structured()  # Should be caught by discard logic, but as a safeguard.
 
     full_context = "\n\n".join(context_parts)
+
+    # ====== ELLA CAREGIVER PROMPT OVERRIDE ======
+    try:
+        from ella.prompts.loader import get_structured_summary_prompt, should_use_caregiver_prompts
+        if should_use_caregiver_prompts(uid):
+            caregiver_prompt = get_structured_summary_prompt()
+            if caregiver_prompt:
+                prompt = caregiver_prompt
+                chain = prompt | llm_medium_experiment | parser
+                response = chain.invoke({
+                    'full_context': full_context,
+                    'format_instructions': parser.get_format_instructions(),
+                    'language_code': language_code,
+                    'started_at': started_at.isoformat(),
+                    'tz': tz,
+                })
+                for event in response.events or []:
+                    if event.duration > 180:
+                        event.duration = 180
+                    event.created = False
+                action_items = extract_action_items(
+                    transcript, started_at, language_code, tz, photos,
+                    existing_action_items, calendar_meeting_context
+                )
+                response.action_items = action_items
+                # Mark as caregiver-enriched (fallback path, still enhanced)
+                response.emoji = "🛡️" + (response.emoji or "💬")
+                return response
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[FLOW:SUMMARY] caregiver_prompt FAILED error={e}, falling back to upstream", flush=True)
+    # ====== END ELLA CAREGIVER OVERRIDE ======
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.
