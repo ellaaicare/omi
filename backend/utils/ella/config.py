@@ -17,7 +17,7 @@ class EllaConfig:
 
     # Webhook endpoints
     scanner_endpoint: str = "/webhook/scanner-agent"
-    summary_endpoint: str = "/webhook/summary-agent"
+    summary_endpoint: str = "/webhook/summarize-transcript"
     memory_endpoint: str = "/webhook/memory-agent"
     voice_stream_endpoint: str = "/webhook/voice-stream"  # Future: voice mode
     llm_proxy_endpoint: str = "/webhook/llm-proxy"  # Chat routing to Letta
