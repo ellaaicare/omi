@@ -3,6 +3,7 @@ import os
 
 import firebase_admin
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from modal import Image, App, asgi_app, Secret
 from routers import (
@@ -56,6 +57,22 @@ else:
     firebase_admin.initialize_app()
 
 app = FastAPI()
+
+# CORS — allow admin dashboard + localhost dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://admin.ella-ai-care.com",
+        "https://ella-ai-care.com",
+        "https://www.ella-ai-care.com",
+        "http://localhost:3000",
+        "http://localhost:3002",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=3600,
+)
 
 app.include_router(transcribe.router)
 app.include_router(conversations.router)

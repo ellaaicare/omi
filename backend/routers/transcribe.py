@@ -1427,6 +1427,14 @@ async def _stream_handler(
                 continue
 
             segments_to_process = realtime_segment_buffers.copy()
+
+            # DEBUG: Log received transcript segments
+            if segments_to_process:
+                print(f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}")
+                if len(segments_to_process) > 0:
+                    first_text = segments_to_process[0].get("text", "")[:80] if isinstance(segments_to_process[0], dict) else str(segments_to_process[0])[:80]
+                    print(f"[TRANSCRIPT-RECV] First segment: {first_text}")
+
             realtime_segment_buffers = []
 
             photos_to_process = realtime_photo_buffers.copy()
@@ -2080,6 +2088,21 @@ async def listen_handler(
     custom_stt_mode = CustomSttMode.enabled if custom_stt == 'enabled' else CustomSttMode.disabled
     onboarding_mode = onboarding == 'enabled'
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
+
+    # Ella sidecar: auto-provision check
+    try:
+        from ella.routers.auto_provision import get_agent_cluster, auto_provision_user
+        cluster = await get_agent_cluster(uid)
+        if not cluster:
+            logger = logging.getLogger(__name__)
+            logger.info(f"No agent cluster for uid={uid}, auto-provisioning...")
+            result = await auto_provision_user(uid)
+            if not result.get("success"):
+                logger.warning(f"Auto-provision failed: {result.get('error')}")
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Auto-provision check error: {e}")
+
     await _listen(
         websocket,
         uid,
