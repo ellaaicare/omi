@@ -449,3 +449,19 @@ async def debug_status():
         "uniqueUids": len(set(t.uid for t in _traces)),
         "lastTrace": _traces[0].to_dict() if _traces else None,
     }
+
+
+# --------------- Debug Console (HTML) ---------------
+
+from fastapi.responses import HTMLResponse, FileResponse
+
+
+@router.get("/console", response_class=HTMLResponse)
+async def debug_console():
+    """Serve the Routing Debug Console HTML page."""
+    console_path = "/var/www/ella-ai-care.com/debug-console.html"
+    try:
+        with open(console_path, "r") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Debug console not found</h1>", status_code=404)

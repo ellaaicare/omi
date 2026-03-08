@@ -13,6 +13,7 @@ This implements the hybrid auth approach:
 
 import os
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -133,12 +134,17 @@ async def create_voice_session(
     if not uid:
         raise HTTPException(status_code=400, detail="uid required")
 
+    _start = time.time()
+
     try:
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,  # In production, get from auth
             display_name=None,  # In production, get from user profile
         )
+
+        _elapsed = int((time.time() - _start) * 1000)
+        print(f"[FLOW:VOICE-SESSION] uid={uid} endpoint={ELLA_VOICE_ENDPOINT} expiry={SESSION_EXPIRY_HOURS}h latency={_elapsed}ms", flush=True)
 
         return VoiceSessionResponse(
             session_token=token,
@@ -148,7 +154,7 @@ async def create_voice_session(
         )
 
     except Exception as e:
-        logger.error(f"[Voice] Failed to create session: {e}")
+        logger.error(f"[FLOW:VOICE-SESSION] uid={uid} error={e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -184,10 +190,15 @@ async def synthesize_speech(request: TtsRequest):
     Proxies TTS requests so the API key stays server-side.
     Returns audio/mpeg bytes directly.
     """
+    _start = time.time()
+    text_len = len(request.text)
+
     if not ELEVENLABS_API_KEY:
+        print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs key_missing=true text_len={text_len}", flush=True)
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
 
     text = request.text[:500]  # Cap at 500 chars for v1
+    print(f"[FLOW:VOICE-TTS] provider=elevenlabs voice={request.voice_id} model=eleven_turbo_v2_5 text_len={text_len} capped_len={len(text)}", flush=True)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -206,18 +217,26 @@ async def synthesize_speech(request: TtsRequest):
                 timeout=30.0,
             )
 
+        _elapsed = int((time.time() - _start) * 1000)
+
         if response.status_code != 200:
-            logger.error(f"[Voice TTS] ElevenLabs returned {response.status_code}: {response.text[:200]}")
+            print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}", flush=True)
             raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
+
+        audio_size = len(response.content)
+        print(f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
 
         return Response(content=response.content, media_type="audio/mpeg")
 
     except httpx.TimeoutException:
+        _elapsed = int((time.time() - _start) * 1000)
+        print(f"[FLOW:VOICE-TTS] TIMEOUT provider=elevenlabs latency={_elapsed}ms", flush=True)
         raise HTTPException(status_code=504, detail="ElevenLabs TTS timed out")
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[Voice TTS] Error: {e}")
+        _elapsed = int((time.time() - _start) * 1000)
+        print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs error={e} latency={_elapsed}ms", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
