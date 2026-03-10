@@ -424,6 +424,14 @@ class SharedPreferencesUtil {
   set preferredSummarizationAppId(String value) => saveString('preferredSummarizationAppId', value);
 
   List<ServerConversation> get cachedConversations {
+    // Only return cache if it belongs to the current user
+    final cachedUid = getString('cachedConversationsUid');
+    if (cachedUid.isNotEmpty && cachedUid != uid) {
+      // Stale cache from a different user — wipe it
+      saveStringList('cachedConversations', []);
+      saveString('cachedConversationsUid', '');
+      return [];
+    }
     if (getBool('migratedMemories')) {
       final cachedMemories = getStringList('cachedMemories');
       if (cachedMemories.isNotEmpty) {
@@ -439,9 +447,17 @@ class SharedPreferencesUtil {
   set cachedConversations(List<ServerConversation> value) {
     final List<String> conversations = value.map((e) => jsonEncode(e.toJson())).toList();
     saveStringList('cachedConversations', conversations);
+    saveString('cachedConversationsUid', uid);
   }
 
   List<ServerMessage> get cachedMessages {
+    // Only return cache if it belongs to the current user
+    final cachedUid = getString('cachedMessagesUid');
+    if (cachedUid.isNotEmpty && cachedUid != uid) {
+      saveStringList('cachedMessages', []);
+      saveString('cachedMessagesUid', '');
+      return [];
+    }
     final messages = getStringList('cachedMessages');
     return messages.map((e) => ServerMessage.fromJson(jsonDecode(e))).toList();
   }
@@ -449,6 +465,15 @@ class SharedPreferencesUtil {
   set cachedMessages(List<ServerMessage> value) {
     final List<String> messages = value.map((e) => jsonEncode(e.toJson())).toList();
     saveStringList('cachedMessages', messages);
+    saveString('cachedMessagesUid', uid);
+  }
+
+  void clearUserCaches() {
+    saveStringList('cachedConversations', []);
+    saveStringList('cachedMessages', []);
+    saveStringList('cachedMemories', []);
+    saveString('cachedConversationsUid', '');
+    saveString('cachedMessagesUid', '');
   }
 
   // Pending memories - memories created offline that need to be synced
