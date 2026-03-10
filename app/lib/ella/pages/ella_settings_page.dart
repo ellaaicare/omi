@@ -17,7 +17,7 @@ import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
-import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -110,7 +110,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
           TextButton(
             onPressed: () async {
               Navigator.of(ctx).pop();
-              await AuthService.instance.signOut();
+              await signOutAndClearUserData(context);
               if (mounted) {
                 Navigator.of(context).pushAndRemoveUntil(
                   MaterialPageRoute(builder: (context) => const AppShell()),
