@@ -33,6 +33,10 @@ class $AssetsDeviceAssetsGen {
 class $AssetsFontsGen {
   const $AssetsFontsGen();
 
+  /// File path: assets/fonts/Manrope-VariableFont_wght.ttf
+  String get manropeVariableFontWght =>
+      'assets/fonts/Manrope-VariableFont_wght.ttf';
+
   /// File path: assets/fonts/SFPRODISPLAYBLACKITALIC.OTF
   String get sfprodisplayblackitalic =>
       'assets/fonts/SFPRODISPLAYBLACKITALIC.OTF';
@@ -64,6 +68,7 @@ class $AssetsFontsGen {
 
   /// List of all assets
   List<String> get values => [
+    manropeVariableFontWght,
     sfprodisplayblackitalic,
     sfprodisplaybold,
     sfprodisplayheavyitalic,
@@ -152,6 +157,10 @@ class $AssetsImagesGen {
   /// File path: assets/images/ella_splash.png
   AssetGenImage get ellaSplash =>
       const AssetGenImage('assets/images/ella_splash.png');
+
+  /// File path: assets/images/ella_wordmark.png
+  AssetGenImage get ellaWordmark =>
+      const AssetGenImage('assets/images/ella_wordmark.png');
 
   /// File path: assets/images/email_logo.png
   AssetGenImage get emailLogo =>
@@ -381,6 +390,7 @@ class $AssetsImagesGen {
     ellaOnboarding2,
     ellaOnboarding3,
     ellaSplash,
+    ellaWordmark,
     emailLogo,
     emotionalFeedback1,
     facebookLogo,
