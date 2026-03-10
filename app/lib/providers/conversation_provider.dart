@@ -62,6 +62,27 @@ class ConversationProvider extends ChangeNotifier {
     shortConversationThreshold = prefs.shortConversationThreshold;
   }
 
+  void reset() {
+    conversations = [];
+    searchedConversations = [];
+    groupedConversations = {};
+    processingConversations = [];
+    isLoadingConversations = false;
+    isFetchingConversations = false;
+    previousQuery = '';
+    totalSearchPages = 1;
+    currentSearchPage = 1;
+    selectedDate = null;
+    selectedFolderId = null;
+    mergingConversationIds = {};
+    isSelectionModeActive = false;
+    selectedConversationIds = {};
+    _processingConversationWatchTimer?.cancel();
+    _refreshDebounceTimer?.cancel();
+    _lastRefreshTime = null;
+    notifyListeners();
+  }
+
   void _setupMergeListener() {
     _mergeCompletedSubscription = MergeNotificationHandler.onMergeCompleted.listen((event) {
       onMergeCompleted(event.mergedConversationId, event.removedConversationIds);
