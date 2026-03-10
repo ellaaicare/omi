@@ -61,6 +61,30 @@ def new_memories_extractor(
     # TODO: include negative facts too? Things the user doesn't like?
     # TODO: make it more strict?
 
+    # ====== ELLA CAREGIVER MEMORY OVERRIDE ======
+    try:
+        from ella.prompts.loader import get_memory_extraction_prompt, should_use_caregiver_prompts
+        if should_use_caregiver_prompts(uid):
+            caregiver_prompt = get_memory_extraction_prompt()
+            if caregiver_prompt:
+                parser = PydanticOutputParser(pydantic_object=Memories)
+                chain = caregiver_prompt | llm_mini | parser
+                response: Memories = chain.invoke({
+                    'user_name': user_name,
+                    'conversation': content,
+                    'memories_str': memories_str,
+                    'format_instructions': parser.get_format_instructions(),
+                })
+                for memory in response.facts:
+                    if isinstance(memory.category, str) and memory.category in LEGACY_TO_NEW_CATEGORY:
+                        memory.category = LEGACY_TO_NEW_CATEGORY[memory.category]
+                return response.facts
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Ella caregiver memory override failed: {e}, falling back to upstream", flush=True)
+    # ====== END ELLA CAREGIVER OVERRIDE ======
+
     try:
         parser = PydanticOutputParser(pydantic_object=Memories)
         chain = extract_memories_prompt | llm_mini | parser

@@ -63,19 +63,42 @@ _apply_ella_llm_patch()
 
 
 # Base models for general use
-# Priority: Ella LLM Proxy > xAI Grok > OpenAI (upstream defaults)
+# Priority: OpenRouter (Grok) > Ella LLM Proxy > xAI Direct > OpenAI (upstream defaults)
+# OpenRouter provides unified billing for all Grok models.
+# Embeddings always use OpenAI (Pinecone index is 3072-dim, matched to text-embedding-3-large).
+_openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+_openrouter_base_url = "https://openrouter.ai/api/v1"
+_openrouter_headers = {"X-Title": "Ella AI", "HTTP-Referer": "https://ella-ai-care.com"}
 _ella_base_url = os.getenv('ELLA_LLM_BASE_URL')
 _ella_api_key = os.getenv('ELLA_LLM_API_KEY', 'ella-internal')
 _xai_api_key = os.getenv('XAI_API_KEY')
 _xai_base_url = "https://api.x.ai/v1"
-_default_mini = os.getenv('OMI_LLM_MINI', 'grok-4-1-fast-non-reasoning')
-_default_medium = os.getenv('OMI_LLM_MEDIUM', 'grok-4-1-fast-non-reasoning')
-_default_large = os.getenv('OMI_LLM_LARGE', 'grok-4-1-fast-reasoning')
+_default_mini = os.getenv('OMI_LLM_MINI', 'x-ai/grok-4.1-fast')
+_default_medium = os.getenv('OMI_LLM_MEDIUM', 'x-ai/grok-4.1-fast')
+_default_large = os.getenv('OMI_LLM_LARGE', 'x-ai/grok-4.1-fast')
+_default_high = os.getenv('OMI_LLM_EXPERIMENT', 'x-ai/grok-4.1-fast')
 _ella_model = os.getenv('ELLA_LLM_MODEL', 'ella-enhanced')
 
-if _ella_base_url and _xai_api_key:
-    # Hybrid: internal calls (mini, large) use Grok direct for structured output / reasoning.
-    # Only chat response (medium_stream) routes through Ella proxy to OpenClaw.
+# ====== FLOW LOGGING: LLM Provider Selection ======
+if _openrouter_api_key:
+    _provider_name = "openrouter"
+    print(f"[FLOW:LLM-INIT] provider=openrouter mini={_default_mini} medium={_default_medium} large={_default_large} high={_default_high}", flush=True)
+    # PRIMARY PATH: All LLM calls via OpenRouter (unified billing)
+    _or_kwargs = dict(api_key=_openrouter_api_key, base_url=_openrouter_base_url, default_headers=_openrouter_headers)
+    llm_mini = ChatOpenAI(model=_default_mini, **_or_kwargs)
+    llm_mini_stream = ChatOpenAI(model=_default_mini, **_or_kwargs, streaming=True)
+    llm_medium = ChatOpenAI(model=_default_medium, **_or_kwargs)
+    if _ella_base_url:
+        # Chat streaming routes through Ella proxy to OpenClaw for personalized responses
+        print(f"[FLOW:LLM-INIT] medium_stream routed via ella_proxy={_ella_base_url} model={_ella_model}", flush=True)
+        llm_medium_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
+    else:
+        llm_medium_stream = ChatOpenAI(model=_default_medium, **_or_kwargs, streaming=True)
+    llm_large = ChatOpenAI(model=_default_large, **_or_kwargs)
+    llm_large_stream = ChatOpenAI(model=_default_large, **_or_kwargs, streaming=True)
+elif _ella_base_url and _xai_api_key:
+    _provider_name = "ella_proxy+xai"
+    print(f"[FLOW:LLM-INIT] provider=ella_proxy+xai ella_base={_ella_base_url} mini={_default_mini} medium={_default_medium}", flush=True)
     llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
     llm_medium = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url)
@@ -83,6 +106,8 @@ if _ella_base_url and _xai_api_key:
     llm_large = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_large_stream = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
 elif _xai_api_key:
+    _provider_name = "xai_direct"
+    print(f"[FLOW:LLM-INIT] provider=xai_direct mini={_default_mini} medium={_default_medium} large={_default_large}", flush=True)
     llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
     llm_medium = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url)
@@ -90,6 +115,8 @@ elif _xai_api_key:
     llm_large = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url)
     llm_large_stream = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
 else:
+    _provider_name = "openai_fallback"
+    print(f"[FLOW:LLM-INIT] provider=openai_fallback (no OpenRouter/xAI keys found)", flush=True)
     llm_mini = ChatOpenAI(model='gpt-4.1-mini')
     llm_mini_stream = ChatOpenAI(model='gpt-4.1-mini', streaming=True)
     llm_medium = ChatOpenAI(model='gpt-4.1')
@@ -97,14 +124,27 @@ else:
     llm_large = ChatOpenAI(model='o1-preview')
     llm_large_stream = ChatOpenAI(model='o1-preview', streaming=True, temperature=1)
 
-# These models are NOT routed through Ella proxy (OpenRouter/specialized)
-llm_high = ChatOpenAI(model='o4-mini')
-llm_high_stream = ChatOpenAI(model='o4-mini', streaming=True, temperature=1)
-llm_medium_experiment = ChatOpenAI(model='gpt-5.1')
+# High-tier and experiment models: also use OpenRouter when available
+if _openrouter_api_key:
+    llm_high = ChatOpenAI(model=_default_high, **_or_kwargs)
+    llm_high_stream = ChatOpenAI(model=_default_high, **_or_kwargs, streaming=True, temperature=1)
+    llm_medium_experiment = ChatOpenAI(model=_default_high, **_or_kwargs)
+elif _xai_api_key:
+    llm_high = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url)
+    llm_high_stream = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True, temperature=1)
+    llm_medium_experiment = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url)
+else:
+    llm_high = ChatOpenAI(model='o4-mini')
+    llm_high_stream = ChatOpenAI(model='o4-mini', streaming=True, temperature=1)
+    llm_medium_experiment = ChatOpenAI(model='gpt-5.1')
 
-# Specialized models for agentic workflows
-llm_agent = ChatOpenAI(model='gpt-5.1')
-llm_agent_stream = ChatOpenAI(model='gpt-5.1', streaming=True)
+# Specialized models: agent workflows use OpenRouter Grok too (not GPT-5.1)
+if _openrouter_api_key:
+    llm_agent = ChatOpenAI(model=_default_medium, **_or_kwargs)
+    llm_agent_stream = ChatOpenAI(model=_default_medium, **_or_kwargs, streaming=True)
+else:
+    llm_agent = ChatOpenAI(model='gpt-5.1')
+    llm_agent_stream = ChatOpenAI(model='gpt-5.1', streaming=True)
 llm_persona_mini_stream = ChatOpenAI(
     temperature=0.8,
     model="google/gemini-flash-1.5-8b",
@@ -130,6 +170,8 @@ llm_gemini_flash = ChatOpenAI(
     base_url="https://openrouter.ai/api/v1",
     default_headers={"X-Title": "Omi Wrapped"},
 )
+
+print(f"[FLOW:LLM-INIT] provider={_provider_name} embeddings=openai/text-embedding-3-large ella_patch=active", flush=True)
 
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 parser = PydanticOutputParser(pydantic_object=Structured)

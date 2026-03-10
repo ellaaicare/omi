@@ -143,6 +143,25 @@ MCP_TOOLS = [
             "required": ["conversation_id"],
         },
     },
+    {
+        "name": "update_conversation_summary",
+        "description": "Update the structured summary of a conversation. Can update title, overview, emoji, and/or category.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {"type": "string", "description": "The ID of the conversation to update"},
+                "title": {"type": "string", "description": "New title for the conversation"},
+                "overview": {"type": "string", "description": "New overview/summary text for the conversation"},
+                "emoji": {"type": "string", "description": "New emoji for the conversation"},
+                "category": {
+                    "type": "string",
+                    "enum": [c.value for c in CategoryEnum],
+                    "description": "New category for the conversation",
+                },
+            },
+            "required": ["conversation_id"],
+        },
+    },
 ]
 
 
@@ -280,6 +299,39 @@ def execute_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
             raise ToolExecutionError("Unlimited Plan Required to access this conversation.", code=-32002)
 
         return {"conversation": conversation}
+
+    elif tool_name == "update_conversation_summary":
+        conversation_id = arguments.get("conversation_id")
+        if not conversation_id:
+            raise ToolExecutionError("conversation_id is required")
+
+        # Verify conversation exists
+        conversation = conversations_db.get_conversation(user_id, conversation_id)
+        if not conversation:
+            raise ToolExecutionError("Conversation not found", code=-32001)
+
+        # Build update dict with dot-notation for Firestore nested fields
+        update_data = {}
+        if "title" in arguments:
+            update_data["structured.title"] = arguments["title"]
+        if "overview" in arguments:
+            update_data["structured.overview"] = arguments["overview"]
+        if "emoji" in arguments:
+            update_data["structured.emoji"] = arguments["emoji"]
+        if "category" in arguments:
+            # Validate category
+            try:
+                CategoryEnum(arguments["category"])
+            except ValueError:
+                raise ToolExecutionError(f"Invalid category: '{arguments['category']}'", code=-32602)
+            update_data["structured.category"] = arguments["category"]
+
+        if not update_data:
+            raise ToolExecutionError("At least one field (title, overview, emoji, category) must be provided")
+
+        conversations_db.update_conversation(user_id, conversation_id, update_data)
+
+        return {"success": True, "updated_fields": list(update_data.keys())}
 
     else:
         raise ToolExecutionError(f"Unknown tool: {tool_name}", code=-32601)

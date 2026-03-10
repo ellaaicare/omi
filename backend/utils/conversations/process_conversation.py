@@ -66,6 +66,13 @@ from utils.notifications import send_notification
 from utils.other.hume import get_hume, HumeJobCallbackModel, HumeJobModelPredictionResponseModel
 from utils.retrieval.rag import retrieve_rag_conversation_context
 from utils.webhooks import conversation_created_webhook
+
+# ====== ELLA POST-PROCESS HOOK IMPORT ======
+try:
+    from utils.ella.postprocess import fire_postprocess_webhook
+except ImportError:
+    fire_postprocess_webhook = None
+# ====== END ELLA IMPORT ======
 from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
@@ -144,8 +151,10 @@ def _get_structured(
             )
 
         # Determine whether to discard the conversation based on its content (transcript and/or photos).
+        print(f"[FLOW:PROCESS] checking discard uid={uid} transcript_len={len(transcript_text) if transcript_text else 0}", flush=True)
         discarded = should_discard_conversation(transcript_text, conversation.photos)
         if discarded:
+            print(f"[FLOW:PROCESS] DISCARDED uid={uid}", flush=True)
             return Structured(emoji=random.choice(['🧠', '🎉'])), True
 
         # If not discarded, proceed to generate the structured summary from transcript and/or photos.
@@ -701,7 +710,12 @@ def process_conversation(
         #     args=(uid, conversation),
         # ).start()
 
-    # TODO: trigger external integrations here too
+    # Ella post-process hook: notify n8n after conversation is fully saved
+    if not is_reprocess and fire_postprocess_webhook:
+        threading.Thread(
+            target=fire_postprocess_webhook,
+            args=(uid, conversation),
+        ).start()
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation
