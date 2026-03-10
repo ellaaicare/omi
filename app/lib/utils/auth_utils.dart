@@ -30,6 +30,9 @@ Future<void> signOutAndClearUserData(BuildContext context) async {
     context.read<MemoriesProvider>().reset();
   } catch (_) {}
 
+  // Explicitly clear conversation/message caches first (prevents cross-account data leak)
+  SharedPreferencesUtil().clearUserCaches();
+
   // Clear all persisted local data
   await SharedPreferencesUtil().clear();
 
