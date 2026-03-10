@@ -236,6 +236,22 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
+  void reset() {
+    _conversation = null;
+    segments = [];
+    photos = [];
+    _segmentsPhotosVersion = 0;
+    suggestionsBySegmentId = {};
+    taggingSegmentIds = [];
+    hasTranscripts = false;
+    _transcriptionServiceStatuses = [];
+    _recordingDuration = 0;
+    _freemiumThresholdReached = false;
+    _freemiumRemainingSeconds = 0;
+    _freemiumRequiresUserAction = false;
+    notifyListeners();
+  }
+
   BtDevice? _recordingDevice;
 
   String? _getConversationSourceFromDevice() {
