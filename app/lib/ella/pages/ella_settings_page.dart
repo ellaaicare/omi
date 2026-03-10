@@ -15,6 +15,7 @@ import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -227,6 +228,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 );
               },
             ),
+
+            // DEVELOPER section
+            _buildSectionHeader('DEVELOPER'),
+            EllaSettingsRow(
+              icon: Icons.developer_mode,
+              title: 'Developer Settings',
+              subtitle: 'ASR, transcription, language, debug',
+              onTap: () => SettingsDrawer.show(context),
+            ),
+            const SizedBox(height: 8),
 
             // ABOUT section
             _buildSectionHeader(context.l10n.ellaAboutSection),
