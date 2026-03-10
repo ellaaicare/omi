@@ -392,6 +392,24 @@ class MessageProvider extends ChangeNotifier {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
     }
+
+    // Ella mode: OpenClaw is the source of truth, not /v2/messages.
+    // Until GET /v1/ella/chat/history is implemented (issue #301),
+    // use local cache as source of truth so messages survive refresh.
+    const isEllaApp = true; // TODO: replace with flavor check
+    if (isEllaApp) {
+      final cached = SharedPreferencesUtil().cachedMessages;
+      if (cached.isNotEmpty) {
+        messages = cached;
+        setHasCachedMessages(true);
+      }
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      setLoadingMessages(false);
+      notifyListeners();
+      return;
+    }
+
+    // Stock OMI mode: fetch from /v2/messages as before
     // Preserve locally-injected voice messages before server fetch
     final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
     messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
@@ -663,6 +681,8 @@ class MessageProvider extends ChangeNotifier {
       aiStreamProgress = 1.0;
       setShowTypingIndicator(false);
       setSendingMessage(false);
+      // Persist full message list to cache so Ella messages survive refresh
+      SharedPreferencesUtil().cachedMessages = messages;
     }
   }
 
