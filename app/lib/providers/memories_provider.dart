@@ -121,6 +121,17 @@ class MemoriesProvider extends ChangeNotifier {
   }
 
   /// Set the connectivity provider to listen for connection changes
+  void reset() {
+    _memories = [];
+    _loading = false;
+    _searchQuery = '';
+    _selectedCategories = {};
+    _showOnlyManual = false;
+    categories = [];
+    selectedCategory = null;
+    notifyListeners();
+  }
+
   void setConnectivityProvider(ConnectivityProvider provider) {
     _connectivityProvider = provider;
     _connectivityProvider?.addListener(_onConnectivityChanged);
