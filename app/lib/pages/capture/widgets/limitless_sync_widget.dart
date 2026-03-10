@@ -47,7 +47,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
                 children: [
                   const Icon(
                     Icons.sync,
-                    color: Colors.white70,
+                    color: EllaColors.textSecondary,
                     size: 22,
                   ),
                   const SizedBox(width: 12),
@@ -55,7 +55,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
                     child: Text(
                       isSyncing ? context.l10n.syncingYourRecordings : context.l10n.syncYourRecordings,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 16,
                       ),
                     ),
@@ -77,7 +77,7 @@ class LimitlessSyncCardWidget extends StatelessWidget {
                     Text(
                       '${(progress * 100).toInt()}%',
                       style: const TextStyle(
-                        color: Colors.white70,
+                        color: EllaColors.textSecondary,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
