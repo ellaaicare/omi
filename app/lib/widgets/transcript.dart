@@ -15,7 +15,6 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/constants.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
-import 'package:omi/ella/ella_theme.dart';
 
 // Use speaker colors from person.dart for bubble colors
 final List<Color> _speakerColors = speakerColors;
@@ -531,8 +530,8 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                 data.speakerId == omiSpeakerId ? 'omi' : (person?.name ?? 'Speaker ${data.speakerId}'),
                                 style: TextStyle(
                                   color: data.speakerId == omiSpeakerId || person != null
-                                      ? Colors.grey.shade300
-                                      : Colors.grey.shade400,
+                                      ? EllaColors.textTertiary
+                                      : EllaColors.textDisabled,
                                   fontSize: 13,
                                   fontWeight: FontWeight.w500,
                                 ),
@@ -545,7 +544,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                 height: 12,
                                 child: CircularProgressIndicator(
                                   strokeWidth: 1.5,
-                                  valueColor: AlwaysStoppedAnimation(Colors.white),
+                                  valueColor: AlwaysStoppedAnimation(EllaColors.primary),
                                 ),
                               )
                             ],
@@ -594,7 +593,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                     text: TextSpan(
                                       style: TextStyle(
                                         letterSpacing: 0.0,
-                                        color: isUser ? Colors.white : Colors.grey.shade100,
+                                        color: isUser ? Colors.white : EllaColors.textPrimary,
                                         fontSize: 15,
                                         height: 1.4,
                                       ),
@@ -621,7 +620,7 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                               letterSpacing: 0.0,
                                               color: isUser
                                                   ? Colors.white.withValues(alpha: 0.8)
-                                                  : Colors.grey.shade300.withValues(alpha: 0.8),
+                                                  : EllaColors.textSecondary.withValues(alpha: 0.8),
                                               fontSize: 14,
                                               fontStyle: FontStyle.italic,
                                               height: 1.3,
@@ -644,8 +643,9 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                           Text(
                                             SttProviderConfig.getDisplayName(data.sttProvider),
                                             style: TextStyle(
-                                              color:
-                                                  isUser ? Colors.white.withValues(alpha: 0.5) : Colors.grey.shade500,
+                                              color: isUser
+                                                  ? Colors.white.withValues(alpha: 0.5)
+                                                  : EllaColors.textTertiary,
                                               fontSize: 10,
                                               fontStyle: FontStyle.italic,
                                             ),
@@ -654,8 +654,9 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                             Text(
                                               ' · ',
                                               style: TextStyle(
-                                                color:
-                                                    isUser ? Colors.white.withValues(alpha: 0.5) : Colors.grey.shade500,
+                                                color: isUser
+                                                    ? Colors.white.withValues(alpha: 0.5)
+                                                    : EllaColors.textTertiary,
                                                 fontSize: 10,
                                               ),
                                             ),
@@ -671,8 +672,9 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                             child: Icon(
                                               Icons.play_circle_outline,
                                               size: 16,
-                                              color:
-                                                  isUser ? Colors.white.withValues(alpha: 0.7) : Colors.grey.shade400,
+                                              color: isUser
+                                                  ? Colors.white.withValues(alpha: 0.7)
+                                                  : EllaColors.textTertiary,
                                             ),
                                           ),
                                           const SizedBox(width: 6),
@@ -681,8 +683,9 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
                                           Text(
                                             data.getTimestampString(),
                                             style: TextStyle(
-                                              color:
-                                                  isUser ? Colors.white.withValues(alpha: 0.7) : Colors.grey.shade400,
+                                              color: isUser
+                                                  ? Colors.white.withValues(alpha: 0.7)
+                                                  : EllaColors.textTertiary,
                                               fontSize: 11,
                                             ),
                                           ),
@@ -806,7 +809,7 @@ class LiteTranscriptWidget extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: Theme.of(context).textTheme.bodyMedium!.copyWith(
-              color: Colors.grey.shade300.withValues(alpha: 0.6),
+              color: EllaColors.textTertiary.withValues(alpha: 0.6),
               height: 1.3,
             ),
         textAlign: TextAlign.right,
