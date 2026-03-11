@@ -668,6 +668,10 @@ class SharedPreferencesUtil {
   String get pendingEmergency => getString('pendingEmergency');
   set pendingEmergency(String value) => saveString('pendingEmergency', value);
 
+  // TTS Provider (dev setting) — elevenlabs | fish-audio-s2 | kokoro
+  String get ttsProvider => getString('devTtsProvider', defaultValue: 'elevenlabs');
+  set ttsProvider(String value) => saveString('devTtsProvider', value);
+
   //--------------------------- Setters & Getters -----------------------------//
 
   String getString(String key, {String defaultValue = ''}) => _preferences?.getString(key) ?? defaultValue;
