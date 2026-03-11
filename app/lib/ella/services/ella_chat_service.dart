@@ -23,6 +23,7 @@ Map<String, String> _ellaDebugHeaders({required String routeSource}) {
     'X-Ella-Client-Version': PlatformManager.instance.appVersion,
     'X-Ella-Route-Source': routeSource,
     'X-Ella-Session-Key': 'ella:$uid',
+    'X-TTS-Provider': SharedPreferencesUtil().ttsProvider,
   };
 }
 
