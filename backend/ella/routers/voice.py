@@ -200,6 +200,7 @@ async def synthesize_speech(
     text_len = len(request.text)
     provider = (x_tts_provider or "elevenlabs").lower()
     text = request.text[:500]  # Cap at 500 chars
+    print(f"[FLOW:VOICE-TTS] header=X-TTS-Provider raw={x_tts_provider!r} resolved={provider}", flush=True)
 
     # --- Local ella-tts proxy (Fish Audio S1 or Kokoro) ---
     if provider in ("fish-audio", "kokoro"):
