@@ -115,17 +115,18 @@ class TtsRequest(BaseModel):
 # ============================================================================
 
 
-async def _inworld_tts(text: str, api_key: str) -> bytes:
+async def _inworld_tts(text: str, api_key: str, voice_id: str = "Evelyn") -> bytes:
     """Call Inworld TTS via persistent WebSocket, return MP3 bytes."""
-    uri = f"wss://api.inworld.ai/tts/v1/voice:streamBidirectional?authorization=Basic {api_key}"
+    uri = "wss://api.inworld.ai/tts/v1/voice:streamBidirectional"
     chunks = []
-    async with websockets.connect(uri, open_timeout=10) as ws:
+    async with websockets.connect(uri, extra_headers={"Authorization": f"Basic {api_key}"}, open_timeout=10) as ws:
         # Create context
         await ws.send(json.dumps({
             "create": {
                 "modelId": "inworld-tts-1.5-mini",
                 "audioConfig": {"audioEncoding": "MP3"},
                 "autoMode": True,
+                "voiceId": voice_id,
             },
             "contextId": "ctx-1",
         }))
