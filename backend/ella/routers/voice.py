@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -180,25 +180,61 @@ class TtsRequest(BaseModel):
 
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 
 
 @router.post("/tts")
-async def synthesize_speech(request: TtsRequest):
+async def synthesize_speech(
+    request: TtsRequest,
+    x_tts_provider: Optional[str] = Header(default=None, alias="X-TTS-Provider"),
+):
     """
-    Synthesize speech from text via ElevenLabs.
+    Synthesize speech from text.
 
-    Proxies TTS requests so the API key stays server-side.
-    Returns audio/mpeg bytes directly.
+    Routes to TTS backend based on X-TTS-Provider header:
+      elevenlabs  — ElevenLabs API (default)
+      fish-audio  — Fish Audio S1 via local ella-tts server (Mac Mini :8930)
+      kokoro      — Kokoro-82M via local ella-tts server (Mac Mini :8930)
     """
     _start = time.time()
     text_len = len(request.text)
+    provider = (x_tts_provider or "elevenlabs").lower()
+    text = request.text[:500]  # Cap at 500 chars
 
+    # --- Local ella-tts proxy (Fish Audio S1 or Kokoro) ---
+    if provider in ("fish-audio", "kokoro"):
+        print(f"[FLOW:VOICE-TTS] provider={provider} text_len={text_len} url={ELLA_TTS_URL}", flush=True)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{ELLA_TTS_URL}/v1/audio/speech",
+                    json={"input": text, "voice": "nova", "response_format": "mp3"},
+                    timeout=30.0,
+                )
+            _elapsed = int((time.time() - _start) * 1000)
+            if response.status_code != 200:
+                print(f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms", flush=True)
+                raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
+            audio_size = len(response.content)
+            print(f"[FLOW:VOICE-TTS] OK provider={provider} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
+            return Response(content=response.content, media_type="audio/mpeg")
+        except httpx.TimeoutException:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] TIMEOUT provider={provider} latency={_elapsed}ms", flush=True)
+            raise HTTPException(status_code=504, detail=f"{provider} TTS timed out")
+        except HTTPException:
+            raise
+        except Exception as e:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # --- ElevenLabs (default) ---
     if not ELEVENLABS_API_KEY:
         print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs key_missing=true text_len={text_len}", flush=True)
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
 
-    text = request.text[:500]  # Cap at 500 chars for v1
-    print(f"[FLOW:VOICE-TTS] provider=elevenlabs voice={request.voice_id} model=eleven_turbo_v2_5 text_len={text_len} capped_len={len(text)}", flush=True)
+    print(f"[FLOW:VOICE-TTS] provider=elevenlabs voice={request.voice_id} text_len={text_len}", flush=True)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -248,5 +284,7 @@ async def voice_health():
         "service": "ella-voice",
         "voice_endpoint": ELLA_VOICE_ENDPOINT,
         "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_configured": bool(ELEVENLABS_API_KEY),
+        "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
+        "tts_local_url": ELLA_TTS_URL,
+        "tts_providers": ["elevenlabs", "fish-audio", "kokoro"],
     }
