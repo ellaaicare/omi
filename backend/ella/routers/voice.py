@@ -71,6 +71,14 @@ V2V_PROVIDERS = {
 # ============================================================================
 
 
+class VoiceSessionRequest(BaseModel):
+    """Request for creating a V2V voice session."""
+
+    uid: str
+    provider: str = "grok-voice"
+    voice_mode: Optional[str] = None
+
+
 class VoiceSessionResponse(BaseModel):
     """Response containing session token and connection details."""
 
@@ -206,12 +214,16 @@ async def get_voice_providers():
 
 @router.post("/session", response_model=VoiceSessionResponse)
 async def create_voice_session(
+    body: Optional[VoiceSessionRequest] = None,
     uid: Optional[str] = None,
-    provider: str = "grok-voice",
+    provider: Optional[str] = None,
     voice_mode: Optional[str] = None,
 ):
     """
     Create a voice session token for connecting to V2V service.
+
+    Accepts params via JSON body (iOS) or query params (curl/testing).
+    Body fields take priority over query params.
 
     Flow:
     1. iOS calls this endpoint with uid and provider
@@ -232,6 +244,11 @@ async def create_voice_session(
         expires_in: Token lifetime in seconds
         audio_format: Required audio configuration
     """
+    # Merge body and query params (body takes priority)
+    uid = (body.uid if body else None) or uid
+    provider = (body.provider if body else None) or provider or "grok-voice"
+    voice_mode = (body.voice_mode if body else None) or voice_mode
+
     if not uid:
         raise HTTPException(status_code=400, detail="uid required")
 
