@@ -33,6 +33,12 @@ class V2VClient {
   bool _isConnected = false;
   bool _isPlaying = false;
 
+  /// Pre-buffer audio to avoid underruns from tiny PCM chunks.
+  final List<Uint8List> _audioBuffer = [];
+  int _bufferedBytes = 0;
+  static const int _preBufferBytes = 9600; // 200ms at 24kHz PCM16 mono
+  bool _preBufferFilled = false;
+
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
 
@@ -130,6 +136,9 @@ class V2VClient {
       } catch (_) {}
       _isPlaying = false;
     }
+    _preBufferFilled = false;
+    _audioBuffer.clear();
+    _bufferedBytes = 0;
   }
 
   // --- Session management ---
@@ -218,12 +227,26 @@ class V2VClient {
 
     try {
       if (!_isPlaying) {
+        // Accumulate 200ms of audio before starting playback to avoid underruns
+        if (!_preBufferFilled) {
+          _audioBuffer.add(pcmData);
+          _bufferedBytes += pcmData.length;
+          if (_bufferedBytes < _preBufferBytes) return;
+          _preBufferFilled = true;
+        }
         _isPlaying = true;
         await _player!.startPlayerFromStream(
           codec: Codec.pcm16,
           numChannels: 1,
           sampleRate: 24000,
         );
+        // Flush pre-buffer
+        for (final chunk in _audioBuffer) {
+          // ignore: deprecated_member_use
+          _player!.foodSink?.add(FoodData(chunk));
+        }
+        _audioBuffer.clear();
+        _bufferedBytes = 0;
       }
       // ignore: deprecated_member_use
       _player!.foodSink?.add(FoodData(pcmData));
@@ -291,11 +314,17 @@ class V2VClient {
   void _finishPlayback() async {
     if (_isPlaying && _player != null) {
       try {
+        // Wait for buffered audio to drain before stopping
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (!_isPlaying) return; // interrupted while waiting
         // ignore: deprecated_member_use
         _player!.foodSink?.add(FoodEvent(() {}));
         await _player!.stopPlayer();
       } catch (_) {}
       _isPlaying = false;
     }
+    _preBufferFilled = false;
+    _audioBuffer.clear();
+    _bufferedBytes = 0;
   }
 }
