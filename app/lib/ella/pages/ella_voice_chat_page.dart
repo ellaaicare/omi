@@ -13,10 +13,12 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/messages.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
@@ -65,6 +67,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// Track tab visibility
   bool _wasOnVoiceTab = false;
 
+  /// V2V client for WebSocket-based voice-to-voice mode
+  V2VClient? _v2vClient;
+  bool _isV2VMode = false;
+
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
     r'[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|'
@@ -81,6 +87,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     r'[\u{26EA}]|[\u{26F2}-\u{26F3}]|[\u{26F5}]|[\u{26FA}]|[\u{26FD}]',
     unicode: true,
   );
+
+  /// Check if current TTS provider is a V2V provider.
+  static bool _isV2VProvider(String provider) => provider == 'grok-voice' || provider == 'gemini-live';
 
   @override
   bool get wantKeepAlive => true;
@@ -114,15 +123,24 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       if (isOnVoiceTab && !_wasOnVoiceTab && !_voiceModeActive) {
         debugPrint('[VoiceChat] Voice tab became active, auto-starting');
         _voiceModeActive = true;
+        final provider = SharedPreferencesUtil().ttsProvider;
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && _orbState == VoiceOrbState.idle) {
-            _startListening();
+            if (_isV2VProvider(provider)) {
+              _startV2V(provider);
+            } else {
+              _startListening();
+            }
           }
         });
       } else if (!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive) {
         // Navigated away — pause voice mode
         debugPrint('[VoiceChat] Left voice tab, pausing');
-        _pauseVoiceMode();
+        if (_isV2VMode) {
+          _stopV2V();
+        } else {
+          _pauseVoiceMode();
+        }
       }
       _wasOnVoiceTab = isOnVoiceTab;
     } catch (_) {
@@ -170,6 +188,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (_speech.isListening) {
       _speech.stop();
     }
+    _v2vClient?.disconnect();
+    _v2vClient = null;
     super.dispose();
   }
 
@@ -188,17 +208,28 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _onOrbTap() async {
-    debugPrint('[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive');
+    debugPrint('[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive, v2v: $_isV2VMode');
     HapticFeedback.mediumImpact();
 
     if (!_voiceModeActive) {
-      // Resume voice mode
+      // Resume voice mode — check if V2V provider is selected
       _voiceModeActive = true;
-      await _startListening();
+      final provider = SharedPreferencesUtil().ttsProvider;
+      if (_isV2VProvider(provider)) {
+        await _startV2V(provider);
+      } else {
+        _isV2VMode = false;
+        await _startListening();
+      }
       return;
     }
 
     // Voice mode is active — tap means pause
+    if (_isV2VMode) {
+      await _stopV2V();
+      return;
+    }
+
     switch (_orbState) {
       case VoiceOrbState.idle:
         _pauseVoiceMode();
@@ -224,6 +255,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _pauseVoiceMode() {
     debugPrint('[VoiceChat] Pausing voice mode');
     _voiceModeActive = false;
+    _isV2VMode = false;
     _typewriterTimer?.cancel();
     if (_speech.isListening) {
       _speech.stop();
@@ -397,6 +429,127 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _voiceModeActive = false;
         }
       }
+    }
+  }
+
+  // --- V2V (Voice-to-Voice) WebSocket mode ---
+
+  Future<void> _startV2V(String provider) async {
+    debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
+    _isV2VMode = true;
+
+    // Stop any existing mic recording from CaptureProvider
+    if (mounted) {
+      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+      if (captureProvider.recordingState == RecordingState.record) {
+        debugPrint('[VoiceChat] Pausing capture recording for V2V');
+        await captureProvider.stopStreamRecording();
+        _didPauseCaptureRecording = true;
+      }
+    }
+
+    setState(() {
+      _orbState = VoiceOrbState.processing;
+      _statusText = 'Connecting...';
+      _audioLevel = 0.0;
+    });
+
+    // Stop any playing audio
+    try {
+      await _audioPlayer.stop();
+    } catch (_) {}
+
+    _v2vClient = V2VClient(
+      onEvent: _onV2VEvent,
+      onConnectionChanged: (connected) {
+        if (!mounted) return;
+        if (!connected && _isV2VMode) {
+          debugPrint('[VoiceChat] V2V disconnected unexpectedly');
+          setState(() {
+            _orbState = VoiceOrbState.idle;
+            _statusText = 'Disconnected — Tap to Reconnect';
+            _isV2VMode = false;
+            _voiceModeActive = false;
+          });
+        }
+      },
+    );
+
+    final success = await _v2vClient!.connect(provider: provider);
+    if (!mounted) return;
+
+    if (!success) {
+      debugPrint('[VoiceChat] V2V connect failed, falling back to STT mode');
+      _isV2VMode = false;
+      _v2vClient = null;
+      // Fall back to standard STT→LLM→TTS
+      _startListening();
+      return;
+    }
+
+    setState(() {
+      _orbState = VoiceOrbState.listening;
+      _statusText = 'V2V Active — Tap to Stop';
+    });
+  }
+
+  Future<void> _stopV2V() async {
+    debugPrint('[VoiceChat] Stopping V2V mode');
+    await _v2vClient?.disconnect();
+    _v2vClient = null;
+    _pauseVoiceMode();
+  }
+
+  void _onV2VEvent(V2VEvent event) {
+    if (!mounted) return;
+
+    switch (event.type) {
+      case 'user_transcript':
+        setState(() {
+          _lastUserText = event.text ?? '';
+          _ellaDisplayText = '';
+        });
+        _scrollToBottom();
+        break;
+      case 'transcript':
+        final text = event.text ?? '';
+        _lastEllaText = text;
+        setState(() {
+          _ellaDisplayText = text;
+          _orbState = VoiceOrbState.speaking;
+          _statusText = 'Ella is speaking...';
+        });
+        _scrollToBottom();
+        // Inject into chat history
+        if (_lastUserText.isNotEmpty && text.isNotEmpty) {
+          _injectVoiceMessages(_lastUserText, text);
+        }
+        break;
+      case 'audio_done':
+        if (_isV2VMode) {
+          setState(() {
+            _orbState = VoiceOrbState.listening;
+            _statusText = 'V2V Active — Tap to Stop';
+          });
+        }
+        break;
+      case 'speech_started':
+        // User started talking — interrupt playback
+        setState(() {
+          _orbState = VoiceOrbState.listening;
+          _statusText = 'Listening...';
+          _ellaDisplayText = '';
+        });
+        break;
+      case 'error':
+        debugPrint('[VoiceChat] V2V error: ${event.text}');
+        break;
+      case 'session_end':
+        debugPrint('[VoiceChat] V2V session ended: ${event.text}');
+        if (_isV2VMode) {
+          _stopV2V();
+        }
+        break;
     }
   }
 
