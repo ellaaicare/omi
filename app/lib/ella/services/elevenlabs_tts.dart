@@ -6,6 +6,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -27,7 +28,7 @@ class ElevenLabsTts {
     try {
       final response = await makeApiCall(
         url: url,
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json', 'X-TTS-Provider': SharedPreferencesUtil().ttsProvider},
         body: '{"text": ${_jsonEscapeString(text)}}',
         method: 'POST',
         timeout: const Duration(seconds: 30),
