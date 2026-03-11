@@ -769,6 +769,71 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 32),
 
+                  // TTS Provider Section
+                  _buildSectionHeader('Voice (TTS)', subtitle: 'Text-to-speech engine for Ella voice responses'),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1C1C1E),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2A2A2E),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Center(
+                            child: FaIcon(
+                              FontAwesomeIcons.volumeHigh,
+                              color: Colors.grey.shade400,
+                              size: 16,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'TTS Provider',
+                                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Sent as X-TTS-Provider header',
+                                style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                        DropdownButton<String>(
+                          value: SharedPreferencesUtil().ttsProvider,
+                          dropdownColor: const Color(0xFF2A2A2E),
+                          underline: const SizedBox.shrink(),
+                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                          items: const [
+                            DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
+                            DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
+                            DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
+                          ],
+                          onChanged: (value) {
+                            if (value != null) {
+                              setState(() {
+                                SharedPreferencesUtil().ttsProvider = value;
+                              });
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+
                   // Debug Logs Section
                   _buildSectionHeader(context.l10n.debugAndDiagnostics),
                   Container(
