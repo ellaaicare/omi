@@ -446,3 +446,103 @@ async def ella_chat_stream(
         _stream_level_2_grok(request.message),
         media_type="text/event-stream",
     )
+
+
+# === Chat History Endpoint (added 2026-03-10 for iOS #301) ===
+
+class EllaChatHistoryRequest(BaseModel):
+    """Query params come as Pydantic model for POST, but we use GET with Query."""
+    pass
+
+
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+
+
+@router.get("/chat/history")
+async def ella_chat_history(
+    uid: str,
+    limit: int = 50,
+    before: str = None,
+):
+    """Return recent chat messages for a user from OpenClaw session history.
+
+    Resolves the user's agent routing, then proxies to the Mac Mini provision
+    API which reads JSONL session files directly.
+
+    Returns messages in reverse-chronological order (newest first) in the
+    iOS ServerMessage schema format.
+
+    Args:
+        uid: Firebase UID (omi_uid)
+        limit: Max messages to return (default 50, max 200)
+        before: ISO timestamp — only return messages before this time
+    """
+    import time as _time
+    _start = _time.time()
+
+    limit = min(limit, 200)
+
+    # Resolve user to get their OpenClaw user ID
+    resolved = await resolve_user_routing(uid)
+    if not resolved:
+        logger.warning(f"[FLOW:HISTORY] uid={uid} user_not_found")
+        return {"messages": [], "hasMore": False}
+
+    routing = resolved.get("routing")
+    if not routing:
+        logger.warning(f"[FLOW:HISTORY] uid={uid} no_routing")
+        return {"messages": [], "hasMore": False}
+
+    # Extract the OpenClaw user ID from the workspace path or agent ID
+    agent_id = routing.get("agentId", "")
+    workspace = routing.get("workspace", "")
+
+    # The provision API uses the OpenClaw userId (e.g., "omi-5agc5ye9...")
+    # which is the prefix of the agent ID (e.g., "ella-omi-5agc5ye9...")
+    # Extract it from the agent ID: "ella-{userId}" -> "{userId}"
+    if agent_id and agent_id.startswith("ella-"):
+        openclaw_user_id = agent_id[5:]  # Remove "ella-" prefix
+    else:
+        openclaw_user_id = agent_id
+
+    # Build query params for Mac Mini provision API
+    params = {"limit": limit}
+    if before:
+        params["before"] = before
+
+    headers = {}
+    if PROVISION_API_TOKEN:
+        headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{PROVISION_API_URL}/users/{openclaw_user_id}/history",
+                params=params,
+                headers=headers,
+                timeout=15.0,
+            )
+
+        _elapsed = int((_time.time() - _start) * 1000)
+
+        if response.status_code == 200:
+            result = response.json()
+            msg_count = len(result.get("messages", []))
+            logger.info(f"[FLOW:HISTORY] uid={uid} agent={agent_id} messages={msg_count} latency={_elapsed}ms")
+            return result
+        elif response.status_code == 404:
+            logger.warning(f"[FLOW:HISTORY] uid={uid} agent={agent_id} no_sessions latency={_elapsed}ms")
+            return {"messages": [], "hasMore": False}
+        else:
+            logger.error(f"[FLOW:HISTORY] uid={uid} agent={agent_id} status={response.status_code} latency={_elapsed}ms")
+            return {"messages": [], "hasMore": False}
+
+    except httpx.TimeoutException:
+        _elapsed = int((_time.time() - _start) * 1000)
+        logger.error(f"[FLOW:HISTORY] uid={uid} timeout latency={_elapsed}ms")
+        return {"messages": [], "hasMore": False}
+    except Exception as e:
+        _elapsed = int((_time.time() - _start) * 1000)
+        logger.error(f"[FLOW:HISTORY] uid={uid} error={e} latency={_elapsed}ms")
+        return {"messages": [], "hasMore": False}
