@@ -820,6 +820,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
                             DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
                             DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
+                            DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
+                            DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
                           ],
                           onChanged: (value) {
                             if (value != null) {
