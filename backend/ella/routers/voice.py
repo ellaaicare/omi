@@ -192,9 +192,13 @@ async def synthesize_speech(
     Synthesize speech from text.
 
     Routes to TTS backend based on X-TTS-Provider header:
-      elevenlabs  — ElevenLabs API (default)
-      fish-audio  — Fish Audio S1 via local ella-tts server (Mac Mini :8930)
-      kokoro      — Kokoro-82M via local ella-tts server (Mac Mini :8930)
+      elevenlabs         — ElevenLabs API (default)
+      fish-audio         — Fish Audio via local ella-tts server (Mac Mini :8930)
+      fish-audio-s1      — Fish Audio S1 (alias)
+      fish-audio-s2      — Fish Audio S2 (alias)
+      kokoro             — Kokoro-82M via local ella-tts server (Mac Mini :8930)
+
+    No fallbacks — unknown or failing providers return errors directly.
     """
     _start = time.time()
     text_len = len(request.text)
@@ -202,8 +206,8 @@ async def synthesize_speech(
     text = request.text[:500]  # Cap at 500 chars
     print(f"[FLOW:VOICE-TTS] header=X-TTS-Provider raw={x_tts_provider!r} resolved={provider}", flush=True)
 
-    # --- Local ella-tts proxy (Fish Audio S1 or Kokoro) ---
-    if provider in ("fish-audio", "kokoro"):
+    # --- Local ella-tts proxy (Fish Audio or Kokoro) ---
+    if provider in ("fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"):
         print(f"[FLOW:VOICE-TTS] provider={provider} text_len={text_len} url={ELLA_TTS_URL}", flush=True)
         try:
             async with httpx.AsyncClient() as client:
@@ -230,7 +234,12 @@ async def synthesize_speech(
             print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    # --- ElevenLabs (default) ---
+    # --- Reject unknown providers (no silent fallbacks) ---
+    if provider != "elevenlabs":
+        print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
+        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro")
+
+    # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
         print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs key_missing=true text_len={text_len}", flush=True)
         raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
