@@ -13,6 +13,8 @@ Provider types:
   v2v  — Voice-to-voice (WebSocket, bidirectional audio streaming via /session)
 """
 
+import base64
+import json
 import os
 import logging
 import time
@@ -20,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
+import websockets
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -44,6 +47,7 @@ ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 SESSION_EXPIRY_HOURS = int(os.getenv("ELLA_SESSION_EXPIRY_HOURS", "1"))
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
@@ -109,6 +113,56 @@ class TtsRequest(BaseModel):
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+
+async def _inworld_tts(text: str, api_key: str, voice_id: str = "Serena") -> bytes:
+    """Call Inworld TTS via HTTP streaming endpoint, return MP3 bytes.
+
+    Uses POST /tts/v1/voice:stream (~0.8-1.1s) instead of WebSocket per-request (~3s).
+    Override defaults via env vars:
+      INWORLD_VOICE_ID     — voice name (default: Serena)
+      INWORLD_SPEAKING_RATE — float 0.5-1.5 (default: 1.1)
+    Full voice list: Luna, Claire, Evelyn, Serena, Riley, Chloe, Julia, Abby, Tessa,
+                     Kayla, Kelsey, Mia, Naomi, Olivia, Jessica, Lauren, Ashley,
+                     Dennis, Blake, Alex, Avery (see GET /tts/v1/voices for full list).
+    """
+    voice = os.getenv("INWORLD_VOICE_ID", voice_id)
+    payload = {
+        "text": text,
+        "voiceId": voice,
+        "modelId": "inworld-tts-1.5-mini",
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "speakingRate": float(os.getenv("INWORLD_SPEAKING_RATE", "1.1")),
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.inworld.ai/tts/v1/voice:stream",
+            headers={"Authorization": f"Basic {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15.0,
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Inworld API error {response.status_code}: {response.text[:200]}")
+
+    # Response is newline-delimited JSON chunks, each with base64 audioContent
+    audio_chunks = []
+    for line in response.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+            audio_b64 = msg.get("result", {}).get("audioContent")
+            if audio_b64:
+                audio_chunks.append(base64.b64decode(audio_b64))
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    if not audio_chunks:
+        raise RuntimeError("Inworld returned no audio chunks")
+    return b"".join(audio_chunks)
 
 
 def create_session_token(
@@ -189,6 +243,13 @@ async def get_voice_providers():
             "type": "tts",
             "description": "Fish Audio via local server",
             "available": True,
+        },
+        {
+            "id": "inworld",
+            "name": "Inworld TTS",
+            "type": "tts",
+            "description": "Inworld TTS WebSocket, ~120-200ms, $5-10/1M chars",
+            "available": bool(INWORLD_API_KEY),
         },
         {
             "id": "grok-voice",
@@ -343,6 +404,7 @@ async def synthesize_speech(
       fish-audio-s1      — Fish Audio S1 (alias)
       fish-audio-s2      — Fish Audio S2 (alias)
       kokoro             — Kokoro-82M via local ella-tts server (Mac Mini :8930)
+      inworld            — Inworld TTS WebSocket (~120-200ms, $5-10/1M chars)
 
     V2V providers (grok-voice, gemini-live) return 422 directing iOS to use
     the /session endpoint instead — V2V replaces the entire STT→LLM→TTS chain.
@@ -394,10 +456,26 @@ async def synthesize_speech(
             print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # --- Inworld TTS (WebSocket, ~120-200ms) ---
+    if provider == "inworld":
+        if not INWORLD_API_KEY:
+            print(f"[FLOW:VOICE-TTS] ERROR provider=inworld key_missing=true", flush=True)
+            raise HTTPException(status_code=500, detail="INWORLD_API_KEY not configured")
+        print(f"[FLOW:VOICE-TTS] provider=inworld model=tts-1.5-mini text_len={text_len}", flush=True)
+        try:
+            audio = await _inworld_tts(text, INWORLD_API_KEY)
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] OK provider=inworld audio_bytes={len(audio)} latency={_elapsed}ms", flush=True)
+            return Response(content=audio, media_type="audio/mpeg")
+        except Exception as e:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] ERROR provider=inworld error={e} latency={_elapsed}ms", flush=True)
+            raise HTTPException(status_code=502, detail=f"Inworld TTS error: {e}")
+
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, grok-voice, gemini-live")
+        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live")
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
@@ -462,7 +540,7 @@ async def voice_health():
         "service": "ella-voice",
         "voice_endpoint": ELLA_VOICE_ENDPOINT,
         "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_providers": ["elevenlabs", "fish-audio", "kokoro"],
+        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld"],
         "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
         "tts_local_url": ELLA_TTS_URL,
         "v2v_providers": v2v_status,
