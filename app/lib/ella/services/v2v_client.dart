@@ -37,6 +37,8 @@ class V2VClient {
   /// SoLoud engine + stream source for real-time PCM playback.
   AudioSource? _streamSource;
   SoundHandle? _playHandle;
+  int _chunkCount = 0;
+  int _totalBytes = 0;
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
@@ -67,11 +69,13 @@ class V2VClient {
       return false;
     }
 
-    // 2. Configure iOS audio session for full-duplex
-    await _configureAudioSession();
-
-    // 3. Initialize SoLoud for playback
+    // 2. Initialize SoLoud BEFORE audio session — SoLoud uses miniaudio which
+    //    defers to the existing AVAudioSession (noAudioSessionActivate=true).
     await _initSoLoud();
+
+    // 3. Configure iOS audio session for full-duplex with defaultToSpeaker
+    //    (voiceChat mode routes to earpiece by default — we need the main speaker)
+    await _configureAudioSession();
 
     // 4. Connect WebSocket
     final wsUrl = '$endpoint&token=$token';
@@ -148,14 +152,17 @@ class V2VClient {
 
   Future<void> _configureAudioSession() async {
     final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration(
+    await session.configure(AudioSessionConfiguration(
       avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
+          AVAudioSessionCategoryOptions.allowBluetooth |
+          AVAudioSessionCategoryOptions.allowBluetoothA2dp,
       avAudioSessionMode: AVAudioSessionMode.voiceChat,
       avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
       avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
     ));
     await session.setActive(true);
-    Logger.debug('[V2V] Audio session configured: playAndRecord + voiceChat');
+    Logger.debug('[V2V] Audio session configured: playAndRecord + defaultToSpeaker + voiceChat');
   }
 
   // --- Session management ---
@@ -258,44 +265,58 @@ class V2VClient {
   }
 
   /// Feed PCM16 audio chunk directly to SoLoud for real-time playback.
-  void _playAudioChunk(Uint8List pcmData) async {
+  Future<void> _playAudioChunk(Uint8List pcmData) async {
     if (_streamSource == null || pcmData.isEmpty) return;
+
+    _chunkCount++;
+    _totalBytes += pcmData.length;
 
     try {
       // Start playback on first chunk
       if (!_isPlaying) {
         _isPlaying = true;
         _playHandle = await SoLoud.instance.play(_streamSource!);
-        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Streaming audio...'));
-        Logger.debug('[V2V] Started SoLoud stream playback');
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Audio stream started'));
+        Logger.debug('[V2V] Started SoLoud stream playback, handle=$_playHandle');
       }
 
       // Feed PCM16 data directly — SoLoud handles buffering internally
       SoLoud.instance.addAudioDataStream(_streamSource!, pcmData);
+
+      if (_chunkCount % 20 == 0) {
+        Logger.debug('[V2V] Fed $_chunkCount chunks, ${_totalBytes}B total');
+      }
     } catch (e) {
-      Logger.debug('[V2V] SoLoud feed error: $e');
+      Logger.debug('[V2V] SoLoud feed error (chunk $_chunkCount): $e');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Feed error: $e'));
     }
   }
 
   /// Called on audio_done — mark the stream as ended so SoLoud plays remaining buffer.
   void _finishPlayback() {
+    final stats = '$_chunkCount chunks, ${(_totalBytes / 1024).toStringAsFixed(1)}KB';
+    Logger.debug('[V2V] Audio done: $stats');
+    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Done: $stats'));
+
     if (_streamSource != null) {
       try {
         SoLoud.instance.setDataIsEnded(_streamSource!);
         Logger.debug('[V2V] Stream data ended, playing remaining buffer');
-        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Audio complete'));
       } catch (e) {
         Logger.debug('[V2V] setDataIsEnded error: $e');
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'setDataIsEnded err: $e'));
       }
     }
 
-    // Wait briefly then reset for next response
-    Future.delayed(const Duration(seconds: 1), () {
+    // Wait for remaining buffer to play, then reset for next response
+    final waitMs = (_totalBytes > 0) ? 2000 : 500;
+    Future.delayed(Duration(milliseconds: waitMs), () {
       _isPlaying = false;
       _playHandle = null;
+      _chunkCount = 0;
+      _totalBytes = 0;
       if (_streamSource != null) {
         try {
-          // Reset stream buffer for next turn
           SoLoud.instance.resetBufferStream(_streamSource!);
         } catch (_) {}
       }
@@ -308,6 +329,7 @@ class V2VClient {
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
       // Binary frame = raw PCM16 audio from proxy — play immediately
+      // Fire-and-forget but _playAudioChunk handles its own errors
       _playAudioChunk(Uint8List.fromList(message));
       return;
     }
