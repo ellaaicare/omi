@@ -115,41 +115,54 @@ class TtsRequest(BaseModel):
 # ============================================================================
 
 
-async def _inworld_tts(text: str, api_key: str, voice_id: str = "Evelyn") -> bytes:
-    """Call Inworld TTS via persistent WebSocket, return MP3 bytes."""
-    uri = "wss://api.inworld.ai/tts/v1/voice:streamBidirectional"
-    chunks = []
-    async with websockets.connect(uri, extra_headers={"Authorization": f"Basic {api_key}"}, open_timeout=10) as ws:
-        # Create context
-        await ws.send(json.dumps({
-            "create": {
-                "modelId": "inworld-tts-1.5-mini",
-                "audioConfig": {"audioEncoding": "MP3"},
-                "autoMode": True,
-                "voiceId": voice_id,
-            },
-            "contextId": "ctx-1",
-        }))
-        msg = json.loads(await ws.recv())  # contextCreated
-        if "error" in msg:
-            raise RuntimeError(f"Inworld context error: {msg}")
+async def _inworld_tts(text: str, api_key: str, voice_id: str = "Serena") -> bytes:
+    """Call Inworld TTS via HTTP streaming endpoint, return MP3 bytes.
 
-        # Send text + flush
-        await ws.send(json.dumps({
-            "send_text": {"text": text, "flush_context": {}},
-            "contextId": "ctx-1",
-        }))
+    Uses POST /tts/v1/voice:stream (~0.8-1.1s) instead of WebSocket per-request (~3s).
+    Override defaults via env vars:
+      INWORLD_VOICE_ID     — voice name (default: Serena)
+      INWORLD_SPEAKING_RATE — float 0.5-1.5 (default: 1.1)
+    Full voice list: Luna, Claire, Evelyn, Serena, Riley, Chloe, Julia, Abby, Tessa,
+                     Kayla, Kelsey, Mia, Naomi, Olivia, Jessica, Lauren, Ashley,
+                     Dennis, Blake, Alex, Avery (see GET /tts/v1/voices for full list).
+    """
+    voice = os.getenv("INWORLD_VOICE_ID", voice_id)
+    payload = {
+        "text": text,
+        "voiceId": voice,
+        "modelId": "inworld-tts-1.5-mini",
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "speakingRate": float(os.getenv("INWORLD_SPEAKING_RATE", "1.1")),
+        },
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://api.inworld.ai/tts/v1/voice:stream",
+            headers={"Authorization": f"Basic {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15.0,
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Inworld API error {response.status_code}: {response.text[:200]}")
 
-        # Collect audio chunks until flushCompleted
-        async for raw in ws:
-            msg = json.loads(raw)
-            r = msg.get("result", {})
-            if "audioChunk" in r:
-                chunks.append(base64.b64decode(r["audioChunk"]["audioContent"]))
-            elif "flushCompleted" in r:
-                break
+    # Response is newline-delimited JSON chunks, each with base64 audioContent
+    audio_chunks = []
+    for line in response.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+            audio_b64 = msg.get("result", {}).get("audioContent")
+            if audio_b64:
+                audio_chunks.append(base64.b64decode(audio_b64))
+        except (json.JSONDecodeError, KeyError):
+            continue
 
-    return b"".join(chunks)
+    if not audio_chunks:
+        raise RuntimeError("Inworld returned no audio chunks")
+    return b"".join(audio_chunks)
 
 
 def create_session_token(
