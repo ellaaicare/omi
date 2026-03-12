@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_sound/flutter_sound.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -27,18 +30,17 @@ class V2VEvent {
 class V2VClient {
   WebSocketChannel? _channel;
   FlutterSoundRecorder? _recorder;
-  FlutterSoundPlayer? _player;
+  AudioPlayer? _audioPlayer;
   StreamController<Uint8List>? _micController;
   StreamSubscription? _wsSub;
+  StreamSubscription? _playerSub;
   bool _isConnected = false;
   bool _isPlaying = false;
   bool _micMuted = false;
+  String? _cachedTempDir;
 
-  /// Pre-buffer audio to avoid underruns from tiny PCM chunks.
-  final List<Uint8List> _audioBuffer = [];
-  int _bufferedBytes = 0;
-  static const int _preBufferBytes = 9600; // 200ms at 24kHz PCM16 mono
-  bool _preBufferFilled = false;
+  /// Accumulate all PCM audio chunks for the current response, then play as WAV.
+  final BytesBuilder _audioAccumulator = BytesBuilder(copy: false);
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
@@ -131,15 +133,13 @@ class V2VClient {
 
   /// Interrupt current playback (e.g., user started speaking).
   Future<void> interruptPlayback() async {
-    if (_isPlaying && _player != null) {
+    _audioAccumulator.clear();
+    if (_isPlaying && _audioPlayer != null) {
       try {
-        await _player!.stopPlayer();
+        await _audioPlayer!.stop();
       } catch (_) {}
       _isPlaying = false;
     }
-    _preBufferFilled = false;
-    _audioBuffer.clear();
-    _bufferedBytes = 0;
     _micMuted = false;
   }
 
@@ -210,63 +210,45 @@ class V2VClient {
   // --- Audio playback ---
 
   Future<void> _initPlayer() async {
-    _player = FlutterSoundPlayer();
-    await _player!.openPlayer();
+    _audioPlayer = AudioPlayer();
+    _playerSub = _audioPlayer!.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed && _isPlaying) {
+        _isPlaying = false;
+        _micMuted = false;
+        onEvent?.call(V2VEvent(type: 'playback_complete'));
+      }
+    });
+    _cachedTempDir ??= (await getTemporaryDirectory()).path;
     Logger.debug('[V2V] Audio player initialized');
   }
 
   Future<void> _stopPlayer() async {
+    _playerSub?.cancel();
+    _playerSub = null;
     try {
-      if (_isPlaying) await _player?.stopPlayer();
-      await _player?.closePlayer();
+      await _audioPlayer?.stop();
+      await _audioPlayer?.dispose();
     } catch (_) {}
-    _player = null;
+    _audioPlayer = null;
     _isPlaying = false;
   }
 
-  Future<void> _playAudioChunk(Uint8List pcmData) async {
-    if (_player == null || pcmData.isEmpty) return;
-
-    try {
-      if (!_isPlaying) {
-        // Accumulate 200ms of audio before starting playback to avoid underruns
-        if (!_preBufferFilled) {
-          _audioBuffer.add(pcmData);
-          _bufferedBytes += pcmData.length;
-          if (_bufferedBytes < _preBufferBytes) return;
-          _preBufferFilled = true;
-        }
-        _isPlaying = true;
-        // Mute mic to prevent echo feedback while playing
-        _micMuted = true;
-        await _player!.startPlayerFromStream(
-          codec: Codec.pcm16,
-          numChannels: 1,
-          sampleRate: 24000,
-        );
-        // Flush pre-buffer
-        for (final chunk in _audioBuffer) {
-          // ignore: deprecated_member_use
-          _player!.foodSink?.add(FoodData(chunk));
-        }
-        _audioBuffer.clear();
-        _bufferedBytes = 0;
-      }
-      // ignore: deprecated_member_use
-      _player!.foodSink?.add(FoodData(pcmData));
-    } catch (e) {
-      Logger.debug('[V2V] Audio play error: $e');
+  /// Accumulate PCM chunk — actual playback happens in _finishPlayback on audio_done.
+  void _bufferAudioChunk(Uint8List pcmData) {
+    if (pcmData.isEmpty) return;
+    if (_audioAccumulator.isEmpty) {
+      // First chunk of a new response — mute mic
+      _micMuted = true;
     }
+    _audioAccumulator.add(pcmData);
   }
 
   // --- WebSocket message handling ---
 
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
-      // Binary frame = raw PCM16 audio from proxy
-      final audioBytes = Uint8List.fromList(message);
-      _playAudioChunk(audioBytes);
-      onEvent?.call(V2VEvent(type: 'audio', audio: audioBytes));
+      // Binary frame = raw PCM16 audio from proxy — buffer it
+      _bufferAudioChunk(Uint8List.fromList(message));
       return;
     }
 
@@ -315,22 +297,73 @@ class V2VClient {
     }
   }
 
+  /// Write accumulated PCM to WAV file and play it with just_audio.
   void _finishPlayback() async {
-    if (_isPlaying && _player != null) {
-      try {
-        // Wait for buffered audio to drain before stopping
-        await Future.delayed(const Duration(milliseconds: 500));
-        if (!_isPlaying) return; // interrupted while waiting
-        // ignore: deprecated_member_use
-        _player!.foodSink?.add(FoodEvent(() {}));
-        await _player!.stopPlayer();
-      } catch (_) {}
-      _isPlaying = false;
+    final pcmData = _audioAccumulator.takeBytes();
+    if (pcmData.isEmpty || _audioPlayer == null) {
+      _micMuted = false;
+      return;
     }
-    _preBufferFilled = false;
-    _audioBuffer.clear();
-    _bufferedBytes = 0;
-    // Unmute mic now that playback is done
-    _micMuted = false;
+
+    try {
+      // Wrap PCM16 in WAV header
+      final wavBytes = _pcmToWav(pcmData, sampleRate: 24000);
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final path = '$_cachedTempDir/ella_v2v_$ts.wav';
+      await File(path).writeAsBytes(wavBytes, flush: true);
+
+      Logger.debug('[V2V] Playing ${pcmData.length} bytes PCM as WAV: $path');
+      _isPlaying = true;
+      await _audioPlayer!.setFilePath(path);
+      await _audioPlayer!.play();
+      // _playerSub listener handles completion → unmutes mic
+    } catch (e) {
+      Logger.error('[V2V] Playback error: $e');
+      _isPlaying = false;
+      _micMuted = false;
+    }
+  }
+
+  /// Wrap raw PCM16 mono data in a WAV container.
+  static Uint8List _pcmToWav(Uint8List pcmData, {int sampleRate = 24000, int channels = 1, int bitsPerSample = 16}) {
+    final dataSize = pcmData.length;
+    final fileSize = 36 + dataSize;
+    final byteRate = sampleRate * channels * (bitsPerSample ~/ 8);
+    final blockAlign = channels * (bitsPerSample ~/ 8);
+
+    final header = ByteData(44);
+    // RIFF header
+    header.setUint8(0, 0x52); // R
+    header.setUint8(1, 0x49); // I
+    header.setUint8(2, 0x46); // F
+    header.setUint8(3, 0x46); // F
+    header.setUint32(4, fileSize, Endian.little);
+    header.setUint8(8, 0x57); // W
+    header.setUint8(9, 0x41); // A
+    header.setUint8(10, 0x56); // V
+    header.setUint8(11, 0x45); // E
+    // fmt chunk
+    header.setUint8(12, 0x66); // f
+    header.setUint8(13, 0x6D); // m
+    header.setUint8(14, 0x74); // t
+    header.setUint8(15, 0x20); // (space)
+    header.setUint32(16, 16, Endian.little);
+    header.setUint16(20, 1, Endian.little); // PCM
+    header.setUint16(22, channels, Endian.little);
+    header.setUint32(24, sampleRate, Endian.little);
+    header.setUint32(28, byteRate, Endian.little);
+    header.setUint16(32, blockAlign, Endian.little);
+    header.setUint16(34, bitsPerSample, Endian.little);
+    // data chunk
+    header.setUint8(36, 0x64); // d
+    header.setUint8(37, 0x61); // a
+    header.setUint8(38, 0x74); // t
+    header.setUint8(39, 0x61); // a
+    header.setUint32(40, dataSize, Endian.little);
+
+    final wav = Uint8List(44 + dataSize);
+    wav.setRange(0, 44, header.buffer.asUint8List());
+    wav.setRange(44, 44 + dataSize, pcmData);
+    return wav;
   }
 }
