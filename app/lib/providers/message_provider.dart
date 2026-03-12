@@ -500,6 +500,8 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
     messages.add(message);
+    // Persist immediately so the user message survives tab switches before streaming completes
+    SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
   }
 
@@ -660,8 +662,11 @@ class MessageProvider extends ChangeNotifier {
         flushBuffer();
 
         if (chunk.type == MessageChunkType.done) {
-          message = chunk.message!;
-          messages[aiIndex] = message;
+          // Guard: OpenAI-style done chunks may have null message
+          if (chunk.message != null) {
+            message = chunk.message!;
+            messages[aiIndex] = message;
+          }
           notifyListeners();
           continue;
         }

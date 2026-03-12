@@ -71,6 +71,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   V2VClient? _v2vClient;
   bool _isV2VMode = false;
 
+  /// Track whether we've injected chat messages for the current V2V turn
+  bool _v2vTurnInjected = false;
+
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
     r'[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|'
@@ -505,6 +508,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     switch (event.type) {
       case 'user_transcript':
+        _v2vTurnInjected = false; // new turn started
+        _lastEllaText = ''; // reset accumulator for next response
         setState(() {
           _lastUserText = event.text ?? '';
           _ellaDisplayText = '';
@@ -512,20 +517,29 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _scrollToBottom();
         break;
       case 'transcript':
-        final text = event.text ?? '';
-        _lastEllaText = text;
+        // Proxy sends streaming deltas — accumulate them
+        final delta = event.text ?? '';
+        _lastEllaText += delta;
         setState(() {
-          _ellaDisplayText = text;
+          _ellaDisplayText = _lastEllaText;
           _orbState = VoiceOrbState.speaking;
           _statusText = 'Ella is speaking...';
         });
         _scrollToBottom();
-        // Inject into chat history
-        if (_lastUserText.isNotEmpty && text.isNotEmpty) {
-          _injectVoiceMessages(_lastUserText, text);
-        }
         break;
       case 'audio_done':
+        // Inject into chat history once per turn (using final transcript)
+        if (!_v2vTurnInjected && _lastUserText.isNotEmpty && _lastEllaText.isNotEmpty) {
+          _injectVoiceMessages(_lastUserText, _lastEllaText);
+          _v2vTurnInjected = true;
+        }
+        // Audio is now being played via just_audio — wait for playback_complete
+        setState(() {
+          _statusText = 'Playing audio...';
+        });
+        break;
+      case 'playback_complete':
+        // WAV file finished playing — transition back to listening
         if (_isV2VMode) {
           setState(() {
             _orbState = VoiceOrbState.listening;
@@ -534,15 +548,26 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         break;
       case 'speech_started':
-        // User started talking — interrupt playback
+        // User started talking — interrupt playback, reset turn tracking
+        _v2vTurnInjected = false;
+        _lastEllaText = '';
         setState(() {
           _orbState = VoiceOrbState.listening;
           _statusText = 'Listening...';
           _ellaDisplayText = '';
         });
         break;
+      case 'v2v_debug':
+        // Debug info from V2V client — show on screen temporarily
+        setState(() {
+          _statusText = event.text ?? '';
+        });
+        break;
       case 'error':
         debugPrint('[VoiceChat] V2V error: ${event.text}');
+        setState(() {
+          _statusText = 'Error: ${event.text ?? "unknown"}';
+        });
         break;
       case 'session_end':
         debugPrint('[VoiceChat] V2V session ended: ${event.text}');
