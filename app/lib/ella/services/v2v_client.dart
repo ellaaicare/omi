@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
@@ -70,7 +71,10 @@ class V2VClient {
       return false;
     }
 
-    // 2. Connect WebSocket
+    // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
+    await _configureAudioSession();
+
+    // 3. Connect WebSocket
     final wsUrl = '$endpoint&token=$token';
     Logger.debug('[V2V] Connecting to WebSocket...');
 
@@ -147,6 +151,24 @@ class V2VClient {
     _chunkCount = 0;
   }
 
+  // --- Audio session ---
+
+  Future<void> _configureAudioSession() async {
+    final session = await AudioSession.instance;
+    await session.configure(AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
+          AVAudioSessionCategoryOptions.allowBluetooth |
+          AVAudioSessionCategoryOptions.allowBluetoothA2dp |
+          AVAudioSessionCategoryOptions.allowAirPlay,
+      avAudioSessionMode: AVAudioSessionMode.voiceChat,
+      avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+      avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+    ));
+    await session.setActive(true);
+    Logger.debug('[V2V] Audio session: playAndRecord + defaultToSpeaker + BT + AirPlay');
+  }
+
   // --- Session management ---
 
   Future<Map<String, dynamic>?> _createSession(String uid, String provider) async {
@@ -176,24 +198,38 @@ class V2VClient {
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
 
   Future<void> _startMicStream() async {
-    _recorder = AudioRecorder();
+    try {
+      _recorder = AudioRecorder();
 
-    final stream = await _recorder!.startStream(const RecordConfig(
-      encoder: AudioEncoder.pcm16bits,
-      sampleRate: 24000,
-      numChannels: 1,
-      autoGain: true,
-      echoCancel: true,
-      noiseSuppress: true,
-    ));
-
-    _micSub = stream.listen((data) {
-      if (_isConnected && _channel != null && !_micMuted) {
-        _channel!.sink.add(data);
+      final hasPermission = await _recorder!.hasPermission();
+      if (!hasPermission) {
+        Logger.error('[V2V] Mic permission denied');
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic permission denied'));
+        return;
       }
-    });
 
-    Logger.debug('[V2V] Mic recording started at 24kHz (record package)');
+      final stream = await _recorder!.startStream(const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 24000,
+        numChannels: 1,
+        autoGain: true,
+        echoCancel: true,
+        noiseSuppress: true,
+      ));
+
+      _micSub = stream.listen((data) {
+        if (_isConnected && _channel != null && !_micMuted) {
+          _channel!.sink.add(data);
+        }
+      });
+
+      _micMuted = false;
+      Logger.debug('[V2V] Mic recording started at 24kHz');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic active'));
+    } catch (e) {
+      Logger.error('[V2V] Mic start failed: $e');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic error: $e'));
+    }
   }
 
   Future<void> _stopMicStream() async {
@@ -260,7 +296,16 @@ class V2VClient {
       await _audioPlayer.setFilePath(wavPath);
       await _audioPlayer.play();
       Logger.debug('[V2V] Playback started');
-      // playerStateStream listener handles completion
+
+      // Safety timeout — if playerStateStream doesn't fire completion within
+      // expected duration + 3s buffer, force restart mic anyway
+      final timeoutMs = durationMs.toInt() + 3000;
+      Future.delayed(Duration(milliseconds: timeoutMs), () {
+        if (_isPlaying) {
+          Logger.debug('[V2V] Playback safety timeout after ${timeoutMs}ms, forcing mic restart');
+          _onPlaybackComplete();
+        }
+      });
     } catch (e) {
       Logger.error('[V2V] Playback error: $e');
       onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Play error: $e'));
@@ -274,6 +319,7 @@ class V2VClient {
 
   /// Called when just_audio finishes playing.
   Future<void> _onPlaybackComplete() async {
+    if (!_isPlaying && !_micMuted) return; // Already handled
     Logger.debug('[V2V] Playback complete, restarting mic');
     _isPlaying = false;
     _micMuted = false;
