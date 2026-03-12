@@ -4,6 +4,7 @@ Ella Voice Router - Voice session management for Ella Voice Service.
 Endpoints:
 - POST /v1/voice/session - Issue session token for V2V connection
 - POST /v1/voice/tts - Text-to-speech synthesis (TTS providers only)
+- POST /v1/voice/context - Assemble user context for voice proxy at call start
 - GET /v1/voice/providers - List available voice providers
 - GET /v1/voice/config - Get voice configuration
 - GET /v1/voice/health - Health check
@@ -21,9 +22,10 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+import asyncpg
 import httpx
 import websockets
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -50,6 +52,41 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+
+# Database connection pool (lazy-initialized, shared pattern with other Ella routers)
+_pool: Optional[asyncpg.Pool] = None
+
+
+async def _get_pool() -> asyncpg.Pool:
+    """Get or create the asyncpg connection pool."""
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            database="ella_ai",
+            min_size=2,
+            max_size=10,
+        )
+    return _pool
+
+
+# Voice interaction rules — injected into voice proxy system prompt
+VOICE_INTERACTION_RULES = """
+Voice Interaction Rules:
+- One or two short sentences only. Never three or more.
+- Sound like a warm friend chatting, not an AI giving a report.
+- Never fabricate information. Say "I'm not sure" if you don't know.
+- If a tool returns data, summarize it casually in one sentence.
+- When using ask_ella tool, say a brief filler first like "Let me check" before calling.
+- Keep things natural and brief.
+"""
 
 # V2V provider registry — maps provider ID to endpoint and metadata
 V2V_PROVIDERS = {
@@ -544,4 +581,151 @@ async def voice_health():
         "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
         "tts_local_url": ELLA_TTS_URL,
         "v2v_providers": v2v_status,
+    }
+
+
+# ============================================================================
+# Voice Context Assembly
+# ============================================================================
+
+
+def _extract_caregiver_section(user_profile: str) -> str:
+    """Extract caregiver-relevant notes from USER.md content."""
+    if not user_profile:
+        return ""
+    # Look for caregiver section header
+    sections = user_profile.split("##")
+    for section in sections:
+        if any(kw in section.lower() for kw in ["caregiver", "care team", "family"]):
+            return section.strip()[:500]
+    return ""
+
+
+@router.post("/context")
+async def get_voice_context(request: Request):
+    """
+    Assemble voice context for a user from postgres + provision API workspace files.
+    Called by the voice proxy at session start to build the system prompt.
+
+    Request body:
+        uid (str, required): OMI user ID (Firebase UID / omi_uid)
+        context_budget (int, optional): Max chars for context sections (default: 8000)
+
+    Returns structured context: user info, soul, user profile, conditions,
+    medications, recent voice summaries, dynamic rules, and voice rules.
+    """
+    body = await request.json()
+    uid = body.get("uid")
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid is required")
+
+    budget = body.get("context_budget", 8000)
+    _start = time.time()
+
+    # 1. DB lookup — user + agent cluster
+    pool = await _get_pool()
+    try:
+        row = await pool.fetchrow(
+            """
+            SELECT u.id, u.name, u.conditions, u.medications, u.guardian_mode,
+                   ac.agents
+            FROM users u
+            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+            WHERE u.omi_uid = $1
+            """,
+            uid,
+        )
+    except Exception as e:
+        logger.error(f"[FLOW:VOICE-CONTEXT] DB error for uid={uid}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"User not found for uid: {uid}")
+
+    # Parse agents JSONB (asyncpg may return as str or dict)
+    agents_raw = row["agents"]
+    if isinstance(agents_raw, str):
+        agents = json.loads(agents_raw)
+    elif isinstance(agents_raw, dict):
+        agents = agents_raw
+    else:
+        agents = {}
+
+    agent_id = agents.get("userAgentId", "")
+    gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
+    gateway_token = agents.get("gatewayToken", OPENCLAW_GATEWAY_TOKEN)
+
+    # 2. Read workspace files from provision API
+    files = {}
+    if agent_id and PROVISION_API_TOKEN:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{PROVISION_API_URL}/workspace/{agent_id}/files",
+                    headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                )
+                if resp.status_code == 200:
+                    file_list = resp.json().get("files", [])
+                    files = {
+                        f.get("name", f.get("filename", "")): f.get("content", "")
+                        for f in file_list
+                    }
+                    logger.info(
+                        f"[FLOW:VOICE-CONTEXT] Loaded {len(files)} workspace files "
+                        f"for agent={agent_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"[FLOW:VOICE-CONTEXT] Provision API returned "
+                        f"{resp.status_code} for agent={agent_id}"
+                    )
+        except Exception as e:
+            logger.warning(f"[FLOW:VOICE-CONTEXT] Provision API error: {e}")
+
+    # 3. Read dynamic scanner rules
+    dynamic_rules = []
+    try:
+        rules = await pool.fetch(
+            """
+            SELECT rule_text FROM guardian_dynamic_rules
+            WHERE uid = $1 AND is_active = true
+              AND (expires_at IS NULL OR expires_at > NOW())
+            """,
+            uid,
+        )
+        dynamic_rules = [r["rule_text"] for r in rules]
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Dynamic rules error: {e}")
+
+    # 4. Assemble context (trim to budget)
+    soul = files.get("SOUL.md", "")[:3000]
+    user_profile = files.get("USER.md", "")[:2000]
+    voice_summaries = files.get("voice-summaries.md", "")[:1500]
+    memory = files.get("MEMORY.md", "")[:500]
+
+    # conditions and medications are text[] arrays in postgres
+    conditions_list = list(row["conditions"] or [])
+    medications_list = list(row["medications"] or [])
+
+    _elapsed = int((time.time() - _start) * 1000)
+    print(
+        f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
+        f"files={len(files)} rules={len(dynamic_rules)} latency={_elapsed}ms",
+        flush=True,
+    )
+
+    return {
+        "user_name": row["name"],
+        "user_agent_id": agent_id,
+        "gateway_url": gateway_url,
+        "gateway_token": gateway_token,
+        "soul": soul,
+        "user_profile": user_profile,
+        "memory": memory,
+        "conditions": conditions_list,
+        "medications": medications_list,
+        "recent_voice_summaries": voice_summaries,
+        "caregiver_notes": _extract_caregiver_section(user_profile),
+        "dynamic_rules": dynamic_rules,
+        "voice_rules": VOICE_INTERACTION_RULES,
     }
