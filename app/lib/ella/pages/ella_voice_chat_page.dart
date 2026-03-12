@@ -531,6 +531,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _injectVoiceMessages(_lastUserText, _lastEllaText);
           _v2vTurnInjected = true;
         }
+        // Audio is now being played via just_audio — wait for playback_complete
+        break;
+      case 'playback_complete':
+        // WAV file finished playing — transition back to listening
         if (_isV2VMode) {
           setState(() {
             _orbState = VoiceOrbState.listening;
