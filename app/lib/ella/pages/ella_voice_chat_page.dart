@@ -71,6 +71,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   V2VClient? _v2vClient;
   bool _isV2VMode = false;
 
+  /// Track whether we've injected chat messages for the current V2V turn
+  bool _v2vTurnInjected = false;
+
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
     r'[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|'
@@ -505,6 +508,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     switch (event.type) {
       case 'user_transcript':
+        _v2vTurnInjected = false; // new turn started
         setState(() {
           _lastUserText = event.text ?? '';
           _ellaDisplayText = '';
@@ -520,12 +524,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _statusText = 'Ella is speaking...';
         });
         _scrollToBottom();
-        // Inject into chat history
-        if (_lastUserText.isNotEmpty && text.isNotEmpty) {
-          _injectVoiceMessages(_lastUserText, text);
-        }
         break;
       case 'audio_done':
+        // Inject into chat history once per turn (using final transcript)
+        if (!_v2vTurnInjected && _lastUserText.isNotEmpty && _lastEllaText.isNotEmpty) {
+          _injectVoiceMessages(_lastUserText, _lastEllaText);
+          _v2vTurnInjected = true;
+        }
         if (_isV2VMode) {
           setState(() {
             _orbState = VoiceOrbState.listening;
@@ -534,7 +539,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         break;
       case 'speech_started':
-        // User started talking — interrupt playback
+        // User started talking — interrupt playback, reset turn tracking
+        _v2vTurnInjected = false;
         setState(() {
           _orbState = VoiceOrbState.listening;
           _statusText = 'Listening...';
