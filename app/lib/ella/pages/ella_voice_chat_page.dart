@@ -509,6 +509,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     switch (event.type) {
       case 'user_transcript':
         _v2vTurnInjected = false; // new turn started
+        _lastEllaText = ''; // reset accumulator for next response
         setState(() {
           _lastUserText = event.text ?? '';
           _ellaDisplayText = '';
@@ -516,10 +517,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _scrollToBottom();
         break;
       case 'transcript':
-        final text = event.text ?? '';
-        _lastEllaText = text;
+        // Proxy sends streaming deltas — accumulate them
+        final delta = event.text ?? '';
+        _lastEllaText += delta;
         setState(() {
-          _ellaDisplayText = text;
+          _ellaDisplayText = _lastEllaText;
           _orbState = VoiceOrbState.speaking;
           _statusText = 'Ella is speaking...';
         });
@@ -548,6 +550,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       case 'speech_started':
         // User started talking — interrupt playback, reset turn tracking
         _v2vTurnInjected = false;
+        _lastEllaText = '';
         setState(() {
           _orbState = VoiceOrbState.listening;
           _statusText = 'Listening...';
