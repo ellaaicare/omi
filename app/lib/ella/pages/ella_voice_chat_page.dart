@@ -532,6 +532,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _v2vTurnInjected = true;
         }
         // Audio is now being played via just_audio — wait for playback_complete
+        setState(() {
+          _statusText = 'Playing audio...';
+        });
         break;
       case 'playback_complete':
         // WAV file finished playing — transition back to listening
@@ -551,8 +554,17 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _ellaDisplayText = '';
         });
         break;
+      case 'v2v_debug':
+        // Debug info from V2V client — show on screen temporarily
+        setState(() {
+          _statusText = event.text ?? '';
+        });
+        break;
       case 'error':
         debugPrint('[VoiceChat] V2V error: ${event.text}');
+        setState(() {
+          _statusText = 'Error: ${event.text ?? "unknown"}';
+        });
         break;
       case 'session_end':
         debugPrint('[VoiceChat] V2V session ended: ${event.text}');

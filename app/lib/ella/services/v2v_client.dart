@@ -239,6 +239,7 @@ class V2VClient {
     if (_audioAccumulator.isEmpty) {
       // First chunk of a new response — mute mic
       _micMuted = true;
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Receiving audio...'));
     }
     _audioAccumulator.add(pcmData);
   }
@@ -306,6 +307,8 @@ class V2VClient {
     Logger.debug('[V2V] _finishPlayback: ${pcmData.length}b PCM, player=${_audioPlayer != null}, dir=$_cachedTempDir');
     if (pcmData.isEmpty || _audioPlayer == null) {
       Logger.debug('[V2V] _finishPlayback: skipping — empty=${pcmData.isEmpty}, player=${_audioPlayer == null}');
+      onEvent
+          ?.call(V2VEvent(type: 'v2v_debug', text: 'No audio: buf=${pcmData.length}b player=${_audioPlayer != null}'));
       _micMuted = false;
       return;
     }
@@ -318,15 +321,16 @@ class V2VClient {
       await File(path).writeAsBytes(wavBytes, flush: true);
       final fileSize = await File(path).length();
 
-      Logger.debug('[V2V] WAV written: $fileSize bytes → $path');
       _isPlaying = true;
       await _audioPlayer!.setFilePath(path);
-      Logger.debug('[V2V] Audio duration: ${_audioPlayer!.duration}');
+      final dur = _audioPlayer!.duration;
+      Logger.debug('[V2V] WAV: ${fileSize}b, duration: $dur → $path');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing ${fileSize ~/ 1024}KB, ${dur?.inMilliseconds ?? 0}ms'));
       await _audioPlayer!.play();
-      Logger.debug('[V2V] play() called');
       // _playerSub listener handles completion → unmutes mic
     } catch (e, st) {
       Logger.error('[V2V] Playback error: $e\n$st');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Play error: $e'));
       _isPlaying = false;
       _micMuted = false;
     }
