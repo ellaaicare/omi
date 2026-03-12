@@ -33,6 +33,7 @@ class V2VClient {
   StreamSubscription? _wsSub;
   bool _isConnected = false;
   bool _isPlaying = false;
+  bool _micMuted = false;
 
   /// SoLoud engine + stream source for real-time PCM playback.
   AudioSource? _streamSource;
@@ -140,6 +141,9 @@ class V2VClient {
       _isPlaying = false;
       _playHandle = null;
     }
+    _micMuted = false;
+    _chunkCount = 0;
+    _totalBytes = 0;
     // Reset the stream buffer for the next response
     if (_streamSource != null) {
       try {
@@ -206,7 +210,7 @@ class V2VClient {
     ));
 
     _micSub = stream.listen((data) {
-      if (_isConnected && _channel != null) {
+      if (_isConnected && _channel != null && !_micMuted) {
         _channel!.sink.add(data);
       }
     });
@@ -272,12 +276,13 @@ class V2VClient {
     _totalBytes += pcmData.length;
 
     try {
-      // Start playback on first chunk
+      // Start playback on first chunk — mute mic to prevent echo→VAD→interruption
       if (!_isPlaying) {
         _isPlaying = true;
+        _micMuted = true;
         _playHandle = await SoLoud.instance.play(_streamSource!);
-        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Audio stream started'));
-        Logger.debug('[V2V] Started SoLoud stream playback, handle=$_playHandle');
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Audio stream started (mic muted)'));
+        Logger.debug('[V2V] Started SoLoud stream playback, mic muted, handle=$_playHandle');
       }
 
       // Feed PCM16 data directly — SoLoud handles buffering internally
@@ -312,6 +317,7 @@ class V2VClient {
     final waitMs = (_totalBytes > 0) ? 2000 : 500;
     Future.delayed(Duration(milliseconds: waitMs), () {
       _isPlaying = false;
+      _micMuted = false;
       _playHandle = null;
       _chunkCount = 0;
       _totalBytes = 0;
@@ -320,6 +326,7 @@ class V2VClient {
           SoLoud.instance.resetBufferStream(_streamSource!);
         } catch (_) {}
       }
+      Logger.debug('[V2V] Playback complete, mic unmuted');
       onEvent?.call(V2VEvent(type: 'playback_complete'));
     });
   }
