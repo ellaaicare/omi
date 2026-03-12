@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter_sound/flutter_sound.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:audio_session/audio_session.dart';
+import 'package:flutter_soloud/flutter_soloud.dart';
+import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -18,29 +17,26 @@ import 'package:omi/utils/logger.dart';
 class V2VEvent {
   final String type;
   final String? text;
-  final Uint8List? audio;
 
-  V2VEvent({required this.type, this.text, this.audio});
+  V2VEvent({required this.type, this.text});
 }
 
-/// Voice-to-voice WebSocket client for bidirectional PCM16 audio streaming.
+/// Voice-to-voice WebSocket client for full-duplex PCM16 audio streaming.
 ///
-/// Connects to the Grok Voice / Gemini Live proxy via WebSocket,
-/// streams mic audio as raw PCM16 24kHz mono, and receives audio + JSON events.
+/// Uses `record` package for mic input and `flutter_soloud` for real-time
+/// PCM16 playback — both can run simultaneously on iOS with the
+/// `playAndRecord` audio session category.
 class V2VClient {
   WebSocketChannel? _channel;
-  FlutterSoundRecorder? _recorder;
-  AudioPlayer? _audioPlayer;
-  StreamController<Uint8List>? _micController;
+  AudioRecorder? _recorder;
+  StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
-  StreamSubscription? _playerSub;
   bool _isConnected = false;
   bool _isPlaying = false;
-  bool _micMuted = false;
-  String? _cachedTempDir;
 
-  /// Accumulate all PCM audio chunks for the current response, then play as WAV.
-  final BytesBuilder _audioAccumulator = BytesBuilder(copy: false);
+  /// SoLoud engine + stream source for real-time PCM playback.
+  AudioSource? _streamSource;
+  SoundHandle? _playHandle;
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
@@ -48,10 +44,7 @@ class V2VClient {
   /// Callback for connection state changes.
   final void Function(bool connected)? onConnectionChanged;
 
-  /// Callback for audio level from mic (0.0 - 1.0).
-  final void Function(double level)? onAudioLevel;
-
-  V2VClient({this.onEvent, this.onConnectionChanged, this.onAudioLevel});
+  V2VClient({this.onEvent, this.onConnectionChanged});
 
   bool get isConnected => _isConnected;
 
@@ -70,13 +63,19 @@ class V2VClient {
     final token = sessionData['session_token'] as String? ?? '';
     final endpoint = sessionData['voice_endpoint'] as String? ?? '';
     if (token.isEmpty || endpoint.isEmpty) {
-      Logger.debug('[V2V] Invalid session data: token=${token.isNotEmpty}, endpoint=${endpoint.isNotEmpty}');
+      Logger.debug('[V2V] Invalid session data');
       return false;
     }
 
-    // 2. Connect WebSocket
+    // 2. Configure iOS audio session for full-duplex
+    await _configureAudioSession();
+
+    // 3. Initialize SoLoud for playback
+    await _initSoLoud();
+
+    // 4. Connect WebSocket
     final wsUrl = '$endpoint&token=$token';
-    Logger.debug('[V2V] Connecting to WebSocket: ${endpoint.split('?').first}...');
+    Logger.debug('[V2V] Connecting to WebSocket...');
 
     try {
       _channel = IOWebSocketChannel.connect(
@@ -87,7 +86,7 @@ class V2VClient {
       _isConnected = true;
       onConnectionChanged?.call(true);
 
-      // 3. Listen for messages from proxy
+      // 5. Listen for messages from proxy
       _wsSub = _channel!.stream.listen(
         _handleMessage,
         onError: (error) {
@@ -101,11 +100,8 @@ class V2VClient {
         },
       );
 
-      // 4. Start recording mic audio and streaming to WebSocket
+      // 6. Start recording mic audio and streaming to WebSocket
       await _startMicStream();
-
-      // 5. Open player for received audio
-      await _initPlayer();
 
       return true;
     } catch (e) {
@@ -128,19 +124,38 @@ class V2VClient {
     _channel = null;
 
     await _stopMicStream();
-    await _stopPlayer();
+    await _stopSoLoud();
   }
 
   /// Interrupt current playback (e.g., user started speaking).
   Future<void> interruptPlayback() async {
-    _audioAccumulator.clear();
-    if (_isPlaying && _audioPlayer != null) {
+    if (_isPlaying && _playHandle != null) {
       try {
-        await _audioPlayer!.stop();
+        SoLoud.instance.stop(_playHandle!);
       } catch (_) {}
       _isPlaying = false;
+      _playHandle = null;
     }
-    _micMuted = false;
+    // Reset the stream buffer for the next response
+    if (_streamSource != null) {
+      try {
+        SoLoud.instance.resetBufferStream(_streamSource!);
+      } catch (_) {}
+    }
+  }
+
+  // --- Audio session ---
+
+  Future<void> _configureAudioSession() async {
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+      avAudioSessionMode: AVAudioSessionMode.voiceChat,
+      avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+      avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+    ));
+    await session.setActive(true);
+    Logger.debug('[V2V] Audio session configured: playAndRecord + voiceChat');
   }
 
   // --- Session management ---
@@ -169,89 +184,131 @@ class V2VClient {
     }
   }
 
-  // --- Mic recording (PCM16, 24kHz, mono) ---
+  // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
 
   Future<void> _startMicStream() async {
-    _recorder = FlutterSoundRecorder();
-    await _recorder!.openRecorder();
+    _recorder = AudioRecorder();
 
-    _micController = StreamController<Uint8List>();
-    _micController!.stream.listen((buffer) {
-      if (_isConnected && _channel != null && !_micMuted) {
-        // Send raw PCM16 bytes directly to WebSocket
-        _channel!.sink.add(buffer);
+    final stream = await _recorder!.startStream(const RecordConfig(
+      encoder: AudioEncoder.pcm16bits,
+      sampleRate: 24000,
+      numChannels: 1,
+      autoGain: true,
+      echoCancel: true,
+      noiseSuppress: true,
+    ));
+
+    _micSub = stream.listen((data) {
+      if (_isConnected && _channel != null) {
+        _channel!.sink.add(data);
       }
     });
 
-    await _recorder!.startRecorder(
-      toStream: _micController!.sink,
-      codec: Codec.pcm16,
-      numChannels: 1,
-      sampleRate: 24000,
-      bufferSize: 4800, // 100ms at 24kHz mono 16-bit = 4800 bytes
-    );
-
-    Logger.debug('[V2V] Mic recording started at 24kHz');
+    Logger.debug('[V2V] Mic recording started at 24kHz (record package)');
   }
 
   Future<void> _stopMicStream() async {
+    _micSub?.cancel();
+    _micSub = null;
     try {
-      await _recorder?.stopRecorder();
-      await _recorder?.closeRecorder();
+      await _recorder?.stop();
+      await _recorder?.dispose();
     } catch (_) {}
     _recorder = null;
-
-    try {
-      await _micController?.close();
-    } catch (_) {}
-    _micController = null;
   }
 
-  // --- Audio playback ---
+  // --- Audio playback using flutter_soloud ---
 
-  Future<void> _initPlayer() async {
-    _audioPlayer = AudioPlayer();
-    _playerSub = _audioPlayer!.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed && _isPlaying) {
-        _isPlaying = false;
-        _micMuted = false;
-        onEvent?.call(V2VEvent(type: 'playback_complete'));
+  Future<void> _initSoLoud() async {
+    try {
+      if (!SoLoud.instance.isInitialized) {
+        await SoLoud.instance.init();
       }
-    });
-    _cachedTempDir ??= (await getTemporaryDirectory()).path;
-    Logger.debug('[V2V] Audio player initialized');
-  }
 
-  Future<void> _stopPlayer() async {
-    _playerSub?.cancel();
-    _playerSub = null;
-    try {
-      await _audioPlayer?.stop();
-      await _audioPlayer?.dispose();
-    } catch (_) {}
-    _audioPlayer = null;
-    _isPlaying = false;
-  }
+      // Create a buffer stream source for real-time PCM16 feeding
+      _streamSource = SoLoud.instance.setBufferStream(
+        sampleRate: 24000,
+        channels: Channels.mono,
+        format: BufferType.s16le,
+        bufferingTimeNeeds: 0.2, // 200ms buffer before playback starts
+        bufferingType: BufferingType.released,
+      );
 
-  /// Accumulate PCM chunk — actual playback happens in _finishPlayback on audio_done.
-  void _bufferAudioChunk(Uint8List pcmData) {
-    if (pcmData.isEmpty) return;
-    if (_audioAccumulator.isEmpty) {
-      // First chunk of a new response — mute mic
-      _micMuted = true;
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Receiving audio...'));
+      Logger.debug('[V2V] SoLoud initialized with PCM16 24kHz mono stream');
+    } catch (e) {
+      Logger.error('[V2V] SoLoud init error: $e');
     }
-    _audioAccumulator.add(pcmData);
+  }
+
+  Future<void> _stopSoLoud() async {
+    if (_playHandle != null) {
+      try {
+        SoLoud.instance.stop(_playHandle!);
+      } catch (_) {}
+      _playHandle = null;
+    }
+    if (_streamSource != null) {
+      try {
+        SoLoud.instance.disposeSource(_streamSource!);
+      } catch (_) {}
+      _streamSource = null;
+    }
+    _isPlaying = false;
+    // Don't deinit SoLoud globally — other parts of the app may use it
+  }
+
+  /// Feed PCM16 audio chunk directly to SoLoud for real-time playback.
+  void _playAudioChunk(Uint8List pcmData) async {
+    if (_streamSource == null || pcmData.isEmpty) return;
+
+    try {
+      // Start playback on first chunk
+      if (!_isPlaying) {
+        _isPlaying = true;
+        _playHandle = await SoLoud.instance.play(_streamSource!);
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Streaming audio...'));
+        Logger.debug('[V2V] Started SoLoud stream playback');
+      }
+
+      // Feed PCM16 data directly — SoLoud handles buffering internally
+      SoLoud.instance.addAudioDataStream(_streamSource!, pcmData);
+    } catch (e) {
+      Logger.debug('[V2V] SoLoud feed error: $e');
+    }
+  }
+
+  /// Called on audio_done — mark the stream as ended so SoLoud plays remaining buffer.
+  void _finishPlayback() {
+    if (_streamSource != null) {
+      try {
+        SoLoud.instance.setDataIsEnded(_streamSource!);
+        Logger.debug('[V2V] Stream data ended, playing remaining buffer');
+        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Audio complete'));
+      } catch (e) {
+        Logger.debug('[V2V] setDataIsEnded error: $e');
+      }
+    }
+
+    // Wait briefly then reset for next response
+    Future.delayed(const Duration(seconds: 1), () {
+      _isPlaying = false;
+      _playHandle = null;
+      if (_streamSource != null) {
+        try {
+          // Reset stream buffer for next turn
+          SoLoud.instance.resetBufferStream(_streamSource!);
+        } catch (_) {}
+      }
+      onEvent?.call(V2VEvent(type: 'playback_complete'));
+    });
   }
 
   // --- WebSocket message handling ---
 
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
-      // Binary frame = raw PCM16 audio from proxy — buffer it
-      final bytes = Uint8List.fromList(message);
-      _bufferAudioChunk(bytes);
-      Logger.debug('[V2V] Buffered ${bytes.length}b audio, total: ${_audioAccumulator.length}b');
+      // Binary frame = raw PCM16 audio from proxy — play immediately
+      _playAudioChunk(Uint8List.fromList(message));
       return;
     }
 
@@ -275,7 +332,6 @@ class V2VClient {
             onEvent?.call(V2VEvent(type: 'audio_done'));
             break;
           case 'speech_started':
-            // User started speaking — interrupt playback
             interruptPlayback();
             onEvent?.call(V2VEvent(type: 'speech_started'));
             break;
@@ -299,83 +355,5 @@ class V2VClient {
         Logger.debug('[V2V] Failed to parse JSON event: $e');
       }
     }
-  }
-
-  /// Write accumulated PCM to WAV file and play it with just_audio.
-  void _finishPlayback() async {
-    final pcmData = _audioAccumulator.takeBytes();
-    Logger.debug('[V2V] _finishPlayback: ${pcmData.length}b PCM, player=${_audioPlayer != null}, dir=$_cachedTempDir');
-    if (pcmData.isEmpty || _audioPlayer == null) {
-      Logger.debug('[V2V] _finishPlayback: skipping — empty=${pcmData.isEmpty}, player=${_audioPlayer == null}');
-      onEvent
-          ?.call(V2VEvent(type: 'v2v_debug', text: 'No audio: buf=${pcmData.length}b player=${_audioPlayer != null}'));
-      _micMuted = false;
-      return;
-    }
-
-    try {
-      // Wrap PCM16 in WAV header
-      final wavBytes = _pcmToWav(pcmData, sampleRate: 24000);
-      final ts = DateTime.now().millisecondsSinceEpoch;
-      final path = '$_cachedTempDir/ella_v2v_$ts.wav';
-      await File(path).writeAsBytes(wavBytes, flush: true);
-      final fileSize = await File(path).length();
-
-      _isPlaying = true;
-      await _audioPlayer!.setFilePath(path);
-      final dur = _audioPlayer!.duration;
-      Logger.debug('[V2V] WAV: ${fileSize}b, duration: $dur → $path');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing ${fileSize ~/ 1024}KB, ${dur?.inMilliseconds ?? 0}ms'));
-      await _audioPlayer!.play();
-      // _playerSub listener handles completion → unmutes mic
-    } catch (e, st) {
-      Logger.error('[V2V] Playback error: $e\n$st');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Play error: $e'));
-      _isPlaying = false;
-      _micMuted = false;
-    }
-  }
-
-  /// Wrap raw PCM16 mono data in a WAV container.
-  static Uint8List _pcmToWav(Uint8List pcmData, {int sampleRate = 24000, int channels = 1, int bitsPerSample = 16}) {
-    final dataSize = pcmData.length;
-    final fileSize = 36 + dataSize;
-    final byteRate = sampleRate * channels * (bitsPerSample ~/ 8);
-    final blockAlign = channels * (bitsPerSample ~/ 8);
-
-    final header = ByteData(44);
-    // RIFF header
-    header.setUint8(0, 0x52); // R
-    header.setUint8(1, 0x49); // I
-    header.setUint8(2, 0x46); // F
-    header.setUint8(3, 0x46); // F
-    header.setUint32(4, fileSize, Endian.little);
-    header.setUint8(8, 0x57); // W
-    header.setUint8(9, 0x41); // A
-    header.setUint8(10, 0x56); // V
-    header.setUint8(11, 0x45); // E
-    // fmt chunk
-    header.setUint8(12, 0x66); // f
-    header.setUint8(13, 0x6D); // m
-    header.setUint8(14, 0x74); // t
-    header.setUint8(15, 0x20); // (space)
-    header.setUint32(16, 16, Endian.little);
-    header.setUint16(20, 1, Endian.little); // PCM
-    header.setUint16(22, channels, Endian.little);
-    header.setUint32(24, sampleRate, Endian.little);
-    header.setUint32(28, byteRate, Endian.little);
-    header.setUint16(32, blockAlign, Endian.little);
-    header.setUint16(34, bitsPerSample, Endian.little);
-    // data chunk
-    header.setUint8(36, 0x64); // d
-    header.setUint8(37, 0x61); // a
-    header.setUint8(38, 0x74); // t
-    header.setUint8(39, 0x61); // a
-    header.setUint32(40, dataSize, Endian.little);
-
-    final wav = Uint8List(44 + dataSize);
-    wav.setRange(0, 44, header.buffer.asUint8List());
-    wav.setRange(44, 44 + dataSize, pcmData);
-    return wav;
   }
 }
