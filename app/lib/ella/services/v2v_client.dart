@@ -32,6 +32,7 @@ class V2VClient {
   StreamSubscription? _wsSub;
   bool _isConnected = false;
   bool _isPlaying = false;
+  bool _micMuted = false;
 
   /// Pre-buffer audio to avoid underruns from tiny PCM chunks.
   final List<Uint8List> _audioBuffer = [];
@@ -139,6 +140,7 @@ class V2VClient {
     _preBufferFilled = false;
     _audioBuffer.clear();
     _bufferedBytes = 0;
+    _micMuted = false;
   }
 
   // --- Session management ---
@@ -175,7 +177,7 @@ class V2VClient {
 
     _micController = StreamController<Uint8List>();
     _micController!.stream.listen((buffer) {
-      if (_isConnected && _channel != null) {
+      if (_isConnected && _channel != null && !_micMuted) {
         // Send raw PCM16 bytes directly to WebSocket
         _channel!.sink.add(buffer);
       }
@@ -235,6 +237,8 @@ class V2VClient {
           _preBufferFilled = true;
         }
         _isPlaying = true;
+        // Mute mic to prevent echo feedback while playing
+        _micMuted = true;
         await _player!.startPlayerFromStream(
           codec: Codec.pcm16,
           numChannels: 1,
@@ -326,5 +330,7 @@ class V2VClient {
     _preBufferFilled = false;
     _audioBuffer.clear();
     _bufferedBytes = 0;
+    // Unmute mic now that playback is done
+    _micMuted = false;
   }
 }
