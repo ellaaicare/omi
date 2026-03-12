@@ -248,12 +248,15 @@ class V2VClient {
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
       // Binary frame = raw PCM16 audio from proxy — buffer it
-      _bufferAudioChunk(Uint8List.fromList(message));
+      final bytes = Uint8List.fromList(message);
+      _bufferAudioChunk(bytes);
+      Logger.debug('[V2V] Buffered ${bytes.length}b audio, total: ${_audioAccumulator.length}b');
       return;
     }
 
     if (message is String) {
       // JSON event
+      Logger.debug('[V2V] JSON event: $message');
       try {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
@@ -300,7 +303,9 @@ class V2VClient {
   /// Write accumulated PCM to WAV file and play it with just_audio.
   void _finishPlayback() async {
     final pcmData = _audioAccumulator.takeBytes();
+    Logger.debug('[V2V] _finishPlayback: ${pcmData.length}b PCM, player=${_audioPlayer != null}, dir=$_cachedTempDir');
     if (pcmData.isEmpty || _audioPlayer == null) {
+      Logger.debug('[V2V] _finishPlayback: skipping — empty=${pcmData.isEmpty}, player=${_audioPlayer == null}');
       _micMuted = false;
       return;
     }
@@ -311,14 +316,17 @@ class V2VClient {
       final ts = DateTime.now().millisecondsSinceEpoch;
       final path = '$_cachedTempDir/ella_v2v_$ts.wav';
       await File(path).writeAsBytes(wavBytes, flush: true);
+      final fileSize = await File(path).length();
 
-      Logger.debug('[V2V] Playing ${pcmData.length} bytes PCM as WAV: $path');
+      Logger.debug('[V2V] WAV written: $fileSize bytes → $path');
       _isPlaying = true;
       await _audioPlayer!.setFilePath(path);
+      Logger.debug('[V2V] Audio duration: ${_audioPlayer!.duration}');
       await _audioPlayer!.play();
+      Logger.debug('[V2V] play() called');
       // _playerSub listener handles completion → unmutes mic
-    } catch (e) {
-      Logger.error('[V2V] Playback error: $e');
+    } catch (e, st) {
+      Logger.error('[V2V] Playback error: $e\n$st');
       _isPlaying = false;
       _micMuted = false;
     }
