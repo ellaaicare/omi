@@ -93,7 +93,7 @@ V2V_PROVIDERS = {
     "grok-voice": {
         "name": "Grok Voice (V2V)",
         "description": "Voice-to-voice via Grok Realtime API, sub-second latency",
-        "default_mode": "v3-rich",
+        "default_mode": "v4",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
@@ -372,11 +372,23 @@ async def create_voice_session(
 
     _start = time.time()
 
+    # Look up user display name from DB
+    user_display_name = None
+    try:
+        pool = await _get_pool()
+        row = await pool.fetchrow(
+            "SELECT name FROM users WHERE omi_uid = $1", uid
+        )
+        if row:
+            user_display_name = row["name"]
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
+
     try:
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,
-            display_name=None,
+            display_name=user_display_name,
             voice_mode=resolved_mode,
             provider=provider,
         )
