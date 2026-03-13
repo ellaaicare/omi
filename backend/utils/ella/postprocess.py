@@ -30,7 +30,7 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
     Fire post-process webhook after conversation is fully saved.
 
     This is called in a background thread from process_conversation.py.
-    It sends the conversation metadata (NOT the full transcript) to n8n
+    It sends the conversation metadata and transcript text to n8n
     for downstream processing.
 
     Args:
@@ -57,6 +57,17 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             # Handle category enum
             if structured.get('category') and hasattr(structured['category'], 'value'):
                 structured['category'] = structured['category'].value
+
+        # Serialize transcript for downstream workspace file writes
+        transcript_text = ""
+        segment_count = 0
+        if hasattr(conversation, 'transcript_segments') and conversation.transcript_segments:
+            segment_count = len(conversation.transcript_segments)
+            parts = []
+            for seg in conversation.transcript_segments:
+                speaker = "User" if seg.is_user else (seg.speaker or "Other")
+                parts.append(f"{speaker}: {seg.text}")
+            transcript_text = "\n\n".join(parts)
 
         payload = {
             'event': 'conversation.completed',
@@ -97,15 +108,20 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
                 'event': 'conversation_ready',
                 'uid': uid,
                 'conversation_id': conversation.id,
+                'transcript': transcript_text,
+                'segment_count': segment_count,
+                'structured': structured,
+                'started_at': conversation.started_at.isoformat() if conversation.started_at else None,
+                'finished_at': conversation.finished_at.isoformat() if conversation.finished_at else None,
             }
             ready_resp = requests.post(
                 CONVERSATION_READY_WEBHOOK_URL,
                 json=ready_payload,
                 headers={'Content-Type': 'application/json'},
-                timeout=POSTPROCESS_TIMEOUT,
+                timeout=15,  # increased for larger payload with transcript
             )
             _elapsed_ready = int((time.time() - _ready_start) * 1000)
-            print(f"[FLOW:POSTPROCESS] conversation-ready uid={uid} conv={conv_short} status={ready_resp.status_code} latency={_elapsed_ready}ms url={CONVERSATION_READY_WEBHOOK_URL}", flush=True)
+            print(f"[FLOW:POSTPROCESS] conversation-ready uid={uid} conv={conv_short} segments={segment_count} status={ready_resp.status_code} latency={_elapsed_ready}ms url={CONVERSATION_READY_WEBHOOK_URL}", flush=True)
         except Exception as e:
             print(f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={uid} conv={conv_short} error={e}", flush=True)
 
