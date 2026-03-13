@@ -31,6 +31,7 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-resolve"])
 _pool: Optional[asyncpg.Pool] = None
 
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 
 
@@ -85,6 +86,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "gatewayUrl": gateway_url,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": OPENCLAW_GATEWAY_TOKEN,
+            "provisionToken": PROVISION_API_KEY,
             "clusterStatus": row["cluster_status"],
             "workspace": agents.get("workspace"),
         }
@@ -183,6 +185,7 @@ async def resolve_endpoint(
             "gatewayUrl": gateway_url,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": OPENCLAW_GATEWAY_TOKEN,
+            "provisionToken": PROVISION_API_KEY,
             "clusterStatus": row["cluster_status"],
         }
 
