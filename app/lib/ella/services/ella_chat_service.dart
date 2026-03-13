@@ -33,6 +33,7 @@ class _ResolvedEndpoint {
   final String sessionKey;
   final String gatewayUrl;
   final String token;
+  final String provisionToken;
   final DateTime expiresAt;
 
   _ResolvedEndpoint({
@@ -40,6 +41,7 @@ class _ResolvedEndpoint {
     required this.sessionKey,
     required this.gatewayUrl,
     required this.token,
+    this.provisionToken = '',
     required this.expiresAt,
   });
 
@@ -50,6 +52,7 @@ class _ResolvedEndpoint {
         'sessionKey': sessionKey,
         'gatewayUrl': gatewayUrl,
         'token': token,
+        'provisionToken': provisionToken,
         'expiresAt': expiresAt.toIso8601String(),
       };
 
@@ -58,6 +61,7 @@ class _ResolvedEndpoint {
         sessionKey: json['sessionKey'] ?? '',
         gatewayUrl: json['gatewayUrl'] ?? '',
         token: json['token'] ?? '',
+        provisionToken: json['provisionToken'] ?? '',
         expiresAt: DateTime.tryParse(json['expiresAt'] ?? '') ?? DateTime(2000),
       );
 }
@@ -111,11 +115,14 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
+    // Response has nested structure: { "user": {...}, "routing": {...} }
+    final routing = data['routing'] as Map<String, dynamic>? ?? data;
     final endpoint = _ResolvedEndpoint(
-      agentId: data['agentId'] ?? '',
-      sessionKey: data['sessionKey'] ?? '',
-      gatewayUrl: data['gatewayUrl'] ?? '',
-      token: data['token'] ?? '',
+      agentId: routing['agentId'] ?? '',
+      sessionKey: routing['sessionKey'] ?? '',
+      gatewayUrl: routing['gatewayUrl'] ?? '',
+      token: routing['token'] ?? '',
+      provisionToken: routing['provisionToken'] ?? '',
       expiresAt: DateTime.now().add(const Duration(hours: 1)),
     );
 
@@ -166,6 +173,68 @@ ServerMessageChunk? _parseOpenAiSseChunk(String line, String messageId) {
   } catch (e) {
     Logger.debug('[EllaChat] Failed to parse OpenAI SSE chunk: $e');
     return null;
+  }
+}
+
+/// Fetch chat history from OpenClaw Provision API.
+/// Returns messages converted to [ServerMessage] format, or empty list on failure.
+Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
+  final endpoint = await _resolveEndpoint();
+  if (endpoint == null || endpoint.agentId.isEmpty) {
+    Logger.debug('[EllaChat] Cannot fetch history: no resolved endpoint');
+    return [];
+  }
+
+  try {
+    // Provision API is on the same gateway host, port 8100
+    final gatewayUri = Uri.parse(endpoint.gatewayUrl);
+    final provisionUrl = '${gatewayUri.scheme}://${gatewayUri.host}:8100'
+        '/chat/history/${endpoint.agentId}?limit=$limit';
+
+    final response = await makeApiCall(
+      url: provisionUrl,
+      headers: {'x-api-key': endpoint.provisionToken.isNotEmpty ? endpoint.provisionToken : endpoint.token},
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+    );
+
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] History fetch failed: ${response?.statusCode}');
+      return [];
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final rawMessages = data['messages'] as List<dynamic>? ?? [];
+
+    final result = <ServerMessage>[];
+    for (final m in rawMessages) {
+      final role = m['role'] as String? ?? '';
+      final content = m['content'] as String? ?? '';
+      final ts = m['timestamp'] as String?;
+      final id = m['id'] as String? ?? const Uuid().v4();
+      if (content.isEmpty) continue;
+
+      result.add(ServerMessage(
+        id,
+        ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
+        content,
+        role == 'user' ? MessageSender.human : MessageSender.ai,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        askForNps: false,
+      ));
+    }
+
+    Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
+    return result;
+  } catch (e) {
+    Logger.debug('[EllaChat] History fetch error: $e');
+    return [];
   }
 }
 
