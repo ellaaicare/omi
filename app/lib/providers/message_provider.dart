@@ -393,15 +393,21 @@ class MessageProvider extends ChangeNotifier {
       setHasCachedMessages(true);
     }
 
-    // Ella mode: OpenClaw is the source of truth, not /v2/messages.
-    // Until GET /v1/ella/chat/history is implemented (issue #301),
-    // use local cache as source of truth so messages survive refresh.
+    // Ella mode: use local cache first, fall back to server history API.
     const isEllaApp = true; // TODO: replace with flavor check
     if (isEllaApp) {
       final cached = SharedPreferencesUtil().cachedMessages;
       if (cached.isNotEmpty) {
         messages = cached;
         setHasCachedMessages(true);
+      } else {
+        // Cache empty (e.g. after logout/login) — rehydrate from server
+        final history = await fetchEllaChatHistory(limit: 50);
+        if (history.isNotEmpty) {
+          messages = history;
+          SharedPreferencesUtil().cachedMessages = messages;
+          setHasCachedMessages(true);
+        }
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
