@@ -393,21 +393,16 @@ class MessageProvider extends ChangeNotifier {
       setHasCachedMessages(true);
     }
 
-    // Ella mode: use local cache first, fall back to OpenClaw history API.
+    // Ella mode: use local cache for chat UI history.
+    // The agent retains full context server-side (OpenClaw session persists
+    // across logins via stable "omi-{uid}" user field), so even if the local
+    // cache is empty after logout, the agent still remembers prior conversations.
     const isEllaApp = true; // TODO: replace with flavor check
     if (isEllaApp) {
       final cached = SharedPreferencesUtil().cachedMessages;
       if (cached.isNotEmpty) {
         messages = cached;
         setHasCachedMessages(true);
-      } else {
-        // Cache empty (e.g. after logout/login) — rehydrate from server
-        final history = await fetchEllaChatHistory(limit: 50);
-        if (history.isNotEmpty) {
-          messages = history;
-          SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(true);
-        }
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
