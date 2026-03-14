@@ -91,6 +91,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "provisionUrl": PROVISION_API_URL,
             "clusterStatus": row["cluster_status"],
             "workspace": agents.get("workspace"),
+            "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
         }
 
     return {
