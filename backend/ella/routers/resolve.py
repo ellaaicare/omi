@@ -30,10 +30,10 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-resolve"])
 # Database connection pool (shared with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "3f9318d7b89865bd68c09f92e6f8d969455a71200ea7544c")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
-PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.75.8.74:8100")
-DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.75.8.74:42858")
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
+DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 
 
 async def _get_pool() -> asyncpg.Pool:
