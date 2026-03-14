@@ -34,6 +34,7 @@ class _ResolvedEndpoint {
   final String gatewayUrl;
   final String token;
   final String provisionToken;
+  final String provisionUrl;
   final DateTime expiresAt;
 
   _ResolvedEndpoint({
@@ -42,6 +43,7 @@ class _ResolvedEndpoint {
     required this.gatewayUrl,
     required this.token,
     this.provisionToken = '',
+    this.provisionUrl = '',
     required this.expiresAt,
   });
 
@@ -53,6 +55,7 @@ class _ResolvedEndpoint {
         'gatewayUrl': gatewayUrl,
         'token': token,
         'provisionToken': provisionToken,
+        'provisionUrl': provisionUrl,
         'expiresAt': expiresAt.toIso8601String(),
       };
 
@@ -62,6 +65,7 @@ class _ResolvedEndpoint {
         gatewayUrl: json['gatewayUrl'] ?? '',
         token: json['token'] ?? '',
         provisionToken: json['provisionToken'] ?? '',
+        provisionUrl: json['provisionUrl'] ?? '',
         expiresAt: DateTime.tryParse(json['expiresAt'] ?? '') ?? DateTime(2000),
       );
 }
@@ -123,6 +127,7 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
       gatewayUrl: routing['gatewayUrl'] ?? '',
       token: routing['token'] ?? '',
       provisionToken: routing['provisionToken'] ?? '',
+      provisionUrl: routing['provisionUrl'] ?? '',
       expiresAt: DateTime.now().add(const Duration(hours: 1)),
     );
 
@@ -186,14 +191,13 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
   }
 
   try {
-    // Provision API is on the same gateway host, port 8100
-    final gatewayUri = Uri.parse(endpoint.gatewayUrl);
-    final provisionUrl = '${gatewayUri.scheme}://${gatewayUri.host}:8100'
-        '/chat/history/${endpoint.agentId}?limit=$limit';
+    // Route through VPS proxy which forwards to Provision API on Mac Mini.
+    // The app can't reach the Mac Mini's Tailscale IP directly.
+    final historyUrl = '${Env.apiBaseUrl}v1/ella/chat/history/${endpoint.agentId}?limit=$limit';
 
     final response = await makeApiCall(
-      url: provisionUrl,
-      headers: {'x-api-key': endpoint.provisionToken.isNotEmpty ? endpoint.provisionToken : endpoint.token},
+      url: historyUrl,
+      headers: _ellaDebugHeaders(routeSource: 'chat-history'),
       method: 'GET',
       body: '',
       timeout: const Duration(seconds: 10),
@@ -275,7 +279,9 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
           {'role': 'user', 'content': text},
         ],
         'stream': true,
-        'user': endpoint.sessionKey,
+        // Stable user ID ensures same OpenClaw session across logins.
+        // Format must be "omi-{omiUid}" to match provisioned identity.
+        'user': 'omi-$uid',
       }),
     )) {
       if (line.trim().isEmpty || line.startsWith(':')) continue;
