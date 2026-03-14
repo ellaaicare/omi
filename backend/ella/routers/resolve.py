@@ -30,9 +30,10 @@ router = APIRouter(prefix="/v1/ella", tags=["ella-resolve"])
 # Database connection pool (shared with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "3f9318d7b89865bd68c09f92e6f8d969455a71200ea7544c")
 PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
-DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.75.8.74:8100")
+DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.75.8.74:42858")
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -85,8 +86,9 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
             "gatewayUrl": gateway_url,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
-            "token": OPENCLAW_GATEWAY_TOKEN,
+            "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
             "provisionToken": PROVISION_API_KEY,
+            "provisionUrl": PROVISION_API_URL,
             "clusterStatus": row["cluster_status"],
             "workspace": agents.get("workspace"),
         }
@@ -184,8 +186,9 @@ async def resolve_endpoint(
             "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
             "gatewayUrl": gateway_url,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
-            "token": OPENCLAW_GATEWAY_TOKEN,
+            "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
             "provisionToken": PROVISION_API_KEY,
+            "provisionUrl": PROVISION_API_URL,
             "clusterStatus": row["cluster_status"],
         }
 
@@ -200,3 +203,32 @@ async def resolve_endpoint(
         },
         "routing": routing,
     }
+
+
+@router.get("/chat/history/{agent_id}")
+async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Optional[str] = None):
+    """Proxy chat history requests to the Provision API on Mac Mini.
+
+    The iOS app can't reach the Mac Mini's Tailscale IP directly,
+    so this endpoint forwards the request.
+    """
+    import httpx
+
+    provision_base = PROVISION_API_URL.rstrip('/')
+    params = f"limit={limit}"
+    if session_key:
+        from urllib.parse import quote
+        params += f"&session_key={quote(session_key)}"
+    url = f"{provision_base}/chat/history/{agent_id}?{params}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers={"x-api-key": PROVISION_API_KEY})
+            if resp.status_code != 200:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=resp.status_code, content={"error": "upstream_error"})
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Chat history proxy error: {e}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=502, content={"error": "provision_unreachable"})

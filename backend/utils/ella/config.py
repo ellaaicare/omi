@@ -75,6 +75,9 @@ def load_config() -> EllaConfig:
     if os.getenv('ELLA_SCANNER_ENABLED'):
         config.scanner_enabled = os.getenv('ELLA_SCANNER_ENABLED', 'true').lower() == 'true'
 
+    if os.getenv('ELLA_SCANNER_TIMEOUT'):
+        config.scanner_timeout = float(os.getenv('ELLA_SCANNER_TIMEOUT', '2.0'))
+
     if os.getenv('ELLA_ASYNC_MODE'):
         config.async_mode = os.getenv('ELLA_ASYNC_MODE', 'true').lower() == 'true'
 
