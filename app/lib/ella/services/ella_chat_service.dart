@@ -33,6 +33,7 @@ class _ResolvedEndpoint {
   final String sessionKey;
   final String gatewayUrl;
   final String token;
+  final String historyUrl;
   final DateTime expiresAt;
 
   _ResolvedEndpoint({
@@ -40,6 +41,7 @@ class _ResolvedEndpoint {
     required this.sessionKey,
     required this.gatewayUrl,
     required this.token,
+    this.historyUrl = '',
     required this.expiresAt,
   });
 
@@ -50,6 +52,7 @@ class _ResolvedEndpoint {
         'sessionKey': sessionKey,
         'gatewayUrl': gatewayUrl,
         'token': token,
+        'historyUrl': historyUrl,
         'expiresAt': expiresAt.toIso8601String(),
       };
 
@@ -58,6 +61,7 @@ class _ResolvedEndpoint {
         sessionKey: json['sessionKey'] ?? '',
         gatewayUrl: json['gatewayUrl'] ?? '',
         token: json['token'] ?? '',
+        historyUrl: json['historyUrl'] ?? '',
         expiresAt: DateTime.tryParse(json['expiresAt'] ?? '') ?? DateTime(2000),
       );
 }
@@ -111,11 +115,13 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final routing = data['routing'] as Map<String, dynamic>? ?? data;
     final endpoint = _ResolvedEndpoint(
-      agentId: data['agentId'] ?? '',
-      sessionKey: data['sessionKey'] ?? '',
-      gatewayUrl: data['gatewayUrl'] ?? '',
-      token: data['token'] ?? '',
+      agentId: routing['agentId'] ?? '',
+      sessionKey: routing['sessionKey'] ?? '',
+      gatewayUrl: routing['gatewayUrl'] ?? '',
+      token: routing['token'] ?? '',
+      historyUrl: routing['historyUrl'] ?? '',
       expiresAt: DateTime.now().add(const Duration(hours: 1)),
     );
 
@@ -166,6 +172,66 @@ ServerMessageChunk? _parseOpenAiSseChunk(String line, String messageId) {
   } catch (e) {
     Logger.debug('[EllaChat] Failed to parse OpenAI SSE chunk: $e');
     return null;
+  }
+}
+
+/// Fetch chat history from the VPS proxy endpoint.
+/// Returns messages in chronological order (oldest first), or empty list on failure.
+Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
+  final endpoint = await _resolveEndpoint();
+  if (endpoint == null || endpoint.historyUrl.isEmpty) {
+    Logger.debug('[EllaChat] Cannot fetch history: no resolved endpoint or historyUrl');
+    return [];
+  }
+
+  try {
+    final url = '${Env.apiBaseUrl}${endpoint.historyUrl.replaceFirst(RegExp(r'^/'), '')}?limit=$limit';
+    final response = await makeApiCall(
+      url: url,
+      headers: _ellaDebugHeaders(routeSource: 'chat-history'),
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+    );
+
+    if (response == null || response.statusCode != 200) {
+      Logger.debug('[EllaChat] History fetch failed: ${response?.statusCode}');
+      return [];
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final rawMessages = data['messages'] as List<dynamic>? ?? [];
+
+    final result = <ServerMessage>[];
+    for (final m in rawMessages) {
+      final role = m['role'] as String? ?? '';
+      final content = m['content'] as String? ?? '';
+      final ts = m['timestamp'] as String?;
+      final id = m['id'] as String? ?? const Uuid().v4();
+      if (content.isEmpty) continue;
+
+      result.add(ServerMessage(
+        id,
+        ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
+        content,
+        role == 'user' ? MessageSender.human : MessageSender.ai,
+        MessageType.text,
+        null,
+        false,
+        [],
+        [],
+        [],
+        askForNps: false,
+      ));
+    }
+
+    // API returns newest first; reverse for chronological UI order
+    result.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    Logger.debug('[EllaChat] Fetched ${result.length} messages from history');
+    return result;
+  } catch (e) {
+    Logger.debug('[EllaChat] History fetch error: $e');
+    return [];
   }
 }
 
