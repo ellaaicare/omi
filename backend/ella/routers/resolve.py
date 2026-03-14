@@ -191,6 +191,8 @@ async def resolve_endpoint(
             "provisionToken": PROVISION_API_KEY,
             "provisionUrl": PROVISION_API_URL,
             "clusterStatus": row["cluster_status"],
+            "workspace": agents.get("workspace"),
+            "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
         }
 
     return {
@@ -201,6 +203,8 @@ async def resolve_endpoint(
             "status": row["status"],
             "guardianMode": row["guardian_mode"],
             "timezone": row["timezone"],
+            "conditions": row["conditions"],
+            "medications": row["medications"],
         },
         "routing": routing,
     }
