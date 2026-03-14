@@ -34,6 +34,7 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
+PUBLIC_GATEWAY_URL = os.getenv("OPENCLAW_PUBLIC_URL", "https://gateway.ella-ai-care.com")
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -84,7 +85,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
             "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
-            "gatewayUrl": gateway_url,
+            "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
             "provisionToken": PROVISION_API_KEY,
@@ -185,7 +186,7 @@ async def resolve_endpoint(
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
             "sessionKey": f"ella:{row['omi_uid'].lower()}" if row["omi_uid"] else None,
-            "gatewayUrl": gateway_url,
+            "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
             "provisionToken": PROVISION_API_KEY,
