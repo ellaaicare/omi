@@ -809,3 +809,31 @@ async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
 # All caregiver data in ella-ai-care Postgres, not OMI Firestore.
 # See: https://github.com/ellaaicare/ella-ai/issues/55
 # ============================================================================
+
+
+# ============================================================================
+# Internal Conversation Fetch (for n8n pipeline — no Firebase auth)
+# ============================================================================
+
+@router.get("/conversation/{conversation_id}")
+async def get_conversation_internal(
+    conversation_id: str,
+    uid: str = None,
+):
+    """
+    Fetch a conversation by ID without Firebase auth.
+    Internal endpoint for n8n pipeline use only.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    try:
+        conv_data = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not conv_data:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return conv_data
