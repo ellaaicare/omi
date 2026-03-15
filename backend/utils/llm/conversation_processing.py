@@ -595,35 +595,9 @@ def get_transcript_structure(
     uid: str = None,
     existing_conversation_id: str = None,
 ) -> Structured:
-    # ====== ELLA SUMMARY ADAPTER HOOK ======
-    try:
-        print(f"[FLOW:SUMMARY] adapter_hook entered uid={uid} conv={existing_conversation_id} transcript_len={len(transcript) if transcript else 0}", flush=True)
-        from utils.ella.summary import call_summary_agent
-
-        success, result_dict, error = call_summary_agent(
-            uid=uid,
-            conversation_id=existing_conversation_id,
-            transcript=transcript,
-            started_at=started_at,
-        )
-        print(f"[FLOW:SUMMARY] adapter_hook result success={success} has_data={result_dict is not None} error={error}", flush=True)
-        if success and result_dict:
-            from utils.ella.summary import parse_summary_response
-
-            parsed = parse_summary_response(result_dict)
-            # Mark as enriched by Ella pipeline (visible in app as emoji prefix)
-            parsed["emoji"] = "🛡️" + parsed.get("emoji", "💬")
-            title_val = parsed.get("title", "no title")
-            emoji_val = parsed.get("emoji", "?")
-            print(f"[FLOW:SUMMARY] ENRICHED via n8n title={title_val} emoji={emoji_val}", flush=True)
-            return Structured(**parsed)
-        else:
-            print(f"[FLOW:SUMMARY] adapter returned no usable data, falling through to LLM", flush=True)
-    except ImportError as ie:
-        print(f"[FLOW:SUMMARY] ImportError in adapter (silenced): {ie}", flush=True)
-    except Exception as e:
-        print(f"⚠️  Ella summary adapter failed: {e}, falling back to upstream LLM", flush=True)
-    # ====== END ELLA HOOK ======
+    # ELLA SUMMARY ADAPTER — REMOVED (2026-03-15)
+    # Stock OMI summary runs here. PATH 3 (conversation-ready webhook)
+    # enriches via main agent + MCP write-back. See docs/plans/2026-03-15-*.md
 
     context_parts = []
     if transcript and transcript.strip():
@@ -660,38 +634,8 @@ CALENDAR MEETING CONTEXT:
 
     full_context = "\n\n".join(context_parts)
 
-    # ====== ELLA CAREGIVER PROMPT OVERRIDE ======
-    try:
-        from ella.prompts.loader import get_structured_summary_prompt, should_use_caregiver_prompts
-        if should_use_caregiver_prompts(uid):
-            caregiver_prompt = get_structured_summary_prompt()
-            if caregiver_prompt:
-                prompt = caregiver_prompt
-                chain = prompt | llm_medium_experiment | parser
-                response = chain.invoke({
-                    'full_context': full_context,
-                    'format_instructions': parser.get_format_instructions(),
-                    'language_code': language_code,
-                    'started_at': started_at.isoformat(),
-                    'tz': tz,
-                })
-                for event in response.events or []:
-                    if event.duration > 180:
-                        event.duration = 180
-                    event.created = False
-                action_items = extract_action_items(
-                    transcript, started_at, language_code, tz, photos,
-                    existing_action_items, calendar_meeting_context
-                )
-                response.action_items = action_items
-                # Mark as caregiver-enriched (fallback path, still enhanced)
-                response.emoji = "🛡️" + (response.emoji or "💬")
-                return response
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"[FLOW:SUMMARY] caregiver_prompt FAILED error={e}, falling back to upstream", flush=True)
-    # ====== END ELLA CAREGIVER OVERRIDE ======
+    # ELLA CAREGIVER PROMPT OVERRIDE — REMOVED (2026-03-15)
+    # Caregiver-oriented summaries handled by PATH 3 enrichment.
 
     prompt_text = '''You are an expert content analyzer. Your task is to analyze the provided content (which could be a transcript, a series of photo descriptions from a wearable camera, or both) and provide structure and clarity.
     The content language is {language_code}. Use the same language {language_code} for your response.
