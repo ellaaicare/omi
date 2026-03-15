@@ -140,6 +140,61 @@ def _upload_audio_to_gcs(audio_bytes: bytes, uid: str) -> Optional[str]:
         return None
 
 
+
+
+# ============================================================================
+# Conversation Summary Update (for n8n pipeline write-back)
+# ============================================================================
+
+class ConversationSummaryUpdate(BaseModel):
+    """Schema for updating conversation structured summary fields."""
+    title: Optional[str] = None
+    overview: Optional[str] = None
+    emoji: Optional[str] = None
+    category: Optional[str] = None
+
+
+@router.patch("/conversation/{conversation_id}/summary")
+async def update_conversation_summary(
+    conversation_id: str,
+    update: ConversationSummaryUpdate,
+    uid: str = None,
+):
+    """
+    Update the structured summary of an OMI conversation.
+    Called by n8n pipeline after agent enhances the summary.
+    Requires uid as query parameter (internal endpoint, not user-facing).
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    # Build Firestore dot-notation update dict
+    update_data = {}
+    if update.title is not None:
+        update_data["structured.title"] = update.title
+    if update.overview is not None:
+        update_data["structured.overview"] = update.overview
+    if update.emoji is not None:
+        update_data["structured.emoji"] = update.emoji
+    if update.category is not None:
+        update_data["structured.category"] = update.category
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    try:
+        conversations_db.update_conversation(uid, conversation_id, update_data)
+    except Exception as e:
+        logging.error(f"Failed to update conversation summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "status": "ok",
+        "conversation_id": conversation_id,
+        "updated_fields": list(update_data.keys()),
+    }
+
+
 # ============================================================================
 # Endpoints
 # ============================================================================
