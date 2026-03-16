@@ -64,6 +64,7 @@ jobs:
       - name: Archive
         working-directory: app/ios
         run: |
+          set -o pipefail
           xcodebuild archive \
             -workspace Runner.xcworkspace \
             -scheme prod \
@@ -76,11 +77,12 @@ jobs:
             -authenticationKeyPath ~/.private_keys/AuthKey_J77JD8RJXF.p8 \
             -authenticationKeyID J77JD8RJXF \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            | xcpretty
+            2>&1 | tail -30
 
       - name: Export IPA
         working-directory: app/ios
         run: |
+          set -o pipefail
           xcodebuild -exportArchive \
             -archivePath ../build/ios/EllaCare.xcarchive \
             -exportPath ../build/ios/ipa \
@@ -89,7 +91,7 @@ jobs:
             -authenticationKeyPath ~/.private_keys/AuthKey_J77JD8RJXF.p8 \
             -authenticationKeyID J77JD8RJXF \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            | xcpretty
+            2>&1 | tail -30
 
       - name: Upload to TestFlight
         working-directory: app/ios
