@@ -61,10 +61,6 @@ jobs:
         working-directory: app
         run: flutter build ios --flavor prod --release --no-codesign
 
-      - name: Pod install
-        working-directory: app/ios
-        run: pod install --repo-update
-
       - name: Archive
         working-directory: app/ios
         run: |
