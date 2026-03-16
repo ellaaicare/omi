@@ -657,6 +657,15 @@ class SharedPreferencesUtil {
   String get ellaKey => getString('ellaKey');
   set ellaKey(String value) => saveString('ellaKey', value);
 
+  String get ellaGatewayUrl => getString('ellaGatewayUrl');
+  set ellaGatewayUrl(String value) => saveString('ellaGatewayUrl', value);
+
+  String get ellaAgentId => getString('ellaAgentId');
+  set ellaAgentId(String value) => saveString('ellaAgentId', value);
+
+  String get ellaGatewayToken => getString('ellaGatewayToken');
+  set ellaGatewayToken(String value) => saveString('ellaGatewayToken', value);
+
   //--------------------------- Emergency Contact ----------------------------//
 
   String get emergencyContactName => getString('emergencyContactName');

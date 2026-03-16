@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -26,6 +25,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   bool _isSignedIn = false;
+  bool _checkingProvision = false;
 
   @override
   void initState() {
@@ -35,7 +35,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
         if (SharedPreferencesUtil().onboardingCompleted) {
           routeToPage(context, const HomePageWrapper(), replace: true);
         } else {
-          setState(() => _isSignedIn = true);
+          _onSignedIn();
         }
       }
     });
@@ -45,6 +45,33 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   void dispose() {
     _pageController.dispose();
     super.dispose();
+  }
+
+  Future<void> _onSignedIn() async {
+    setState(() {
+      _isSignedIn = true;
+      _checkingProvision = true;
+    });
+    // Check if user is pre-provisioned by admin — skip wizard if so
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final timezone = await FlutterTimezone.getLocalTimezone();
+      final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
+      final result = await provisionEllaUser(
+        firebaseUid: user.uid,
+        email: user.email ?? '',
+        name: name.isNotEmpty ? name : (user.displayName ?? ''),
+        timezone: timezone,
+      );
+      if (!mounted) return;
+      if (result.isPreProvisioned) {
+        SharedPreferencesUtil().onboardingCompleted = true;
+        updateUserOnboardingState(completed: true);
+        routeToPage(context, const HomePageWrapper(), replace: true);
+        return;
+      }
+    }
+    if (mounted) setState(() => _checkingProvision = false);
   }
 
   void _goToPage(int page) {
@@ -60,12 +87,14 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      _provisionElla();
+      // Provision is already called at sign-in; call again to ensure
+      // new users are provisioned after completing the wizard
+      _reprovisionElla();
     }
     routeToPage(context, const HomePageWrapper(), replace: true);
   }
 
-  void _provisionElla() async {
+  void _reprovisionElla() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     final timezone = await FlutterTimezone.getLocalTimezone();
@@ -88,9 +117,28 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
             if (SharedPreferencesUtil().onboardingCompleted) {
               routeToPage(context, const HomePageWrapper(), replace: true);
             } else {
-              setState(() => _isSignedIn = true);
+              _onSignedIn();
             }
           },
+        ),
+      );
+    }
+
+    if (_checkingProvision) {
+      return Scaffold(
+        backgroundColor: EllaColors.bgPrimary,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: EllaColors.primary),
+              const SizedBox(height: 24),
+              Text(
+                'Setting up your account...',
+                style: TextStyle(color: EllaColors.textSecondary, fontSize: 16),
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -106,7 +154,10 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
             children: [
               EllaWelcome(
                 onNext: () => _goToPage(1),
-                onSignOut: () => setState(() => _isSignedIn = false),
+                onSignOut: () => setState(() {
+                  _isSignedIn = false;
+                  _checkingProvision = false;
+                }),
               ),
               EllaConnect(
                 onNext: () => _goToPage(2),

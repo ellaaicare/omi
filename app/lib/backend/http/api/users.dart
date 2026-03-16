@@ -675,7 +675,15 @@ Future<bool> setMentorNotificationSettings(int frequency) async {
 
 const String _ellaDashboardBase = 'https://www.ella-ai-care.com';
 
-Future<void> provisionEllaUser({
+/// Result from provisionEllaUser.
+/// [isPreProvisioned] is true when the user was already set up by an admin
+/// and the iOS app should skip onboarding and go straight to chat.
+class EllaProvisionResult {
+  final bool isPreProvisioned;
+  EllaProvisionResult({required this.isPreProvisioned});
+}
+
+Future<EllaProvisionResult> provisionEllaUser({
   required String firebaseUid,
   required String email,
   required String name,
@@ -705,11 +713,35 @@ Future<void> provisionEllaUser({
       if (ellaKey != null && ellaKey.isNotEmpty) {
         SharedPreferencesUtil().ellaKey = ellaKey;
       }
-      Logger.debug('Ella provisioning success: userId=$userId');
+
+      // Store OpenClaw agent config if present
+      final agents = data['agents'] as Map<String, dynamic>?;
+      if (agents != null) {
+        final gatewayUrl = agents['gatewayUrl'] as String?;
+        final userAgentId = agents['userAgentId'] as String?;
+        final gatewayToken = agents['gatewayToken'] as String?;
+        if (gatewayUrl != null && gatewayUrl.isNotEmpty) {
+          SharedPreferencesUtil().ellaGatewayUrl = gatewayUrl;
+        }
+        if (userAgentId != null && userAgentId.isNotEmpty) {
+          SharedPreferencesUtil().ellaAgentId = userAgentId;
+        }
+        if (gatewayToken != null && gatewayToken.isNotEmpty) {
+          SharedPreferencesUtil().ellaGatewayToken = gatewayToken;
+        }
+      }
+
+      // provisioned: false + agents != null → pre-provisioned by admin → skip onboarding
+      final provisioned = data['provisioned'] as bool? ?? true;
+      final isPreProvisioned = !provisioned && agents != null;
+      Logger.debug(
+          'Ella provisioning success: userId=$userId provisioned=$provisioned preProvisioned=$isPreProvisioned');
+      return EllaProvisionResult(isPreProvisioned: isPreProvisioned);
     } else {
       Logger.debug('Ella provisioning failed: ${response.statusCode} ${response.body}');
     }
   } catch (e) {
     Logger.debug('Ella provisioning error: $e');
   }
+  return EllaProvisionResult(isPreProvisioned: false);
 }
