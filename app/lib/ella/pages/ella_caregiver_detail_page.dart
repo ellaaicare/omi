@@ -231,7 +231,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text('Phone: ${cg.phone}',
+                    child: Text('Phone: ${_formatPhone(cg.phone)}',
                         style:
                             const TextStyle(fontSize: 18, fontWeight: FontWeight.w400, color: EllaColors.textPrimary)),
                   ),
@@ -340,5 +340,17 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         ),
       ),
     );
+  }
+
+  String _formatPhone(String? phone) {
+    if (phone == null || phone.isEmpty) return '';
+    final digits = phone.replaceAll(RegExp(r'[^\d]'), '');
+    if (digits.length == 11 && digits.startsWith('1')) {
+      return '+1 (${digits.substring(1, 4)}) ${digits.substring(4, 7)}-${digits.substring(7)}';
+    }
+    if (digits.length == 10) {
+      return '(${digits.substring(0, 3)}) ${digits.substring(3, 6)}-${digits.substring(6)}';
+    }
+    return phone; // return as-is if non-US format
   }
 }
