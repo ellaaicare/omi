@@ -52,6 +52,8 @@ jobs:
           [ -f ios/Config/Prod/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/
           [ -f ios/Config/Dev/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Config/Dev/
           [ -f ios/Runner/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Runner/
+          cp setup/prebuilt/firebase_options.dart lib/firebase_options_dev.dart
+          cp setup/prebuilt/firebase_options.dart lib/firebase_options_prod.dart
           bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter
           echo "APP_BUNDLE_IDENTIFIER=com.ellaaicare.ella" >> ios/Flutter/Custom.xcconfig
 
