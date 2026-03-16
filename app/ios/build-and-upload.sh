@@ -7,13 +7,11 @@ set -euo pipefail
 # Pulls latest main, builds Flutter iOS (prod), archives with
 # xcodebuild, and uploads to TestFlight via fastlane.
 #
-# Required env vars:
-#   ASC_ISSUER_ID  — App Store Connect API Issuer ID
-#
 # Optional env vars:
 #   FLAVOR         — "prod" (default) or "dev"
 #   SKIP_PULL      — set to "1" to skip git pull
 #   SKIP_UPLOAD    — set to "1" to build only, no TestFlight upload
+#   ASC_ISSUER_ID  — App Store Connect API Issuer ID (has default)
 # ──────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,12 +19,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 APP_DIR="$REPO_ROOT/app"
 IOS_DIR="$APP_DIR/ios"
 FLUTTER="/Users/ellaai/dev/flutter/bin/flutter"
+DART="/Users/ellaai/dev/flutter/bin/dart"
 
 FLAVOR="${FLAVOR:-prod}"
 TEAM_ID="H6S4582TRM"
 SCHEME="$FLAVOR"
 KEYCHAIN_PATH="$HOME/Library/Keychains/login.keychain-db"
 KEYCHAIN_PASSWORD="comp3000"
+ASC_ISSUER_ID="${ASC_ISSUER_ID:-5ed3a276-d6c0-43eb-ba70-13eed9b35a7e}"
+ASC_KEY_PATH="/Users/ellaai/.private_keys/AuthKey_J77JD8RJXF.p8"
+ASC_KEY_ID="J77JD8RJXF"
 
 BUILD_DIR="$APP_DIR/build/ios"
 ARCHIVE_PATH="$BUILD_DIR/EllaCare.xcarchive"
@@ -42,13 +44,7 @@ fi
 
 log() { echo "=== $(date '+%H:%M:%S') $1 ==="; }
 
-# ── Step 0: Validate prerequisites ────────────────────────────
-if [ -z "${ASC_ISSUER_ID:-}" ] && [ "${SKIP_UPLOAD:-0}" != "1" ]; then
-  echo "ERROR: ASC_ISSUER_ID env var is required for TestFlight upload."
-  echo "  Find it at: App Store Connect → Users and Access → Integrations → Team Key → Issuer ID"
-  echo "  Or set SKIP_UPLOAD=1 to build without uploading."
-  exit 1
-fi
+log "ASC Issuer ID: $ASC_ISSUER_ID  Key ID: $ASC_KEY_ID"
 
 # ── Step 1: Pull latest main ──────────────────────────────────
 if [ "${SKIP_PULL:-0}" != "1" ]; then
@@ -62,7 +58,7 @@ fi
 log "Flutter pub get + build_runner"
 cd "$APP_DIR"
 $FLUTTER pub get
-dart run build_runner build --delete-conflicting-outputs
+$DART run build_runner build --delete-conflicting-outputs
 
 # ── Step 3: Ensure Firebase/env configs exist ─────────────────
 log "Checking configs"
@@ -90,11 +86,20 @@ log "Pod install"
 cd "$IOS_DIR"
 pod install --repo-update
 
-# ── Step 6: Unlock keychain ───────────────────────────────────
-log "Unlocking keychain"
+# ── Step 6: Unlock keychain + ensure Distribution cert ───────
+log "Unlocking keychain and granting codesign access"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1 || true
+
+log "Ensuring Distribution certificate via fastlane"
+export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:$PATH"
+BUNDLE_ID="$BUNDLE_ID" fastlane setup_signing
 
 # ── Step 7: xcodebuild archive ───────────────────────────────
+# CODE_SIGN_STYLE=Automatic with -allowProvisioningUpdates + ASC key allows
+# xcodebuild to download/create a Distribution certificate automatically.
+# Do NOT override CODE_SIGN_IDENTITY here — that conflicts with Pod targets
+# which use Automatic signing. Let xcodebuild select the right cert type.
 log "Archiving ($SCHEME)"
 mkdir -p "$BUILD_DIR"
 xcodebuild archive \
@@ -106,15 +111,18 @@ xcodebuild archive \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   CODE_SIGN_STYLE=Automatic \
   -allowProvisioningUpdates \
-  -authenticationKeyPath "$HOME/.private_keys/AuthKey_J77JD8RJXF.p8" \
-  -authenticationKeyID "J77JD8RJXF" \
-  -authenticationKeyIssuerID "${ASC_ISSUER_ID:-}" \
-  | xcpretty || true
+  -authenticationKeyPath "$ASC_KEY_PATH" \
+  -authenticationKeyID "$ASC_KEY_ID" \
+  -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+  2>&1 | tee /tmp/ella-xcodebuild-archive.log | grep -E "(error:|ARCHIVE|Signing|certificate|profile|succeeded)" || true
 
 if [ ! -d "$ARCHIVE_PATH" ]; then
-  echo "ERROR: Archive failed. Check xcodebuild output above."
+  echo "ERROR: Archive failed. Full log at /tmp/ella-xcodebuild-archive.log"
+  echo "--- Last 50 lines ---"
+  tail -50 /tmp/ella-xcodebuild-archive.log
   exit 1
 fi
+log "Archive succeeded: $ARCHIVE_PATH"
 
 # ── Step 8: Export IPA ────────────────────────────────────────
 log "Exporting IPA"
@@ -124,14 +132,15 @@ xcodebuild -exportArchive \
   -exportPath "$IPA_DIR" \
   -exportOptionsPlist "$APP_DIR/ExportOptions.plist" \
   -allowProvisioningUpdates \
-  -authenticationKeyPath "$HOME/.private_keys/AuthKey_J77JD8RJXF.p8" \
-  -authenticationKeyID "J77JD8RJXF" \
-  -authenticationKeyIssuerID "${ASC_ISSUER_ID:-}" \
-  | xcpretty || true
+  -authenticationKeyPath "$ASC_KEY_PATH" \
+  -authenticationKeyID "$ASC_KEY_ID" \
+  -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+  2>&1 | tee /tmp/ella-xcodebuild-export.log | grep -E "(error:|EXPORT|ipa|IPA|succeeded)" || true
 
 IPA_FILE=$(find "$IPA_DIR" -name "*.ipa" -type f | head -1)
 if [ -z "$IPA_FILE" ]; then
-  echo "ERROR: IPA export failed."
+  echo "ERROR: IPA export failed. Full log at /tmp/ella-xcodebuild-export.log"
+  tail -30 /tmp/ella-xcodebuild-export.log
   exit 1
 fi
 echo "IPA: $IPA_FILE"
@@ -144,7 +153,6 @@ if [ "${SKIP_UPLOAD:-0}" = "1" ]; then
 fi
 
 log "Uploading to TestFlight via fastlane"
-export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:$PATH"
 cd "$IOS_DIR"
 fastlane upload_testflight ipa:"$IPA_FILE"
 

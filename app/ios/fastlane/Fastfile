@@ -6,6 +6,32 @@ ASC_ISSUER_ID = ENV["ASC_ISSUER_ID"] || "5ed3a276-d6c0-43eb-ba70-13eed9b35a7e"
 ASC_KEY_PATH = File.expand_path("~/.private_keys/AuthKey_J77JD8RJXF.p8")
 
 platform :ios do
+  desc "Ensure Distribution cert + provisioning profile are installed"
+  lane :setup_signing do |options|
+    bundle_id = options[:bundle_id] || ENV["BUNDLE_ID"] || "com.ellaaicare.ella"
+
+    api_key = app_store_connect_api_key(
+      key_id: ASC_KEY_ID,
+      issuer_id: ASC_ISSUER_ID,
+      key_filepath: ASC_KEY_PATH,
+      in_house: false
+    )
+
+    # Download/create Apple Distribution certificate and install in keychain
+    get_certificates(
+      api_key: api_key,
+      output_path: "/tmp/fastlane_certs"
+    )
+
+    # Download/create App Store provisioning profile
+    get_provisioning_profile(
+      api_key: api_key,
+      app_identifier: bundle_id,
+      output_path: "/tmp/fastlane_profiles",
+      readonly: false
+    )
+  end
+
   desc "Upload an IPA to TestFlight"
   lane :upload_testflight do |options|
     ipa_path = options[:ipa] || "../build/ios/ipa/Ella Care.ipa"
