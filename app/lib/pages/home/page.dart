@@ -611,15 +611,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                             ),
                           ),
                           // Bottom padding to account for emergency button + BottomNavBar overlay
-                          // Skip for chat (index 1) and voice (index 2) — they handle their own padding
-                          if (context.watch<HomeProvider>().selectedIndex != 1 &&
-                              context.watch<HomeProvider>().selectedIndex != 2)
+                          // Only needed on home (index 0) where Guardian + Emergency buttons are shown.
+                          // Chat (1), voice (2), and settings (3) handle their own padding.
+                          if (context.watch<HomeProvider>().selectedIndex == 0)
                             SizedBox(
                                 height: EllaSizes.guardianButtonHeight +
                                     EllaSizes.emergencyButtonHeight +
                                     EllaSizes.navBarHeight +
                                     (EllaSizes.buttonStackSpacing * 2) +
                                     MediaQuery.of(context).padding.bottom),
+                          // Settings and other non-home tabs just need nav bar clearance
+                          if (context.watch<HomeProvider>().selectedIndex == 3)
+                            SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
                         ],
                       ),
                       // Action buttons stack (Guardian + Emergency) - consolidated for self-adjusting layout
@@ -729,7 +732,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       elevation: 0,
     );
   }
-
 
   @override
   Future<void> dispose() async {
