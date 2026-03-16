@@ -1,0 +1,53 @@
+default_platform(:ios)
+
+TEAM_ID = "H6S4582TRM"
+ASC_KEY_ID = "J77JD8RJXF"
+ASC_ISSUER_ID = ENV["ASC_ISSUER_ID"] || "5ed3a276-d6c0-43eb-ba70-13eed9b35a7e"
+ASC_KEY_PATH = File.expand_path("~/.private_keys/AuthKey_J77JD8RJXF.p8")
+
+platform :ios do
+  desc "Upload an IPA to TestFlight"
+  lane :upload_testflight do |options|
+    ipa_path = options[:ipa] || "../build/ios/ipa/Ella Care.ipa"
+
+    api_key = app_store_connect_api_key(
+      key_id: ASC_KEY_ID,
+      issuer_id: ASC_ISSUER_ID,
+      key_filepath: ASC_KEY_PATH,
+      in_house: false
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: ipa_path,
+      skip_waiting_for_build_processing: true,
+      skip_submission: true
+    )
+  end
+
+  desc "Build and upload prod to TestFlight"
+  lane :build_and_upload do
+    api_key = app_store_connect_api_key(
+      key_id: ASC_KEY_ID,
+      issuer_id: ASC_ISSUER_ID,
+      key_filepath: ASC_KEY_PATH,
+      in_house: false
+    )
+
+    build_app(
+      workspace: "Runner.xcworkspace",
+      scheme: "prod",
+      export_method: "app-store",
+      export_team_id: TEAM_ID,
+      output_directory: "../build/ios/ipa",
+      output_name: "Ella Care.ipa",
+      clean: true
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true,
+      skip_submission: true
+    )
+  end
+end

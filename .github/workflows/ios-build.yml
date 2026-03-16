@@ -1,0 +1,105 @@
+name: iOS Build & TestFlight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    env:
+      FLUTTER_ROOT: /Users/ellaai/dev/flutter
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up environment
+        run: |
+          echo "$FLUTTER_ROOT/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/opt/ruby/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/lib/ruby/gems/4.0.0/bin" >> $GITHUB_PATH
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Unlock keychain
+        run: |
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" ~/Library/Keychains/login.keychain-db
+          security set-keychain-settings -t 3600 ~/Library/Keychains/login.keychain-db
+
+      - name: Flutter pub get
+        working-directory: app
+        run: |
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+
+      - name: Set up configs
+        working-directory: app
+        run: |
+          mkdir -p ios/Config/Dev/ ios/Config/Prod/ ios/Runner/
+          [ -f ios/Config/Prod/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/
+          [ -f ios/Config/Dev/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Config/Dev/
+          [ -f ios/Runner/GoogleService-Info.plist ] || cp setup/prebuilt/GoogleService-Info.plist ios/Runner/
+          bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter
+          echo "APP_BUNDLE_IDENTIFIER=com.ellaaicare.ella" >> ios/Flutter/Custom.xcconfig
+
+      - name: Flutter build iOS
+        working-directory: app
+        run: flutter build ios --flavor prod --release --no-codesign
+
+      - name: Pod install
+        working-directory: app/ios
+        run: pod install --repo-update
+
+      - name: Archive
+        working-directory: app/ios
+        run: |
+          xcodebuild archive \
+            -workspace Runner.xcworkspace \
+            -scheme prod \
+            -configuration Release-prod \
+            -archivePath ../build/ios/EllaCare.xcarchive \
+            -destination "generic/platform=iOS" \
+            DEVELOPMENT_TEAM=H6S4582TRM \
+            CODE_SIGN_STYLE=Automatic \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/.private_keys/AuthKey_J77JD8RJXF.p8 \
+            -authenticationKeyID J77JD8RJXF \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            | xcpretty
+
+      - name: Export IPA
+        working-directory: app/ios
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath ../build/ios/EllaCare.xcarchive \
+            -exportPath ../build/ios/ipa \
+            -exportOptionsPlist ../ExportOptions.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/.private_keys/AuthKey_J77JD8RJXF.p8 \
+            -authenticationKeyID J77JD8RJXF \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            | xcpretty
+
+      - name: Upload to TestFlight
+        working-directory: app/ios
+        run: |
+          IPA_FILE=$(find ../build/ios/ipa -name "*.ipa" -type f | head -1)
+          fastlane upload_testflight ipa:"$IPA_FILE"
+
+      - name: Clean up
+        if: always()
+        working-directory: app
+        run: rm -rf build/ios/EllaCare.xcarchive build/ios/ipa
