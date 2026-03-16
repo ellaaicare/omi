@@ -557,6 +557,17 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _ellaDisplayText = '';
         });
         break;
+      case 'function_calling':
+        setState(() {
+          _orbState = VoiceOrbState.processing;
+          _statusText = 'Ella is thinking...';
+        });
+        break;
+      case 'function_executed':
+        setState(() {
+          _statusText = 'Generating response...';
+        });
+        break;
       case 'v2v_debug':
         // Debug info from V2V client — show on screen temporarily
         setState(() {
