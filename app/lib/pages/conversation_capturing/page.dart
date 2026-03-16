@@ -310,7 +310,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFFFB800),
+                            color: EllaColors.warning,
                             borderRadius: BorderRadius.circular(28),
                             boxShadow: [
                               BoxShadow(
@@ -350,7 +350,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                           width: 52,
                           height: 52,
                           decoration: BoxDecoration(
-                            color: _isMuted ? Colors.red : EllaColors.bgTertiary,
+                            color: _isMuted ? EllaColors.error : EllaColors.bgTertiary,
                             shape: BoxShape.circle,
                             boxShadow: [
                               BoxShadow(
@@ -436,7 +436,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
             children: [
               const CircleAvatar(
                 radius: 16,
-                backgroundColor: Color(0xFF2A5D3E),
+                backgroundColor: EllaColors.primary,
                 child: Icon(Icons.camera_alt, size: 16, color: Colors.white70),
               ),
               const SizedBox(height: 2),
@@ -450,7 +450,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 maxWidth: MediaQuery.of(context).size.width * 0.7,
               ),
               decoration: BoxDecoration(
-                color: const Color(0xFF1A3D2E),
+                color: EllaColors.primary.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(18),
                 boxShadow: [
                   BoxShadow(
@@ -486,11 +486,11 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.camera_alt, size: 12, color: Colors.grey.shade500),
+                        Icon(Icons.camera_alt, size: 12, color: EllaColors.textTertiary),
                         const SizedBox(width: 4),
                         Text(
                           group.length > 1 ? '$timeStr · ${group.length} photos' : timeStr,
-                          style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                          style: TextStyle(color: EllaColors.textTertiary, fontSize: 11),
                         ),
                       ],
                     ),
@@ -625,7 +625,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 children: [
                   CircleAvatar(
                     radius: 16,
-                    backgroundColor: Colors.blueGrey.withValues(alpha: 0.3),
+                    backgroundColor: EllaColors.bgTertiary,
                     child: const Icon(Icons.person, size: 16, color: Colors.white70),
                   ),
                   const SizedBox(height: 2),
@@ -643,7 +643,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
-                  color: isUser ? const Color(0xFF8B5CF6).withValues(alpha: 0.8) : const Color(0xFF2A2A32),
+                  color: isUser ? EllaColors.primary : EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(18),
                   boxShadow: [
                     BoxShadow(
@@ -656,7 +656,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 child: Text(
                   segment.text,
                   style: TextStyle(
-                    color: isUser ? Colors.white : Colors.grey.shade100,
+                    color: isUser ? Colors.white : EllaColors.textPrimary,
                     fontSize: 15,
                     height: 1.4,
                   ),
@@ -672,7 +672,7 @@ class _ConversationCapturingPageState extends State<ConversationCapturingPage> w
                 children: [
                   CircleAvatar(
                     radius: 16,
-                    backgroundColor: const Color(0xFF8B5CF6).withValues(alpha: 0.3),
+                    backgroundColor: EllaColors.primary.withValues(alpha: 0.3),
                     child: const Icon(Icons.person, size: 16, color: Colors.white70),
                   ),
                   const SizedBox(height: 2),
