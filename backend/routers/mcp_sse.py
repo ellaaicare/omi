@@ -329,6 +329,15 @@ def execute_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
         if not update_data:
             raise ToolExecutionError("At least one field (title, overview, emoji, category) must be provided")
 
+        # When overview is updated, clear apps_results so the iOS app
+        # falls through to structured.overview in getSummarizedApp().
+        # If apps_results[0] exists, the Flutter app shows it under the
+        # "Ella AI" app label; clearing it shows structured.overview as
+        # a plain "Summary" instead.
+        if "overview" in arguments:
+            update_data["apps_results"] = []
+            update_data["plugins_results"] = []
+
         conversations_db.update_conversation(user_id, conversation_id, update_data)
 
         return {"success": True, "updated_fields": list(update_data.keys())}
