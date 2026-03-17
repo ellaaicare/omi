@@ -85,21 +85,21 @@ class _TranscriptWidgetState extends State<TranscriptWidget> {
 
   Color _getSpeakerBubbleColor(bool isUser, int speakerId, Person? person) {
     if (isUser) {
-      return const Color(0xFF8B5CF6).withValues(alpha: 0.8);
+      return EllaColors.primary;
     }
     final colorIndex = (person?.colorIdx ?? speakerId) % _speakerColors.length;
-    return _speakerColors[colorIndex].withValues(alpha: 0.8);
+    return _speakerColors[colorIndex];
   }
 
   Color _getSpeakerAvatarColor(bool isUser, int speakerId, Person? person) {
     if (isUser) {
-      return const Color(0xFF8B5CF6).withValues(alpha: 0.3);
+      return EllaColors.primary.withValues(alpha: 0.3);
     }
     if (speakerId == omiSpeakerId) {
-      return Colors.purple.withValues(alpha: 0.3);
+      return EllaColors.primary.withValues(alpha: 0.2);
     }
     final colorIndex = (person?.colorIdx ?? speakerId) % _speakerColors.length;
-    return _speakerColors[colorIndex].withValues(alpha: 0.3);
+    return _speakerColors[colorIndex].withValues(alpha: 0.6);
   }
 
   Widget _getSpeakerAvatar(int speakerId, bool isUser, Person? person) {
