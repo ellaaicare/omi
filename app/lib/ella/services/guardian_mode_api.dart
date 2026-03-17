@@ -2,12 +2,11 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
-import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/utils/logger.dart';
 
-const String _dashboardBase = 'https://api.ella-ai-care.com';
+const String _dashboardBase = 'https://ella-ai-care.com';
 
 /// In-memory cache for presets (they change rarely).
 List<GuardianPreset>? _cachedPresets;
@@ -19,14 +18,12 @@ String get _userId {
 
 /// GET /api/users/{userId}/guardian-mode
 Future<GuardianModeInfo?> getGuardianMode() async {
+  final uid = _userId;
+  if (uid.isEmpty) return null;
   try {
-    final authHeader = await getAuthHeader();
     final response = await http.get(
-      Uri.parse('$_dashboardBase/api/users/$_userId/guardian-mode'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': authHeader,
-      },
+      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
+      headers: {'Content-Type': 'application/json'},
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
@@ -45,14 +42,12 @@ Future<GuardianModeInfo?> getGuardianMode() async {
 
 /// PUT /api/users/{userId}/guardian-mode
 Future<bool> setGuardianMode(GuardianModeKey mode) async {
+  final uid = _userId;
+  if (uid.isEmpty) return false;
   try {
-    final authHeader = await getAuthHeader();
     final response = await http.put(
-      Uri.parse('$_dashboardBase/api/users/$_userId/guardian-mode'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': authHeader,
-      },
+      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
+      headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'mode': mode.toApiString()}),
     ).timeout(const Duration(seconds: 10));
 
