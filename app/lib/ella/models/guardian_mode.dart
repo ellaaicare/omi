@@ -5,7 +5,8 @@ enum GuardianModeKey {
   emergencyOnly,
   activeSupport,
   maximumAwareness,
-  custom;
+  custom,
+  cyborg;
 
   static GuardianModeKey fromString(String value) {
     switch (value.toUpperCase()) {
@@ -17,6 +18,8 @@ enum GuardianModeKey {
         return GuardianModeKey.maximumAwareness;
       case 'CUSTOM':
         return GuardianModeKey.custom;
+      case 'CYBORG':
+        return GuardianModeKey.cyborg;
       default:
         return GuardianModeKey.activeSupport;
     }
@@ -32,6 +35,8 @@ enum GuardianModeKey {
         return 'MAXIMUM_AWARENESS';
       case GuardianModeKey.custom:
         return 'CUSTOM';
+      case GuardianModeKey.cyborg:
+        return 'CYBORG';
     }
   }
 }
@@ -115,6 +120,8 @@ class GuardianModeInfo {
         return 'Maximum Awareness';
       case GuardianModeKey.custom:
         return 'Custom';
+      case GuardianModeKey.cyborg:
+        return 'Cyborg';
     }
   }
 
@@ -128,6 +135,8 @@ class GuardianModeInfo {
         return const Color(0xFF6366F1);
       case GuardianModeKey.custom:
         return const Color(0xFF8B5CF6);
+      case GuardianModeKey.cyborg:
+        return const Color(0xFFEC4899);
     }
   }
 }

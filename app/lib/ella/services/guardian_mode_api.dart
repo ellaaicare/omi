@@ -117,4 +117,11 @@ List<GuardianPreset> _fallbackPresets() => [
         detailsBullets: ['Customizable alerts', 'Configurable thresholds'],
         color: const Color(0xFF8B5CF6),
       ),
+      GuardianPreset(
+        presetKey: 'CYBORG',
+        name: 'Cyborg',
+        description: 'Continuous real-time audio response — every utterance gets an Ella reply in your ear.',
+        detailsBullets: ['All utterances processed', 'Real-time audio responses', 'Continuous conversation context'],
+        color: const Color(0xFFEC4899),
+      ),
     ];
