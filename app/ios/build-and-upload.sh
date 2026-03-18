@@ -4,8 +4,13 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────
 # build-and-upload.sh — Ella iOS CI build script
 #
-# Pulls latest main, builds Flutter iOS (prod), archives with
-# xcodebuild, and uploads to TestFlight via fastlane.
+# Builds Flutter iOS (prod), archives unsigned, signs with
+# rcodesign using credentials in ~/.signing/, and uploads to
+# TestFlight via xcrun altool.
+#
+# Signing credentials in ~/.signing/ (chmod 700 dir, 600 files):
+#   dist_privkey.pem  — RSA private key (from fastlane AZ7KXT4377.p12)
+#   dist_cert.pem     — Distribution cert (from AZ7KXT4377.cer)
 #
 # Optional env vars:
 #   FLAVOR         — "prod" (default) or "dev"
@@ -20,19 +25,26 @@ APP_DIR="$REPO_ROOT/app"
 IOS_DIR="$APP_DIR/ios"
 FLUTTER="/Users/ellaai/dev/flutter/bin/flutter"
 DART="/Users/ellaai/dev/flutter/bin/dart"
+RCODESIGN="/usr/local/bin/rcodesign"
 
 FLAVOR="${FLAVOR:-prod}"
 TEAM_ID="H6S4582TRM"
 SCHEME="$FLAVOR"
-KEYCHAIN_PATH="$HOME/Library/Keychains/login.keychain-db"
-KEYCHAIN_PASSWORD="comp3000"
 ASC_ISSUER_ID="${ASC_ISSUER_ID:-5ed3a276-d6c0-43eb-ba70-13eed9b35a7e}"
 ASC_KEY_PATH="/Users/ellaai/.private_keys/AuthKey_J77JD8RJXF.p8"
 ASC_KEY_ID="J77JD8RJXF"
 
+# Signing credentials — persistent, owner-only
+SIGNING_DIR="$HOME/.signing"
+PRIVKEY_PEM="$SIGNING_DIR/dist_privkey.pem"
+CERT_PEM="$SIGNING_DIR/dist_cert.pem"
+ENTITLEMENTS="/tmp/entitlements.plist"
+PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/AppStore_com.ellaaicare.ella.mobileprovision"
+
 BUILD_DIR="$APP_DIR/build/ios"
 ARCHIVE_PATH="$BUILD_DIR/EllaCare.xcarchive"
-IPA_DIR="$BUILD_DIR/ipa"
+PAYLOAD_DIR="/tmp/ella-payload"
+IPA_PATH="$BUILD_DIR/EllaCare.ipa"
 
 if [ "$FLAVOR" = "prod" ]; then
   BUNDLE_ID="com.ellaaicare.ella"
@@ -44,7 +56,18 @@ fi
 
 log() { echo "=== $(date '+%H:%M:%S') $1 ==="; }
 
-log "ASC Issuer ID: $ASC_ISSUER_ID  Key ID: $ASC_KEY_ID"
+# ── Preflight: verify signing credentials exist ───────────────
+if [ ! -f "$PRIVKEY_PEM" ] || [ ! -s "$PRIVKEY_PEM" ]; then
+  echo "ERROR: Missing signing private key at $PRIVKEY_PEM"
+  echo "Regenerate: cp /tmp/fastlane_certs/AZ7KXT4377.p12 $PRIVKEY_PEM && chmod 600 $PRIVKEY_PEM"
+  exit 1
+fi
+if [ ! -f "$CERT_PEM" ] || [ ! -s "$CERT_PEM" ]; then
+  echo "ERROR: Missing distribution cert at $CERT_PEM"
+  echo "Regenerate: openssl x509 -inform DER -in /tmp/fastlane_certs/AZ7KXT4377.cer -out $CERT_PEM && chmod 600 $CERT_PEM"
+  exit 1
+fi
+log "Signing credentials OK"
 
 # ── Step 1: Pull latest main ──────────────────────────────────
 if [ "${SKIP_PULL:-0}" != "1" ]; then
@@ -72,13 +95,11 @@ fi
 if [ ! -f ios/Runner/GoogleService-Info.plist ]; then
   cp setup/prebuilt/GoogleService-Info.plist ios/Runner/
 fi
-
-# Generate Custom.xcconfig
 bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter
 echo "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" >> ios/Flutter/Custom.xcconfig
 
-# ── Step 4: Flutter build iOS ─────────────────────────────────
-log "Flutter build ios --flavor $FLAVOR --release"
+# ── Step 4: Flutter build iOS (no codesign) ───────────────────
+log "Flutter build ios --flavor $FLAVOR --release --no-codesign"
 $FLUTTER build ios --flavor "$FLAVOR" --release --no-codesign
 
 # ── Step 5: CocoaPods ─────────────────────────────────────────
@@ -86,21 +107,8 @@ log "Pod install"
 cd "$IOS_DIR"
 pod install --repo-update
 
-# ── Step 6: Unlock keychain + ensure Distribution cert ───────
-log "Unlocking keychain and granting codesign access"
-security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null 2>&1 || true
-
-log "Ensuring Distribution certificate via fastlane"
-export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:$PATH"
-BUNDLE_ID="$BUNDLE_ID" fastlane setup_signing
-
-# ── Step 7: xcodebuild archive ───────────────────────────────
-# CODE_SIGN_STYLE=Automatic with -allowProvisioningUpdates + ASC key allows
-# xcodebuild to download/create a Distribution certificate automatically.
-# Do NOT override CODE_SIGN_IDENTITY here — that conflicts with Pod targets
-# which use Automatic signing. Let xcodebuild select the right cert type.
-log "Archiving ($SCHEME)"
+# ── Step 6: xcodebuild archive (unsigned) ────────────────────
+log "Archiving ($SCHEME) — unsigned"
 mkdir -p "$BUILD_DIR"
 xcodebuild archive \
   -workspace Runner.xcworkspace \
@@ -108,52 +116,63 @@ xcodebuild archive \
   -configuration "$CONFIG" \
   -archivePath "$ARCHIVE_PATH" \
   -destination "generic/platform=iOS" \
-  DEVELOPMENT_TEAM="$TEAM_ID" \
-  CODE_SIGN_STYLE=Automatic \
-  -allowProvisioningUpdates \
-  -authenticationKeyPath "$ASC_KEY_PATH" \
-  -authenticationKeyID "$ASC_KEY_ID" \
-  -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-  2>&1 | tee /tmp/ella-xcodebuild-archive.log | grep -E "(error:|ARCHIVE|Signing|certificate|profile|succeeded)" || true
+  CODE_SIGNING_REQUIRED=NO \
+  CODE_SIGN_IDENTITY="" \
+  CODE_SIGNING_ALLOWED=NO \
+  2>&1 | tee /tmp/ella-xcodebuild-archive.log | grep -E "(error:|ARCHIVE|succeeded|BUILD)" || true
 
 if [ ! -d "$ARCHIVE_PATH" ]; then
   echo "ERROR: Archive failed. Full log at /tmp/ella-xcodebuild-archive.log"
-  echo "--- Last 50 lines ---"
   tail -50 /tmp/ella-xcodebuild-archive.log
   exit 1
 fi
 log "Archive succeeded: $ARCHIVE_PATH"
 
-# ── Step 8: Export IPA ────────────────────────────────────────
-log "Exporting IPA"
-mkdir -p "$IPA_DIR"
-xcodebuild -exportArchive \
-  -archivePath "$ARCHIVE_PATH" \
-  -exportPath "$IPA_DIR" \
-  -exportOptionsPlist "$APP_DIR/ExportOptions.plist" \
-  -allowProvisioningUpdates \
-  -authenticationKeyPath "$ASC_KEY_PATH" \
-  -authenticationKeyID "$ASC_KEY_ID" \
-  -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-  2>&1 | tee /tmp/ella-xcodebuild-export.log | grep -E "(error:|EXPORT|ipa|IPA|succeeded)" || true
+APP_BUNDLE="$ARCHIVE_PATH/Products/Applications/Ella Care.app"
 
-IPA_FILE=$(find "$IPA_DIR" -name "*.ipa" -type f | head -1)
-if [ -z "$IPA_FILE" ]; then
-  echo "ERROR: IPA export failed. Full log at /tmp/ella-xcodebuild-export.log"
-  tail -30 /tmp/ella-xcodebuild-export.log
+# ── Step 7: Embed provisioning profile ───────────────────────
+log "Embedding provisioning profile"
+cp "$PROFILE" "$APP_BUNDLE/embedded.mobileprovision"
+
+# ── Step 8: Sign with rcodesign ──────────────────────────────
+log "Signing with rcodesign (Distribution)"
+"$RCODESIGN" sign \
+  --pem-source "$PRIVKEY_PEM" \
+  --pem-source "$CERT_PEM" \
+  -e "$ENTITLEMENTS" \
+  "$APP_BUNDLE"
+
+# Verify
+AUTHORITY=$(codesign -dvvv "$APP_BUNDLE" 2>&1 | grep "^Authority=" | head -1)
+log "Signature: $AUTHORITY"
+if [[ "$AUTHORITY" != *"Apple Distribution"* ]]; then
+  echo "ERROR: App not signed with Distribution cert"
   exit 1
 fi
-echo "IPA: $IPA_FILE"
 
-# ── Step 9: Upload to TestFlight ──────────────────────────────
+# ── Step 9: Package IPA ──────────────────────────────────────
+log "Packaging IPA"
+rm -rf "$PAYLOAD_DIR"
+mkdir -p "$PAYLOAD_DIR/Payload"
+cp -r "$APP_BUNDLE" "$PAYLOAD_DIR/Payload/"
+mkdir -p "$BUILD_DIR"
+(cd "$PAYLOAD_DIR" && zip -qr "$IPA_PATH" Payload/)
+rm -rf "$PAYLOAD_DIR"
+log "IPA: $IPA_PATH ($(du -sh "$IPA_PATH" | cut -f1))"
+
+# ── Step 10: Upload to TestFlight ─────────────────────────────
 if [ "${SKIP_UPLOAD:-0}" = "1" ]; then
   log "Skipping upload (SKIP_UPLOAD=1)"
-  echo "IPA ready at: $IPA_FILE"
+  echo "IPA ready at: $IPA_PATH"
   exit 0
 fi
 
-log "Uploading to TestFlight via fastlane"
-cd "$IOS_DIR"
-fastlane upload_testflight ipa:"$IPA_FILE"
+log "Uploading to TestFlight"
+xcrun altool --upload-app \
+  -f "$IPA_PATH" \
+  -t ios \
+  --apiKey "$ASC_KEY_ID" \
+  --apiIssuer "$ASC_ISSUER_ID" \
+  2>&1
 
 log "Done! Build uploaded to TestFlight."
