@@ -168,7 +168,7 @@ class V2VClient {
           AVAudioSessionCategoryOptions.allowBluetooth |
           AVAudioSessionCategoryOptions.allowBluetoothA2dp |
           AVAudioSessionCategoryOptions.allowAirPlay,
-      avAudioSessionMode: AVAudioSessionMode.defaultMode,
+      avAudioSessionMode: AVAudioSessionMode.voiceChat,
       avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
       avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
     ));
