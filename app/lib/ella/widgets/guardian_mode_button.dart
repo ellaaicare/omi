@@ -86,6 +86,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
       case GuardianModeState.idle:
         return Colors.grey.shade700;
       case GuardianModeState.active:
+      case GuardianModeState.paused:
         return EllaColors.primary;
       case GuardianModeState.error:
         return Colors.red.shade600;
@@ -97,6 +98,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
       case GuardianModeState.idle:
         return Icons.shield_outlined;
       case GuardianModeState.active:
+      case GuardianModeState.paused:
         return Icons.shield;
       case GuardianModeState.error:
         return Icons.warning;
@@ -108,6 +110,8 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
       case GuardianModeState.idle:
         return 'Guardian Mode OFF';
       case GuardianModeState.active:
+        return 'Guardian Mode ON';
+      case GuardianModeState.paused:
         return 'Guardian Mode ON';
       case GuardianModeState.error:
         return 'Guardian Mode Error';
