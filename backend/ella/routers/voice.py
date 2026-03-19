@@ -1127,11 +1127,25 @@ def _get_allowed_sources(agent_role: str, requested_sources: list = None) -> dic
 
 def _validate_agent_uid(agent_id: str, uid: str) -> bool:
     """Verify the agent_id is plausibly associated with this uid.
-    Agent IDs follow pattern: ella-{type}-{userId} or ella-{userId}.
-    For now, basic non-empty check — full validation would query postgres."""
+    Agent IDs follow patterns: ella-{userId}, ella-{type}-{userId},
+    ella-cg-{userId}, ella-scanner-{userId}. Also accepts direct API
+    calls (no agent_id) as trusted."""
     if not agent_id:
         return True  # No agent_id means direct API call (trusted)
-    return bool(agent_id)
+    if not uid:
+        return False
+    # Agent IDs should contain the uid as a suffix component
+    # Patterns: ella-{uid}, ella-user-{uid}, ella-cg-{uid}, ella-scanner-{uid}
+    parts = agent_id.split("-")
+    if len(parts) < 2:
+        return False
+    # The uid should appear as the last segment(s) of the agent_id
+    if agent_id.endswith(uid):
+        return True
+    # Also accept if uid appears anywhere in the agent_id (for flexibility)
+    if uid in agent_id:
+        return True
+    return False
 
 
 def _keyword_score(text: str, terms: list) -> int:
@@ -1541,13 +1555,14 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
                 limit * 5,  # Fetch more for keyword filtering
             )
         else:
-            # Caregiver "full": all escalation summaries (escalated only for privacy)
+            # Caregiver "full": all scanner events (not just escalated)
+            # Caregivers need full visibility into safety monitoring patterns
             rows = await pool.fetch(
                 """
                 SELECT id, stage, category, urgency, transcript_preview,
                        result, escalated, created_at
                 FROM scanner_logs
-                WHERE uid = $1 AND escalated = true
+                WHERE uid = $1
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
