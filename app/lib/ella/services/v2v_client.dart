@@ -161,7 +161,7 @@ class V2VClient {
           AVAudioSessionCategoryOptions.allowBluetooth |
           AVAudioSessionCategoryOptions.allowBluetoothA2dp |
           AVAudioSessionCategoryOptions.allowAirPlay,
-      avAudioSessionMode: AVAudioSessionMode.voiceChat,
+      avAudioSessionMode: AVAudioSessionMode.defaultMode,
       avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
       avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
     ));
@@ -293,6 +293,7 @@ class V2VClient {
     // Play with just_audio
     try {
       _isPlaying = true;
+      await _audioPlayer.setVolume(1.0);
       await _audioPlayer.setFilePath(wavPath);
       await _audioPlayer.play();
       Logger.debug('[V2V] Playback started');

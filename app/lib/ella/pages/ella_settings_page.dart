@@ -12,7 +12,10 @@ import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
+import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
+import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
@@ -32,6 +35,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   List<Caregiver> _caregivers = [];
   String? _emergencyContactId;
   String _appVersion = '';
+  GuardianModeInfo? _guardianMode;
 
   @override
   void initState() {
@@ -47,16 +51,23 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
-      final caregivers = await caregiver_api.getCaregivers();
-      final emergencyId = await caregiver_api.getEmergencyContactId();
+      final results = await Future.wait([
+        caregiver_api.getCaregivers(),
+        caregiver_api.getEmergencyContactId(),
+        guardian_api.getGuardianMode(),
+      ]);
+      final caregivers = results[0] as List<Caregiver>;
+      final emergencyId = results[1] as String?;
+      final guardianMode = results[2] as GuardianModeInfo?;
       if (mounted) {
         setState(() {
           _caregivers = caregivers;
           _emergencyContactId = emergencyId;
+          if (guardianMode != null) _guardianMode = guardianMode;
         });
       }
     } catch (e) {
-      Logger.debug('Failed to load caregivers: $e');
+      Logger.debug('Failed to load settings data: $e');
     }
   }
 
@@ -163,6 +174,25 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                   MaterialPageRoute(builder: (context) => const EllaProfilePage()),
                 );
                 setState(() {}); // refresh after profile edits
+              },
+            ),
+            const SizedBox(height: 8),
+
+            // Guardian Mode row
+            EllaSettingsRow(
+              icon: Icons.shield,
+              iconColor: _guardianMode?.color ?? EllaColors.primary,
+              iconBgColor: _guardianMode?.color ?? EllaColors.primary,
+              title: 'Guardian Mode',
+              subtitle: _guardianMode != null ? _guardianMode!.displayName : 'Loading…',
+              onTap: () async {
+                final updated = await Navigator.push<GuardianModeKey>(
+                  context,
+                  MaterialPageRoute(builder: (context) => const GuardianModePage()),
+                );
+                if (updated != null && mounted) {
+                  _loadData(); // refresh mode display
+                }
               },
             ),
 

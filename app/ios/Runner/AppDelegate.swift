@@ -217,6 +217,19 @@ extension FlutterError: Error {}
       }
 
       print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
+
+      // When headphones or Bluetooth are removed, iOS defaults .playAndRecord back to the
+      // earpiece. Override to the loudspeaker so guardian audio stays audible.
+      if reason == .oldDeviceUnavailable {
+          DispatchQueue.main.async {
+              do {
+                  try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+                  print("AppDelegate: Forced output to loudspeaker after device removal")
+              } catch {
+                  print("AppDelegate: Failed to override output port: \(error)")
+              }
+          }
+      }
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
