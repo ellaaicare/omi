@@ -194,16 +194,17 @@ extension FlutterError: Error {}
 
       switch type {
       case .began:
-          print("AppDelegate: Audio session interrupted")
+          print("AppDelegate: Audio session interrupted — pausing guardian")
+          GuardianModeManager.shared.pause()
       case .ended:
-          print("AppDelegate: Audio session interruption ended")
-          // Reactivate audio session
+          print("AppDelegate: Audio session interruption ended — resuming guardian")
           do {
               try AVAudioSession.sharedInstance().setActive(true)
               print("AppDelegate: Audio session reactivated after interruption")
           } catch {
               print("AppDelegate: Failed to reactivate audio session: \(error)")
           }
+          GuardianModeManager.shared.resume()
       @unknown default:
           break
       }
@@ -763,6 +764,14 @@ extension AppDelegate: WCSessionDelegate {
         case "stop":
             GuardianModeManager.shared.stop()
             result(["status": "idle"])
+
+        case "pause":
+            GuardianModeManager.shared.pause()
+            result(["status": "paused"])
+
+        case "resume":
+            GuardianModeManager.shared.resume()
+            result(["status": GuardianModeManager.shared.getState()])
 
         case "getState":
             let state = GuardianModeManager.shared.getState()

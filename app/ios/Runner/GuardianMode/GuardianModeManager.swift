@@ -15,6 +15,7 @@ class GuardianModeManager: NSObject {
 
     private var audioPlayer: AVQueuePlayer?
     private var isActive = false
+    private var isPaused = false
     private let queue = DispatchQueue(label: "com.ella.guardianmode")
     private var cancellables = Set<AnyCancellable>()
     private var healthTimer: DispatchSourceTimer?
@@ -112,6 +113,7 @@ class GuardianModeManager: NSObject {
             audioPlayer = nil
             cancellables.removeAll()
             isActive = false
+            isPaused = false
 
             let rate = totalInjections > 0
                 ? String(format: "%.1f%%", Double(successfulInjections) / Double(totalInjections) * 100)
@@ -122,10 +124,36 @@ class GuardianModeManager: NSObject {
         }
     }
 
+    /// Pause Guardian Mode — suspends audio and polling without tearing down the queue.
+    /// Safe to call when already paused or stopped.
+    func pause() {
+        queue.sync {
+            guard isActive, !isPaused else { return }
+            isPaused = true
+            audioPlayer?.pause()
+            stopHealthMonitor()
+            GuardianModePollingService.shared.stopPolling()
+            NSLog("GuardianMode: Paused (phone call or active voice session)")
+        }
+    }
+
+    /// Resume Guardian Mode after a pause. No-op if not paused.
+    func resume() {
+        queue.sync {
+            guard isActive, isPaused else { return }
+            isPaused = false
+            audioPlayer?.play()
+            startHealthMonitor()
+            GuardianModePollingService.shared.startPolling()
+            NSLog("GuardianMode: Resumed")
+        }
+    }
+
     /// Get current state
     func getState() -> String {
         return queue.sync {
-            return isActive ? "active" : "idle"
+            if !isActive { return "idle" }
+            return isPaused ? "paused" : "active"
         }
     }
 
@@ -200,8 +228,8 @@ class GuardianModeManager: NSObject {
         let depth = player.items().count
         let rate = player.rate
 
-        // Detect stalled player
-        if rate == 0 && isActive {
+        // Detect stalled player (skip if intentionally paused)
+        if rate == 0 && isActive && !isPaused {
             NSLog("GuardianMode: HEALTH WARNING - Player stalled, restarting playback")
             player.play()
         }

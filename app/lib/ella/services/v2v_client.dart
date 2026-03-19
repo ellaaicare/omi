@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -71,7 +72,10 @@ class V2VClient {
       return false;
     }
 
-    // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
+    // 2. Pause guardian so it doesn't mix with or trigger on V2V audio
+    await GuardianModeService().pause();
+
+    // 3. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     await _configureAudioSession();
 
     // 3. Connect WebSocket
@@ -136,6 +140,9 @@ class V2VClient {
       await _audioPlayer.stop();
       await _audioPlayer.dispose();
     } catch (_) {}
+
+    // Resume guardian now that V2V session is closed
+    await GuardianModeService().resume();
   }
 
   /// Interrupt current playback (e.g., user started speaking).

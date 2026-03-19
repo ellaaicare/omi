@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 enum GuardianModeState {
   idle,
   active,
+  paused,
   error,
 }
 
@@ -54,6 +55,29 @@ class GuardianModeService {
       print('GuardianMode: Error starting: $e');
       _updateState(GuardianModeState.error);
       rethrow;
+    }
+  }
+
+  /// Pause Guardian Mode — suspends audio and polling without stopping.
+  /// No-op if not active or already paused.
+  Future<void> pause() async {
+    if (_currentState != GuardianModeState.active) return;
+    try {
+      await _channel.invokeMethod('pause');
+      _updateState(GuardianModeState.paused);
+    } catch (e) {
+      print('GuardianMode: Error pausing: $e');
+    }
+  }
+
+  /// Resume Guardian Mode after a pause. No-op if not paused.
+  Future<void> resume() async {
+    if (_currentState != GuardianModeState.paused) return;
+    try {
+      await _channel.invokeMethod('resume');
+      _updateState(GuardianModeState.active);
+    } catch (e) {
+      print('GuardianMode: Error resuming: $e');
     }
   }
 

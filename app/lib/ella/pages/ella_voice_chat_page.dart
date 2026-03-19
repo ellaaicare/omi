@@ -15,6 +15,7 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
@@ -100,6 +101,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void initState() {
     super.initState();
+    // Pause guardian so it doesn't mix with or trigger on voice chat audio
+    GuardianModeService().pause();
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
@@ -193,6 +196,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
     _v2vClient?.disconnect();
     _v2vClient = null;
+    // Resume guardian now that voice chat is closed
+    GuardianModeService().resume();
     super.dispose();
   }
 
