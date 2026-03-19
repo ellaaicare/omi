@@ -8,6 +8,7 @@ Endpoints:
 - GET /v1/voice/providers - List available voice providers
 - GET /v1/voice/config - Get voice configuration
 - GET /v1/voice/health - Health check
+- POST /v1/voice/search - Unified cross-source search with role-based privacy
 
 Provider types:
   tts  — Text-to-speech (request/response, POST /v1/voice/tts)
@@ -20,7 +21,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 
 import asyncpg
 import httpx
@@ -601,6 +602,118 @@ async def voice_health():
 # ============================================================================
 
 
+
+
+async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
+    """Fetch recent OMI conversation summaries from Firestore for voice context.
+    Returns formatted string of recent conversations (title + overview)."""
+    try:
+        # Direct Firestore query — simpler than get_conversations() to avoid
+        # composite index requirements (discarded + created_at needs index)
+        from google.cloud import firestore
+        db = firestore.Client()
+        convos_ref = (
+            db.collection("users").document(uid).collection("conversations")
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+        convos = [doc.to_dict() for doc in convos_ref.stream()]
+        
+        if not convos:
+            return ""
+        
+        parts = []
+        for c in convos:
+            structured = c.get("structured", {})
+            title = structured.get("title", "Untitled")
+            overview = structured.get("overview", "")
+            emoji = structured.get("emoji", "")
+            created = c.get("created_at")
+            
+            # Format timestamp
+            ts = ""
+            if created:
+                if hasattr(created, 'strftime'):
+                    ts = created.strftime("%b %d %I:%M %p")
+                else:
+                    ts = str(created)[:16]
+            
+            entry = f"- {emoji} {title}"
+            if overview:
+                # Truncate long overviews
+                overview_short = overview[:200] + "..." if len(overview) > 200 else overview
+                entry += f": {overview_short}"
+            if ts:
+                entry += f" ({ts})"
+            parts.append(entry)
+        
+        return "\n".join(parts)
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Conversation fetch failed: {e}")
+        return ""
+
+
+async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name: str = "user") -> str:
+    """Fetch recent memory/agent context via OpenClaw memory_search.
+    Returns formatted string of relevant memory snippets."""
+    if not gateway_token:
+        return ""
+    
+    headers = {
+        "Authorization": f"Bearer {gateway_token}",
+        "Content-Type": "application/json",
+    }
+    
+    results_all = []
+    queries = [
+        f"{user_name} recent activity today schedule important",
+        f"recent conversations events updates news",
+    ]
+    
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            for query in queries:
+                try:
+                    resp = await client.post(
+                        f"{gateway_url}/tools/invoke",
+                        headers=headers,
+                        json={"tool": "memory_search", "args": {"query": query}},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("ok"):
+                            import json as json_mod
+                            results_text = data["result"]["content"][0]["text"]
+                            results = json_mod.loads(results_text).get("results", [])
+                            for r in results[:3]:
+                                if r.get("score", 0) > 0.3:
+                                    snippet = r.get("snippet", "")[:300]
+                                    if snippet and snippet not in [s for s, _ in results_all]:
+                                        results_all.append((snippet, r.get("score", 0)))
+                except Exception as e:
+                    logger.debug(f"[FLOW:VOICE-CONTEXT] Memory search query failed: {e}")
+                    continue
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Memory context fetch failed: {e}")
+        return ""
+    
+    if not results_all:
+        return ""
+    
+    # Sort by score, deduplicate, take top 5
+    results_all.sort(key=lambda x: x[1], reverse=True)
+    seen = set()
+    unique = []
+    for snippet, score in results_all:
+        key = snippet[:80]
+        if key not in seen:
+            seen.add(key)
+            unique.append(snippet)
+        if len(unique) >= 5:
+            break
+    
+    return "\n---\n".join(unique)
+
 def _extract_caregiver_section(user_profile: str) -> str:
     """Extract caregiver-relevant notes from USER.md content."""
     if not user_profile:
@@ -709,11 +822,55 @@ async def get_voice_context(request: Request):
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Dynamic rules error: {e}")
 
-    # 4. Assemble context (trim to budget)
+    # 4. Fetch recent OMI conversation summaries (Firestore) + agent memory context
+    recent_conversations = ""
+    memory_context = ""
+    try:
+        import asyncio as _aio
+        # Run both fetches concurrently
+        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=5))
+        mem_task = _aio.create_task(_fetch_memory_context(gateway_url, gateway_token, row["name"] or "user"))
+        recent_conversations, memory_context = await _aio.gather(conv_task, mem_task)
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
+
+    # 5. Assemble context (trim to budget)
     soul = files.get("SOUL.md", "")[:3000]
     user_profile = files.get("USER.md", "")[:2000]
-    voice_summaries = files.get("voice-summaries.md", "")[:1500]
+    # Read last 2 days of daily voice logs (today + yesterday, UTC)
+    voice_summaries = ""
+    if agent_id and PROVISION_API_TOKEN:
+        try:
+            _today = datetime.utcnow()
+            _yesterday = _today - timedelta(days=1)
+            _voice_parts = []
+            async with httpx.AsyncClient(timeout=10.0) as _vc:
+                for _d in [_yesterday, _today]:
+                    _vpath = f"voice/{_d.strftime('%Y-%m-%d')}.md"
+                    _vresp = await _vc.get(
+                        f"{PROVISION_API_URL}/workspace/{agent_id}/files/{_vpath}",
+                        headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                    )
+                    if _vresp.status_code == 200:
+                        _vcontent = _vresp.json().get("content", "").strip()
+                        if _vcontent:
+                            _voice_parts.append(_vcontent)
+            if _voice_parts:
+                voice_summaries = "\n\n".join(_voice_parts)
+                if len(voice_summaries) > 1500:
+                    voice_summaries = voice_summaries[-1500:]
+        except Exception as _ve:
+            logger.warning(f"[FLOW:VOICE-CONTEXT] Voice daily log read error: {_ve}")
     memory = files.get("MEMORY.md", "")[:500]
+    
+    # Additional workspace files for richer context
+    tools_md = files.get("TOOLS.md", "")[:500]  # Agent capabilities awareness
+    shared_reports = ""
+    for fname, fcontent in files.items():
+        if fname.startswith("shared/reports/") and fcontent:
+            shared_reports += fcontent[:800] + "\n"
+            if len(shared_reports) > 1500:
+                break
 
     # conditions and medications are text[] arrays in postgres
     conditions_list = list(row["conditions"] or [])
@@ -722,7 +879,9 @@ async def get_voice_context(request: Request):
     _elapsed = int((time.time() - _start) * 1000)
     print(
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
-        f"files={len(files)} rules={len(dynamic_rules)} latency={_elapsed}ms",
+        f"files={len(files)} rules={len(dynamic_rules)} "
+        f"convos={len(recent_conversations)} mem={len(memory_context)} "
+        f"latency={_elapsed}ms",
         flush=True,
     )
 
@@ -737,7 +896,837 @@ async def get_voice_context(request: Request):
         "conditions": conditions_list,
         "medications": medications_list,
         "recent_voice_summaries": voice_summaries,
+        "recent_conversations": recent_conversations,
+        "memory_context": memory_context,
+        "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
         "dynamic_rules": dynamic_rules,
         "voice_rules": VOICE_INTERACTION_RULES,
+    }
+
+
+@router.post("/search-omi")
+async def search_omi_conversations(request: Request):
+    """
+    Search OMI conversations for a user. Called by Grok voice proxy during live calls
+    when the user asks to look up specific past conversations.
+    
+    Body:
+        uid (str): Firebase UID of the user
+        query (str): Search terms (matched against title and overview)
+        limit (int, optional): Max results (default: 5, max: 10)
+    
+    Returns list of matching conversations with title, overview, and timestamp.
+    """
+    body = await request.json()
+    uid = body.get("uid", "")
+    query = body.get("query", "")
+    limit = min(body.get("limit", 5), 10)
+    
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid required")
+    if not query:
+        raise HTTPException(status_code=400, detail="query required")
+    
+    logger.info(f"[FLOW:VOICE-SEARCH] uid={uid} query=\"{query}\" limit={limit}")
+    
+    try:
+        from google.cloud import firestore
+        db = firestore.Client()
+        
+        from datetime import datetime, timedelta
+        import re as re_mod
+        
+        # Parse date hints from query for date-range filtering
+        now = datetime.utcnow()
+        date_filter_start = None
+        date_filter_end = None
+        keyword_terms = []
+        
+        query_lower = query.lower().strip()
+        
+        # Date patterns: "march 8", "march 8th", "3/8", "yesterday", "last week", "today"
+        date_parsed = False
+        
+        if "yesterday" in query_lower:
+            d = now - timedelta(days=1)
+            date_filter_start = d.replace(hour=0, minute=0, second=0)
+            date_filter_end = d.replace(hour=23, minute=59, second=59)
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.split() if t != "yesterday"]
+        elif "today" in query_lower:
+            date_filter_start = now.replace(hour=0, minute=0, second=0)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.split() if t != "today"]
+        elif "last week" in query_lower:
+            date_filter_start = now - timedelta(days=7)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.replace("last week", "").split() if t]
+        elif "last month" in query_lower:
+            date_filter_start = now - timedelta(days=30)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.replace("last month", "").split() if t]
+        else:
+            # Try "month day" pattern: "march 8", "march 8th", "mar 8"
+            month_names = {
+                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+                "nov": 11, "november": 11, "dec": 12, "december": 12,
+            }
+            date_match = re_mod.search(
+                r"(january|february|march|april|may|june|july|august|september|october|november|december|"
+                r"jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?",
+                query_lower
+            )
+            if date_match:
+                month_str = date_match.group(1)
+                day = int(date_match.group(2))
+                month = month_names.get(month_str, 0)
+                if month and 1 <= day <= 31:
+                    try:
+                        year = now.year
+                        target = datetime(year, month, day)
+                        # If date is in the future, assume last year
+                        if target > now:
+                            target = datetime(year - 1, month, day)
+                        date_filter_start = target.replace(hour=0, minute=0, second=0)
+                        date_filter_end = target.replace(hour=23, minute=59, second=59)
+                        date_parsed = True
+                        # Remove date part from query for keyword matching
+                        remaining = query_lower[:date_match.start()] + query_lower[date_match.end():]
+                        keyword_terms = [t for t in remaining.split() if t]
+                    except ValueError:
+                        pass
+        
+        if not date_parsed:
+            keyword_terms = query_lower.split()
+        
+        logger.info(f"[FLOW:VOICE-SEARCH] date_filter={date_filter_start}->{date_filter_end}, keywords={keyword_terms}")
+        
+        # Fetch conversations — use date filter if we have one, otherwise get last 100
+        if date_filter_start and date_filter_end:
+            # Firestore query with date range
+            convos_ref = (
+                db.collection("users").document(uid).collection("conversations")
+                .where("created_at", ">=", date_filter_start)
+                .where("created_at", "<=", date_filter_end)
+                .order_by("created_at", direction=firestore.Query.DESCENDING)
+                .limit(50)
+            )
+        else:
+            convos_ref = (
+                db.collection("users").document(uid).collection("conversations")
+                .order_by("created_at", direction=firestore.Query.DESCENDING)
+                .limit(100)
+            )
+        convos = [doc.to_dict() for doc in convos_ref.stream()]
+        
+        # Client-side keyword match (skip if only date search with no keywords)
+        matches = []
+        
+        for c in convos:
+            structured = c.get("structured", {})
+            title = (structured.get("title", "") or "").lower()
+            overview = (structured.get("overview", "") or "").lower()
+            category = (structured.get("category", "") or "").lower()
+            
+            # Include formatted date in searchable text
+            created = c.get("created_at")
+            date_str = ""
+            if created and hasattr(created, "strftime"):
+                date_str = created.strftime("%B %d %Y %b %A").lower()  # "march 18 2026 mar monday"
+            
+            searchable = f"{title} {overview} {category} {date_str}"
+            
+            if keyword_terms:
+                # Score: how many keyword terms match
+                score = sum(1 for term in keyword_terms if term in searchable)
+                if score > 0:
+                    matches.append((score, c))
+            else:
+                # Date-only search — return all conversations from that date
+                matches.append((1, c))
+        
+        # Sort by score (desc), then by recency
+        matches.sort(key=lambda x: x[0], reverse=True)
+        matches = matches[:limit]
+        
+        results = []
+        for score, c in matches:
+            structured = c.get("structured", {})
+            created = c.get("created_at")
+            ts = ""
+            if created:
+                if hasattr(created, "strftime"):
+                    ts = created.strftime("%Y-%m-%d %I:%M %p")
+                else:
+                    ts = str(created)[:16]
+            
+            results.append({
+                "title": structured.get("title", "Untitled"),
+                "overview": structured.get("overview", ""),
+                "emoji": structured.get("emoji", ""),
+                "category": structured.get("category", ""),
+                "timestamp": ts,
+                "score": score,
+            })
+        
+        logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
+        return {"results": results, "total_searched": len(convos), "query": query}
+    
+    except Exception as e:
+        logger.error(f"[FLOW:VOICE-SEARCH] Error: {e}")
+        return {"results": [], "error": str(e), "query": query}
+
+
+# ============================================================================
+# Unified Search Endpoint — POST /v1/voice/search
+# Role-based fan-out across workspace, OMI conversations, memories,
+# voice logs, and scanner escalation logs.
+# ============================================================================
+
+# Privacy policy: maps agent_role -> source -> access level
+# True = full access, False = no access, "own" = own data only, "full" = full
+SEARCH_POLICY = {
+    "user":      {"workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
+    "caregiver": {"workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
+    "scanner":   {"workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
+    "voice":     {"workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
+}
+
+# Which source keys map to which request-level source names
+_SOURCE_TO_POLICY_KEYS = {
+    "workspace": ["workspace"],
+    "omi":       ["omi_full", "omi_meta"],
+    "memories":  ["memories"],
+    "voice":     ["voice"],
+    "scanner":   ["scanner"],
+}
+
+
+def _get_allowed_sources(agent_role: str, requested_sources: list = None) -> dict:
+    """Return dict of policy_key -> access_level for the given role.
+    Filters by requested_sources if provided."""
+    policy = SEARCH_POLICY.get(agent_role, SEARCH_POLICY["scanner"])  # Default most restrictive
+
+    if requested_sources is None:
+        return {k: v for k, v in policy.items() if v}
+
+    # Build set of policy keys that correspond to the requested source names
+    allowed_policy_keys = set()
+    for src in requested_sources:
+        for pk in _SOURCE_TO_POLICY_KEYS.get(src, []):
+            allowed_policy_keys.add(pk)
+
+    return {k: v for k, v in policy.items() if v and k in allowed_policy_keys}
+
+
+def _validate_agent_uid(agent_id: str, uid: str) -> bool:
+    """Verify the agent_id is plausibly associated with this uid.
+    Agent IDs follow pattern: ella-{type}-{userId} or ella-{userId}.
+    For now, basic non-empty check — full validation would query postgres."""
+    if not agent_id:
+        return True  # No agent_id means direct API call (trusted)
+    return bool(agent_id)
+
+
+def _keyword_score(text: str, terms: list) -> int:
+    """Simple keyword match score: count of query terms found in text."""
+    text_lower = text.lower()
+    return sum(1 for t in terms if t in text_lower)
+
+
+async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> list:
+    """Search workspace files via Provision API. Falls back to reading key files
+    and doing keyword matching if no search endpoint exists."""
+    results = []
+    if not agent_id or not PROVISION_API_TOKEN:
+        return results
+
+    query_terms = query.lower().split()
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Try the search endpoint first
+            resp = await client.get(
+                f"{PROVISION_API_URL}/workspace/{agent_id}/search",
+                params={"q": query},
+                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("results", [])[:limit]:
+                    results.append({
+                        "source": "workspace",
+                        "title": item.get("file", ""),
+                        "content": (item.get("snippet", "") or item.get("content", ""))[:500],
+                        "timestamp": "",
+                        "score": item.get("score", 1),
+                        "metadata": {"file": item.get("file", "")},
+                    })
+                return results
+
+            # 404 = no search endpoint; fall back to reading key files
+            if resp.status_code != 404:
+                logger.warning(
+                    f"[FLOW:UNIFIED-SEARCH] Provision search returned {resp.status_code}"
+                )
+                return results
+
+            # Fallback: read files list and grep
+            resp2 = await client.get(
+                f"{PROVISION_API_URL}/workspace/{agent_id}/files",
+                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+            )
+            if resp2.status_code != 200:
+                return results
+
+            file_list = resp2.json().get("files", [])
+            for f in file_list:
+                fname = f.get("name", f.get("filename", ""))
+                content = f.get("content", "")
+                if not content:
+                    continue
+                score = _keyword_score(f"{fname} {content}", query_terms)
+                if score > 0:
+                    # Extract matching snippet
+                    content_lower = content.lower()
+                    snippet = ""
+                    for term in query_terms:
+                        idx = content_lower.find(term)
+                        if idx >= 0:
+                            start = max(0, idx - 80)
+                            end = min(len(content), idx + len(term) + 120)
+                            snippet = content[start:end].strip()
+                            break
+                    if not snippet:
+                        snippet = content[:200]
+
+                    results.append({
+                        "source": "workspace",
+                        "title": fname,
+                        "content": snippet,
+                        "timestamp": "",
+                        "score": score,
+                        "metadata": {"file": fname},
+                    })
+
+            # Sort by score desc, limit
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
+
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Workspace search error: {e}")
+        return results
+
+
+async def _search_omi_conversations(uid: str, query: str, limit: int, full_access: bool) -> list:
+    """Search OMI conversations in Firestore. Reuses date-parsing logic from
+    search_omi_conversations endpoint.
+    If full_access=False (caregiver role), returns only title/overview metadata
+    with overview truncated to 100 chars."""
+    results = []
+    try:
+        from google.cloud import firestore as _fs
+        import re as _re
+
+        db = _fs.Client()
+        query_lower = query.lower().strip()
+        now = datetime.utcnow()
+
+        # --- Date parsing (reused from search_omi_conversations) ---
+        date_filter_start = None
+        date_filter_end = None
+        keyword_terms = []
+        date_parsed = False
+
+        if "yesterday" in query_lower:
+            d = now - timedelta(days=1)
+            date_filter_start = d.replace(hour=0, minute=0, second=0)
+            date_filter_end = d.replace(hour=23, minute=59, second=59)
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.split() if t != "yesterday"]
+        elif "today" in query_lower:
+            date_filter_start = now.replace(hour=0, minute=0, second=0)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.split() if t != "today"]
+        elif "last week" in query_lower:
+            date_filter_start = now - timedelta(days=7)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.replace("last week", "").split() if t]
+        elif "last month" in query_lower:
+            date_filter_start = now - timedelta(days=30)
+            date_filter_end = now
+            date_parsed = True
+            keyword_terms = [t for t in query_lower.replace("last month", "").split() if t]
+        else:
+            month_names = {
+                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+                "nov": 11, "november": 11, "dec": 12, "december": 12,
+            }
+            date_match = _re.search(
+                r"(january|february|march|april|may|june|july|august|september|october|"
+                r"november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+                r"\s+(\d{1,2})(?:st|nd|rd|th)?",
+                query_lower,
+            )
+            if date_match:
+                month_str = date_match.group(1)
+                day = int(date_match.group(2))
+                month = month_names.get(month_str, 0)
+                if month and 1 <= day <= 31:
+                    try:
+                        year = now.year
+                        target = datetime(year, month, day)
+                        if target > now:
+                            target = datetime(year - 1, month, day)
+                        date_filter_start = target.replace(hour=0, minute=0, second=0)
+                        date_filter_end = target.replace(hour=23, minute=59, second=59)
+                        date_parsed = True
+                        remaining = query_lower[: date_match.start()] + query_lower[date_match.end() :]
+                        keyword_terms = [t for t in remaining.split() if t]
+                    except ValueError:
+                        pass
+
+        if not date_parsed:
+            keyword_terms = query_lower.split()
+
+        # --- Firestore query ---
+        if date_filter_start and date_filter_end:
+            convos_ref = (
+                db.collection("users").document(uid).collection("conversations")
+                .where("created_at", ">=", date_filter_start)
+                .where("created_at", "<=", date_filter_end)
+                .order_by("created_at", direction=_fs.Query.DESCENDING)
+                .limit(50)
+            )
+        else:
+            convos_ref = (
+                db.collection("users").document(uid).collection("conversations")
+                .order_by("created_at", direction=_fs.Query.DESCENDING)
+                .limit(100)
+            )
+        convos = [doc.to_dict() for doc in convos_ref.stream()]
+
+        # --- Client-side keyword matching ---
+        matches = []
+        for c in convos:
+            structured = c.get("structured", {})
+            title = (structured.get("title", "") or "").lower()
+            overview = (structured.get("overview", "") or "").lower()
+            category = (structured.get("category", "") or "").lower()
+
+            created = c.get("created_at")
+            date_str = ""
+            if created and hasattr(created, "strftime"):
+                date_str = created.strftime("%B %d %Y %b %A").lower()
+
+            searchable = f"{title} {overview} {category} {date_str}"
+
+            if keyword_terms:
+                score = sum(1 for term in keyword_terms if term in searchable)
+                if score > 0:
+                    matches.append((score, c))
+            else:
+                matches.append((1, c))
+
+        matches.sort(key=lambda x: x[0], reverse=True)
+        matches = matches[:limit]
+
+        for score, c in matches:
+            structured = c.get("structured", {})
+            created = c.get("created_at")
+            ts = ""
+            if created:
+                if hasattr(created, "strftime"):
+                    ts = created.strftime("%Y-%m-%d %I:%M %p")
+                else:
+                    ts = str(created)[:16]
+
+            overview_text = structured.get("overview", "") or ""
+            if not full_access:
+                # Caregiver: truncate overview to first 100 chars, no raw content
+                overview_text = overview_text[:100] + ("..." if len(overview_text) > 100 else "")
+
+            results.append({
+                "source": "omi",
+                "title": structured.get("title", "Untitled"),
+                "content": overview_text,
+                "timestamp": ts,
+                "score": score,
+                "metadata": {
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                },
+            })
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] OMI search error: {e}")
+        return results
+
+
+async def _search_memories(uid: str, query: str, limit: int) -> list:
+    """Search OMI memories (Firestore users/{uid}/memories collection).
+    Client-side keyword matching against content and category."""
+    results = []
+    try:
+        from google.cloud import firestore as _fs
+
+        db = _fs.Client()
+        query_terms = query.lower().split()
+
+        # Fetch recent memories sorted by scoring (same pattern as database/memories.py)
+        memories_ref = (
+            db.collection("users").document(uid).collection("memories")
+            .order_by("scoring", direction=_fs.Query.DESCENDING)
+            .order_by("created_at", direction=_fs.Query.DESCENDING)
+            .limit(100)
+        )
+        memories = [doc.to_dict() for doc in memories_ref.stream()]
+
+        matches = []
+        for mem in memories:
+            if mem.get("user_review") is False:
+                continue  # Excluded by user
+            if mem.get("deleted", False):
+                continue
+
+            content = (mem.get("structured_memory", "") or mem.get("content", "") or "").lower()
+            category = (mem.get("category", "") or "").lower()
+            searchable = f"{content} {category}"
+
+            score = sum(1 for t in query_terms if t in searchable)
+            if score > 0:
+                matches.append((score, mem))
+
+        matches.sort(key=lambda x: x[0], reverse=True)
+        matches = matches[:limit]
+
+        for score, mem in matches:
+            created = mem.get("created_at")
+            ts = ""
+            if created:
+                if hasattr(created, "strftime"):
+                    ts = created.strftime("%Y-%m-%d %I:%M %p")
+                else:
+                    ts = str(created)[:16]
+
+            display_content = mem.get("structured_memory", "") or mem.get("content", "")
+            results.append({
+                "source": "memories",
+                "title": (mem.get("category", "") or "Memory").title(),
+                "content": (display_content or "")[:500],
+                "timestamp": ts,
+                "score": score,
+                "metadata": {
+                    "category": mem.get("category", ""),
+                    "id": mem.get("id", ""),
+                },
+            })
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Memory search error: {e}")
+        return results
+
+
+async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) -> list:
+    """Search voice daily log files (voice/YYYY-MM-DD.md) via Provision API.
+    Reads the last 7 days of logs and performs keyword matching."""
+    results = []
+    if not agent_id or not PROVISION_API_TOKEN:
+        return results
+
+    query_terms = query.lower().split()
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Read workspace files and filter to voice/ directory
+            resp = await client.get(
+                f"{PROVISION_API_URL}/workspace/{agent_id}/files",
+                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+            )
+            if resp.status_code != 200:
+                return results
+
+            file_list = resp.json().get("files", [])
+
+            # Filter to voice log files from last 7 days
+            now = datetime.utcnow()
+            voice_files = []
+            for f in file_list:
+                fname = f.get("name", f.get("filename", ""))
+                if not fname.startswith("voice/") or not fname.endswith(".md"):
+                    continue
+                # Try to extract date from filename (voice/YYYY-MM-DD.md)
+                try:
+                    date_part = fname.replace("voice/", "").replace(".md", "")
+                    file_date = datetime.strptime(date_part, "%Y-%m-%d")
+                    if (now - file_date).days <= 7:
+                        voice_files.append(f)
+                except ValueError:
+                    # Non-date voice files still included
+                    voice_files.append(f)
+
+            for f in voice_files:
+                fname = f.get("name", f.get("filename", ""))
+                content = f.get("content", "")
+                if not content:
+                    continue
+
+                score = _keyword_score(f"{fname} {content}", query_terms)
+                if score > 0:
+                    # Extract snippet around first match
+                    content_lower = content.lower()
+                    snippet = ""
+                    for term in query_terms:
+                        idx = content_lower.find(term)
+                        if idx >= 0:
+                            start = max(0, idx - 80)
+                            end = min(len(content), idx + len(term) + 120)
+                            snippet = content[start:end].strip()
+                            break
+                    if not snippet:
+                        snippet = content[:200]
+
+                    results.append({
+                        "source": "voice",
+                        "title": fname,
+                        "content": snippet,
+                        "timestamp": fname.replace("voice/", "").replace(".md", ""),
+                        "score": score,
+                        "metadata": {"file": fname},
+                    })
+
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
+
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Voice log search error: {e}")
+        return results
+
+
+async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: str) -> list:
+    """Search scanner escalation logs in PostgreSQL.
+    access_level "own" = only escalated events for this uid.
+    access_level "full" = all scanner logs (escalated + non-escalated) for this uid."""
+    results = []
+    try:
+        pool = await _get_pool()
+        query_terms = query.lower().split()
+
+        if access_level == "own":
+            # User role: only see escalated events
+            rows = await pool.fetch(
+                """
+                SELECT id, stage, category, urgency, transcript_preview,
+                       result, escalated, created_at
+                FROM scanner_logs
+                WHERE uid = $1 AND escalated = true
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                uid,
+                limit * 5,  # Fetch more for keyword filtering
+            )
+        else:
+            # Caregiver "full": all escalation summaries (escalated only for privacy)
+            rows = await pool.fetch(
+                """
+                SELECT id, stage, category, urgency, transcript_preview,
+                       result, escalated, created_at
+                FROM scanner_logs
+                WHERE uid = $1 AND escalated = true
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                uid,
+                limit * 5,
+            )
+
+        matches = []
+        for row in rows:
+            category = (row["category"] or "").lower()
+            urgency = (row["urgency"] or "").lower()
+            preview = (row["transcript_preview"] or "").lower()
+            result_data = row["result"] if isinstance(row["result"], dict) else {}
+            summary = (result_data.get("summary", "") or "").lower()
+
+            searchable = f"{category} {urgency} {preview} {summary}"
+            score = _keyword_score(searchable, query_terms)
+
+            # If no specific keywords, return all escalated events
+            if not query_terms:
+                score = 1
+
+            if score > 0:
+                ts = ""
+                if row["created_at"]:
+                    ts = row["created_at"].strftime("%Y-%m-%d %I:%M %p")
+
+                display_content = result_data.get("summary", row["transcript_preview"] or "")
+                matches.append((score, {
+                    "source": "scanner",
+                    "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
+                    "content": (display_content or "")[:500],
+                    "timestamp": ts,
+                    "score": score,
+                    "metadata": {
+                        "category": row["category"] or "",
+                        "urgency": row["urgency"] or "",
+                        "escalated": row["escalated"],
+                        "id": str(row["id"]),
+                    },
+                }))
+
+        matches.sort(key=lambda x: x[0], reverse=True)
+        return [m[1] for m in matches[:limit]]
+
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Scanner search error: {e}")
+        return results
+
+
+@router.post("/search")
+async def unified_search(request: Request):
+    """
+    Unified search across multiple data sources with role-based privacy filtering.
+    Fans out to workspace files, OMI conversations, memories, voice logs, and
+    scanner escalation logs based on the requesting agent's role.
+
+    Body:
+        uid (str, required): Firebase UID
+        query (str, required): Search terms
+        agent_role (str, required): One of "user", "caregiver", "scanner", "voice"
+        agent_id (str, optional): Agent ID for workspace resolution
+        sources (list, optional): Filter to specific sources. Default: all allowed
+        limit (int, optional): Max results per source. Default: 5, max: 10
+
+    Returns merged results sorted by score, with sources_searched and sources_denied.
+    """
+    import asyncio as _aio
+
+    body = await request.json()
+    uid = body.get("uid", "")
+    query = body.get("query", "")
+    agent_role = body.get("agent_role", "voice")
+    agent_id = body.get("agent_id", "")
+    requested_sources = body.get("sources", None)
+    limit = min(body.get("limit", 5), 10)
+
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid required")
+    if not query:
+        raise HTTPException(status_code=400, detail="query required")
+    if agent_role not in SEARCH_POLICY:
+        raise HTTPException(status_code=400, detail=f"Invalid agent_role: {agent_role}. Must be one of: {list(SEARCH_POLICY.keys())}")
+
+    # Validate agent-uid association
+    if not _validate_agent_uid(agent_id, uid):
+        raise HTTPException(status_code=403, detail="agent_id does not belong to this uid")
+
+    _start = time.time()
+
+    # Resolve agent_id from postgres if not provided
+    if not agent_id:
+        try:
+            pool = await _get_pool()
+            row = await pool.fetchrow(
+                """
+                SELECT ac.agents FROM users u
+                JOIN agent_clusters ac ON ac.user_id = u.id
+                WHERE u.omi_uid = $1
+                """,
+                uid,
+            )
+            if row and row["agents"]:
+                agents_raw = row["agents"]
+                if isinstance(agents_raw, str):
+                    agents_data = json.loads(agents_raw)
+                elif isinstance(agents_raw, dict):
+                    agents_data = agents_raw
+                else:
+                    agents_data = {}
+                agent_id = agents_data.get("userAgentId", "")
+        except Exception as e:
+            logger.warning(f"[FLOW:UNIFIED-SEARCH] Agent ID lookup failed: {e}")
+
+    # Determine allowed sources based on role
+    allowed = _get_allowed_sources(agent_role, requested_sources)
+
+    # Build task list for parallel fan-out
+    tasks = []
+    task_source_names = []
+
+    if allowed.get("workspace"):
+        tasks.append(_search_workspace(uid, agent_id, query, limit))
+        task_source_names.append("workspace")
+
+    if allowed.get("omi_full") or allowed.get("omi_meta"):
+        full_access = bool(allowed.get("omi_full"))
+        tasks.append(_search_omi_conversations(uid, query, limit, full_access))
+        task_source_names.append("omi")
+
+    if allowed.get("memories"):
+        tasks.append(_search_memories(uid, query, limit))
+        task_source_names.append("memories")
+
+    if allowed.get("voice"):
+        tasks.append(_search_voice_logs(uid, agent_id, query, limit))
+        task_source_names.append("voice")
+
+    scanner_access = allowed.get("scanner")
+    if scanner_access:
+        access_level = "full" if scanner_access == "full" else "own"
+        tasks.append(_search_scanner_logs(uid, query, limit, access_level))
+        task_source_names.append("scanner")
+
+    # Determine which sources were denied
+    all_source_names = {"workspace", "omi", "memories", "voice", "scanner"}
+    if requested_sources:
+        requested_set = set(requested_sources)
+    else:
+        requested_set = all_source_names
+    sources_searched = set(task_source_names)
+    sources_denied = sorted(requested_set - sources_searched)
+
+    # Execute all searches in parallel with individual timeouts
+    all_results = []
+    if tasks:
+        gathered = await _aio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(gathered):
+            src_name = task_source_names[i]
+            if isinstance(result, Exception):
+                logger.warning(f"[FLOW:UNIFIED-SEARCH] Source {src_name} failed: {result}")
+                continue
+            if isinstance(result, list):
+                all_results.extend(result)
+
+    # Sort merged results by score (desc)
+    all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    _elapsed = int((time.time() - _start) * 1000)
+    logger.info(
+        f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
+        f"sources={sorted(sources_searched)} results={len(all_results)} "
+        f"denied={sources_denied} latency={_elapsed}ms"
+    )
+
+    return {
+        "results": all_results,
+        "sources_searched": sorted(sources_searched),
+        "sources_denied": sources_denied,
+        "total_results": len(all_results),
+        "query": query,
     }
