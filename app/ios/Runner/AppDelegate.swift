@@ -166,6 +166,24 @@ extension FlutterError: Error {}
     }
     print("AppDelegate: Guardian Mode MethodChannel registered")
 
+    // Debug Events MethodChannel
+    let debugEventsChannel = FlutterMethodChannel(
+        name: "com.ellaaicare.ella/debug_events",
+        binaryMessenger: controller.binaryMessenger
+    )
+    debugEventsChannel.setMethodCallHandler { (call, result) in
+        switch call.method {
+        case "getEvents":
+            result(DebugEventBuffer.shared.asFlutterList())
+        case "clearEvents":
+            DebugEventBuffer.shared.clear()
+            result(nil)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+    print("AppDelegate: Debug Events MethodChannel registered")
+
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }

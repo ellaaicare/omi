@@ -20,6 +20,58 @@ class GuardianModePollingService {
     struct PollResponse: Codable {
         let url: String?
         let id: String?
+        let priority: String?
+        let triggerType: String?
+        let message: String?
+        let metadata: AnyCodableDict?
+
+        enum CodingKeys: String, CodingKey {
+            case url, id, priority, message, metadata
+            case triggerType = "trigger_type"
+        }
+    }
+
+    // Minimal JSON dictionary decoder for metadata field
+    struct AnyCodableDict: Codable {
+        var dict: [String: Any] = [:]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let raw = try? container.decode([String: AnyCodableValue].self) {
+                dict = raw.mapValues { $0.value }
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(dict.mapValues { AnyCodableValue($0) })
+        }
+    }
+
+    struct AnyCodableValue: Codable {
+        let value: Any
+
+        init(_ value: Any) { self.value = value }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let v = try? c.decode(Bool.self)   { value = v; return }
+            if let v = try? c.decode(Int.self)    { value = v; return }
+            if let v = try? c.decode(Double.self) { value = v; return }
+            if let v = try? c.decode(String.self) { value = v; return }
+            value = ""
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.singleValueContainer()
+            switch value {
+            case let v as Bool:   try c.encode(v)
+            case let v as Int:    try c.encode(v)
+            case let v as Double: try c.encode(v)
+            case let v as String: try c.encode(v)
+            default: try c.encode("")
+            }
+        }
     }
 
     private var isPolling = false
@@ -50,7 +102,7 @@ class GuardianModePollingService {
         isPolling = false
     }
 
-    func pollForNewAudio() async throws -> (url: URL, id: String)? {
+    func pollForNewAudio() async throws -> PollResponse? {
         // Flutter shared_preferences stores with "flutter." prefix on iOS
         let uid = UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid") ?? "unknown"
         let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
@@ -77,10 +129,8 @@ class GuardianModePollingService {
 
         let pollResponse = try JSONDecoder().decode(PollResponse.self, from: data)
 
-        if let urlString = pollResponse.url,
-           let id = pollResponse.id,
-           let audioURL = URL(string: urlString) {
-            return (url: audioURL, id: id)
+        if pollResponse.url != nil || pollResponse.priority == "debug" {
+            return pollResponse
         }
 
         return nil
@@ -108,14 +158,23 @@ class GuardianModePollingService {
 
         do {
             if let result = try await pollForNewAudio() {
-                let audioURL = result.url
-                let eventId = result.id
-
                 consecutiveErrors = 0
-                NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                let eventId = result.id ?? "unknown"
 
-                // Inject via GuardianModeManager (handles pre-download + retry)
-                GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+                if result.priority == "debug" {
+                    // Route to debug buffer — never plays audio
+                    DebugEventBuffer.shared.add(
+                        id: result.id,
+                        triggerType: result.triggerType ?? "unknown",
+                        message: result.message ?? "",
+                        metadata: result.metadata?.dict ?? [:]
+                    )
+                } else if let urlString = result.url,
+                          let audioURL = URL(string: urlString) {
+                    NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                    // Inject via GuardianModeManager (handles pre-download + retry)
+                    GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+                }
             }
         } catch {
             consecutiveErrors += 1
