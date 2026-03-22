@@ -107,6 +107,7 @@ async def next_audio(uid: str):
                     WHEN 'urgent' THEN 0
                     WHEN 'normal' THEN 1
                     WHEN 'scheduled' THEN 2
+                    WHEN 'debug' THEN 3
                 END,
                 created_at ASC
             LIMIT 1
@@ -254,6 +255,7 @@ async def view_queue(uid: str):
                 WHEN 'urgent' THEN 0
                 WHEN 'normal' THEN 1
                 WHEN 'scheduled' THEN 2
+                WHEN 'debug' THEN 3
             END,
             created_at ASC
         """,
