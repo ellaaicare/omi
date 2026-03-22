@@ -38,7 +38,7 @@ ASC_KEY_ID="J77JD8RJXF"
 SIGNING_DIR="$HOME/.signing"
 PRIVKEY_PEM="$SIGNING_DIR/dist_privkey.pem"
 CERT_PEM="$SIGNING_DIR/dist_cert.pem"
-ENTITLEMENTS="/tmp/entitlements.plist"
+ENTITLEMENTS="$APP_DIR/entitlements.plist"
 PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/AppStore_com.ellaaicare.ella.mobileprovision"
 
 BUILD_DIR="$APP_DIR/build/ios"
