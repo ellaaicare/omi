@@ -13,6 +13,7 @@ import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/pages/debug_event_log_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
@@ -266,6 +267,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               title: 'Developer Settings',
               subtitle: 'ASR, transcription, language, debug',
               onTap: () => SettingsDrawer.show(context),
+            ),
+            const SizedBox(height: 8),
+            EllaSettingsRow(
+              icon: Icons.timeline,
+              title: 'Debug Event Log',
+              subtitle: 'Real-time scanner decisions and escalations',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DebugEventLogPage()),
+              ),
             ),
             const SizedBox(height: 8),
 
