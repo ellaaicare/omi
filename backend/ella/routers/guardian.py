@@ -403,13 +403,20 @@ async def next_audio(uid: str):
 
     print(f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms", flush=True)
 
+    meta = row["metadata"]
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = {}
+
     return {
         "url": row["url"],
         "id": row["id"],
         "priority": row["priority"],
         "message": row["message"],
         "trigger_type": row["trigger_type"],
-        "metadata": dict(row["metadata"]) if row["metadata"] else {},
+        "metadata": meta if isinstance(meta, dict) else {},
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
