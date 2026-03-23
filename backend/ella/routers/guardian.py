@@ -348,7 +348,7 @@ async def next_audio(uid: str):
             # Mark ALL pending items consumed
             pending_ids = [r["id"] for r in pending_rows]
             await pool.execute(
-                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::uuid[])",
+                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
                 pending_ids,
             )
 
