@@ -47,7 +47,7 @@ _PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 _OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 _LLM_API_KEY = _OPENROUTER_KEY or os.getenv("XAI_API_KEY", "")
 _LLM_API_BASE = "https://openrouter.ai/api/v1" if _OPENROUTER_KEY else "https://api.x.ai/v1"
-_LLM_MODEL = "x-ai/grok-3-mini-fast" if _OPENROUTER_KEY else "grok-3-mini-fast"
+_LLM_MODEL = "x-ai/grok-4.1-fast" if _OPENROUTER_KEY else "grok-4-1-fast-non-reasoning"
 
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
