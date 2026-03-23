@@ -43,10 +43,11 @@ CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 _PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
-# LLM settings for consolidator (uses XAI Grok fast by default)
-_LLM_API_KEY = os.getenv("XAI_API_KEY", "")
-_LLM_API_BASE = "https://api.x.ai/v1"
-_LLM_MODEL = "grok-3-mini-fast"
+# LLM settings for consolidator — prefers OpenRouter, falls back to XAI direct
+_OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
+_LLM_API_KEY = _OPENROUTER_KEY or os.getenv("XAI_API_KEY", "")
+_LLM_API_BASE = "https://openrouter.ai/api/v1" if _OPENROUTER_KEY else "https://api.x.ai/v1"
+_LLM_MODEL = "x-ai/grok-3-mini-fast" if _OPENROUTER_KEY else "grok-3-mini-fast"
 
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
