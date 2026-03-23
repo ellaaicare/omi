@@ -126,6 +126,152 @@ class EnqueueRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Consolidation helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
+    """Fetch recent conversation turns for a UID from the chat history endpoint.
+
+    Returns list of {role, content} dicts, newest first. Returns [] on any error.
+    """
+    try:
+        resolved = await resolve_user_routing(uid)
+        if not resolved:
+            return []
+
+        routing = resolved.get("routing", {})
+        if not routing:
+            return []
+
+        agent_id = routing.get("agentId", "")
+        if not agent_id:
+            return []
+
+        openclaw_user_id = agent_id[5:] if agent_id.startswith("ella-") else agent_id
+
+        headers = {}
+        if _PROVISION_API_TOKEN:
+            headers["Authorization"] = f"Bearer {_PROVISION_API_TOKEN}"
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{_PROVISION_API_URL}/users/{openclaw_user_id}/history",
+                params={"limit": limit},
+                headers=headers,
+            )
+
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json()
+        messages = data.get("messages", [])
+        turns = []
+        for m in messages[:limit]:
+            role = m.get("role", m.get("type", "user"))
+            content = m.get("content", m.get("text", ""))
+            if content:
+                turns.append({"role": role, "content": str(content)[:500]})
+        return turns
+    except Exception as e:
+        print(f"[CONSOLIDATOR] chat history fetch error: {e}", flush=True)
+        return []
+
+
+async def _consolidate_queue(
+    uid: str,
+    pending: list[dict],
+    recently_consumed: list[dict],
+    chat_turns: list[dict],
+    echo_risk: str = "unknown",
+) -> Optional[str]:
+    """Call LLM to consolidate a pile of pending guardian queue items.
+
+    Returns:
+        str  — consolidated spoken message to enqueue (plain text, no SSML)
+        None — all items are resolved/irrelevant, nothing to say
+    """
+    pending_text = "\n".join(
+        f"- [{i+1}] ({item.get('trigger_type', '?')} at {item.get('created_at', '?')}): {item.get('message', '')}"
+        for i, item in enumerate(pending)
+    )
+
+    consumed_text = ""
+    if recently_consumed:
+        consumed_text = "\nMessages Ella just played aloud (last 60s):\n" + "\n".join(
+            f"- {c.get('message', '')}" for c in recently_consumed
+        )
+
+    context_text = ""
+    if chat_turns:
+        context_text = "\nRecent conversation (newest first):\n" + "\n".join(
+            f"- {t['role']}: {t['content']}" for t in chat_turns
+        )
+
+    echo_instruction = ""
+    if echo_risk not in ("none", "unknown"):
+        echo_instruction = (
+            f"\n\nIMPORTANT: Audio is playing through a speaker (echo_risk={echo_risk}). "
+            "Some pending alerts may be echoes — transcriptions of audio Ella just played. "
+            "Compare pending items against recently played messages and discard obvious echoes."
+        )
+
+    system_prompt = """You are Ella's alert consolidator. You receive a list of pending unplayed alerts and recent conversation context.
+
+Your job:
+1. Discard alerts that are no longer relevant (user already resolved the situation, conversation moved on)
+2. Discard duplicate or near-duplicate alerts
+3. Discard echo alerts (transcriptions of audio Ella just played)
+4. Merge what remains into ONE concise spoken message Ella will say aloud
+
+Rules:
+- URGENT alerts (fall, emergency, "can't breathe") are NEVER discarded, always included
+- If EVERYTHING is resolved or irrelevant, output exactly: NULL
+- Output ONLY the spoken message text, no preamble, no JSON, no quotes
+- Keep it under 40 words — this will be spoken aloud
+- Natural spoken language only — no markdown, no bullet points"""
+
+    user_prompt = (
+        f"Pending alerts ({len(pending)} items):\n{pending_text}"
+        f"{consumed_text}"
+        f"{context_text}"
+        f"{echo_instruction}"
+        "\n\nOutput the consolidated spoken message, or NULL if nothing needs to be said:"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(
+                f"{_LLM_API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {_LLM_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": _LLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 100,
+                    "temperature": 0.2,
+                },
+            )
+
+        if resp.status_code != 200:
+            print(f"[CONSOLIDATOR] LLM error {resp.status_code}: {resp.text[:200]}", flush=True)
+            return pending[0].get("message", "")
+
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"[CONSOLIDATOR] uid={uid} pending={len(pending)} result={content[:80]!r}", flush=True)
+
+        if content.upper() == "NULL" or not content:
+            return None
+        return content
+
+    except Exception as e:
+        print(f"[CONSOLIDATOR] error: {e}", flush=True)
+        return pending[0].get("message", "")
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/ella/guardian/next-audio?uid={uid}
 # iOS polls this. Returns and consumes next queued audio clip.
 # ---------------------------------------------------------------------------
