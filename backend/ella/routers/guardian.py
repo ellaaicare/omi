@@ -133,14 +133,98 @@ class EnqueueRequest(BaseModel):
 
 @router.get("/next-audio")
 async def next_audio(uid: str):
-    """Pop next audio clip from queue for the given user."""
+    """Pop next audio clip from queue. Consolidates if pile-up detected."""
     if not uid or uid == "unknown":
         return {"url": None}
 
     _start = time.time()
     pool = await _get_pool()
 
-    # Atomic pop: SELECT ... FOR UPDATE SKIP LOCKED + UPDATE in one query
+    # --- Check queue depth first (excluding debug items) ---
+    depth_row = await pool.fetchrow(
+        """
+        SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL) AS pending
+        FROM guardian_queue
+        WHERE uid = $1 AND priority != 'debug'
+        """,
+        uid,
+    )
+    pending_count = depth_row["pending"] if depth_row else 0
+
+    # --- Consolidation path ---
+    if pending_count >= CONSOLIDATION_THRESHOLD:
+        print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={pending_count} triggering consolidation", flush=True)
+
+        # Fetch all pending non-debug items
+        pending_rows = await pool.fetch(
+            """
+            SELECT id, url, priority, message, trigger_type, metadata, created_at
+            FROM guardian_queue
+            WHERE uid = $1 AND consumed_at IS NULL AND priority != 'debug'
+            ORDER BY
+                CASE priority WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                created_at ASC
+            """,
+            uid,
+        )
+
+        # Urgent items bypass consolidation — fall through to normal pop
+        urgent = [r for r in pending_rows if r["priority"] == "urgent"]
+        if not urgent:
+            # Fetch recently consumed items for echo detection
+            consumed_rows = await pool.fetch(
+                """
+                SELECT message, trigger_type, consumed_at
+                FROM guardian_queue
+                WHERE uid = $1
+                  AND consumed_at IS NOT NULL
+                  AND consumed_at > NOW() - INTERVAL '60 seconds'
+                  AND priority != 'debug'
+                ORDER BY consumed_at DESC
+                LIMIT 10
+                """,
+                uid,
+            )
+
+            playback = get_playback_event(uid)
+            echo_risk = playback["echo_risk"] if playback else "unknown"
+
+            chat_turns = await _get_recent_chat_turns(uid, limit=5)
+
+            consolidated_msg = await _consolidate_queue(
+                uid=uid,
+                pending=[dict(r) for r in pending_rows],
+                recently_consumed=[dict(r) for r in consumed_rows],
+                chat_turns=chat_turns,
+                echo_risk=echo_risk,
+            )
+
+            # Mark ALL pending items consumed
+            pending_ids = [r["id"] for r in pending_rows]
+            await pool.execute(
+                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::uuid[])",
+                pending_ids,
+            )
+
+            if consolidated_msg is None:
+                _elapsed = int((time.time() - _start) * 1000)
+                print(f"[FLOW:CONSOLIDATOR] uid={uid} result=null latency={_elapsed}ms", flush=True)
+                return {"url": None}
+
+            # Enqueue consolidated message so it plays next
+            new_id = str(uuid.uuid4())
+            await pool.execute(
+                """
+                INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+                VALUES ($1, $2, '', 'urgent', $3, 'consolidated', '{}')
+                """,
+                new_id,
+                uid,
+                consolidated_msg,
+            )
+            # Fall through to pop the newly-inserted consolidated item
+
+    # --- Normal pop path ---
     row = await pool.fetchrow(
         """
         UPDATE guardian_queue
@@ -154,6 +238,7 @@ async def next_audio(uid: str):
                     WHEN 'normal' THEN 1
                     WHEN 'scheduled' THEN 2
                     WHEN 'debug' THEN 3
+                    ELSE 4
                 END,
                 created_at ASC
             LIMIT 1
@@ -207,8 +292,7 @@ async def enqueue(
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
 
     # Serialize metadata to JSON string for the JSONB column
-    import json as _json
-    metadata_str = _json.dumps(req.metadata) if req.metadata else "{}"
+    metadata_str = json.dumps(req.metadata) if req.metadata else "{}"
 
     pool = await _get_pool()
     await pool.execute(
@@ -366,7 +450,6 @@ async def activate_guardian(request: Request):
 
     # Enqueue the static guardian-active audio
     item_id = f"guardian_{uuid.uuid4().hex[:12]}"
-    import json as _json
     await pool.execute(
         """
         INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
@@ -379,7 +462,7 @@ async def activate_guardian(request: Request):
         "urgent",
         "Guardian active. I am listening and will alert you if anything needs your attention.",
         "guardian-activate",
-        _json.dumps({"source": "ios-activate"}),
+        json.dumps({"source": "ios-activate"}),
     )
 
     print(f"[FLOW:GUARDIAN-ACTIVATE] uid={uid} activated id={item_id}", flush=True)
@@ -412,15 +495,13 @@ async def get_pipeline_trace(conversation_id: str):
             print(f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} not_found", flush=True)
             return {"trace_id": conversation_id, "stages": [], "found": False}
 
-        import json as _json_mod
-
         def _parse_meta(val):
             """Parse metadata: asyncpg may return JSONB as str or dict."""
             if val is None:
                 return {}
             if isinstance(val, str):
                 try:
-                    return _json_mod.loads(val)
+                    return json.loads(val)
                 except (ValueError, TypeError):
                     return {}
             return val
@@ -479,8 +560,6 @@ async def get_pipeline_trace(conversation_id: str):
 @router.post("/trace/log")
 async def log_pipeline_event(request: Request):
     """Log a pipeline event (called by n8n workflows)."""
-    import json as _json
-
     request_body = await request.json()
 
     trace_id = request_body.get("trace_id")
@@ -504,7 +583,7 @@ async def log_pipeline_event(request: Request):
         stage,
         status,
         latency_ms,
-        _json.dumps(metadata),
+        json.dumps(metadata),
     )
 
     print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
