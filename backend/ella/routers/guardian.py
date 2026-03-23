@@ -113,7 +113,7 @@ async def next_audio(uid: str):
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, url, priority, message, created_at
+        RETURNING id, url, priority, message, trigger_type, metadata, created_at
         """,
         uid,
     )
@@ -131,6 +131,8 @@ async def next_audio(uid: str):
         "id": row["id"],
         "priority": row["priority"],
         "message": row["message"],
+        "trigger_type": row["trigger_type"],
+        "metadata": dict(row["metadata"]) if row["metadata"] else {},
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
