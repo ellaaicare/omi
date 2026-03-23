@@ -11,14 +11,18 @@ Queue: ella-postgres guardian_queue table.
 Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 """
 
+import json
 import os
 import time
 import uuid
 from typing import Optional
 
 import asyncpg
+import httpx
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
+
+from ella.routers.resolve import resolve_user_routing
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
@@ -32,8 +36,41 @@ GUARDIAN_WEBHOOK_KEY = os.getenv(
     "GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"
 )
 
+# Consolidate queue when this many non-debug items are pending
+CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
+
+# Provision API for chat history lookups
+_PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+_PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+
+# LLM settings for consolidator (uses XAI Grok fast by default)
+_LLM_API_KEY = os.getenv("XAI_API_KEY", "")
+_LLM_API_BASE = "https://api.x.ai/v1"
+_LLM_MODEL = "grok-3-mini-fast"
+
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
+
+# ---------------------------------------------------------------------------
+# In-memory playback event store (echo risk tracking)
+# ---------------------------------------------------------------------------
+
+# uid -> last playback event (resets on restart — used only for echo risk)
+_playback_events: dict[str, dict] = {}
+
+# Echo risk by iOS AVAudioSession portType rawValue
+_ECHO_RISK = {
+    "Speaker": "high",        # builtInSpeaker
+    "Receiver": "none",       # builtInReceiver
+    "Headphones": "none",     # headphones
+    "BluetoothHFP": "none",   # BT headset (hands-free)
+    "BluetoothA2DP": "high",  # BT speaker/headphones
+    "BluetoothLE": "medium",  # BT LE audio
+    "AirPlay": "very_high",   # AirPlay / Apple TV
+    "HDMI": "very_high",
+    "CarAudio": "high",
+    "USBAudio": "low",
+}
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -67,6 +104,15 @@ def _verify_key(
 # ---------------------------------------------------------------------------
 
 
+class PlaybackEventRequest(BaseModel):
+    """JSON body for /playback-event endpoint."""
+    uid: str
+    port_type: str       # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
+    port_name: str = ""  # human-readable device name (e.g. "AirPods Pro")
+    device_uid: str = "" # unique device ID from AVAudioSessionPortDescription
+    duration_ms: int = 0 # estimated audio duration in ms
+
+
 class EnqueueRequest(BaseModel):
     """JSON body for enqueue endpoint."""
     uid: Optional[str] = None
@@ -87,14 +133,98 @@ class EnqueueRequest(BaseModel):
 
 @router.get("/next-audio")
 async def next_audio(uid: str):
-    """Pop next audio clip from queue for the given user."""
+    """Pop next audio clip from queue. Consolidates if pile-up detected."""
     if not uid or uid == "unknown":
         return {"url": None}
 
     _start = time.time()
     pool = await _get_pool()
 
-    # Atomic pop: SELECT ... FOR UPDATE SKIP LOCKED + UPDATE in one query
+    # --- Check queue depth first (excluding debug items) ---
+    depth_row = await pool.fetchrow(
+        """
+        SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL) AS pending
+        FROM guardian_queue
+        WHERE uid = $1 AND priority != 'debug'
+        """,
+        uid,
+    )
+    pending_count = depth_row["pending"] if depth_row else 0
+
+    # --- Consolidation path ---
+    if pending_count >= CONSOLIDATION_THRESHOLD:
+        print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={pending_count} triggering consolidation", flush=True)
+
+        # Fetch all pending non-debug items
+        pending_rows = await pool.fetch(
+            """
+            SELECT id, url, priority, message, trigger_type, metadata, created_at
+            FROM guardian_queue
+            WHERE uid = $1 AND consumed_at IS NULL AND priority != 'debug'
+            ORDER BY
+                CASE priority WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                created_at ASC
+            """,
+            uid,
+        )
+
+        # Urgent items bypass consolidation — fall through to normal pop
+        urgent = [r for r in pending_rows if r["priority"] == "urgent"]
+        if not urgent:
+            # Fetch recently consumed items for echo detection
+            consumed_rows = await pool.fetch(
+                """
+                SELECT message, trigger_type, consumed_at
+                FROM guardian_queue
+                WHERE uid = $1
+                  AND consumed_at IS NOT NULL
+                  AND consumed_at > NOW() - INTERVAL '60 seconds'
+                  AND priority != 'debug'
+                ORDER BY consumed_at DESC
+                LIMIT 10
+                """,
+                uid,
+            )
+
+            playback = get_playback_event(uid)
+            echo_risk = playback["echo_risk"] if playback else "unknown"
+
+            chat_turns = await _get_recent_chat_turns(uid, limit=5)
+
+            consolidated_msg = await _consolidate_queue(
+                uid=uid,
+                pending=[dict(r) for r in pending_rows],
+                recently_consumed=[dict(r) for r in consumed_rows],
+                chat_turns=chat_turns,
+                echo_risk=echo_risk,
+            )
+
+            # Mark ALL pending items consumed
+            pending_ids = [r["id"] for r in pending_rows]
+            await pool.execute(
+                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::uuid[])",
+                pending_ids,
+            )
+
+            if consolidated_msg is None:
+                _elapsed = int((time.time() - _start) * 1000)
+                print(f"[FLOW:CONSOLIDATOR] uid={uid} result=null latency={_elapsed}ms", flush=True)
+                return {"url": None}
+
+            # Enqueue consolidated message so it plays next
+            new_id = str(uuid.uuid4())
+            await pool.execute(
+                """
+                INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+                VALUES ($1, $2, '', 'urgent', $3, 'consolidated', '{}')
+                """,
+                new_id,
+                uid,
+                consolidated_msg,
+            )
+            # Fall through to pop the newly-inserted consolidated item
+
+    # --- Normal pop path ---
     row = await pool.fetchrow(
         """
         UPDATE guardian_queue
@@ -108,6 +238,7 @@ async def next_audio(uid: str):
                     WHEN 'normal' THEN 1
                     WHEN 'scheduled' THEN 2
                     WHEN 'debug' THEN 3
+                    ELSE 4
                 END,
                 created_at ASC
             LIMIT 1
@@ -161,8 +292,7 @@ async def enqueue(
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
 
     # Serialize metadata to JSON string for the JSONB column
-    import json as _json
-    metadata_str = _json.dumps(req.metadata) if req.metadata else "{}"
+    metadata_str = json.dumps(req.metadata) if req.metadata else "{}"
 
     pool = await _get_pool()
     await pool.execute(
@@ -320,7 +450,6 @@ async def activate_guardian(request: Request):
 
     # Enqueue the static guardian-active audio
     item_id = f"guardian_{uuid.uuid4().hex[:12]}"
-    import json as _json
     await pool.execute(
         """
         INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
@@ -333,7 +462,7 @@ async def activate_guardian(request: Request):
         "urgent",
         "Guardian active. I am listening and will alert you if anything needs your attention.",
         "guardian-activate",
-        _json.dumps({"source": "ios-activate"}),
+        json.dumps({"source": "ios-activate"}),
     )
 
     print(f"[FLOW:GUARDIAN-ACTIVATE] uid={uid} activated id={item_id}", flush=True)
@@ -366,15 +495,13 @@ async def get_pipeline_trace(conversation_id: str):
             print(f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} not_found", flush=True)
             return {"trace_id": conversation_id, "stages": [], "found": False}
 
-        import json as _json_mod
-
         def _parse_meta(val):
             """Parse metadata: asyncpg may return JSONB as str or dict."""
             if val is None:
                 return {}
             if isinstance(val, str):
                 try:
-                    return _json_mod.loads(val)
+                    return json.loads(val)
                 except (ValueError, TypeError):
                     return {}
             return val
@@ -433,8 +560,6 @@ async def get_pipeline_trace(conversation_id: str):
 @router.post("/trace/log")
 async def log_pipeline_event(request: Request):
     """Log a pipeline event (called by n8n workflows)."""
-    import json as _json
-
     request_body = await request.json()
 
     trace_id = request_body.get("trace_id")
@@ -458,9 +583,45 @@ async def log_pipeline_event(request: Request):
         stage,
         status,
         latency_ms,
-        _json.dumps(metadata),
+        json.dumps(metadata),
     )
 
     print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
 
     return {"logged": True, "trace_id": trace_id, "stage": stage}
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/ella/guardian/playback-event
+# iOS calls this when guardian audio starts playing. Fire-and-forget.
+# Records output route so the smart-queue consolidator knows echo risk.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/playback-event")
+async def record_playback_event(req: PlaybackEventRequest):
+    """iOS calls this when guardian audio starts playing.
+    Records output route so the consolidator knows echo risk."""
+    echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
+    _playback_events[req.uid] = {
+        "port_type": req.port_type,
+        "port_name": req.port_name,
+        "device_uid": req.device_uid,
+        "echo_risk": echo_risk,
+        "recorded_at": time.time(),
+    }
+    print(
+        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
+        flush=True,
+    )
+    return {"echo_risk": echo_risk}
+
+
+def get_playback_event(uid: str) -> dict | None:
+    """Return the most recent playback event for a UID, or None if >60s old."""
+    event = _playback_events.get(uid)
+    if not event:
+        return None
+    if time.time() - event["recorded_at"] > 60:
+        return None  # stale — more than 60s old
+    return event
