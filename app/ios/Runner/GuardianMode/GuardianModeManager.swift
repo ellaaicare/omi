@@ -231,6 +231,45 @@ class GuardianModeManager: NSObject {
         NSLog("GuardianMode: Health OK (depth: \(depth), rate: \(rate), injections: \(stats))")
     }
 
+    // MARK: - Playback Route Reporting
+
+    /// Fire-and-forget POST to backend recording the current audio output route.
+    /// Called on each audio injection and on route changes so backend knows echo risk.
+    func reportPlaybackEvent(durationMs: Int = 0) {
+        let session = AVAudioSession.sharedInstance()
+        guard let port = session.currentRoute.outputs.first else { return }
+
+        let portType = port.portType.rawValue
+        let portName = port.portName
+        let deviceUID = port.uid
+
+        let uid = UserDefaults.standard.string(forKey: "flutter.uid")
+                   ?? UserDefaults.standard.string(forKey: "uid")
+                   ?? "unknown"
+        guard uid != "unknown" else { return }
+
+        let backendURL = GuardianModePollingService.shared.backendURL
+        guard let url = URL(string: "\(backendURL)/v1/ella/guardian/playback-event") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 3.0
+
+        let body: [String: Any] = [
+            "uid": uid,
+            "port_type": portType,
+            "port_name": portName,
+            "device_uid": deviceUID,
+            "duration_ms": durationMs
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        request.httpBody = data
+
+        URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
+        NSLog("PLAYBACK_EVENT port=\(portType) device=\(portName.isEmpty ? "unknown" : portName) uid=\(uid)")
+    }
+
     // MARK: - Audio Injection with Pre-download + Retry
 
     /// Inject remote audio with pre-download and retry logic
@@ -242,6 +281,9 @@ class GuardianModeManager: NSObject {
             self.totalInjections += 1
             let seq = self.injectionSequence
             let filename = audioURL.lastPathComponent
+
+            // Report current output route to backend for echo risk tracking
+            self.reportPlaybackEvent()
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
 

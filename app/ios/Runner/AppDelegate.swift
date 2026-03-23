@@ -248,6 +248,9 @@ extension FlutterError: Error {}
               }
           }
       }
+
+      // Report new route to backend so consolidator knows current echo risk
+      GuardianModeManager.shared.reportPlaybackEvent()
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
