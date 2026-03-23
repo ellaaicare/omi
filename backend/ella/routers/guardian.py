@@ -11,14 +11,18 @@ Queue: ella-postgres guardian_queue table.
 Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 """
 
+import json
 import os
 import time
 import uuid
 from typing import Optional
 
 import asyncpg
+import httpx
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
+
+from ella.routers.resolve import resolve_user_routing
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
@@ -32,8 +36,41 @@ GUARDIAN_WEBHOOK_KEY = os.getenv(
     "GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"
 )
 
+# Consolidate queue when this many non-debug items are pending
+CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
+
+# Provision API for chat history lookups
+_PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
+_PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+
+# LLM settings for consolidator (uses XAI Grok fast by default)
+_LLM_API_KEY = os.getenv("XAI_API_KEY", "")
+_LLM_API_BASE = "https://api.x.ai/v1"
+_LLM_MODEL = "grok-3-mini-fast"
+
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
+
+# ---------------------------------------------------------------------------
+# In-memory playback event store (echo risk tracking)
+# ---------------------------------------------------------------------------
+
+# uid -> last playback event (resets on restart — used only for echo risk)
+_playback_events: dict[str, dict] = {}
+
+# Echo risk by iOS AVAudioSession portType rawValue
+_ECHO_RISK = {
+    "Speaker": "high",        # builtInSpeaker
+    "Receiver": "none",       # builtInReceiver
+    "Headphones": "none",     # headphones
+    "BluetoothHFP": "none",   # BT headset (hands-free)
+    "BluetoothA2DP": "high",  # BT speaker/headphones
+    "BluetoothLE": "medium",  # BT LE audio
+    "AirPlay": "very_high",   # AirPlay / Apple TV
+    "HDMI": "very_high",
+    "CarAudio": "high",
+    "USBAudio": "low",
+}
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -65,6 +102,15 @@ def _verify_key(
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
+
+class PlaybackEventRequest(BaseModel):
+    """JSON body for /playback-event endpoint."""
+    uid: str
+    port_type: str       # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
+    port_name: str = ""  # human-readable device name (e.g. "AirPods Pro")
+    device_uid: str = "" # unique device ID from AVAudioSessionPortDescription
+    duration_ms: int = 0 # estimated audio duration in ms
 
 
 class EnqueueRequest(BaseModel):
@@ -464,3 +510,39 @@ async def log_pipeline_event(request: Request):
     print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
 
     return {"logged": True, "trace_id": trace_id, "stage": stage}
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/ella/guardian/playback-event
+# iOS calls this when guardian audio starts playing. Fire-and-forget.
+# Records output route so the smart-queue consolidator knows echo risk.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/playback-event")
+async def record_playback_event(req: PlaybackEventRequest):
+    """iOS calls this when guardian audio starts playing.
+    Records output route so the consolidator knows echo risk."""
+    echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
+    _playback_events[req.uid] = {
+        "port_type": req.port_type,
+        "port_name": req.port_name,
+        "device_uid": req.device_uid,
+        "echo_risk": echo_risk,
+        "recorded_at": time.time(),
+    }
+    print(
+        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
+        flush=True,
+    )
+    return {"echo_risk": echo_risk}
+
+
+def get_playback_event(uid: str) -> dict | None:
+    """Return the most recent playback event for a UID, or None if >60s old."""
+    event = _playback_events.get(uid)
+    if not event:
+        return None
+    if time.time() - event["recorded_at"] > 60:
+        return None  # stale — more than 60s old
+    return event
