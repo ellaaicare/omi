@@ -1,7 +1,11 @@
 import Foundation
+import AVFoundation
 
 class GuardianModePollingService {
     static let shared = GuardianModePollingService()
+
+    // Strong reference — AVSpeechSynthesizer must outlive the speak call
+    private let speechSynthesizer = AVSpeechSynthesizer()
 
     private init() {}
 
@@ -136,6 +140,17 @@ class GuardianModePollingService {
         return nil
     }
 
+    // MARK: - On-Device TTS
+
+    private func speakText(_ text: String) {
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = 0.5
+        utterance.pitchMultiplier = 1.0
+        speechSynthesizer.speak(utterance)
+        NSLog("TTS_SPEAK: \(text.prefix(80))")
+    }
+
     // MARK: - Private Methods
 
     private func createPollTimer() {
@@ -169,11 +184,15 @@ class GuardianModePollingService {
                         message: result.message ?? "",
                         metadata: result.metadata?.dict ?? [:]
                     )
-                } else if let urlString = result.url,
+                } else if let urlString = result.url, !urlString.isEmpty,
                           let audioURL = URL(string: urlString) {
                     NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     // Inject via GuardianModeManager (handles pre-download + retry)
                     GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+                } else if let message = result.message, !message.isEmpty {
+                    // Text-only (consolidated) — use on-device TTS
+                    NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
+                    speakText(message)
                 }
             }
         } catch {
