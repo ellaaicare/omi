@@ -711,7 +711,7 @@ def process_conversation(
         # ).start()
 
     # Ella post-process hook: notify n8n after conversation is fully saved
-    if not is_reprocess and fire_postprocess_webhook:
+    if fire_postprocess_webhook:  # Fires for both initial processing and reprocessing
         threading.Thread(
             target=fire_postprocess_webhook,
             args=(uid, conversation),
