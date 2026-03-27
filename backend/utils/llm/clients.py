@@ -1,5 +1,6 @@
 import contextvars
 import os
+import logging
 from typing import List
 
 from langchain_core.output_parsers import PydanticOutputParser
@@ -8,15 +9,13 @@ import tiktoken
 
 from models.conversation import Structured
 
-# ====== ELLA LLM PROXY PATCH - START ======
-# Injects user context into all LLM API calls when ELLA_LLM_BASE_URL is set.
-# The n8n proxy receives user ID and routes to appropriate models + enhances with context.
+logger = logging.getLogger(__name__)
 
+# ====== ELLA LLM PROXY PATCH - START ======
 _ella_context = contextvars.ContextVar('ella_context', default={})
 
 
 def set_ella_context(uid: str = None, task: str = None):
-    """Set Ella context for the current request/task."""
     ctx = {}
     if uid:
         ctx['uid'] = uid
@@ -26,17 +25,14 @@ def set_ella_context(uid: str = None, task: str = None):
 
 
 def get_ella_context() -> dict:
-    """Get current Ella context for this request/task."""
     return _ella_context.get()
 
 
 def clear_ella_context():
-    """Clear Ella context."""
     _ella_context.set({})
 
 
 def _apply_ella_llm_patch():
-    """Patch ChatOpenAI._generate and _stream to inject user ID into all API calls."""
     _original_generate = ChatOpenAI._generate
     _original_stream = ChatOpenAI._stream
 
@@ -62,117 +58,184 @@ _apply_ella_llm_patch()
 # ====== ELLA LLM PROXY PATCH - END ======
 
 
-# Base models for general use
-# Priority: OpenRouter (Grok) > Ella LLM Proxy > xAI Direct > OpenAI (upstream defaults)
-# OpenRouter provides unified billing for all Grok models.
-# Embeddings always use OpenAI (Pinecone index is 3072-dim, matched to text-embedding-3-large).
-_openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
-_openrouter_base_url = "https://openrouter.ai/api/v1"
-_openrouter_headers = {"X-Title": "Ella AI", "HTTP-Referer": "https://ella-ai-care.com"}
+# ====== RUNTIME FALLBACK PROVIDER CHAIN ======
+# Each LLM call automatically cascades through providers on failure (402, 429, 5xx, timeout).
+# Priority: OpenAI (paid, spending limits) → Ollama Cloud (free, included in sub) → Groq (free tier)
+#
+# Uses LangChain's .with_fallbacks() — on any exception from primary, tries next provider.
+# All exported llm_* variables are RunnableWithFallbacks (or plain ChatOpenAI if only 1 provider).
+# Callers use .invoke(), .ainvoke(), pipe (|), .stream() — all work transparently.
+#
+# Dead providers (out of credits): OpenRouter, xAI — NOT included in chain.
+
+_openai_api_key = os.getenv('OPENAI_API_KEY')
+_ollama_api_key = os.getenv('OLLAMA_API_KEY')
+_groq_api_key = os.getenv('GROQ_API_KEY')
 _ella_base_url = os.getenv('ELLA_LLM_BASE_URL')
 _ella_api_key = os.getenv('ELLA_LLM_API_KEY', 'ella-internal')
-_xai_api_key = os.getenv('XAI_API_KEY')
-_xai_base_url = "https://api.x.ai/v1"
-_default_mini = os.getenv('OMI_LLM_MINI', 'x-ai/grok-4.1-fast')
-_default_medium = os.getenv('OMI_LLM_MEDIUM', 'x-ai/grok-4.1-fast')
-_default_large = os.getenv('OMI_LLM_LARGE', 'x-ai/grok-4.1-fast')
-_default_high = os.getenv('OMI_LLM_EXPERIMENT', 'x-ai/grok-4.1-fast')
 _ella_model = os.getenv('ELLA_LLM_MODEL', 'ella-enhanced')
 
-# ====== FLOW LOGGING: LLM Provider Selection ======
-if _openrouter_api_key:
-    _provider_name = "openrouter"
-    print(f"[FLOW:LLM-INIT] provider=openrouter mini={_default_mini} medium={_default_medium} large={_default_large} high={_default_high}", flush=True)
-    # PRIMARY PATH: All LLM calls via OpenRouter (unified billing)
-    _or_kwargs = dict(api_key=_openrouter_api_key, base_url=_openrouter_base_url, default_headers=_openrouter_headers)
-    llm_mini = ChatOpenAI(model=_default_mini, **_or_kwargs)
-    llm_mini_stream = ChatOpenAI(model=_default_mini, **_or_kwargs, streaming=True)
-    llm_medium = ChatOpenAI(model=_default_medium, **_or_kwargs)
-    if _ella_base_url:
-        # Chat streaming routes through Ella proxy to OpenClaw for personalized responses
-        print(f"[FLOW:LLM-INIT] medium_stream routed via ella_proxy={_ella_base_url} model={_ella_model}", flush=True)
-        llm_medium_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
-    else:
-        llm_medium_stream = ChatOpenAI(model=_default_medium, **_or_kwargs, streaming=True)
-    llm_large = ChatOpenAI(model=_default_large, **_or_kwargs)
-    llm_large_stream = ChatOpenAI(model=_default_large, **_or_kwargs, streaming=True)
-elif _ella_base_url and _xai_api_key:
-    _provider_name = "ella_proxy+xai"
-    print(f"[FLOW:LLM-INIT] provider=ella_proxy+xai ella_base={_ella_base_url} mini={_default_mini} medium={_default_medium}", flush=True)
-    llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
-    llm_medium = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url)
+# Ollama Cloud endpoint (direct to ollama.com — local proxy had auth issues)
+_ollama_cloud_base_url = "https://ollama.com/v1"
+
+# Model selections per provider
+_openai_mini = os.getenv('OMI_OPENAI_MINI', 'gpt-4.1-mini')
+_openai_medium = os.getenv('OMI_OPENAI_MEDIUM', 'gpt-4.1-mini')
+_ollama_model = os.getenv('OMI_OLLAMA_MODEL', 'nemotron-3-super')
+_ollama_fallback_model = os.getenv('OMI_OLLAMA_FALLBACK', 'gemma3:27b')
+_groq_model = os.getenv('OMI_GROQ_MODEL', 'llama-3.1-8b-instant')
+
+
+def _make_openai(model=None, **kwargs):
+    """Create a ChatOpenAI instance using OpenAI direct."""
+    return ChatOpenAI(api_key=_openai_api_key, model=model or _openai_medium, **kwargs)
+
+
+def _make_ollama_cloud(model=None, **kwargs):
+    """Create a ChatOpenAI instance using Ollama Cloud (ollama.com direct)."""
+    return ChatOpenAI(
+        api_key=_ollama_api_key or 'ollama-local',
+        base_url=_ollama_cloud_base_url,
+        model=model or _ollama_model,
+        **kwargs
+    )
+
+
+def _make_groq(model=None, **kwargs):
+    """Create a ChatOpenAI instance using Groq free tier."""
+    return ChatOpenAI(
+        api_key=_groq_api_key,
+        base_url="https://api.groq.com/openai/v1",
+        model=model or _groq_model,
+        **kwargs
+    )
+
+
+def _with_fallbacks(primary, fallbacks):
+    """Wrap a primary LLM with fallback providers. Returns primary if no fallbacks."""
+    available = [f for f in fallbacks if f is not None]
+    if not available:
+        return primary
+    return primary.with_fallbacks(available)
+
+
+# ====== BUILD RUNTIME FALLBACK CHAINS ======
+# Each tier: create primary + fallback instances, wrap with .with_fallbacks()
+
+_providers_available = []
+if _openai_api_key:
+    _providers_available.append('openai')
+if _ollama_api_key:
+    _providers_available.append('ollama_cloud')
+if _groq_api_key:
+    _providers_available.append('groq')
+
+print(f"[FLOW:LLM-INIT] providers_available={_providers_available} mode=runtime_fallback", flush=True)
+
+
+def _build_chain(openai_model=None, ollama_model=None, groq_model=None, **kwargs):
+    """Build a primary→fallback chain from all available providers."""
+    openai_model = openai_model or _openai_medium
+    ollama_model = ollama_model or _ollama_model
+    groq_model = groq_model or _groq_model
+
+    primary = None
+    fallbacks = []
+
+    if _openai_api_key:
+        inst = _make_openai(model=openai_model, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
+
+    if _ollama_api_key:
+        inst = _make_ollama_cloud(model=ollama_model, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
+
+    if _groq_api_key:
+        inst = _make_groq(model=groq_model, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
+
+    if primary is None:
+        # No providers — return a bare ChatOpenAI that will fail on use
+        primary = ChatOpenAI(model='gpt-4.1-mini', **kwargs)
+
+    return _with_fallbacks(primary, fallbacks)
+
+
+# ====== EXPORTED LLM INSTANCES (all with runtime fallback) ======
+
+# Mini tier: lightweight tasks (should_discard, memories, onboarding)
+llm_mini = _build_chain(openai_model=_openai_mini, ollama_model=_ollama_fallback_model)
+llm_mini_stream = _build_chain(openai_model=_openai_mini, ollama_model=_ollama_fallback_model, streaming=True)
+
+# Medium tier: conversation processing, structured output
+llm_medium = _build_chain()
+llm_large = _build_chain()  # same as medium, save cost
+llm_large_stream = _build_chain(streaming=True)
+llm_high = _build_chain()
+llm_high_stream = _build_chain(streaming=True)
+llm_medium_experiment = _build_chain()
+llm_agent = _build_chain()
+llm_agent_stream = _build_chain(streaming=True)
+
+# Chat streaming: Ella proxy if available, else fallback chain
+if _ella_base_url:
     llm_medium_stream = ChatOpenAI(model=_ella_model, api_key=_ella_api_key, base_url=_ella_base_url, streaming=True)
-    llm_large = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_large_stream = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
-elif _xai_api_key:
-    _provider_name = "xai_direct"
-    print(f"[FLOW:LLM-INIT] provider=xai_direct mini={_default_mini} medium={_default_medium} large={_default_large}", flush=True)
-    llm_mini = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_mini_stream = ChatOpenAI(model=_default_mini, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
-    llm_medium = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_medium_stream = ChatOpenAI(model=_default_medium, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
-    llm_large = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_large_stream = ChatOpenAI(model=_default_large, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True)
+    print(f"[FLOW:LLM-INIT] medium_stream=ella_proxy model={_ella_model}", flush=True)
 else:
-    _provider_name = "openai_fallback"
-    print(f"[FLOW:LLM-INIT] provider=openai_fallback (no OpenRouter/xAI keys found)", flush=True)
-    llm_mini = ChatOpenAI(model='gpt-4.1-mini')
-    llm_mini_stream = ChatOpenAI(model='gpt-4.1-mini', streaming=True)
-    llm_medium = ChatOpenAI(model='gpt-4.1')
-    llm_medium_stream = ChatOpenAI(model='gpt-4.1', streaming=True)
-    llm_large = ChatOpenAI(model='o1-preview')
-    llm_large_stream = ChatOpenAI(model='o1-preview', streaming=True, temperature=1)
+    llm_medium_stream = _build_chain(streaming=True)
 
-# High-tier and experiment models: also use OpenRouter when available
-if _openrouter_api_key:
-    llm_high = ChatOpenAI(model=_default_high, **_or_kwargs)
-    llm_high_stream = ChatOpenAI(model=_default_high, **_or_kwargs, streaming=True, temperature=1)
-    llm_medium_experiment = ChatOpenAI(model=_default_high, **_or_kwargs)
-elif _xai_api_key:
-    llm_high = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url)
-    llm_high_stream = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url, streaming=True, temperature=1)
-    llm_medium_experiment = ChatOpenAI(model=_default_high, api_key=_xai_api_key, base_url=_xai_base_url)
-else:
-    llm_high = ChatOpenAI(model='o4-mini')
-    llm_high_stream = ChatOpenAI(model='o4-mini', streaming=True, temperature=1)
-    llm_medium_experiment = ChatOpenAI(model='gpt-5.1')
+# Persona models: prefer Ollama Cloud (free, no token spend) as primary, then OpenAI, then Groq
+def _build_persona_chain(ollama_model=None, temperature=0.8, **kwargs):
+    """Persona chain: Ollama Cloud primary (free) → OpenAI → Groq."""
+    ollama_model = ollama_model or _ollama_model
+    primary = None
+    fallbacks = []
 
-# Specialized models: agent workflows use OpenRouter Grok too (not GPT-5.1)
-if _openrouter_api_key:
-    llm_agent = ChatOpenAI(model=_default_medium, **_or_kwargs)
-    llm_agent_stream = ChatOpenAI(model=_default_medium, **_or_kwargs, streaming=True)
-else:
-    llm_agent = ChatOpenAI(model='gpt-5.1')
-    llm_agent_stream = ChatOpenAI(model='gpt-5.1', streaming=True)
-llm_persona_mini_stream = ChatOpenAI(
-    temperature=0.8,
-    model="google/gemini-flash-1.5-8b",
-    api_key=os.environ.get('OPENROUTER_API_KEY'),
-    base_url="https://openrouter.ai/api/v1",
-    default_headers={"X-Title": "Omi Chat"},
-    streaming=True,
-)
-llm_persona_medium_stream = ChatOpenAI(
-    temperature=0.8,
-    model="anthropic/claude-3.5-sonnet",
-    api_key=os.environ.get('OPENROUTER_API_KEY'),
-    base_url="https://openrouter.ai/api/v1",
-    default_headers={"X-Title": "Omi Chat"},
-    streaming=True,
-)
+    if _ollama_api_key:
+        inst = _make_ollama_cloud(model=ollama_model, temperature=temperature, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
 
-# Gemini models for large context analysis
-llm_gemini_flash = ChatOpenAI(
-    temperature=0.7,
-    model="google/gemini-3-flash-preview",
-    api_key=os.environ.get('OPENROUTER_API_KEY'),
-    base_url="https://openrouter.ai/api/v1",
-    default_headers={"X-Title": "Omi Wrapped"},
-)
+    if _openai_api_key:
+        inst = _make_openai(model=_openai_medium, temperature=temperature, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
 
-print(f"[FLOW:LLM-INIT] provider={_provider_name} embeddings=openai/text-embedding-3-large ella_patch=active", flush=True)
+    if _groq_api_key:
+        inst = _make_groq(temperature=temperature, **kwargs)
+        if primary is None:
+            primary = inst
+        else:
+            fallbacks.append(inst)
 
+    if primary is None:
+        primary = ChatOpenAI(model='gpt-4.1-mini', temperature=temperature, **kwargs)
+
+    return _with_fallbacks(primary, fallbacks)
+
+
+llm_persona_mini_stream = _build_persona_chain(ollama_model=_ollama_fallback_model, streaming=True)
+llm_persona_medium_stream = _build_persona_chain(streaming=True)
+llm_gemini_flash = _build_persona_chain(temperature=0.7)
+
+_primary = _providers_available[0] if _providers_available else 'none'
+_persona_primary = 'ollama_cloud' if _ollama_api_key else _primary
+print(f"[FLOW:LLM-INIT] primary={_primary} persona={_persona_primary} fallbacks={len(_providers_available)} ella_patch=active", flush=True)
+
+# ====== EMBEDDINGS (always OpenAI — Pinecone index is 3072-dim) ======
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
 parser = PydanticOutputParser(pydantic_object=Structured)
 
@@ -180,7 +243,6 @@ encoding = tiktoken.encoding_for_model('gpt-4')
 
 
 def num_tokens_from_string(string: str) -> int:
-    """Returns the number of tokens in a text string."""
     num_tokens = len(encoding.encode(string))
     return num_tokens
 
