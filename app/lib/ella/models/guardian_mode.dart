@@ -6,7 +6,10 @@ enum GuardianModeKey {
   activeSupport,
   maximumAwareness,
   custom,
-  cyborg;
+  cyborg,
+  off,
+  demo,
+  memorySupport;
 
   static GuardianModeKey fromString(String value) {
     switch (value.toUpperCase()) {
@@ -20,6 +23,12 @@ enum GuardianModeKey {
         return GuardianModeKey.custom;
       case 'CYBORG':
         return GuardianModeKey.cyborg;
+      case 'OFF':
+        return GuardianModeKey.off;
+      case 'DEMO':
+        return GuardianModeKey.demo;
+      case 'MEMORY_SUPPORT':
+        return GuardianModeKey.memorySupport;
       default:
         return GuardianModeKey.activeSupport;
     }
@@ -37,8 +46,25 @@ enum GuardianModeKey {
         return 'CUSTOM';
       case GuardianModeKey.cyborg:
         return 'CYBORG';
+      case GuardianModeKey.off:
+        return 'OFF';
+      case GuardianModeKey.demo:
+        return 'DEMO';
+      case GuardianModeKey.memorySupport:
+        return 'MEMORY_SUPPORT';
     }
   }
+
+  /// Returns true if this key is an "Intelligence Mode" override (exclusive,
+  /// replaces care system entirely).
+  bool get isOverride => this == GuardianModeKey.cyborg || this == GuardianModeKey.demo;
+
+  /// Returns true if this key is a composable "Care Feature" checkbox.
+  bool get isCareFeature =>
+      this == GuardianModeKey.emergencyOnly ||
+      this == GuardianModeKey.activeSupport ||
+      this == GuardianModeKey.maximumAwareness ||
+      this == GuardianModeKey.memorySupport;
 }
 
 class GuardianPreset {
@@ -78,15 +104,59 @@ class GuardianPreset {
   GuardianModeKey get modeKey => GuardianModeKey.fromString(presetKey);
 }
 
+/// Two-tier guardian mode state: an optional exclusive override (Intelligence
+/// Mode) and a set of composable care features.
+class GuardianModeState {
+  /// Nullable — 'CYBORG' | 'DEMO' | null
+  final String? override;
+
+  /// List of active care feature keys e.g. ['ACTIVE_SUPPORT', 'MEMORY_SUPPORT']
+  final List<String> features;
+
+  const GuardianModeState({this.override, this.features = const []});
+
+  bool get isOff => override == null && features.isEmpty;
+
+  /// Build from new-schema API response {override, features} or legacy {mode}.
+  factory GuardianModeState.fromJson(Map<String, dynamic> json) {
+    if (json.containsKey('features')) {
+      final rawFeatures = json['features'];
+      return GuardianModeState(
+        override: json['override'] as String?,
+        features: rawFeatures is List ? List<String>.from(rawFeatures) : const [],
+      );
+    }
+    // Legacy schema: {mode: 'ACTIVE_SUPPORT'}
+    final modeStr = json['mode'] as String? ?? json['currentMode'] as String? ?? '';
+    final key = GuardianModeKey.fromString(modeStr);
+    if (key.isOverride) {
+      return GuardianModeState(override: key.toApiString());
+    }
+    if (key == GuardianModeKey.off) {
+      return const GuardianModeState();
+    }
+    return GuardianModeState(features: [key.toApiString()]);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'override': override,
+        'features': features,
+      };
+}
+
 class GuardianModeInfo {
   final GuardianModeKey currentMode;
   final GuardianPreset? preset;
   final DateTime? updatedAt;
 
+  /// New two-tier state (may be null when server returns legacy schema).
+  final GuardianModeState? twoTierState;
+
   const GuardianModeInfo({
     required this.currentMode,
     this.preset,
     this.updatedAt,
+    this.twoTierState,
   });
 
   factory GuardianModeInfo.fromJson(Map<String, dynamic> json) {
@@ -99,10 +169,19 @@ class GuardianModeInfo {
     if (json['updatedAt'] != null) {
       updatedAt = DateTime.tryParse(json['updatedAt'] as String);
     }
+
+    GuardianModeState? twoTierState;
+    if (json.containsKey('features') || json.containsKey('override')) {
+      twoTierState = GuardianModeState.fromJson(json);
+    } else if (json.containsKey('mode')) {
+      twoTierState = GuardianModeState.fromJson(json);
+    }
+
     return GuardianModeInfo(
       currentMode: GuardianModeKey.fromString(modeStr),
       preset: preset,
       updatedAt: updatedAt,
+      twoTierState: twoTierState,
     );
   }
 
@@ -122,6 +201,12 @@ class GuardianModeInfo {
         return 'Custom';
       case GuardianModeKey.cyborg:
         return 'Cyborg';
+      case GuardianModeKey.off:
+        return 'Off';
+      case GuardianModeKey.demo:
+        return 'Demo';
+      case GuardianModeKey.memorySupport:
+        return 'Memory Support';
     }
   }
 
@@ -137,6 +222,12 @@ class GuardianModeInfo {
         return const Color(0xFF8B5CF6);
       case GuardianModeKey.cyborg:
         return const Color(0xFFEC4899);
+      case GuardianModeKey.off:
+        return const Color(0xFF6B7280);
+      case GuardianModeKey.demo:
+        return const Color(0xFF3B82F6);
+      case GuardianModeKey.memorySupport:
+        return const Color(0xFF10B981);
     }
   }
 }
