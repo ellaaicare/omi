@@ -5,16 +5,25 @@ import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 
 class GuardianModePage extends StatefulWidget {
-  const GuardianModePage({super.key});
+  /// When true, show the Demo intelligence mode option.
+  final bool showDemo;
+
+  const GuardianModePage({super.key, this.showDemo = false});
 
   @override
   State<GuardianModePage> createState() => _GuardianModePageState();
 }
 
 class _GuardianModePageState extends State<GuardianModePage> {
-  List<GuardianPreset> _presets = [];
-  GuardianModeKey? _currentMode;
-  GuardianModeKey? _selectedMode;
+  List<GuardianPreset> _allPresets = [];
+
+  // Current saved state (from server).
+  GuardianModeState _currentState = const GuardianModeState(features: ['ACTIVE_SUPPORT']);
+
+  // Pending selection state (user has made changes but not saved).
+  String? _selectedOverride; // 'CYBORG' | 'DEMO' | null
+  Set<String> _selectedFeatures = {'ACTIVE_SUPPORT'}; // composable features
+
   bool _loading = true;
   bool _saving = false;
 
@@ -32,56 +41,80 @@ class _GuardianModePageState extends State<GuardianModePage> {
     ]);
     final presets = results[0] as List<GuardianPreset>;
     final modeInfo = results[1] as GuardianModeInfo?;
+
     if (mounted) {
       setState(() {
-        _presets = presets;
-        _currentMode = modeInfo?.currentMode ?? GuardianModeKey.activeSupport;
-        _selectedMode = _currentMode;
+        _allPresets = presets;
+
+        GuardianModeState state;
+        if (modeInfo?.twoTierState != null) {
+          state = modeInfo!.twoTierState!;
+        } else if (modeInfo != null) {
+          // Old server — synthesize two-tier from currentMode.
+          final key = modeInfo.currentMode;
+          if (key.isOverride) {
+            state = GuardianModeState(override: key.toApiString());
+          } else if (key == GuardianModeKey.off) {
+            state = const GuardianModeState();
+          } else {
+            state = GuardianModeState(features: [key.toApiString()]);
+          }
+        } else {
+          state = const GuardianModeState(features: ['ACTIVE_SUPPORT']);
+        }
+
+        _currentState = state;
+        _selectedOverride = state.override;
+        _selectedFeatures = Set<String>.from(state.features);
         _loading = false;
       });
     }
   }
 
-  bool get _hasChanges => _selectedMode != null && _selectedMode != _currentMode;
+  GuardianModeState get _pendingState => GuardianModeState(
+        override: _selectedOverride,
+        features: _selectedOverride != null ? [] : _selectedFeatures.toList(),
+      );
+
+  bool get _hasChanges {
+    final pending = _pendingState;
+    return pending.override != _currentState.override ||
+        !_sameFeatures(pending.features, _currentState.features);
+  }
+
+  bool _sameFeatures(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    final sa = Set<String>.from(a);
+    return b.every(sa.contains);
+  }
 
   Future<void> _save() async {
-    if (_selectedMode == null || !_hasChanges) return;
+    if (!_hasChanges) return;
 
-    // Confirmation for Maximum Awareness escalation
-    if (_selectedMode == GuardianModeKey.maximumAwareness &&
-        _currentMode != GuardianModeKey.maximumAwareness) {
+    // Confirmation for Maximum Awareness escalation.
+    if (_selectedOverride == null &&
+        _selectedFeatures.contains('MAXIMUM_AWARENESS') &&
+        !_currentState.features.contains('MAXIMUM_AWARENESS')) {
       final confirmed = await _showMaxAwarenessConfirmation();
       if (!confirmed) return;
     }
 
     setState(() => _saving = true);
-    final success = await guardian_api.setGuardianMode(_selectedMode!);
+    final success = await guardian_api.setGuardianModeTwoTier(_pendingState);
     if (!mounted) return;
     setState(() => _saving = false);
 
     if (success) {
-      setState(() => _currentMode = _selectedMode);
-      final modeName = _presets
-          .firstWhere(
-            (p) => p.modeKey == _selectedMode,
-            orElse: () => GuardianPreset(
-              presetKey: _selectedMode!.toApiString(),
-              name: _selectedMode!.toApiString(),
-              description: '',
-              detailsBullets: const [],
-              color: EllaColors.primary,
-            ),
-          )
-          .name;
+      setState(() => _currentState = _pendingState);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Guardian mode updated to $modeName'),
+        const SnackBar(
+          content: Text('Guardian mode updated'),
           backgroundColor: EllaColors.success,
           behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
+          duration: Duration(seconds: 3),
         ),
       );
-      Navigator.of(context).pop(_selectedMode);
+      Navigator.of(context).pop(_pendingState);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -139,6 +172,59 @@ class _GuardianModePageState extends State<GuardianModePage> {
         false;
   }
 
+  // ── Preset helpers ────────────────────────────────────────────────────────
+
+  GuardianPreset _presetFor(String key) {
+    return _allPresets.firstWhere(
+      (p) => p.presetKey == key,
+      orElse: () => GuardianPreset(
+        presetKey: key,
+        name: _fallbackLabel(key),
+        description: '',
+        detailsBullets: const [],
+        color: GuardianModeKey.fromString(key).isOverride
+            ? const Color(0xFFEC4899)
+            : const Color(0xFF14B8A6),
+      ),
+    );
+  }
+
+  String _fallbackLabel(String key) {
+    switch (key) {
+      case 'CYBORG':
+        return 'Cyborg';
+      case 'DEMO':
+        return 'Demo';
+      case 'EMERGENCY_ONLY':
+        return 'Emergency Alerts';
+      case 'ACTIVE_SUPPORT':
+        return 'Active Support';
+      case 'MAXIMUM_AWARENESS':
+        return 'Maximum Awareness';
+      case 'MEMORY_SUPPORT':
+        return 'Memory Support';
+      default:
+        return key;
+    }
+  }
+
+  // ── Intelligence mode rows (exclusive radio) ──────────────────────────────
+
+  List<String> get _overrideModes {
+    final modes = ['CYBORG'];
+    if (widget.showDemo) modes.add('DEMO');
+    return modes;
+  }
+
+  // ── Care feature rows (composable checkboxes) ─────────────────────────────
+
+  static const List<String> _careFeatureKeys = [
+    'EMERGENCY_ONLY',
+    'ACTIVE_SUPPORT',
+    'MAXIMUM_AWARENESS',
+    'MEMORY_SUPPORT',
+  ];
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -175,12 +261,82 @@ class _GuardianModePageState extends State<GuardianModePage> {
                           style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
                         ),
                       ),
-                      ..._presets.map((preset) => _PresetCard(
-                            preset: preset,
-                            isSelected: _selectedMode == preset.modeKey,
-                            isCurrent: _currentMode == preset.modeKey,
-                            onTap: () => setState(() => _selectedMode = preset.modeKey),
-                          )),
+
+                      // ── INTELLIGENCE MODES section ─────────────────────────
+                      const _SectionHeader(label: 'INTELLIGENCE MODES'),
+                      const Padding(
+                        padding: EdgeInsets.only(left: 4, bottom: 10),
+                        child: Text(
+                          'Replaces the care system entirely.',
+                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                        ),
+                      ),
+                      ..._overrideModes.map((key) {
+                        final preset = _presetFor(key);
+                        final isSelected = _selectedOverride == key;
+                        return _OverrideRow(
+                          preset: preset,
+                          isSelected: isSelected,
+                          onTap: () {
+                            setState(() {
+                              if (isSelected) {
+                                _selectedOverride = null;
+                              } else {
+                                _selectedOverride = key;
+                                _selectedFeatures.clear();
+                              }
+                            });
+                          },
+                        );
+                      }),
+
+                      const SizedBox(height: 20),
+
+                      // ── CARE FEATURES section ──────────────────────────────
+                      const _SectionHeader(label: 'CARE FEATURES'),
+                      const Padding(
+                        padding: EdgeInsets.only(left: 4, bottom: 10),
+                        child: Text(
+                          'Combine multiple features simultaneously.',
+                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                        ),
+                      ),
+                      ..._careFeatureKeys.map((key) {
+                        final preset = _presetFor(key);
+                        final isChecked = _selectedFeatures.contains(key);
+                        final dimmed = _selectedOverride != null;
+                        return _FeatureRow(
+                          preset: preset,
+                          isChecked: isChecked,
+                          dimmed: dimmed,
+                          onChanged: dimmed
+                              ? null
+                              : (checked) {
+                                  setState(() {
+                                    if (checked == true) {
+                                      _selectedFeatures.add(key);
+                                    } else {
+                                      _selectedFeatures.remove(key);
+                                    }
+                                  });
+                                },
+                        );
+                      }),
+
+                      const SizedBox(height: 24),
+
+                      // ── Turn Guardian Off ──────────────────────────────────
+                      _TurnOffButton(
+                        isOff: _selectedOverride == null && _selectedFeatures.isEmpty,
+                        onTap: () {
+                          setState(() {
+                            _selectedOverride = null;
+                            _selectedFeatures.clear();
+                          });
+                        },
+                      ),
+
+                      const SizedBox(height: 8),
                     ],
                   ),
                 ),
@@ -195,33 +351,54 @@ class _GuardianModePageState extends State<GuardianModePage> {
   }
 }
 
-class _PresetCard extends StatelessWidget {
+// ── Section header ─────────────────────────────────────────────────────────
+
+class _SectionHeader extends StatelessWidget {
+  final String label;
+  const _SectionHeader({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, bottom: 6),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: EllaColors.textTertiary,
+          letterSpacing: 1.1,
+        ),
+      ),
+    );
+  }
+}
+
+// ── Intelligence mode radio row ────────────────────────────────────────────
+
+class _OverrideRow extends StatelessWidget {
   final GuardianPreset preset;
   final bool isSelected;
-  final bool isCurrent;
   final VoidCallback onTap;
 
-  const _PresetCard({
+  const _OverrideRow({
     required this.preset,
     required this.isSelected,
-    required this.isCurrent,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.only(bottom: 8),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected
-                ? preset.color.withOpacity(0.08)
-                : EllaColors.bgSecondary,
+            color: isSelected ? preset.color.withValues(alpha: 0.08) : EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
             border: Border.all(
               color: isSelected ? preset.color : Colors.transparent,
@@ -229,102 +406,47 @@ class _PresetCard extends StatelessWidget {
             ),
           ),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Color dot / radio indicator
-              Padding(
-                padding: const EdgeInsets.only(top: 3),
-                child: Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: isSelected ? preset.color : Colors.transparent,
-                    border: Border.all(
-                      color: isSelected ? preset.color : EllaColors.bgTertiary,
-                      width: 2,
-                    ),
+              // Radio dot
+              Container(
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isSelected ? preset.color : Colors.transparent,
+                  border: Border.all(
+                    color: isSelected ? preset.color : EllaColors.bgTertiary,
+                    width: 2,
                   ),
-                  child: isSelected
-                      ? const Icon(Icons.check, size: 12, color: Colors.white)
-                      : null,
                 ),
+                child: isSelected
+                    ? const Icon(Icons.check, size: 12, color: Colors.white)
+                    : null,
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Text(
-                          preset.name,
-                          style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
-                            color: isSelected ? preset.color : EllaColors.textPrimary,
-                          ),
-                        ),
-                        if (isCurrent) ...[
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: preset.color.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(EllaSizes.radiusSmall),
-                            ),
-                            child: Text(
-                              'Current',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: preset.color,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
                     Text(
-                      preset.description,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: EllaColors.textTertiary,
+                      preset.name,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: isSelected ? preset.color : EllaColors.textPrimary,
                       ),
                     ),
-                    if (preset.detailsBullets.isNotEmpty && isSelected) ...[
-                      const SizedBox(height: 8),
-                      ...preset.detailsBullets.map(
-                        (bullet) => Padding(
-                          padding: const EdgeInsets.only(top: 3),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                margin: const EdgeInsets.only(top: 6),
-                                width: 4,
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  color: preset.color,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  bullet,
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: preset.color.withOpacity(0.85),
-                                  ),
-                                ),
-                              ),
-                            ],
+                    if (preset.description.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          preset.description,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
                           ),
                         ),
                       ),
-                    ],
                   ],
                 ),
               ),
@@ -335,6 +457,139 @@ class _PresetCard extends StatelessWidget {
     );
   }
 }
+
+// ── Care feature checkbox row ──────────────────────────────────────────────
+
+class _FeatureRow extends StatelessWidget {
+  final GuardianPreset preset;
+  final bool isChecked;
+  final bool dimmed;
+  final ValueChanged<bool?>? onChanged;
+
+  const _FeatureRow({
+    required this.preset,
+    required this.isChecked,
+    required this.dimmed,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final effectiveColor = dimmed ? EllaColors.bgTertiary : preset.color;
+    final textColor = dimmed ? EllaColors.textTertiary : EllaColors.textPrimary;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        onTap: onChanged == null ? null : () => onChanged!(!isChecked),
+        borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: isChecked && !dimmed
+                ? preset.color.withValues(alpha: 0.08)
+                : EllaColors.bgSecondary,
+            borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+            border: Border.all(
+              color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Row(
+            children: [
+              // Checkbox
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 20,
+                height: 20,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(5),
+                  color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
+                  border: Border.all(
+                    color: isChecked && !dimmed ? effectiveColor : EllaColors.bgTertiary,
+                    width: 2,
+                  ),
+                ),
+                child: isChecked && !dimmed
+                    ? const Icon(Icons.check, size: 12, color: Colors.white)
+                    : null,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      preset.name,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: isChecked && !dimmed ? effectiveColor : textColor,
+                      ),
+                    ),
+                    if (preset.description.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          preset.description,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: dimmed
+                                ? EllaColors.textTertiary.withValues(alpha: 0.5)
+                                : EllaColors.textTertiary,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Turn Guardian Off button ───────────────────────────────────────────────
+
+class _TurnOffButton extends StatelessWidget {
+  final bool isOff;
+  final VoidCallback onTap;
+
+  const _TurnOffButton({required this.isOff, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton(
+        onPressed: isOff ? null : onTap,
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(
+            color: isOff ? EllaColors.bgTertiary : const Color(0xFF6B7280),
+            width: 1.5,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+        ),
+        child: Text(
+          isOff ? 'Guardian Off' : 'Turn Guardian Off',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w500,
+            color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Save bar ───────────────────────────────────────────────────────────────
 
 class _SaveBar extends StatelessWidget {
   final bool enabled;

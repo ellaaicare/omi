@@ -17,6 +17,10 @@ String get _userId {
 }
 
 /// GET /api/users/{userId}/guardian-mode
+///
+/// Returns a [GuardianModeInfo] that includes a [GuardianModeState] for the
+/// two-tier picker.  Handles both the new schema {override, features} and the
+/// legacy schema {mode}.
 Future<GuardianModeInfo?> getGuardianMode() async {
   final uid = _userId;
   if (uid.isEmpty) return null;
@@ -41,6 +45,32 @@ Future<GuardianModeInfo?> getGuardianMode() async {
 }
 
 /// PUT /api/users/{userId}/guardian-mode
+///
+/// Sends the new two-tier body:
+///   { "override": "CYBORG" | "DEMO" | null, "features": [...] }
+Future<bool> setGuardianModeTwoTier(GuardianModeState state) async {
+  final uid = _userId;
+  if (uid.isEmpty) return false;
+  try {
+    final response = await http.put(
+      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(state.toJson()),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      return data['success'] == true;
+    }
+    Logger.debug('setGuardianMode: ${response.statusCode} ${response.body}');
+    return false;
+  } catch (e) {
+    Logger.debug('setGuardianMode error: $e');
+    return false;
+  }
+}
+
+/// Legacy single-mode PUT — kept for callers that haven't migrated yet.
 Future<bool> setGuardianMode(GuardianModeKey mode) async {
   final uid = _userId;
   if (uid.isEmpty) return false;
@@ -91,7 +121,7 @@ Future<List<GuardianPreset>> getGuardianPresets() async {
 List<GuardianPreset> _fallbackPresets() => [
       GuardianPreset(
         presetKey: 'EMERGENCY_ONLY',
-        name: 'Emergency Only',
+        name: 'Emergency Alerts',
         description: 'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
         detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
         color: const Color(0xFFF59E0B),
@@ -111,11 +141,11 @@ List<GuardianPreset> _fallbackPresets() => [
         color: const Color(0xFF6366F1),
       ),
       GuardianPreset(
-        presetKey: 'CUSTOM',
-        name: 'Custom',
-        description: 'User-configured rules and notification preferences.',
-        detailsBullets: ['Customizable alerts', 'Configurable thresholds'],
-        color: const Color(0xFF8B5CF6),
+        presetKey: 'MEMORY_SUPPORT',
+        name: 'Memory Support',
+        description: 'Proactive memory cues and gentle recall assistance for cognitive support.',
+        detailsBullets: ['Memory cues', 'Daily routine reminders', 'Cognitive pattern monitoring'],
+        color: const Color(0xFF10B981),
       ),
       GuardianPreset(
         presetKey: 'CYBORG',
@@ -123,5 +153,12 @@ List<GuardianPreset> _fallbackPresets() => [
         description: 'Continuous real-time audio response — every utterance gets an Ella reply in your ear.',
         detailsBullets: ['All utterances processed', 'Real-time audio responses', 'Continuous conversation context'],
         color: const Color(0xFFEC4899),
+      ),
+      GuardianPreset(
+        presetKey: 'DEMO',
+        name: 'Demo',
+        description: 'Demonstration mode with scripted responses for showcasing Ella.',
+        detailsBullets: ['Scripted demo responses', 'Showcase mode'],
+        color: const Color(0xFF3B82F6),
       ),
     ];
