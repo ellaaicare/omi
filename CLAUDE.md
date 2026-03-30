@@ -1,3 +1,26 @@
+## Ella AI — Dispatch Worker Rules
+
+If you were launched by dispatch.sh (your prompt mentions "You are a worker agent"):
+
+### MANDATORY Git Workflow
+
+1. **Branch from latest main**: `git fetch origin main && git checkout -b job-N-impl origin/main`
+2. **Push your branch**: `git push -u origin job-N-impl`
+3. **Create a PR**: `gh pr create --base main --head job-N-impl --title "Job #N: ..." --body "Closes #N"`
+4. **Merge the PR**: `gh pr merge --merge --delete-branch`
+5. **Verify on main**: `git fetch origin main && git log origin/main --oneline -5` — your commits MUST appear
+
+### NEVER
+
+- Close an issue without merging your PR to `main`
+- Build or deploy from a job branch without merging first
+- Leave code only in local git — always push to remote
+- Skip the PR step, even for small changes
+
+Work that doesn't reach `main` will be overwritten by the next worker.
+
+---
+
 # Coding Guidelines
 
 ## Behavior
