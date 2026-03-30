@@ -156,6 +156,7 @@ rm -rf "$PAYLOAD_DIR"
 mkdir -p "$PAYLOAD_DIR/Payload"
 cp -r "$APP_BUNDLE" "$PAYLOAD_DIR/Payload/"
 mkdir -p "$BUILD_DIR"
+rm -f "$IPA_PATH"  # remove old IPA to prevent zip from merging stale files
 (cd "$PAYLOAD_DIR" && zip -qr "$IPA_PATH" Payload/)
 rm -rf "$PAYLOAD_DIR"
 log "IPA: $IPA_PATH ($(du -sh "$IPA_PATH" | cut -f1))"
