@@ -152,11 +152,15 @@ class GuardianModeInfo {
   /// New two-tier state (may be null when server returns legacy schema).
   final GuardianModeState? twoTierState;
 
+  /// When true, the Demo intelligence mode option should be shown in the picker.
+  final bool showDemo;
+
   const GuardianModeInfo({
     required this.currentMode,
     this.preset,
     this.updatedAt,
     this.twoTierState,
+    this.showDemo = false,
   });
 
   factory GuardianModeInfo.fromJson(Map<String, dynamic> json) {
@@ -182,6 +186,7 @@ class GuardianModeInfo {
       preset: preset,
       updatedAt: updatedAt,
       twoTierState: twoTierState,
+      showDemo: json['showDemo'] as bool? ?? false,
     );
   }
 
