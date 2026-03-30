@@ -264,6 +264,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
                 headers={
                     "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
                     "Content-Type": "application/json",
+                    "x-openclaw-scopes": "operator.write",
                 },
                 json={
                     "model": f"openclaw:{agent_id}",
