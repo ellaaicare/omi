@@ -645,8 +645,9 @@ class MessageProvider extends ChangeNotifier {
     try {
       // Ella uses its own simple chat endpoint; OMI uses the graph chat
       const isEllaApp = true; // TODO: replace with flavor check
-      var stream =
-          isEllaApp ? sendEllaChatStream(text) : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
+      var stream = isEllaApp
+          ? sendEllaDirectStream(text)
+          : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
       await for (var chunk in stream) {
         if (chunk.type == MessageChunkType.think) {
           flushBuffer();
