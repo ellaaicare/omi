@@ -8,7 +8,7 @@ class GuardianModePage extends StatefulWidget {
   /// When true, show the Demo intelligence mode option.
   final bool showDemo;
 
-  const GuardianModePage({super.key, this.showDemo = false});
+  const GuardianModePage({super.key, this.showDemo = true});
 
   @override
   State<GuardianModePage> createState() => _GuardianModePageState();

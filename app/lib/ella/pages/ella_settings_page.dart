@@ -189,7 +189,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               onTap: () async {
                 final updated = await Navigator.push<GuardianModeKey>(
                   context,
-                  MaterialPageRoute(builder: (context) => GuardianModePage(showDemo: _guardianMode?.showDemo ?? false)),
+                  MaterialPageRoute(builder: (context) => GuardianModePage(showDemo: true)),
                 );
                 if (updated != null && mounted) {
                   _loadData(); // refresh mode display
