@@ -393,6 +393,16 @@ class V2VClient {
         final type = json['type'] as String? ?? 'unknown';
         final text = json['text'] as String? ?? json['transcript'] as String?;
 
+        // Handle legacy {"error": "..."} format sent by older proxy versions
+        if (type == 'unknown') {
+          final legacyError = json['error'] as String?;
+          if (legacyError != null) {
+            Logger.error('[V2V] Server error (legacy format): $legacyError');
+            onEvent?.call(V2VEvent(type: 'error', text: legacyError));
+            return;
+          }
+        }
+
         switch (type) {
           case 'user_transcript':
             onEvent?.call(V2VEvent(type: 'user_transcript', text: text));

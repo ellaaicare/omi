@@ -576,8 +576,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         break;
       case 'error':
         debugPrint('[VoiceChat] V2V error: ${event.text}');
+        // Stop V2V mode on server error so user can tap to retry cleanly
+        _isV2VMode = false;
+        _v2vClient?.disconnect();
+        _v2vClient = null;
+        _voiceModeActive = false;
         setState(() {
-          _statusText = 'Error: ${event.text ?? "unknown"}';
+          _orbState = VoiceOrbState.idle;
+          _statusText = event.text ?? 'Voice unavailable — Tap to retry';
         });
         break;
       case 'session_end':
