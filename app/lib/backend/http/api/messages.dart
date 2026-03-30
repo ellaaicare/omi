@@ -266,6 +266,7 @@ Stream<ServerMessageChunk> sendEllaDirectStream(String text) async* {
       headers: {
         'Authorization': 'Bearer ${endpoint.token}',
         'Content-Type': 'application/json',
+        'x-openclaw-scopes': 'operator.write',
       },
       body: jsonEncode({
         'model': 'openclaw:${endpoint.agentId}',
