@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/knowledge_api.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaProfilePage extends StatefulWidget {
@@ -16,6 +17,7 @@ class _EllaProfilePageState extends State<EllaProfilePage> {
   late TextEditingController _emailController;
   late TextEditingController _phoneController;
   bool _hasChanges = false;
+  List<KnowledgeSection> _knowledgeSections = [];
 
   @override
   void initState() {
@@ -24,6 +26,12 @@ class _EllaProfilePageState extends State<EllaProfilePage> {
     _nameController = TextEditingController(text: prefs.givenName);
     _emailController = TextEditingController(text: prefs.email);
     _phoneController = TextEditingController(text: prefs.phoneNumber);
+    _loadKnowledge();
+  }
+
+  Future<void> _loadKnowledge() async {
+    final sections = await getUserKnowledge();
+    if (mounted) setState(() => _knowledgeSections = sections);
   }
 
   @override
@@ -106,6 +114,68 @@ class _EllaProfilePageState extends State<EllaProfilePage> {
               placeholder: context.l10n.ellaProfileNotSet,
               keyboardType: TextInputType.phone,
             ),
+
+            if (_knowledgeSections.isNotEmpty) ...[
+              const SizedBox(height: 32),
+              _buildLabel('WHAT ELLA KNOWS'),
+              const SizedBox(height: 12),
+              ..._knowledgeSections.map((s) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: EllaColors.bgTertiary,
+                        borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            s.title.toUpperCase(),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: EllaColors.textTertiary,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            s.content,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              color: EllaColors.textSecondary,
+                              height: 1.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )),
+              const SizedBox(height: 16),
+              // Talk to Ella CTA
+              InkWell(
+                onTap: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                child: Container(
+                  height: 52,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: EllaColors.primary, width: 1.5),
+                    borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'Talk to Ella to update',
+                      style: TextStyle(
+                        fontSize: 18,
+                        color: EllaColors.primary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
 
             const SizedBox(height: 32),
 

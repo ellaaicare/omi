@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/pages/ella_demo_scenarios_page.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 
 class GuardianModePage extends StatefulWidget {
@@ -289,6 +290,35 @@ class _GuardianModePageState extends State<GuardianModePage> {
                           },
                         );
                       }),
+
+                      // ── View Demo Scenarios link (when DEMO is selected) ───
+                      if (_selectedOverride == 'DEMO')
+                        InkWell(
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const EllaDemoScenariosPage()),
+                          ),
+                          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.list_alt,
+                                    color: EllaColors.primary, size: 20),
+                                const SizedBox(width: 10),
+                                const Text(
+                                  'View Demo Scenarios',
+                                  style: TextStyle(
+                                      fontSize: 16, color: EllaColors.primary),
+                                ),
+                                const Spacer(),
+                                const Icon(Icons.chevron_right,
+                                    color: EllaColors.textTertiary, size: 20),
+                              ],
+                            ),
+                          ),
+                        ),
 
                       const SizedBox(height: 20),
 
