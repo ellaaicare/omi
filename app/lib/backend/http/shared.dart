@@ -204,10 +204,11 @@ Stream<String> makeStreamingApiCall({
   Map<String, String> headers = const {},
   String body = '',
   String method = 'POST',
+  bool skipAuth = false,
 }) async* {
   try {
     final builtHeaders = await buildHeaders(
-      requireAuthCheck: _isRequiredAuthCheck(url),
+      requireAuthCheck: skipAuth ? false : _isRequiredAuthCheck(url),
       fromHeaders: headers,
     );
 

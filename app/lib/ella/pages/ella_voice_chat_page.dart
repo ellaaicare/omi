@@ -57,6 +57,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// Guard against concurrent _startListening() calls
   bool _isRestarting = false;
 
+  /// Guard against re-entrant _processTranscript calls (iOS callbacks can fire multiple times)
+  bool _processingTranscript = false;
+
   /// ScrollController for the transcript area
   final ScrollController _transcriptScrollController = ScrollController();
 
@@ -373,6 +376,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted || !_voiceModeActive) return;
 
+    _processingTranscript = false;
     _currentWords = '';
     _typewriterTimer?.cancel();
     setState(() {
@@ -593,9 +597,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (!mounted) return;
     debugPrint('[VoiceChat] Speech result: final=${result.finalResult}, text="${result.recognizedWords}"');
 
-    _currentWords = result.recognizedWords;
+    if (!_processingTranscript) {
+      _currentWords = result.recognizedWords;
+    }
 
-    if (result.finalResult && _currentWords.isNotEmpty) {
+    if (result.finalResult && _currentWords.isNotEmpty && !_processingTranscript) {
       _processTranscript(_currentWords);
     } else {
       setState(() {
@@ -606,6 +612,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _processTranscript(String transcript) async {
+    if (_processingTranscript) {
+      debugPrint('[VoiceChat] _processTranscript called while already processing — ignoring duplicate');
+      return;
+    }
+    _processingTranscript = true;
     debugPrint('[VoiceChat] Processing transcript: "$transcript"');
     _currentWords = '';
 
@@ -621,7 +632,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       // Send via Ella's chat endpoint
       debugPrint('[VoiceChat] Sending to Ella chat...');
       final replyBuffer = StringBuffer();
-      await for (var chunk in sendEllaChatStream(transcript)) {
+      await for (var chunk in sendEllaDirectStream(transcript)) {
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
         } else if (chunk.type == MessageChunkType.done && chunk.message != null) {
