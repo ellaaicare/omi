@@ -50,6 +50,13 @@ post_install do |installer|
       # errors in third-party pods (e.g. mcumgr_flutter, DKImagePickerController)
       # that use syntax valid in Swift 5 but illegal in Swift 6.
       config.build_settings['SWIFT_VERSION'] = '5'
+      # Suppress warnings for sign_in_with_apple: Xcode 26 SDK adds new
+      # ASAuthorizationError.Code cases (iOS 19) that the pod's @unknown default
+      # catches correctly at runtime but triggers "switch must be exhaustive"
+      # compile-time warnings. The runtime behavior is correct; silence the noise.
+      if target.name == 'sign_in_with_apple'
+        config.build_settings['SWIFT_SUPPRESS_WARNINGS'] = 'YES'
+      end
       config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
         '$(inherited)',
 
