@@ -95,6 +95,13 @@ fi
 if [ ! -f ios/Runner/GoogleService-Info.plist ]; then
   cp setup/prebuilt/GoogleService-Info.plist ios/Runner/
 fi
+# Ensure firebase_options_*.dart exist (tracked in git; defensive fallback from prebuilt)
+if [ ! -f lib/firebase_options_prod.dart ]; then
+  cp setup/prebuilt/firebase_options.dart lib/firebase_options_prod.dart
+fi
+if [ ! -f lib/firebase_options_dev.dart ]; then
+  cp setup/prebuilt/firebase_options.dart lib/firebase_options_dev.dart
+fi
 bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter
 echo "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" >> ios/Flutter/Custom.xcconfig
 
