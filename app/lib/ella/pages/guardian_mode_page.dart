@@ -226,16 +226,72 @@ class _GuardianModePageState extends State<GuardianModePage> {
     'MEMORY_SUPPORT',
   ];
 
+  Future<void> _maybeDiscard() async {
+    if (!_hasChanges) {
+      Navigator.of(context).pop();
+      return;
+    }
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: EllaColors.bgSecondary,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+        ),
+        title: const Text(
+          'Discard changes?',
+          style: TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            color: EllaColors.textPrimary,
+          ),
+        ),
+        content: const Text(
+          'You have unsaved changes. Leave without saving?',
+          style: TextStyle(fontSize: 16, color: EllaColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text(
+              'Keep editing',
+              style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Discard',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: EllaColors.error,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if ((discard ?? false) && mounted) {
+      Navigator.of(context).pop();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _maybeDiscard();
+      },
+      child: Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
         backgroundColor: EllaColors.bgPrimary,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: EllaColors.textPrimary),
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _maybeDiscard,
         ),
         title: const Text(
           'Guardian Mode',
@@ -324,11 +380,21 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
                       // ── CARE FEATURES section ──────────────────────────────
                       const _SectionHeader(label: 'CARE FEATURES'),
-                      const Padding(
-                        padding: EdgeInsets.only(left: 4, bottom: 10),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
-                          'Combine multiple features simultaneously.',
-                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                          _selectedOverride != null
+                              ? 'Disabled — Intelligence Mode replaces the care system.'
+                              : 'Combine multiple features simultaneously.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: _selectedOverride != null
+                                ? EllaColors.textTertiary.withValues(alpha: 0.5)
+                                : EllaColors.textTertiary,
+                            fontStyle: _selectedOverride != null
+                                ? FontStyle.italic
+                                : FontStyle.normal,
+                          ),
                         ),
                       ),
                       ..._careFeatureKeys.map((key) {
@@ -377,6 +443,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
                 ),
               ],
             ),
+      ),
     );
   }
 }
