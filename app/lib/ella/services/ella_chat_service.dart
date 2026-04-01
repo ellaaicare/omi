@@ -209,6 +209,7 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
       final ts = m['timestamp'] as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
       if (content.isEmpty) continue;
+      if (content.startsWith('[SYSTEM:')) continue; // Filter scanner notifications from chat UI
 
       result.add(ServerMessage(
         id,
@@ -264,6 +265,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       url: '${endpoint.gatewayUrl}/v1/chat/completions',
       headers: {
         'Authorization': 'Bearer ${endpoint.token}',
+        'x-openclaw-scopes': 'operator.write',
         ..._ellaDebugHeaders(routeSource: 'pattern-c'),
       },
       body: jsonEncode({
