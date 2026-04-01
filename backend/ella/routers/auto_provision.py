@@ -205,9 +205,11 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
 
         # Phase 2: Store agent IDs back into DB
         gateway_url = provision_result.get("gatewayUrl", OPENCLAW_GATEWAY_URL)
+        scanner_gateway_url = provision_result.get("scannerGatewayUrl", OPENCLAW_GATEWAY_URL)
         cluster_agents = json.dumps({
             "provider": "openclaw",
             "gatewayUrl": gateway_url,
+            "scannerGatewayUrl": scanner_gateway_url,
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
             "userAgentId": provision_result.get("userAgentId", f"ella-{openclaw_user_id}"),
@@ -225,7 +227,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
                 await pool.execute(
                     """
                     UPDATE agent_clusters
-                    SET agents = $1::jsonb, status = 'ACTIVE',
+                    SET agents = agents || $1::jsonb, status = 'ACTIVE',
                         last_health_check = NOW(), health_status = 'Auto-provisioned'
                     WHERE id = $2::uuid
                     """,
