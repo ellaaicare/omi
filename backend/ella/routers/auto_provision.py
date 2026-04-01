@@ -203,21 +203,34 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
 
         logger.info(f"Provision API success for uid={uid}: workspace={provision_result.get('workspace')}")
 
-        # Phase 2: Store agent IDs back into DB
+        # Phase 2: Store agent IDs back into DB.
+        # IMPORTANT: Use values from provision API, not local fallbacks, for agent IDs
+        # and gatewayToken. The provision API returns authoritative values from Mac Mini.
+        # Local fallbacks would overwrite correct DB values on re-auth.
+        # Postgres UPDATE uses agents || $1 (merge) so fields absent here are preserved.
+        # Incident: ella-ai#501 (Apr 2026) - full replace + wrong fallbacks wiped routing.
         gateway_url = provision_result.get("gatewayUrl", OPENCLAW_GATEWAY_URL)
-        cluster_agents = json.dumps({
+        scanner_gateway_url = provision_result.get("scannerGatewayUrl", OPENCLAW_GATEWAY_URL)
+        cluster_agents_dict = {
             "provider": "openclaw",
             "gatewayUrl": gateway_url,
+            "scannerGatewayUrl": scanner_gateway_url,
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
-            "userAgentId": provision_result.get("userAgentId", f"ella-{openclaw_user_id}"),
-            "caregiverAgentId": provision_result.get("caregiverAgentId", f"ella-cg-{openclaw_user_id}"),
-            "scannerAgentId": provision_result.get("scannerAgentId", f"ella-scanner-{openclaw_user_id}"),
-            "summarizerAgentId": provision_result.get("summarizerAgentId", "summarizer"),
-            "gatewayToken": OPENCLAW_GATEWAY_TOKEN,
             "provisionedAt": provision_result.get("provisionedAt")
                 or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-        })
+        }
+        for field, fallback in [
+            ("userAgentId", f"ella-{openclaw_user_id}"),
+            ("caregiverAgentId", f"ella-cg-{openclaw_user_id}"),
+            ("scannerAgentId", f"ella-scanner-{openclaw_user_id}"),
+            ("summarizerAgentId", "summarizer"),
+        ]:
+            cluster_agents_dict[field] = provision_result.get(field) or fallback
+        cluster_agents_dict["gatewayToken"] = (
+            provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
+        )
+        cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:
             if cluster_id:
@@ -225,7 +238,10 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
                 await pool.execute(
                     """
                     UPDATE agent_clusters
-                    SET agents = $1::jsonb, status = 'ACTIVE',
+                    -- IMPORTANT: Use || merge, NOT plain assignment.
+                    -- Plain SET agents = $1 wipes userAgentId/scannerAgentId/gatewayToken on
+                    -- re-authentication (sign-out → sign-in). Incident: ella-ai#501 (Apr 2026).
+                    SET agents = agents || $1::jsonb, status = 'ACTIVE',
                         last_health_check = NOW(), health_status = 'Auto-provisioned'
                     WHERE id = $2::uuid
                     """,
