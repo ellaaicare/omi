@@ -192,6 +192,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
 
       // Ensure the provider has the conversation data from the widget parameter
       provider.setCachedConversation(widget.conversation);
+      // Fire-and-forget refresh so enriched [Ella] titles are always shown (#508)
+      provider.refreshConversation();
 
       conversationProvider.groupConversationsByDate();
 
