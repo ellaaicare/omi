@@ -32,9 +32,7 @@ router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
 AUDIO_BASE_DIR = "/var/www/ella-ai-care.com/audio"
 AUDIO_PUBLIC_URL = "https://ella-ai-care.com/audio"
-GUARDIAN_WEBHOOK_KEY = os.getenv(
-    "GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"
-)
+GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
@@ -61,13 +59,13 @@ _playback_events: dict[str, dict] = {}
 
 # Echo risk by iOS AVAudioSession portType rawValue
 _ECHO_RISK = {
-    "Speaker": "high",        # builtInSpeaker
-    "Receiver": "none",       # builtInReceiver
-    "Headphones": "none",     # headphones
-    "BluetoothHFP": "none",   # BT headset (hands-free)
+    "Speaker": "high",  # builtInSpeaker
+    "Receiver": "none",  # builtInReceiver
+    "Headphones": "none",  # headphones
+    "BluetoothHFP": "none",  # BT headset (hands-free)
     "BluetoothA2DP": "high",  # BT speaker/headphones
     "BluetoothLE": "medium",  # BT LE audio
-    "AirPlay": "very_high",   # AirPlay / Apple TV
+    "AirPlay": "very_high",  # AirPlay / Apple TV
     "HDMI": "very_high",
     "CarAudio": "high",
     "USBAudio": "low",
@@ -100,6 +98,53 @@ def _verify_key(
         raise HTTPException(status_code=403, detail="Invalid guardian key")
 
 
+async def _update_guardian_override(uid: str, mode: Optional[str]) -> dict:
+    """Update guardian_override (and legacy guardian_mode) for a user.
+
+    Args:
+        uid:  Firebase UID (omi_uid) of the user.
+        mode: Uppercase mode string e.g. "CYBORG", "DEMO", or None/"NORMAL" to clear.
+
+    Returns:
+        {"updated": bool, "previous_mode": str|None, "new_mode": str|None}
+    """
+    # Normalize
+    normalized = (mode or "").strip().upper() or None
+    if normalized in ("NORMAL", ""):
+        normalized = None
+
+    pool = await _get_pool()
+
+    # Read current value for logging
+    row = await pool.fetchrow(
+        "SELECT guardian_override, guardian_mode FROM users WHERE omi_uid = $1",
+        uid,
+    )
+    if not row:
+        print(f"[GUARDIAN-MODE] uid={uid} user_not_found", flush=True)
+        return {"updated": False, "previous_mode": None, "new_mode": None}
+
+    previous = row["guardian_override"]
+
+    await pool.execute(
+        """
+        UPDATE users
+        SET guardian_override = $1,
+            guardian_mode = COALESCE($1, guardian_mode),
+            guardian_updated_at = NOW()
+        WHERE omi_uid = $2
+        """,
+        normalized,
+        uid,
+    )
+
+    print(
+        f"[GUARDIAN-MODE] uid={uid} prev={previous!r} new={normalized!r}",
+        flush=True,
+    )
+    return {"updated": True, "previous_mode": previous, "new_mode": normalized}
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -107,15 +152,33 @@ def _verify_key(
 
 class PlaybackEventRequest(BaseModel):
     """JSON body for /playback-event endpoint."""
+
     uid: str
-    port_type: str       # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
+    port_type: str  # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
     port_name: str = ""  # human-readable device name (e.g. "AirPods Pro")
-    device_uid: str = "" # unique device ID from AVAudioSessionPortDescription
-    duration_ms: int = 0 # estimated audio duration in ms
+    device_uid: str = ""  # unique device ID from AVAudioSessionPortDescription
+    duration_ms: int = 0  # estimated audio duration in ms
+
+
+# ---------------------------------------------------------------------------
+# Guardian mode constants
+# ---------------------------------------------------------------------------
+
+# Tier-1 exclusive overrides — stored in users.guardian_override
+_TIER1_MODES = {"CYBORG", "DEMO", "CHATBOT"}
+
+# Tier-2 composable features — stored in users.guardian_features (array)
+_TIER2_MODES = {"ACTIVE_SUPPORT", "EMERGENCY_ONLY", "MAXIMUM_AWARENESS", "MEMORY_SUPPORT"}
+
+VALID_MODES = _TIER1_MODES | _TIER2_MODES
+
+# Trigger values that signal a mode-switch (sent by n8n @commands handler)
+_MODE_SWITCH_TRIGGERS = {"set_guardian_override", "clear_guardian_override", "guardian-mode-switch"}
 
 
 class EnqueueRequest(BaseModel):
     """JSON body for enqueue endpoint."""
+
     uid: Optional[str] = None
     userID: Optional[str] = None  # alias accepted from n8n
     url: str
@@ -124,6 +187,16 @@ class EnqueueRequest(BaseModel):
     message: Optional[str] = None
     trigger: Optional[str] = None
     metadata: Optional[dict] = None
+    # Layer 2: scanner exact-phrase mode switching
+    # n8n sends mode="CYBORG" (or None to clear) when @commands fires set_guardian_override
+    mode: Optional[str] = None
+
+
+class SetModeRequest(BaseModel):
+    """JSON body for set-mode endpoint (Layer 3 — chat agent tool calls)."""
+
+    uid: str
+    mode: Optional[str] = None  # None / "NORMAL" / "" clears the override
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +475,10 @@ async def next_audio(uid: str):
         # Don't log empty polls (too noisy — iOS polls every 3s)
         return {"url": None}
 
-    print(f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms",
+        flush=True,
+    )
 
     meta = row["metadata"]
     if isinstance(meta, str):
@@ -435,13 +511,42 @@ async def enqueue(
     x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
     key: Optional[str] = Header(None, alias="X-Key"),
 ):
-    """Enqueue an audio clip for a user."""
+    """Enqueue an audio clip for a user.
+
+    Layer 2 — Scanner exact phrase mode switching:
+    When n8n fires a guardian @command (e.g. "ella cyborg mode"), it sets
+    req.mode="CYBORG" (or req.trigger="set_guardian_override" + req.metadata.mode).
+    The handler updates users.guardian_override in PostgreSQL before queuing audio.
+    """
     _start = time.time()
     _verify_key(x_guardian_key, key)
 
     uid = req.uid or req.userID
     if not uid:
         raise HTTPException(status_code=400, detail="uid (or userID) is required")
+
+    # --- Layer 2: Detect and apply guardian mode switch ---
+    # n8n can signal a mode switch three ways:
+    #   1. req.mode = "CYBORG" / "DEMO" / ... (direct field)
+    #   2. req.trigger = "set_guardian_override" + req.metadata.mode
+    #   3. req.trigger = "clear_guardian_override" (clear override)
+    mode_to_set: Optional[str] = None
+    is_mode_switch = False
+
+    if req.mode:
+        mode_to_set = req.mode.strip().upper()
+        is_mode_switch = True
+    elif req.trigger in _MODE_SWITCH_TRIGGERS:
+        is_mode_switch = True
+        if req.trigger == "clear_guardian_override":
+            mode_to_set = None
+        elif req.metadata:
+            mode_to_set = (req.metadata.get("mode") or "").strip().upper() or None
+
+    if is_mode_switch:
+        if mode_to_set and mode_to_set not in VALID_MODES and mode_to_set != "NORMAL":
+            raise HTTPException(status_code=400, detail=f"Invalid mode: {mode_to_set}. Valid: {sorted(VALID_MODES)}")
+        await _update_guardian_override(uid, mode_to_set)
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
 
@@ -471,9 +576,14 @@ async def enqueue(
     )
 
     _elapsed = int((time.time() - _start) * 1000)
-    print(f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} trigger={req.trigger} queued={count} latency={_elapsed}ms", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} "
+        f"trigger={req.trigger} mode_switch={is_mode_switch} new_mode={mode_to_set!r} "
+        f"queued={count} latency={_elapsed}ms",
+        flush=True,
+    )
 
-    return {"ok": True, "id": item_id, "queued": count}
+    return {"ok": True, "id": item_id, "queued": count, "mode_updated": is_mode_switch}
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +621,10 @@ async def upload_audio(
     public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
 
     _elapsed = int((time.time() - _start) * 1000)
-    print(f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}",
+        flush=True,
+    )
 
     return {
         "url": public_url,
@@ -563,6 +676,7 @@ async def view_queue(uid: str):
     print(f"[FLOW:GUARDIAN-QUEUE] uid={uid} pending={len(items)}", flush=True)
 
     return {"uid": uid, "count": len(items), "items": items}
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/ella/guardian/activate
@@ -663,13 +777,15 @@ async def get_pipeline_trace(conversation_id: str):
         stages = []
         for r in rows:
             meta = _parse_meta(r["metadata"])
-            stages.append({
-                "stage": r["stage"],
-                "status": r["status"],
-                "latency_ms": r["latency_ms"],
-                "metadata": meta,
-                "at": r["created_at"].isoformat() if r["created_at"] else None,
-            })
+            stages.append(
+                {
+                    "stage": r["stage"],
+                    "status": r["status"],
+                    "latency_ms": r["latency_ms"],
+                    "metadata": meta,
+                    "at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+            )
 
         # Calculate total latency
         first_ts = rows[0]["created_at"]
@@ -678,18 +794,15 @@ async def get_pipeline_trace(conversation_id: str):
         if first_ts and last_ts:
             total_ms = int((last_ts - first_ts).total_seconds() * 1000)
 
-        escalated = any(
-            _parse_meta(r["metadata"]).get("escalate") is True
-            for r in rows
-        )
-        audio_delivered = any(
-            r["stage"] == "audio_consumed"
-            for r in rows
-        )
+        escalated = any(_parse_meta(r["metadata"]).get("escalate") is True for r in rows)
+        audio_delivered = any(r["stage"] == "audio_consumed" for r in rows)
 
         uid = rows[0]["uid"] if rows else ""
 
-        print(f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} uid={uid} stages={len(stages)} total_ms={total_ms} escalated={escalated}", flush=True)
+        print(
+            f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} uid={uid} stages={len(stages)} total_ms={total_ms} escalated={escalated}",
+            flush=True,
+        )
 
         return {
             "trace_id": conversation_id,
@@ -740,7 +853,10 @@ async def log_pipeline_event(request: Request):
         json.dumps(metadata),
     )
 
-    print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms",
+        flush=True,
+    )
 
     return {"logged": True, "trace_id": trace_id, "stage": stage}
 
@@ -769,6 +885,55 @@ async def record_playback_event(req: PlaybackEventRequest):
         flush=True,
     )
     return {"echo_risk": echo_risk}
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/ella/guardian/set-mode
+# Layer 3 — chat agent intent inference.
+# Chat agent calls this tool internally after natural-language mode request.
+# Also usable directly for testing / manual overrides.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/set-mode")
+async def set_mode(
+    req: SetModeRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Directly set guardian_override for a user (chat agent tool / testing).
+
+    Body: {uid, mode}
+    mode = "CYBORG" | "DEMO" | "CHATBOT" | "ACTIVE_SUPPORT" | "EMERGENCY_ONLY"
+         | "MAXIMUM_AWARENESS" | "MEMORY_SUPPORT" | "NORMAL" | null  (null clears)
+
+    Returns current mode state after update.
+    """
+    _verify_key(x_guardian_key, key)
+
+    normalized = (req.mode or "").strip().upper() or None
+    if normalized == "NORMAL":
+        normalized = None
+
+    if normalized and normalized not in VALID_MODES:
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {normalized}. Valid: {sorted(VALID_MODES)}")
+
+    result = await _update_guardian_override(req.uid, normalized)
+
+    if not result["updated"]:
+        raise HTTPException(status_code=404, detail=f"User not found: {req.uid}")
+
+    print(
+        f"[FLOW:GUARDIAN-SET-MODE] uid={req.uid} prev={result['previous_mode']!r} new={normalized!r}",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "uid": req.uid,
+        "previous_mode": result["previous_mode"],
+        "new_mode": normalized,
+    }
 
 
 def get_playback_event(uid: str) -> dict | None:
