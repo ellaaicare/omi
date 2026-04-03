@@ -39,6 +39,14 @@ GUARDIAN_WEBHOOK_KEY = os.getenv(
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
 
+# Force consolidation if ANY pending item is older than this (seconds).
+# Catches the "app was offline, came back to a stale queue" scenario.
+CONSOLIDATION_STALE_SECONDS = int(os.getenv("CONSOLIDATION_STALE_SECONDS", "30"))
+
+# Telegram notification webhook (fire-and-forget visibility)
+_TELEGRAM_WEBHOOK_URL = "https://n8n.ella-ai-care.com/webhook/agent-telegram-ping"
+_TELEGRAM_WEBHOOK_KEY = "4f13699d8462adf71e35d2098e6a791f"
+
 # Provision API for chat history lookups
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 _PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
@@ -131,6 +139,30 @@ class EnqueueRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _notify_consolidation(uid: str, source_count: int, reason: str, result_msg: str):
+    """Fire-and-forget Telegram notification when consolidation fires."""
+    try:
+        preview = (result_msg or "NULL")[:100]
+        msg = (
+            f"🔄 Guardian Consolidator fired\n"
+            f"UID: {uid[:20]}...\n"
+            f"Batched: {source_count} messages ({reason})\n"
+            f"Result: {preview}"
+        )
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                _TELEGRAM_WEBHOOK_URL,
+                json={
+                    "agent_name": "Guardian Queue",
+                    "message": msg,
+                    "priority": "normal",
+                    "key": _TELEGRAM_WEBHOOK_KEY,
+                },
+            )
+    except Exception:
+        pass  # fire-and-forget, never block the queue
+
+
 async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
     """Fetch recent conversation turns for a UID from the chat history endpoint.
 
@@ -221,16 +253,18 @@ async def _consolidate_queue(
 
 Your job:
 1. Discard alerts that are no longer relevant (user already resolved the situation, conversation moved on)
-2. Discard duplicate or near-duplicate alerts
+2. Discard duplicate or near-duplicate alerts (many alerts may say essentially the same thing)
 3. Discard echo alerts (transcriptions of audio Ella just played)
 4. Merge what remains into ONE concise spoken message Ella will say aloud
 
 Rules:
-- URGENT alerts (fall, emergency, "can't breathe") are NEVER discarded, always included
+- URGENT alerts (fall, emergency, "can't breathe", self-harm) are NEVER discarded — always include their core concern
+- Multiple urgent alerts about the SAME concern should be merged into ONE mention, not repeated
 - If EVERYTHING is resolved or irrelevant, output exactly: NULL
 - Output ONLY the spoken message text, no preamble, no JSON, no quotes
-- Keep it under 40 words — this will be spoken aloud
-- Natural spoken language only — no markdown, no bullet points"""
+- Keep it under 50 words — this will be spoken aloud
+- Natural spoken language only — no markdown, no bullet points
+- When merging many alerts, prioritize the most important concern first"""
 
     user_prompt = (
         f"Pending alerts ({len(pending)} items):\n{pending_text}"
@@ -287,22 +321,41 @@ async def next_audio(uid: str):
     _start = time.time()
     pool = await _get_pool()
 
-    # --- Check queue depth first (excluding debug items) ---
+    # --- Check queue depth and staleness (excluding debug items) ---
     depth_row = await pool.fetchrow(
         """
-        SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL) AS pending
+        SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL) AS pending,
+               MIN(created_at) FILTER (WHERE consumed_at IS NULL) AS oldest
         FROM guardian_queue
         WHERE uid = $1 AND priority != 'debug'
         """,
         uid,
     )
     pending_count = depth_row["pending"] if depth_row else 0
+    oldest_ts = depth_row["oldest"] if depth_row else None
+
+    # Calculate staleness — how long the oldest pending item has been waiting
+    is_stale = False
+    if oldest_ts is not None:
+        from datetime import datetime, timezone
+        age_seconds = (datetime.now(timezone.utc) - oldest_ts).total_seconds()
+        is_stale = age_seconds > CONSOLIDATION_STALE_SECONDS
+
+    # Trigger consolidation if:
+    #   (a) 3+ non-debug items are pending, OR
+    #   (b) 2+ non-debug items AND the oldest is stale (app was offline)
+    should_consolidate = (
+        pending_count >= CONSOLIDATION_THRESHOLD
+        or (pending_count >= 2 and is_stale)
+    )
 
     # --- Consolidation path ---
-    if pending_count >= CONSOLIDATION_THRESHOLD:
-        print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={pending_count} triggering consolidation", flush=True)
+    if should_consolidate:
+        reason = f"count={pending_count}" if pending_count >= CONSOLIDATION_THRESHOLD else f"stale={int(age_seconds)}s"
+        print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={pending_count} reason={reason} triggering consolidation", flush=True)
 
-        # Fetch all pending non-debug items
+        # Fetch all pending non-debug items (including urgent — they get
+        # priority treatment INSIDE the LLM prompt, not by skipping consolidation)
         pending_rows = await pool.fetch(
             """
             SELECT id, url, priority, message, trigger_type, metadata, created_at
@@ -315,61 +368,62 @@ async def next_audio(uid: str):
             uid,
         )
 
-        # Urgent items bypass consolidation — fall through to normal pop
-        urgent = [r for r in pending_rows if r["priority"] == "urgent"]
-        if not urgent:
-            # Fetch recently consumed items for echo detection
-            consumed_rows = await pool.fetch(
-                """
-                SELECT message, trigger_type, consumed_at
-                FROM guardian_queue
-                WHERE uid = $1
-                  AND consumed_at IS NOT NULL
-                  AND consumed_at > NOW() - INTERVAL '60 seconds'
-                  AND priority != 'debug'
-                ORDER BY consumed_at DESC
-                LIMIT 10
-                """,
-                uid,
-            )
+        # Fetch recently consumed items for echo detection
+        consumed_rows = await pool.fetch(
+            """
+            SELECT message, trigger_type, consumed_at
+            FROM guardian_queue
+            WHERE uid = $1
+              AND consumed_at IS NOT NULL
+              AND consumed_at > NOW() - INTERVAL '60 seconds'
+              AND priority != 'debug'
+            ORDER BY consumed_at DESC
+            LIMIT 10
+            """,
+            uid,
+        )
 
-            playback = get_playback_event(uid)
-            echo_risk = playback["echo_risk"] if playback else "unknown"
+        playback = get_playback_event(uid)
+        echo_risk = playback["echo_risk"] if playback else "unknown"
 
-            chat_turns = await _get_recent_chat_turns(uid, limit=5)
+        chat_turns = await _get_recent_chat_turns(uid, limit=5)
 
-            consolidated_msg = await _consolidate_queue(
-                uid=uid,
-                pending=[dict(r) for r in pending_rows],
-                recently_consumed=[dict(r) for r in consumed_rows],
-                chat_turns=chat_turns,
-                echo_risk=echo_risk,
-            )
+        consolidated_msg = await _consolidate_queue(
+            uid=uid,
+            pending=[dict(r) for r in pending_rows],
+            recently_consumed=[dict(r) for r in consumed_rows],
+            chat_turns=chat_turns,
+            echo_risk=echo_risk,
+        )
 
-            # Mark ALL pending items consumed
-            pending_ids = [r["id"] for r in pending_rows]
-            await pool.execute(
-                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
-                pending_ids,
-            )
+        # Mark ALL pending items consumed
+        pending_ids = [r["id"] for r in pending_rows]
+        await pool.execute(
+            "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
+            pending_ids,
+        )
 
-            if consolidated_msg is None:
-                _elapsed = int((time.time() - _start) * 1000)
-                print(f"[FLOW:CONSOLIDATOR] uid={uid} result=null latency={_elapsed}ms", flush=True)
-                return {"url": None}
+        if consolidated_msg is None:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:CONSOLIDATOR] uid={uid} result=null latency={_elapsed}ms", flush=True)
+            await _notify_consolidation(uid, len(pending_ids), reason, None)
+            return {"url": None}
 
-            # Enqueue consolidated message so it plays next
-            new_id = str(uuid.uuid4())
-            await pool.execute(
-                """
-                INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
-                VALUES ($1, $2, '', 'urgent', $3, 'consolidated', '{}')
-                """,
-                new_id,
-                uid,
-                consolidated_msg,
-            )
-            # Fall through to pop the newly-inserted consolidated item
+        # Enqueue consolidated message so it plays next
+        new_id = str(uuid.uuid4())
+        await pool.execute(
+            """
+            INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+            VALUES ($1, $2, '', 'urgent', $3, 'consolidated', $4::jsonb)
+            """,
+            new_id,
+            uid,
+            consolidated_msg,
+            json.dumps({"source_count": len(pending_ids), "reason": reason}),
+        )
+        # Notify Telegram for visibility (fire-and-forget)
+        await _notify_consolidation(uid, len(pending_ids), reason, consolidated_msg)
+        # Fall through to pop the newly-inserted consolidated item
 
     # --- Normal pop path ---
     row = await pool.fetchrow(
@@ -444,6 +498,28 @@ async def enqueue(
         raise HTTPException(status_code=400, detail="uid (or userID) is required")
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
+
+    # --- guardian_mode gate: reject inserts when mode is OFF ---
+    if req.priority != "debug":
+        pool = await _get_pool()
+        mode_row = await pool.fetchrow(
+            "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER($1)",
+            uid,
+        )
+        if mode_row is None or (mode_row["guardian_mode"] or "").upper() == "OFF":
+            _elapsed = int((time.time() - _start) * 1000)
+            mode_val = mode_row["guardian_mode"] if mode_row else None
+            print(
+                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED guardian_mode={mode_val} latency={_elapsed}ms",
+                flush=True,
+            )
+            return {
+                "ok": False,
+                "rejected": True,
+                "reason": "guardian_mode is OFF",
+                "suggestion": "Route critical alerts to iMessage instead",
+            }
+
 
     # Serialize metadata to JSON string for the JSONB column
     metadata_str = json.dumps(req.metadata) if req.metadata else "{}"
