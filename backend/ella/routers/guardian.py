@@ -445,6 +445,28 @@ async def enqueue(
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
 
+    # --- guardian_mode gate: reject inserts when guardian is OFF (NULL) ---
+    if req.priority != "debug":
+        _pool = await _get_pool()
+        mode_row = await _pool.fetchrow(
+            "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER($1)",
+            uid,
+        )
+        guardian_mode = mode_row["guardian_mode"] if mode_row else None
+        if guardian_mode is None:
+            # NULL = guardian is off (iOS sends override:null → DB stores NULL via CHECK constraint)
+            _elapsed = int((time.time() - _start) * 1000)
+            print(
+                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED guardian_mode=NULL latency={_elapsed}ms",
+                flush=True,
+            )
+            return {
+                "ok": False,
+                "rejected": True,
+                "reason": "guardian_mode is OFF (NULL)",
+                "suggestion": "Route critical alerts to iMessage instead",
+            }
+
     # Serialize metadata to JSON string for the JSONB column
     metadata_str = json.dumps(req.metadata) if req.metadata else "{}"
 
