@@ -53,6 +53,23 @@ async def _get_pool() -> asyncpg.Pool:
     return _pool
 
 
+
+
+def _build_canonical_session_key(agent_id: str, row) -> str:
+    """Build the canonical session key for a user.
+
+    If the user has a linked phone number, use the BlueBubbles session key
+    so iOS app and iMessage share the same session bucket.
+    Otherwise fall back to the ella:omi- prefixed key.
+    """
+    identities = json.loads(row["identities"]) if row.get("identities") else {}
+    phone = identities.get("phone")
+    if phone and agent_id:
+        return f"agent:{agent_id}:direct:bluebubbles:{phone}"
+    elif row.get("omi_uid") and agent_id:
+        return f"agent:{agent_id}:direct:ella:omi-{row['omi_uid'].lower()}"
+    return None
+
 async def resolve_user_routing(uid: str) -> Optional[dict]:
     """Resolve a Firebase UID to OpenClaw routing info.
 
@@ -63,7 +80,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     row = await pool.fetchrow(
         """
         SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-               u.conditions, u.medications,
+               u.conditions, u.medications, u.identities,
                ac.agents, ac.status AS cluster_status
         FROM users u
         LEFT JOIN agent_clusters ac ON ac.user_id = u.id
@@ -84,7 +101,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "caregiverAgentId": agents.get("caregiverAgentId"),
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
-            "sessionKey": f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}" if row["omi_uid"] and agents.get("userAgentId") else None,
+            "sessionKey": _build_canonical_session_key(agents.get("userAgentId"), row),
             "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
@@ -134,7 +151,7 @@ async def resolve_endpoint(
         row = await pool.fetchrow(
             """
             SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
+                   u.conditions, u.medications, u.identities,
                    ac.agents, ac.status AS cluster_status
             FROM users u
             LEFT JOIN agent_clusters ac ON ac.user_id = u.id
@@ -146,7 +163,7 @@ async def resolve_endpoint(
         row = await pool.fetchrow(
             """
             SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
+                   u.conditions, u.medications, u.identities,
                    ac.agents, ac.status AS cluster_status
             FROM users u
             LEFT JOIN agent_clusters ac ON ac.user_id = u.id
@@ -159,7 +176,7 @@ async def resolve_endpoint(
         row = await pool.fetchrow(
             """
             SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
+                   u.conditions, u.medications, u.identities,
                    ac.agents, ac.status AS cluster_status
             FROM users u
             LEFT JOIN agent_clusters ac ON ac.user_id = u.id
@@ -185,7 +202,7 @@ async def resolve_endpoint(
             "caregiverAgentId": agents.get("caregiverAgentId"),
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
-            "sessionKey": f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}" if row["omi_uid"] and agents.get("userAgentId") else None,
+            "sessionKey": _build_canonical_session_key(agents.get("userAgentId"), row),
             "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
