@@ -266,6 +266,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       headers: {
         'Authorization': 'Bearer ${endpoint.token}',
         'x-openclaw-scopes': 'operator.write',
+        if (endpoint.sessionKey.isNotEmpty) 'x-openclaw-session-key': endpoint.sessionKey,
         ..._ellaDebugHeaders(routeSource: 'pattern-c'),
       },
       body: jsonEncode({
@@ -274,7 +275,6 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
           {'role': 'user', 'content': text},
         ],
         'stream': true,
-        'user': endpoint.sessionKey,
       }),
     )) {
       if (line.trim().isEmpty || line.startsWith(':')) continue;
