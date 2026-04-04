@@ -58,15 +58,11 @@ async def _get_pool() -> asyncpg.Pool:
 def _build_canonical_session_key(agent_id: str, row) -> str:
     """Build the canonical session key for a user.
 
-    If the user has a linked phone number, use the BlueBubbles session key
-    so iOS app and iMessage share the same session bucket.
-    Otherwise fall back to the ella:omi- prefixed key.
+    Uses the identity-linked canonical key (ella:omi-{uid}) which OpenClaw
+    resolves to for ALL channels when identityLinks is configured.
+    Both BlueBubbles (iMessage) and iOS app hit this same session.
     """
-    identities = json.loads(row["identities"]) if row.get("identities") else {}
-    phone = identities.get("phone")
-    if phone and agent_id:
-        return f"agent:{agent_id}:direct:bluebubbles:{phone}"
-    elif row.get("omi_uid") and agent_id:
+    if row.get("omi_uid") and agent_id:
         return f"agent:{agent_id}:direct:ella:omi-{row['omi_uid'].lower()}"
     return None
 
