@@ -273,7 +273,6 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
                         {"role": "user", "content": user_message},
                     ],
                     "stream": False,
-                    "user": session_key,
                 },
                 timeout=90.0,
             )
