@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from models.conversation import CategoryEnum
 
 
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
@@ -177,7 +178,17 @@ async def update_conversation_summary(
     if update.emoji is not None:
         update_data["structured.emoji"] = update.emoji
     if update.category is not None:
+        try:
+            CategoryEnum(update.category)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid category: '{update.category}'")
         update_data["structured.category"] = update.category
+
+    # Keep this internal callback in parity with the MCP tool path so the app
+    # will surface the refreshed structured overview instead of stale app output.
+    if update.overview is not None:
+        update_data["apps_results"] = []
+        update_data["plugins_results"] = []
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -809,4 +820,3 @@ async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
 # All caregiver data in ella-ai-care Postgres, not OMI Firestore.
 # See: https://github.com/ellaaicare/ella-ai/issues/55
 # ============================================================================
-
