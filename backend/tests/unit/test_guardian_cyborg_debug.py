@@ -44,7 +44,7 @@ def test_promotes_scanner_escalation_debug_event_in_cyborg_mode():
     assert req.metadata["cyborg_promoted"] is True
 
 
-def test_promotes_scanner_clear_debug_event_in_cyborg_mode():
+def test_keeps_scanner_clear_debug_event_silent_in_cyborg_mode():
     req = guardian.EnqueueRequest(
         uid="uid-123",
         url="",
@@ -56,10 +56,46 @@ def test_promotes_scanner_clear_debug_event_in_cyborg_mode():
 
     promoted = guardian._promote_cyborg_debug_event(req, "CYBORG")
 
-    assert promoted is True
-    assert req.priority == "normal"
-    assert req.trigger == "cyborg-scanner-l3-clear"
-    assert req.message == "I heard that. No action needed."
+    assert promoted is False
+    assert req.priority == "debug"
+    assert req.trigger == "scanner-l3-clear"
+    assert req.message == "Scanner: clear - none"
+
+
+def test_keeps_unavailable_scanner_classification_silent_in_cyborg_mode():
+    req = guardian.EnqueueRequest(
+        uid="uid-123",
+        url="",
+        priority="debug",
+        trigger="scanner-l3-escalation",
+        message="Scanner escalated: question -> agent",
+        metadata={"summary": "classification unavailable", "category": "question"},
+    )
+
+    promoted = guardian._promote_cyborg_debug_event(req, "CYBORG")
+
+    assert promoted is False
+    assert req.priority == "debug"
+    assert req.trigger == "scanner-l3-escalation"
+    assert req.message == "Scanner escalated: question -> agent"
+
+
+def test_keeps_media_scanner_classification_silent_in_cyborg_mode():
+    req = guardian.EnqueueRequest(
+        uid="uid-123",
+        url="",
+        priority="debug",
+        trigger="scanner-l3-escalation",
+        message="Scanner escalated: media -> agent",
+        metadata={"summary": "CBS news broadcast about spacecraft splashdown.", "category": "media"},
+    )
+
+    promoted = guardian._promote_cyborg_debug_event(req, "CYBORG")
+
+    assert promoted is False
+    assert req.priority == "debug"
+    assert req.trigger == "scanner-l3-escalation"
+    assert req.message == "Scanner escalated: media -> agent"
 
 
 def test_keeps_scanner_debug_event_silent_outside_cyborg_mode():

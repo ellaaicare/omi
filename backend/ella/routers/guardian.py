@@ -73,7 +73,25 @@ _ECHO_RISK = {
     "USBAudio": "low",
 }
 
-SCANNER_DEBUG_TRIGGERS = {"scanner-l3-escalation", "scanner-l3-clear"}
+SCANNER_CYBORG_TRIGGER = "scanner-l3-escalation"
+_PLACEHOLDER_CLASSIFICATIONS = {
+    "",
+    "none",
+    "n/a",
+    "unknown",
+    "classification unavailable",
+    "unavailable",
+}
+_MEDIA_CATEGORIES = {
+    "media",
+    "news",
+    "broadcast",
+    "tv",
+    "television",
+    "radio",
+    "podcast",
+    "commercial",
+}
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -106,37 +124,50 @@ def _is_cyborg_mode(guardian_mode: Optional[str]) -> bool:
     return (guardian_mode or "").upper() == "CYBORG"
 
 
-def _cyborg_message_from_debug_event(req: "EnqueueRequest") -> str:
+def _normalized_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _is_placeholder_classification(value: object) -> bool:
+    normalized = _normalized_text(value).lower()
+    return normalized in _PLACEHOLDER_CLASSIFICATIONS or "classification unavailable" in normalized
+
+
+def _is_media_classification(metadata: dict) -> bool:
+    category = _normalized_text(metadata.get("category")).lower()
+    summary = _normalized_text(metadata.get("summary")).lower()
+    return any(token in category or token in summary for token in _MEDIA_CATEGORIES)
+
+
+def _cyborg_message_from_debug_event(req: "EnqueueRequest") -> Optional[str]:
     metadata = req.metadata or {}
     summary = metadata.get("summary") if isinstance(metadata, dict) else None
-    category = metadata.get("category") if isinstance(metadata, dict) else None
 
     if req.trigger == "scanner-l3-escalation":
-        if summary:
-            return f"I noticed: {summary}"
-        if category and category != "none":
-            return f"I noticed something in the {category} category."
-        return req.message or "I noticed something that may need your attention."
+        if not isinstance(metadata, dict):
+            return None
+        if _is_placeholder_classification(summary) or _is_media_classification(metadata):
+            return None
+        return f"I noticed: {_normalized_text(summary)}"
 
-    if req.trigger == "scanner-l3-clear":
-        if summary and summary != "none":
-            return f"I heard that. {summary}"
-        return "I heard that. No action needed."
-
-    return req.message or "I heard that."
+    return None
 
 
 def _promote_cyborg_debug_event(req: "EnqueueRequest", guardian_mode: Optional[str]) -> bool:
-    """Convert scanner debug events into user-facing TTS canaries in CYBORG mode."""
-    if req.priority != "debug" or req.trigger not in SCANNER_DEBUG_TRIGGERS or not _is_cyborg_mode(guardian_mode):
+    """Convert useful scanner debug escalations into user-facing TTS in CYBORG mode."""
+    if req.priority != "debug" or req.trigger != SCANNER_CYBORG_TRIGGER or not _is_cyborg_mode(guardian_mode):
         return False
 
     metadata = dict(req.metadata or {})
+    message = _cyborg_message_from_debug_event(req)
+    if not message:
+        return False
+
     metadata["original_priority"] = req.priority
     metadata["original_trigger"] = req.trigger
     metadata["cyborg_promoted"] = True
 
-    req.message = _cyborg_message_from_debug_event(req)
+    req.message = message
     req.priority = "normal"
     req.trigger = f"cyborg-{req.trigger}"
     req.metadata = metadata
