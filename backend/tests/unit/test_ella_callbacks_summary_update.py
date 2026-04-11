@@ -11,6 +11,7 @@ sys.modules.setdefault("database._client", MagicMock())
 sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("database.memories", MagicMock())
 sys.modules.setdefault("database.users", MagicMock())
+sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.notifications", MagicMock())
 sys.modules.setdefault("utils.other.storage", MagicMock())
 sys.modules.setdefault("ella.config", MagicMock())
@@ -69,3 +70,55 @@ def test_update_conversation_summary_rejects_invalid_category():
 
     assert excinfo.value.status_code == 400
     assert "Invalid category" in excinfo.value.detail
+
+
+def test_get_conversation_data_returns_transcript_payload(monkeypatch):
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "transcript_segments": [
+                {"is_user": True, "text": "Can you reprocess this?"},
+                {"speaker": "Other", "text": "Yes, with the full transcript."},
+            ],
+            "structured": {
+                "title": "Original title",
+                "overview": "Original overview",
+                "emoji": "🧠",
+                "category": callbacks.CategoryEnum.technology,
+            },
+            "started_at": "2026-04-10T10:00:00Z",
+            "finished_at": "2026-04-10T10:05:00Z",
+        },
+    )
+
+    result = asyncio.run(callbacks.get_conversation_data("conv-123", uid="user-123"))
+
+    assert result["conversation_id"] == "conv-123"
+    assert result["uid"] == "user-123"
+    assert result["segment_count"] == 2
+    assert result["transcript"] == "User: Can you reprocess this?\n\nOther: Yes, with the full transcript."
+    assert result["structured"]["title"] == "Original title"
+    assert result["structured"]["overview"] == "Original overview"
+    assert result["structured"]["emoji"] == "🧠"
+    assert result["structured"]["category"] == "technology"
+    assert result["started_at"] == "2026-04-10T10:00:00Z"
+    assert result["finished_at"] == "2026-04-10T10:05:00Z"
+
+
+def test_get_conversation_data_requires_uid():
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(callbacks.get_conversation_data("conv-123"))
+
+    assert excinfo.value.status_code == 400
+    assert "uid query parameter required" in excinfo.value.detail
+
+
+def test_get_conversation_data_404s_when_missing(monkeypatch):
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversation", lambda uid, conversation_id: None)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(callbacks.get_conversation_data("missing-conv", uid="user-123"))
+
+    assert excinfo.value.status_code == 404
+    assert "Conversation not found" in excinfo.value.detail
