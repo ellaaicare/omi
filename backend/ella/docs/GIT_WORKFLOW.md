@@ -21,6 +21,10 @@ git merge upstream/main
 
 # 4. Test
 python -c "from ella import ELLA_ENABLED; print(f'Ella OK: {ELLA_ENABLED}')"
+
+# 5. Verify documented upstream patches
+cat backend/ella/docs/POST_MERGE_PATCHES.md
+grep -R "ELLA HOOK\|register_ella_extensions\|send_to_scanner" backend/main.py backend/routers backend/utils
 ```
 
 ---
@@ -50,6 +54,8 @@ backend/utils/llm/conversation_processing.py # Has Ella hook (~10 lines)
 backend/utils/llm/memories.py                # Has Ella hook (~10 lines)
 backend/routers/transcribe.py                # Has Ella hook (~8 lines)
 ```
+
+See `backend/ella/docs/POST_MERGE_PATCHES.md` for the current patch registry and post-merge verification commands.
 
 ---
 

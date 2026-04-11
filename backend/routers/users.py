@@ -31,7 +31,9 @@ from database.redis_db import (
     set_generic_cache,
 )
 from database.users import (
+    get_user_conversation_lifecycle_preferences,
     get_user_transcription_preferences,
+    set_user_conversation_lifecycle_preferences,
     set_user_transcription_preferences,
 )
 from database.users import *
@@ -512,6 +514,56 @@ def update_transcription_preferences_endpoint(
     - vocabulary: List of custom keywords/terms (max 100) for better transcription accuracy
     """
     set_user_transcription_preferences(uid, single_language_mode=data.single_language_mode, vocabulary=data.vocabulary)
+    return {'status': 'ok'}
+
+
+# *************************************************
+# ***** Conversation Lifecycle Preferences ********
+# *************************************************
+
+
+class ConversationLifecyclePreferencesResponse(BaseModel):
+    conversation_max_duration_enabled: Optional[bool] = None
+    conversation_max_duration_seconds: Optional[int] = None
+
+
+class ConversationLifecyclePreferencesUpdate(BaseModel):
+    conversation_max_duration_enabled: Optional[bool] = None
+    conversation_max_duration_seconds: Optional[int] = None
+
+
+@router.get(
+    '/v1/users/conversation-lifecycle-preferences',
+    tags=['v1'],
+    response_model=ConversationLifecyclePreferencesResponse,
+)
+def get_conversation_lifecycle_preferences_endpoint(uid: str = Depends(auth.get_current_user_uid)):
+    """Get user's conversation lifecycle preferences. Null values use server defaults."""
+    return get_user_conversation_lifecycle_preferences(uid)
+
+
+@router.patch('/v1/users/conversation-lifecycle-preferences', tags=['v1'])
+def update_conversation_lifecycle_preferences_endpoint(
+    data: ConversationLifecyclePreferencesUpdate,
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    """Update user-specific conversation lifecycle preferences."""
+    provided_fields = set(getattr(data, 'model_fields_set', getattr(data, '__fields_set__', set())))
+    if data.conversation_max_duration_seconds is not None and not (
+        10 * 60 <= data.conversation_max_duration_seconds <= 4 * 60 * 60
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="conversation_max_duration_seconds must be between 600 and 14400",
+        )
+
+    set_user_conversation_lifecycle_preferences(
+        uid,
+        conversation_max_duration_enabled=data.conversation_max_duration_enabled,
+        conversation_max_duration_seconds=data.conversation_max_duration_seconds,
+        update_enabled='conversation_max_duration_enabled' in provided_fields,
+        update_seconds='conversation_max_duration_seconds' in provided_fields,
+    )
     return {'status': 'ok'}
 
 
