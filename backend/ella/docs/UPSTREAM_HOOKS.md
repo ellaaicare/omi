@@ -2,7 +2,7 @@
 
 **Purpose**: Documents the EXACT modifications needed to upstream OMI backend files.
 
-**Total Lines Modified**: ~35 lines across 4 files
+**Total Lines Modified**: ~35 lines across 4 files, plus any patches listed in `POST_MERGE_PATCHES.md`
 
 ---
 
@@ -166,6 +166,41 @@ async def process_transcript_segment(uid: str, segment: TranscriptSegment, ...):
 
     # ... rest of processing ...
 ```
+
+---
+
+## Post-Merge Patch Registry
+
+Before and after upstream merges, also review:
+
+```bash
+cat backend/ella/docs/POST_MERGE_PATCHES.md
+```
+
+That file is the durable registry for Ella patches that touch upstream-managed source.
+
+---
+
+## Proposed Hook Point 5: routers/transcribe.py (Max-Duration Conversation Split)
+
+**File**: `routers/transcribe.py`
+**Function**: `conversation_lifecycle_manager()`
+**Status**: Implemented for ellaaicare/ella-ai#609
+
+### Why It Cannot Be Ella-Only
+
+The active websocket keeps `current_conversation_id` in local `_stream_handler` state. A separate Ella background monitor would not own that local state and could race with live segment appends. The split should run inside the existing lifecycle manager so it can process the current conversation and immediately create the next in-progress conversation without closing the websocket.
+
+### Preferred Pattern
+
+Keep policy in Ella-owned files:
+
+- `ella/config.py`
+- `ella/services/conversation_lifecycle.py`
+
+Use a minimal upstream hook in `routers/transcribe.py` that asks the Ella helper whether the current in-progress conversation has exceeded the max duration. If Ella is missing or disabled, the hook should no-op and upstream behavior should remain unchanged.
+
+See `POST_MERGE_PATCHES.md` for the patch contract and verification commands.
 
 ---
 

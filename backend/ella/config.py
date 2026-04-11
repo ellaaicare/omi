@@ -51,6 +51,14 @@ class EllaConfig:
     memory_timeout: float = field(default_factory=lambda: float(os.getenv("ELLA_MEMORY_TIMEOUT", "30.0")))
     scanner_timeout: float = field(default_factory=lambda: float(os.getenv("ELLA_SCANNER_TIMEOUT", "2.0")))
 
+    # Conversation lifecycle
+    conversation_max_duration_enabled: bool = field(
+        default_factory=lambda: os.getenv("ELLA_CONVERSATION_MAX_DURATION_ENABLED", "true").lower() == "true"
+    )
+    conversation_max_duration_seconds: int = field(
+        default_factory=lambda: int(os.getenv("ELLA_CONVERSATION_MAX_DURATION_SECONDS", "1800"))
+    )
+
     # =========================================================================
     # VOICE V2 (GROK V2V)
     # =========================================================================
