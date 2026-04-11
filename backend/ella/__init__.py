@@ -284,6 +284,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella trace not available: {e}", flush=True)
 
+    # Debug metadata proxy (Observer sidecars)
+    try:
+        from ella.routers.debug_metadata import router as debug_metadata_router
+
+        app.include_router(debug_metadata_router, tags=["Ella Debug"])
+        print("  🌐 /v1/ella/debug/conversations/* - Observer metadata", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella debug metadata not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
