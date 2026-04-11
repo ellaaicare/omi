@@ -65,8 +65,13 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             segment_count = len(conversation.transcript_segments)
             parts = []
             for seg in conversation.transcript_segments:
-                speaker = "User" if seg.is_user else (seg.speaker or "Other")
-                parts.append(f"{speaker}: {seg.text}")
+                if isinstance(seg, dict):
+                    speaker = "User" if seg.get("is_user") else (seg.get("speaker") or "Other")
+                    text = seg.get("text", "")
+                else:
+                    speaker = "User" if getattr(seg, "is_user", False) else (getattr(seg, "speaker", None) or "Other")
+                    text = getattr(seg, "text", "")
+                parts.append(f"{speaker}: {text}")
             transcript_text = "\n\n".join(parts)
 
         payload = {

@@ -2,7 +2,7 @@ import json
 import os
 import time
 
-from fastapi import Header, HTTPException, Query, WebSocket
+from fastapi import Header, HTTPException
 from fastapi import Request
 from firebase_admin import auth
 from firebase_admin.auth import InvalidIdTokenError
@@ -159,20 +159,3 @@ def timeit(func):
 def delete_account(uid: str):
     auth.delete_user(uid)
     return {"message": "User deleted"}
-
-
-def get_current_user_uid_ws(
-    websocket: WebSocket,
-):
-    """WebSocket-compatible auth: extracts token from query params or Authorization header."""
-    # Try Authorization header first
-    auth_header = websocket.headers.get("authorization", "")
-    if auth_header and len(auth_header.split(" ")) == 2:
-        t = auth_header.split(" ")[1]
-        if t:
-            return verify_token(t)
-    # Try ?token= query param
-    token = websocket.query_params.get("token", "")
-    if token:
-        return verify_token(token)
-    raise HTTPException(status_code=403, detail="No valid auth provided")

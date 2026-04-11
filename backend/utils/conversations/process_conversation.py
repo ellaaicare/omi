@@ -72,6 +72,12 @@ try:
     from utils.ella.postprocess import fire_postprocess_webhook
 except ImportError:
     fire_postprocess_webhook = None
+
+# Ella summarizer: call n8n summarizer pipeline for deep enrichment
+try:
+    from utils.ella.summary import call_summary_agent
+except ImportError:
+    call_summary_agent = None
 # ====== END ELLA IMPORT ======
 from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
@@ -716,6 +722,41 @@ def process_conversation(
             target=fire_postprocess_webhook,
             args=(uid, conversation),
         ).start()
+
+    # Ella summarizer: call n8n summarizer pipeline for deep enrichment (fire-and-forget)
+    # Only fires if ELLA_SUMMARY_ENABLED=true (defaults true)
+    # BUG FIX: Conversation model does not have .text — use transcript_segments instead
+    _summarizer_transcript = ""
+    if hasattr(conversation, "transcript_segments") and conversation.transcript_segments:
+        _parts = []
+        for seg in conversation.transcript_segments:
+            if isinstance(seg, dict):
+                speaker = "User" if seg.get("is_user") else (seg.get("speaker") or "Other")
+                text = seg.get("text", "")
+            else:
+                speaker = "User" if getattr(seg, "is_user", False) else (getattr(seg, "speaker", None) or "Other")
+                text = getattr(seg, "text", "")
+            _parts.append(f"{speaker}: {text}")
+        _summarizer_transcript = "\n\n".join(_parts)
+    elif hasattr(conversation, "text") and conversation.text:
+        _summarizer_transcript = conversation.text
+
+    if call_summary_agent and _summarizer_transcript:
+        def fire_summarizer():
+            transcript_text = _summarizer_transcript
+            started = conversation.started_at
+            finished = conversation.finished_at
+            try:
+                call_summary_agent(
+                    uid=uid,
+                    conversation_id=conversation.id,
+                    transcript=transcript_text,
+                    started_at=started,
+                    finished_at=finished,
+                )
+            except Exception as e:
+                print(f"[FLOW:SUMMARY] UNEXPECTED error={e}", flush=True)
+        threading.Thread(target=fire_summarizer).start()
 
     print('process_conversation completed conversation.id=', conversation.id)
     return conversation

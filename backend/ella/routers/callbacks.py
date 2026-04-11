@@ -17,6 +17,7 @@ Endpoints:
 - POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
 NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n webhooks directly.
 - GET    /v1/ella/health                               - Health check
+- GET    /v1/ella/conversation/{id}/data               - Fetch conversation data with transcript (internal, for reprocessing)
 """
 
 import hashlib
@@ -37,10 +38,12 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from models.conversation import CategoryEnum
 
 
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
 from utils.notifications import send_notification
 from utils.other.storage import storage_client
 
@@ -168,16 +171,39 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
 
+    try:
+        sanitized_update = sanitize_summary_update(
+            title=update.title,
+            overview=update.overview,
+            emoji=update.emoji,
+            category=update.category,
+        )
+    except SummarySanitizationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Unsafe conversation summary", "violations": e.violations},
+        )
+
     # Build Firestore dot-notation update dict
     update_data = {}
-    if update.title is not None:
-        update_data["structured.title"] = update.title
+    if sanitized_update.title is not None:
+        update_data["structured.title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        update_data["structured.overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        update_data["structured.emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
+        try:
+            CategoryEnum(sanitized_update.category)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid category: '{sanitized_update.category}'")
+        update_data["structured.category"] = sanitized_update.category
+
+    # Keep this internal callback in parity with the MCP tool path so the app
+    # will surface the refreshed structured overview instead of stale app output.
     if update.overview is not None:
-        update_data["structured.overview"] = update.overview
-    if update.emoji is not None:
-        update_data["structured.emoji"] = update.emoji
-    if update.category is not None:
-        update_data["structured.category"] = update.category
+        update_data["apps_results"] = []
+        update_data["plugins_results"] = []
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -192,6 +218,78 @@ async def update_conversation_summary(
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "sanitizer_warnings": sanitized_update.warnings,
+    }
+
+
+
+# ============================================================================
+# Conversation Data Fetch (for reprocessing pipeline)
+# ============================================================================
+
+
+@router.get("/conversation/{conversation_id}/data")
+async def get_conversation_data(
+    conversation_id: str,
+    uid: str = None,
+):
+    """
+    Fetch conversation data including transcript segments, structured summary,
+    and metadata. Used by the reprocessing pipeline (provision-api process-requeue)
+    to include full transcript data when re-firing the conversation-ready webhook.
+
+    Internal endpoint — requires uid as query parameter.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # Build transcript text from segments
+    transcript_text = ""
+    segment_count = 0
+    segments = conversation.get("transcript_segments", [])
+    if segments:
+        segment_count = len(segments)
+        parts = []
+        for seg in segments:
+            if isinstance(seg, dict):
+                speaker = "User" if seg.get("is_user") else (seg.get("speaker") or "Other")
+                text = seg.get("text", "")
+            else:
+                speaker = "User" if getattr(seg, "is_user", False) else (getattr(seg, "speaker", None) or "Other")
+                text = getattr(seg, "text", "")
+            parts.append(f"{speaker}: {text}")
+        transcript_text = "\n\n".join(parts)
+
+    structured = {}
+    s = conversation.get("structured", {})
+    if s:
+        structured = {
+            "title": s.get("title") if isinstance(s, dict) else getattr(s, "title", None),
+            "overview": s.get("overview") if isinstance(s, dict) else getattr(s, "overview", None),
+            "emoji": s.get("emoji") if isinstance(s, dict) else getattr(s, "emoji", None),
+            "category": s.get("category") if isinstance(s, dict) else getattr(s, "category", None),
+        }
+        # Handle category enum
+        if structured.get("category") and hasattr(structured["category"], "value"):
+            structured["category"] = structured["category"].value
+
+    return {
+        "conversation_id": conversation_id,
+        "uid": uid,
+        "transcript": transcript_text,
+        "segment_count": segment_count,
+        "structured": structured,
+        "started_at": str(conversation.get("started_at", "")),
+        "finished_at": str(conversation.get("finished_at", "")),
     }
 
 
