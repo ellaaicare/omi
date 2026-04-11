@@ -21,6 +21,7 @@ from pydantic import BaseModel
 import database.memories as memories_db
 import database.conversations as conversations_db
 import database.mcp_api_key as mcp_api_key_db
+from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
 from models.memories import MemoryDB, Memory, MemoryCategory
 from models.conversation import CategoryEnum
 from utils.llm.memories import identify_category_for_memory
@@ -310,21 +311,31 @@ def execute_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
         if not conversation:
             raise ToolExecutionError("Conversation not found", code=-32001)
 
+        try:
+            sanitized_update = sanitize_summary_update(
+                title=arguments.get("title") if "title" in arguments else None,
+                overview=arguments.get("overview") if "overview" in arguments else None,
+                emoji=arguments.get("emoji") if "emoji" in arguments else None,
+                category=arguments.get("category") if "category" in arguments else None,
+            )
+        except SummarySanitizationError as e:
+            raise ToolExecutionError(f"Unsafe conversation summary: {', '.join(e.violations)}", code=-32602)
+
         # Build update dict with dot-notation for Firestore nested fields
         update_data = {}
         if "title" in arguments:
-            update_data["structured.title"] = arguments["title"]
+            update_data["structured.title"] = sanitized_update.title
         if "overview" in arguments:
-            update_data["structured.overview"] = arguments["overview"]
+            update_data["structured.overview"] = sanitized_update.overview
         if "emoji" in arguments:
-            update_data["structured.emoji"] = arguments["emoji"]
+            update_data["structured.emoji"] = sanitized_update.emoji
         if "category" in arguments:
             # Validate category
             try:
-                CategoryEnum(arguments["category"])
+                CategoryEnum(sanitized_update.category)
             except ValueError:
-                raise ToolExecutionError(f"Invalid category: '{arguments['category']}'", code=-32602)
-            update_data["structured.category"] = arguments["category"]
+                raise ToolExecutionError(f"Invalid category: '{sanitized_update.category}'", code=-32602)
+            update_data["structured.category"] = sanitized_update.category
 
         if not update_data:
             raise ToolExecutionError("At least one field (title, overview, emoji, category) must be provided")
@@ -340,7 +351,11 @@ def execute_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
 
         conversations_db.update_conversation(user_id, conversation_id, update_data)
 
-        return {"success": True, "updated_fields": list(update_data.keys())}
+        return {
+            "success": True,
+            "updated_fields": list(update_data.keys()),
+            "sanitizer_warnings": sanitized_update.warnings,
+        }
 
     else:
         raise ToolExecutionError(f"Unknown tool: {tool_name}", code=-32601)

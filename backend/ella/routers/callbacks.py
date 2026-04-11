@@ -43,6 +43,7 @@ from models.conversation import CategoryEnum
 
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
 from utils.notifications import send_notification
 from utils.other.storage import storage_client
 
@@ -170,20 +171,33 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
 
+    try:
+        sanitized_update = sanitize_summary_update(
+            title=update.title,
+            overview=update.overview,
+            emoji=update.emoji,
+            category=update.category,
+        )
+    except SummarySanitizationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Unsafe conversation summary", "violations": e.violations},
+        )
+
     # Build Firestore dot-notation update dict
     update_data = {}
-    if update.title is not None:
-        update_data["structured.title"] = update.title
-    if update.overview is not None:
-        update_data["structured.overview"] = update.overview
-    if update.emoji is not None:
-        update_data["structured.emoji"] = update.emoji
-    if update.category is not None:
+    if sanitized_update.title is not None:
+        update_data["structured.title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        update_data["structured.overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        update_data["structured.emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
         try:
-            CategoryEnum(update.category)
+            CategoryEnum(sanitized_update.category)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid category: '{update.category}'")
-        update_data["structured.category"] = update.category
+            raise HTTPException(status_code=400, detail=f"Invalid category: '{sanitized_update.category}'")
+        update_data["structured.category"] = sanitized_update.category
 
     # Keep this internal callback in parity with the MCP tool path so the app
     # will surface the refreshed structured overview instead of stale app output.
@@ -204,6 +218,7 @@ async def update_conversation_summary(
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "sanitizer_warnings": sanitized_update.warnings,
     }
 
 
