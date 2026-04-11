@@ -17,7 +17,7 @@ jobs:
       contents: 'read'
       id-token: 'write'
 
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     steps:
       # To workaround "no space left on device" issue of GitHub-hosted runner
       - name: Delete huge unnecessary tools folder
@@ -88,4 +88,3 @@ jobs:
 
       - name: Show Output
         run: echo "Backend deployed to development environment"
-
