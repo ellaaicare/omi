@@ -19,7 +19,9 @@ class _GuardianModePageState extends State<GuardianModePage> {
   List<GuardianPreset> _allPresets = [];
 
   // Current saved state (from server).
-  GuardianModeState _currentState = const GuardianModeState(features: ['ACTIVE_SUPPORT']);
+  GuardianModeState _currentState = const GuardianModeState(
+    features: ['ACTIVE_SUPPORT'],
+  );
 
   // Pending selection state (user has made changes but not saved).
   String? _selectedOverride; // 'CYBORG' | 'DEMO' | null
@@ -73,9 +75,9 @@ class _GuardianModePageState extends State<GuardianModePage> {
   }
 
   GuardianModeState get _pendingState => GuardianModeState(
-        override: _selectedOverride,
-        features: _selectedOverride != null ? [] : _selectedFeatures.toList(),
-      );
+    override: _selectedOverride,
+    features: _selectedOverride != null ? [] : _selectedFeatures.toList(),
+  );
 
   bool get _hasChanges {
     final pending = _pendingState;
@@ -153,7 +155,10 @@ class _GuardianModePageState extends State<GuardianModePage> {
                 onPressed: () => Navigator.of(ctx).pop(false),
                 child: const Text(
                   'Cancel',
-                  style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: EllaColors.textTertiary,
+                  ),
                 ),
               ),
               TextButton(
@@ -194,6 +199,8 @@ class _GuardianModePageState extends State<GuardianModePage> {
     switch (key) {
       case 'CYBORG':
         return 'Cyborg';
+      case 'CHATBOT':
+        return 'Chatbot';
       case 'DEMO':
         return 'Demo';
       case 'EMERGENCY_ONLY':
@@ -212,7 +219,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
   // ── Intelligence mode rows (exclusive radio) ──────────────────────────────
 
   List<String> get _overrideModes {
-    final modes = ['CYBORG'];
+    final modes = ['CYBORG', 'CHATBOT'];
     if (widget.showDemo) modes.add('DEMO');
     return modes;
   }
@@ -248,18 +255,26 @@ class _GuardianModePageState extends State<GuardianModePage> {
         centerTitle: false,
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
+          ? const Center(
+              child: CircularProgressIndicator(color: EllaColors.primary),
+            )
           : Column(
               children: [
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
                     children: [
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 16),
                         child: Text(
                           'Choose how closely Ella monitors and supports your loved one.',
-                          style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
 
@@ -269,7 +284,10 @@ class _GuardianModePageState extends State<GuardianModePage> {
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
                           'Replaces the care system entirely.',
-                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
                       ..._overrideModes.map((key) {
@@ -297,24 +315,38 @@ class _GuardianModePageState extends State<GuardianModePage> {
                           onTap: () => Navigator.push(
                             context,
                             MaterialPageRoute(
-                                builder: (_) => const EllaDemoScenariosPage()),
+                              builder: (_) => const EllaDemoScenariosPage(),
+                            ),
                           ),
-                          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                          borderRadius: BorderRadius.circular(
+                            EllaSizes.radiusMedium,
+                          ),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 10,
+                            ),
                             child: Row(
                               children: [
-                                const Icon(Icons.list_alt,
-                                    color: EllaColors.primary, size: 20),
+                                const Icon(
+                                  Icons.list_alt,
+                                  color: EllaColors.primary,
+                                  size: 20,
+                                ),
                                 const SizedBox(width: 10),
                                 const Text(
                                   'View Demo Scenarios',
                                   style: TextStyle(
-                                      fontSize: 16, color: EllaColors.primary),
+                                    fontSize: 16,
+                                    color: EllaColors.primary,
+                                  ),
                                 ),
                                 const Spacer(),
-                                const Icon(Icons.chevron_right,
-                                    color: EllaColors.textTertiary, size: 20),
+                                const Icon(
+                                  Icons.chevron_right,
+                                  color: EllaColors.textTertiary,
+                                  size: 20,
+                                ),
                               ],
                             ),
                           ),
@@ -328,7 +360,10 @@ class _GuardianModePageState extends State<GuardianModePage> {
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
                           'Combine multiple features simultaneously.',
-                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
                       ..._careFeatureKeys.map((key) {
@@ -357,7 +392,9 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
                       // ── Turn Guardian Off ──────────────────────────────────
                       _TurnOffButton(
-                        isOff: _selectedOverride == null && _selectedFeatures.isEmpty,
+                        isOff:
+                            _selectedOverride == null &&
+                            _selectedFeatures.isEmpty,
                         onTap: () {
                           setState(() {
                             _selectedOverride = null;
@@ -428,7 +465,9 @@ class _OverrideRow extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected ? preset.color.withValues(alpha: 0.08) : EllaColors.bgSecondary,
+            color: isSelected
+                ? preset.color.withValues(alpha: 0.08)
+                : EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
             border: Border.all(
               color: isSelected ? preset.color : Colors.transparent,
@@ -463,7 +502,9 @@ class _OverrideRow extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: isSelected ? preset.color : EllaColors.textPrimary,
+                        color: isSelected
+                            ? preset.color
+                            : EllaColors.textPrimary,
                       ),
                     ),
                     if (preset.description.isNotEmpty)
@@ -535,9 +576,13 @@ class _FeatureRow extends StatelessWidget {
                 height: 20,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(5),
-                  color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
+                  color: isChecked && !dimmed
+                      ? effectiveColor
+                      : Colors.transparent,
                   border: Border.all(
-                    color: isChecked && !dimmed ? effectiveColor : EllaColors.bgTertiary,
+                    color: isChecked && !dimmed
+                        ? effectiveColor
+                        : EllaColors.bgTertiary,
                     width: 2,
                   ),
                 ),
@@ -555,7 +600,9 @@ class _FeatureRow extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: isChecked && !dimmed ? effectiveColor : textColor,
+                        color: isChecked && !dimmed
+                            ? effectiveColor
+                            : textColor,
                       ),
                     ),
                     if (preset.description.isNotEmpty)
