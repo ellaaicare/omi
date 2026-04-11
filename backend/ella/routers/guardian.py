@@ -73,27 +73,6 @@ _ECHO_RISK = {
     "USBAudio": "low",
 }
 
-SCANNER_CYBORG_TRIGGER = "scanner-l3-escalation"
-_PLACEHOLDER_CLASSIFICATIONS = {
-    "",
-    "none",
-    "n/a",
-    "unknown",
-    "classification unavailable",
-    "unavailable",
-}
-_MEDIA_CATEGORIES = {
-    "media",
-    "news",
-    "broadcast",
-    "tv",
-    "television",
-    "radio",
-    "podcast",
-    "commercial",
-}
-
-
 async def _get_pool() -> asyncpg.Pool:
     """Get or create the asyncpg connection pool."""
     global _pool
@@ -118,60 +97,6 @@ def _verify_key(
     provided = x_guardian_key or key
     if provided != GUARDIAN_WEBHOOK_KEY:
         raise HTTPException(status_code=403, detail="Invalid guardian key")
-
-
-def _is_cyborg_mode(guardian_mode: Optional[str]) -> bool:
-    return (guardian_mode or "").upper() == "CYBORG"
-
-
-def _normalized_text(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _is_placeholder_classification(value: object) -> bool:
-    normalized = _normalized_text(value).lower()
-    return normalized in _PLACEHOLDER_CLASSIFICATIONS or "classification unavailable" in normalized
-
-
-def _is_media_classification(metadata: dict) -> bool:
-    category = _normalized_text(metadata.get("category")).lower()
-    summary = _normalized_text(metadata.get("summary")).lower()
-    return any(token in category or token in summary for token in _MEDIA_CATEGORIES)
-
-
-def _cyborg_message_from_debug_event(req: "EnqueueRequest") -> Optional[str]:
-    metadata = req.metadata or {}
-    summary = metadata.get("summary") if isinstance(metadata, dict) else None
-
-    if req.trigger == "scanner-l3-escalation":
-        if not isinstance(metadata, dict):
-            return None
-        if _is_placeholder_classification(summary) or _is_media_classification(metadata):
-            return None
-        return f"I noticed: {_normalized_text(summary)}"
-
-    return None
-
-
-def _promote_cyborg_debug_event(req: "EnqueueRequest", guardian_mode: Optional[str]) -> bool:
-    """Convert useful scanner debug escalations into user-facing TTS in CYBORG mode."""
-    if req.priority != "debug" or req.trigger != SCANNER_CYBORG_TRIGGER or not _is_cyborg_mode(guardian_mode):
-        return False
-
-    metadata = dict(req.metadata or {})
-    message = _cyborg_message_from_debug_event(req)
-    if not message:
-        return False
-
-    metadata["original_priority"] = req.priority
-    metadata["original_trigger"] = req.trigger
-    metadata["cyborg_promoted"] = True
-
-    req.message = message
-    req.priority = "normal"
-    req.trigger = f"cyborg-{req.trigger}"
-    req.metadata = metadata
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +450,6 @@ async def enqueue(
         uid,
     )
     guardian_mode = mode_row["guardian_mode"] if mode_row else None
-    cyborg_promoted = _promote_cyborg_debug_event(req, guardian_mode)
 
     # --- guardian_mode gate: reject inserts when guardian is OFF (NULL) ---
     if req.priority != "debug":
@@ -570,7 +494,7 @@ async def enqueue(
     _elapsed = int((time.time() - _start) * 1000)
     print(
         f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} "
-        f"trigger={req.trigger} queued={count} cyborg_promoted={cyborg_promoted} latency={_elapsed}ms",
+        f"trigger={req.trigger} queued={count} latency={_elapsed}ms",
         flush=True,
     )
 
