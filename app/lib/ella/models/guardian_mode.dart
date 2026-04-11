@@ -7,6 +7,7 @@ enum GuardianModeKey {
   maximumAwareness,
   custom,
   cyborg,
+  chatbot,
   off,
   demo,
   memorySupport;
@@ -23,6 +24,8 @@ enum GuardianModeKey {
         return GuardianModeKey.custom;
       case 'CYBORG':
         return GuardianModeKey.cyborg;
+      case 'CHATBOT':
+        return GuardianModeKey.chatbot;
       case 'OFF':
         return GuardianModeKey.off;
       case 'DEMO':
@@ -46,6 +49,8 @@ enum GuardianModeKey {
         return 'CUSTOM';
       case GuardianModeKey.cyborg:
         return 'CYBORG';
+      case GuardianModeKey.chatbot:
+        return 'CHATBOT';
       case GuardianModeKey.off:
         return 'OFF';
       case GuardianModeKey.demo:
@@ -57,7 +62,10 @@ enum GuardianModeKey {
 
   /// Returns true if this key is an "Intelligence Mode" override (exclusive,
   /// replaces care system entirely).
-  bool get isOverride => this == GuardianModeKey.cyborg || this == GuardianModeKey.demo;
+  bool get isOverride =>
+      this == GuardianModeKey.cyborg ||
+      this == GuardianModeKey.chatbot ||
+      this == GuardianModeKey.demo;
 
   /// Returns true if this key is a composable "Care Feature" checkbox.
   bool get isCareFeature =>
@@ -107,7 +115,7 @@ class GuardianPreset {
 /// Two-tier guardian mode state: an optional exclusive override (Intelligence
 /// Mode) and a set of composable care features.
 class GuardianModeState {
-  /// Nullable — 'CYBORG' | 'DEMO' | null
+  /// Nullable — 'CYBORG' | 'CHATBOT' | 'DEMO' | null
   final String? override;
 
   /// List of active care feature keys e.g. ['ACTIVE_SUPPORT', 'MEMORY_SUPPORT']
@@ -123,11 +131,14 @@ class GuardianModeState {
       final rawFeatures = json['features'];
       return GuardianModeState(
         override: json['override'] as String?,
-        features: rawFeatures is List ? List<String>.from(rawFeatures) : const [],
+        features: rawFeatures is List
+            ? List<String>.from(rawFeatures)
+            : const [],
       );
     }
     // Legacy schema: {mode: 'ACTIVE_SUPPORT'}
-    final modeStr = json['mode'] as String? ?? json['currentMode'] as String? ?? '';
+    final modeStr =
+        json['mode'] as String? ?? json['currentMode'] as String? ?? '';
     final key = GuardianModeKey.fromString(modeStr);
     if (key.isOverride) {
       return GuardianModeState(override: key.toApiString());
@@ -138,10 +149,7 @@ class GuardianModeState {
     return GuardianModeState(features: [key.toApiString()]);
   }
 
-  Map<String, dynamic> toJson() => {
-        'override': override,
-        'features': features,
-      };
+  Map<String, dynamic> toJson() => {'override': override, 'features': features};
 }
 
 class GuardianModeInfo {
@@ -206,6 +214,8 @@ class GuardianModeInfo {
         return 'Custom';
       case GuardianModeKey.cyborg:
         return 'Cyborg';
+      case GuardianModeKey.chatbot:
+        return 'Chatbot';
       case GuardianModeKey.off:
         return 'Off';
       case GuardianModeKey.demo:
@@ -227,6 +237,8 @@ class GuardianModeInfo {
         return const Color(0xFF8B5CF6);
       case GuardianModeKey.cyborg:
         return const Color(0xFFEC4899);
+      case GuardianModeKey.chatbot:
+        return const Color(0xFFF97316);
       case GuardianModeKey.off:
         return const Color(0xFF6B7280);
       case GuardianModeKey.demo:
