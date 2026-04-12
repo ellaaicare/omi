@@ -7,6 +7,7 @@ returned plan and report delivery status to trace tables.
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
@@ -17,6 +18,7 @@ from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
     UserPolicyContext,
+    build_plain_language_policy_view,
     evaluate_escalation_policy,
 )
 
@@ -90,7 +92,7 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
 
     caregiver_rows = await pool.fetch(
         """
-        SELECT id, status::text AS status, is_emergency_contact, email, phone, permissions
+        SELECT id, status::text AS status, is_emergency_contact, name, relationship, email, phone, permissions
         FROM caregivers
         WHERE user_id = $1
           AND status::text = 'ACTIVE'
@@ -108,6 +110,8 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
                 caregiver_id=str(row["id"]),
                 status=row["status"],
                 is_emergency_contact=bool(row["is_emergency_contact"]),
+                name=row["name"],
+                relationship=row["relationship"],
                 email=row["email"],
                 phone=row["phone"],
                 permissions=permissions if isinstance(permissions, dict) else {},
@@ -158,3 +162,15 @@ async def evaluate_escalation(
     decision = evaluate_escalation_policy(event, user, caregivers).to_dict()
     await _log_decision(req.uid, decision)
     return {"ok": True, **decision}
+
+
+@router.get("/policy")
+async def get_escalation_policy(uid: str):
+    """Return the read-only effective policy view for user/caregiver UI."""
+    user, caregivers = await _load_context(uid)
+    policy = build_plain_language_policy_view(user, caregivers)
+    return {
+        "ok": True,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **policy,
+    }

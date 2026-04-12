@@ -54,6 +54,8 @@ class CaregiverPolicyContext:
     caregiver_id: str
     status: str
     is_emergency_contact: bool
+    name: Optional[str] = None
+    relationship: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     permissions: dict[str, Any] = field(default_factory=dict)
@@ -251,3 +253,162 @@ def evaluate_escalation_policy(
         reason="low_severity_event",
         trace_id=trace_id,
     )
+
+
+def build_plain_language_policy_view(
+    user: UserPolicyContext,
+    caregivers: list[CaregiverPolicyContext],
+) -> dict[str, Any]:
+    """Return the read-only effective escalation policy for UI display."""
+    emergency_caregivers = _emergency_caregivers(caregivers)
+    emergency_caregiver = emergency_caregivers[0] if emergency_caregivers else None
+    guardian_audio_enabled = _guardian_audio_enabled(user.guardian_mode)
+
+    def channel_status(channel: str, enabled: bool, reason: str) -> dict[str, Any]:
+        return {
+            "channel": channel,
+            "enabled": enabled,
+            "reason": reason,
+        }
+
+    caregiver_views: list[dict[str, Any]] = []
+    for caregiver in caregivers:
+        permissions = caregiver.permissions or {}
+        emergency_alerts = _permission_enabled(
+            permissions,
+            ("receive_emergency_alerts", "emergency_alerts", "urgent_alerts"),
+            default=True,
+        )
+        daily_summary = _permission_enabled(
+            permissions,
+            ("receive_daily_summary", "daily_summary", "daily_summary_email"),
+            default=False,
+        )
+        weekly_summary = _permission_enabled(
+            permissions,
+            ("receive_weekly_summary", "weekly_summary"),
+            default=False,
+        )
+        caregiver_views.append(
+            {
+                "caregiver_id": caregiver.caregiver_id,
+                "display_name": caregiver.name or "Caregiver",
+                "relationship": caregiver.relationship,
+                "status": caregiver.status,
+                "is_emergency_contact": caregiver.is_emergency_contact,
+                "channels": [
+                    channel_status(
+                        CHANNEL_IMESSAGE,
+                        bool(caregiver.phone),
+                        "Phone number on file" if caregiver.phone else "No phone number on file",
+                    ),
+                    channel_status(
+                        CHANNEL_EMAIL,
+                        bool(caregiver.email),
+                        "Email on file" if caregiver.email else "No email on file",
+                    ),
+                ],
+                "permissions": {
+                    "emergency_alerts": emergency_alerts,
+                    "daily_summary": daily_summary,
+                    "weekly_summary": weekly_summary,
+                },
+                "plain_language": (
+                    "This caregiver can receive urgent safety alerts."
+                    if caregiver.is_emergency_contact and emergency_alerts
+                    else "This caregiver will not receive immediate emergency alerts unless you enable it."
+                ),
+            }
+        )
+
+    emergency_contact_text = (
+        f"{emergency_caregiver.name or 'Your emergency caregiver'} is selected as the emergency contact."
+        if emergency_caregiver
+        else "No active emergency caregiver is selected."
+    )
+
+    critical_targets = ["you"]
+    if emergency_caregiver:
+        critical_targets.append("your selected emergency caregiver")
+
+    rules = [
+        {
+            "severity": SEVERITY_CRITICAL,
+            "decision": DECISION_NOTIFY_NOW if emergency_caregiver or guardian_audio_enabled else DECISION_LOG_ONLY,
+            "title": "Critical safety concerns",
+            "text": (
+                "Critical safety concerns notify "
+                + " and ".join(critical_targets)
+                + " immediately when those channels are available."
+            ),
+        },
+        {
+            "severity": SEVERITY_HIGH,
+            "decision": DECISION_ASK_USER_FIRST,
+            "title": "High concern events",
+            "text": "High concern events try to ask you first before notifying a caregiver.",
+        },
+        {
+            "severity": SEVERITY_MEDIUM,
+            "decision": DECISION_QUEUE_FOR_REPORT,
+            "title": "Medium or ambiguous events",
+            "text": "Medium or ambiguous events are saved for review or a recap unless they repeat or get worse.",
+        },
+        {
+            "severity": SEVERITY_LOW,
+            "decision": DECISION_LOG_ONLY,
+            "title": "Low concern events",
+            "text": "Low concern events are logged only and do not notify caregivers immediately.",
+        },
+    ]
+
+    display_rules = [rule["text"] for rule in rules]
+    display_rules.append(
+        "Caregiver reports are privacy-filtered and should include trends or concerns, not raw private chats."
+    )
+
+    return {
+        "policy_version": "ella.escalation_policy.v1",
+        "source": "omi_backend",
+        "uid": user.uid,
+        "user": {
+            "guardian_mode": user.guardian_mode,
+            "channels": [
+                channel_status(
+                    CHANNEL_GUARDIAN_AUDIO,
+                    guardian_audio_enabled,
+                    "Guardian audio mode is active" if guardian_audio_enabled else "Guardian audio mode is off",
+                ),
+                channel_status(
+                    CHANNEL_IMESSAGE,
+                    bool(user.user_phone),
+                    "Phone number on file" if user.user_phone else "No phone number on file",
+                ),
+                channel_status(
+                    CHANNEL_EMAIL,
+                    bool(user.user_email),
+                    "Email on file" if user.user_email else "No email on file",
+                ),
+            ],
+        },
+        "emergency_contact": {
+            "configured": emergency_caregiver is not None,
+            "caregiver_id": emergency_caregiver.caregiver_id if emergency_caregiver else None,
+            "display_name": emergency_caregiver.name if emergency_caregiver else None,
+            "status": emergency_caregiver.status if emergency_caregiver else None,
+            "text": emergency_contact_text,
+        },
+        "caregivers": caregiver_views,
+        "rules": rules,
+        "privacy_notes": [
+            "Emergency alerts can contact the selected emergency caregiver when policy allows it.",
+            "Caregiver reports should include trends, concerns, and escalations, not raw private chats.",
+            "The backend owns these rules so app displays do not drift from delivery behavior.",
+        ],
+        "display": {
+            "title": "How Ella handles alerts",
+            "subtitle": "These rules are resolved by the server from your current caregiver and channel settings.",
+            "emergency_contact": emergency_contact_text,
+            "rules": display_rules,
+        },
+    }
