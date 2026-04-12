@@ -27,11 +27,13 @@ class GuardianModePollingService {
         let priority: String?
         let triggerType: String?
         let message: String?
+        let traceId: String?
         let metadata: AnyCodableDict?
 
         enum CodingKeys: String, CodingKey {
             case url, id, priority, message, metadata
             case triggerType = "trigger_type"
+            case traceId = "trace_id"
         }
     }
 
@@ -133,7 +135,8 @@ class GuardianModePollingService {
 
         let pollResponse = try JSONDecoder().decode(PollResponse.self, from: data)
 
-        if pollResponse.url != nil || pollResponse.priority == "debug" {
+        let hasMessage = !(pollResponse.message?.isEmpty ?? true)
+        if pollResponse.url != nil || pollResponse.priority == "debug" || hasMessage {
             return pollResponse
         }
 
@@ -174,7 +177,11 @@ class GuardianModePollingService {
         do {
             if let result = try await pollForNewAudio() {
                 consecutiveErrors = 0
-                let eventId = result.id ?? "unknown"
+                let metadata = result.metadata?.dict ?? [:]
+                let traceId = result.traceId
+                    ?? metadata["trace_id"] as? String
+                    ?? metadata["traceId"] as? String
+                let eventId = result.id ?? traceId ?? "unknown"
 
                 if result.priority == "debug" {
                     // Route to debug buffer — never plays audio
@@ -182,16 +189,31 @@ class GuardianModePollingService {
                         id: result.id,
                         triggerType: result.triggerType ?? "unknown",
                         message: result.message ?? "",
-                        metadata: result.metadata?.dict ?? [:]
+                        metadata: metadata
                     )
                 } else if let urlString = result.url, !urlString.isEmpty,
                           let audioURL = URL(string: urlString) {
                     NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     // Inject via GuardianModeManager (handles pre-download + retry)
-                    GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+                    GuardianModeManager.shared.injectRemoteAudio(
+                        audioURL: audioURL,
+                        eventId: eventId,
+                        traceId: traceId,
+                        triggerType: result.triggerType,
+                        metadata: metadata
+                    )
                 } else if let message = result.message, !message.isEmpty {
                     // Text-only (consolidated) — use on-device TTS
                     NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
+                    var ttsMetadata = metadata
+                    ttsMetadata["playback_source"] = "on_device_tts"
+                    GuardianModeManager.shared.reportPlaybackEvent(
+                        eventType: "started",
+                        queueItemId: eventId,
+                        traceId: traceId,
+                        triggerType: result.triggerType,
+                        metadata: ttsMetadata
+                    )
                     speakText(message)
                 }
             }
