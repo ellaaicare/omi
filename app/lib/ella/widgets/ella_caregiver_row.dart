@@ -52,7 +52,7 @@ class EllaCaregiverRow extends StatelessWidget {
                 height: 48,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: EllaColors.primary.withOpacity(0.15),
+                  color: EllaColors.primary.withValues(alpha: 0.15),
                 ),
                 child: Center(
                   child: Text(
