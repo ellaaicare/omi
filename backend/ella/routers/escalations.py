@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
+from firebase_admin.auth import InvalidIdTokenError
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
+from utils.other import endpoints as auth_endpoints
 
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
@@ -64,6 +66,40 @@ def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], 
     provided = x_escalation_key or x_guardian_key or key
     if provided != ESCALATION_WEBHOOK_KEY:
         raise HTTPException(status_code=403, detail="Invalid escalation key")
+
+
+def _resolve_policy_view_uid(
+    uid: Optional[str],
+    authorization: Optional[str],
+    x_guardian_key: Optional[str],
+    x_escalation_key: Optional[str],
+    key: Optional[str],
+) -> str:
+    """Resolve the policy-view UID for either app auth or internal callers."""
+    provided_key = x_escalation_key or x_guardian_key or key
+    if provided_key == ESCALATION_WEBHOOK_KEY:
+        if not uid:
+            raise HTTPException(status_code=400, detail="uid is required for internal policy lookup")
+        return uid
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header not found")
+
+    parts = str(authorization).split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+    try:
+        authenticated_uid = auth_endpoints.verify_token(parts[1])
+    except InvalidIdTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+    except Exception as e:
+        print(f"Error verifying Firebase ID token: {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+    if uid and uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail="Authenticated user cannot read another user's escalation policy")
+    return authenticated_uid
 
 
 async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPolicyContext]]:
@@ -165,9 +201,16 @@ async def evaluate_escalation(
 
 
 @router.get("/policy")
-async def get_escalation_policy(uid: str):
+async def get_escalation_policy(
+    uid: Optional[str] = None,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    x_escalation_key: Optional[str] = Header(None, alias="X-Escalation-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
     """Return the read-only effective policy view for user/caregiver UI."""
-    user, caregivers = await _load_context(uid)
+    resolved_uid = _resolve_policy_view_uid(uid, authorization, x_guardian_key, x_escalation_key, key)
+    user, caregivers = await _load_context(resolved_uid)
     policy = build_plain_language_policy_view(user, caregivers)
     return {
         "ok": True,
