@@ -4,7 +4,7 @@ class Caregiver {
   final String? phone;
   final String? email;
   final String relationship;
-  final String status; // "active" or "invited"
+  final String status; // normalized lowercase: "active" or "invited"
   final DateTime? joinedAt;
   final DateTime? invitedAt;
   final bool receiveDailySummary;
@@ -27,8 +27,10 @@ class Caregiver {
         phone = json['phone'],
         email = json['email'],
         relationship = json['relationship'] ?? '',
-        status = json['status'] ?? 'invited',
-        joinedAt = json['joined_at'] != null ? DateTime.parse(json['joined_at']) : null,
+        status = (json['status'] ?? 'invited').toString().toLowerCase(),
+        joinedAt = json['joined_at'] != null
+            ? DateTime.parse(json['joined_at'])
+            : (json['accepted_at'] != null ? DateTime.parse(json['accepted_at']) : null),
         invitedAt = json['invited_at'] != null ? DateTime.parse(json['invited_at']) : null,
         receiveDailySummary = (json['permissions'] as Map<String, dynamic>?)?['receive_daily_summary'] as bool? ?? true;
 
@@ -55,8 +57,8 @@ class Caregiver {
     }
   }
 
-  bool get isActive => status == 'active';
-  bool get isInvited => status == 'invited';
+  bool get isActive => status.toLowerCase() == 'active';
+  bool get isInvited => status.toLowerCase() == 'invited';
 }
 
 class InviteResponse {

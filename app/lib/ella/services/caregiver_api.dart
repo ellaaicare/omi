@@ -87,6 +87,7 @@ Future<void> updateCaregiverPermissions(String caregiverId, {required bool daily
       'uid': _uid,
       'caregiver_id': caregiverId,
       'receive_daily_summary': dailySummary,
+      'daily_summary_email': dailySummary,
     }),
   );
   if (response.statusCode != 200) {

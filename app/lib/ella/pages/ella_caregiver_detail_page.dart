@@ -9,7 +9,6 @@ import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_permission_toggle.dart';
 import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/logger.dart';
 
 class EllaCaregiverDetailPage extends StatefulWidget {
   final Caregiver caregiver;
@@ -21,6 +20,7 @@ class EllaCaregiverDetailPage extends StatefulWidget {
 }
 
 class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
+  late Caregiver _caregiver;
   late bool _dailySummary;
   late bool _isEmergencyContact;
   bool _resending = false;
@@ -29,23 +29,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   @override
   void initState() {
     super.initState();
-    _dailySummary = widget.caregiver.receiveDailySummary;
+    _caregiver = widget.caregiver;
+    _dailySummary = _caregiver.receiveDailySummary;
     _isEmergencyContact = false;
-    _loadEmergencyContact();
-  }
-
-  Future<void> _loadEmergencyContact() async {
-    try {
-      final emergencyId = await caregiver_api.getEmergencyContactId();
-      if (mounted) {
-        setState(() {
-          _isEmergencyContact = emergencyId == widget.caregiver.id;
-          _loadingEmergency = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) setState(() => _loadingEmergency = false);
-    }
+    _refreshFromBackend();
   }
 
   Future<void> _refreshFromBackend() async {
@@ -53,17 +40,19 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
       final caregivers = await caregiver_api.getCaregivers();
       final emergencyId = await caregiver_api.getEmergencyContactId();
       final updated = caregivers.firstWhere(
-        (c) => c.id == widget.caregiver.id,
-        orElse: () => widget.caregiver,
+        (c) => c.id == _caregiver.id,
+        orElse: () => _caregiver,
       );
       if (mounted) {
         setState(() {
           _dailySummary = updated.receiveDailySummary;
-          _isEmergencyContact = emergencyId == widget.caregiver.id;
+          _caregiver = updated;
+          _isEmergencyContact = emergencyId == updated.id;
+          _loadingEmergency = false;
         });
       }
     } catch (_) {
-      // Keep existing state on failure
+      if (mounted) setState(() => _loadingEmergency = false);
     }
   }
 
@@ -75,7 +64,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   Future<void> _toggleDailySummary(bool value) async {
     setState(() => _dailySummary = value);
     try {
-      await caregiver_api.updateCaregiverPermissions(widget.caregiver.id, dailySummary: value);
+      await caregiver_api.updateCaregiverPermissions(_caregiver.id, dailySummary: value);
     } catch (_) {
       if (mounted) setState(() => _dailySummary = !value);
     }
@@ -86,7 +75,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     setState(() => _isEmergencyContact = value);
     try {
       if (value) {
-        await caregiver_api.setEmergencyContact(widget.caregiver.id);
+        await caregiver_api.setEmergencyContact(_caregiver.id);
       } else {
         // Clear emergency contact by setting to empty — backend clears the field
         await caregiver_api.clearEmergencyContact();
@@ -97,16 +86,16 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   }
 
   Future<void> _resendInvite() async {
-    if (_resending || widget.caregiver.phone == null) return;
+    if (_resending || _caregiver.phone == null) return;
     setState(() => _resending = true);
     try {
       await caregiver_api.resendInvite(
         uid: SharedPreferencesUtil().uid,
-        caregiverId: widget.caregiver.id,
+        caregiverId: _caregiver.id,
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaResendSuccess(widget.caregiver.name))),
+          SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))),
         );
       }
     } catch (_) {
@@ -126,11 +115,11 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
         title: Text(
-          context.l10n.ellaRemoveConfirmTitle(widget.caregiver.name),
+          context.l10n.ellaRemoveConfirmTitle(_caregiver.name),
           style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
         ),
         content: Text(
-          context.l10n.ellaRemoveConfirmDescription(widget.caregiver.name),
+          context.l10n.ellaRemoveConfirmDescription(_caregiver.name),
           style: const TextStyle(fontSize: 18, color: EllaColors.textSecondary, height: 1.5),
         ),
         actions: [
@@ -150,10 +139,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     if (confirmed != true || !mounted) return;
 
     try {
-      await caregiver_api.removeCaregiver(widget.caregiver.id);
+      await caregiver_api.removeCaregiver(_caregiver.id);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaRemoveSuccess(widget.caregiver.name))),
+          SnackBar(content: Text(context.l10n.ellaRemoveSuccess(_caregiver.name))),
         );
         Navigator.of(context).pop();
       }
@@ -168,7 +157,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final cg = widget.caregiver;
+    final cg = _caregiver;
     final statusColor = cg.isActive ? EllaColors.success : EllaColors.warning;
     final statusLabel = cg.isActive ? context.l10n.ellaCaregiverStatusActive : context.l10n.ellaCaregiverStatusInvited;
     final dateLabel = cg.isActive
@@ -202,7 +191,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: EllaColors.primary.withOpacity(0.15),
+                color: EllaColors.primary.withValues(alpha: 0.15),
               ),
               child: Center(
                 child: Text(
