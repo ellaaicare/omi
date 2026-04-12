@@ -9,6 +9,7 @@ import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_permission_toggle.dart';
 import 'package:omi/utils/l10n_extensions.dart';
+import 'package:omi/utils/logger.dart';
 
 class EllaCaregiverDetailPage extends StatefulWidget {
   final Caregiver caregiver;
@@ -21,12 +22,49 @@ class EllaCaregiverDetailPage extends StatefulWidget {
 
 class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   late bool _dailySummary;
+  late bool _isEmergencyContact;
   bool _resending = false;
+  bool _loadingEmergency = true;
 
   @override
   void initState() {
     super.initState();
     _dailySummary = widget.caregiver.receiveDailySummary;
+    _isEmergencyContact = false;
+    _loadEmergencyContact();
+  }
+
+  Future<void> _loadEmergencyContact() async {
+    try {
+      final emergencyId = await caregiver_api.getEmergencyContactId();
+      if (mounted) {
+        setState(() {
+          _isEmergencyContact = emergencyId == widget.caregiver.id;
+          _loadingEmergency = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingEmergency = false);
+    }
+  }
+
+  Future<void> _refreshFromBackend() async {
+    try {
+      final caregivers = await caregiver_api.getCaregivers();
+      final emergencyId = await caregiver_api.getEmergencyContactId();
+      final updated = caregivers.firstWhere(
+        (c) => c.id == widget.caregiver.id,
+        orElse: () => widget.caregiver,
+      );
+      if (mounted) {
+        setState(() {
+          _dailySummary = updated.receiveDailySummary;
+          _isEmergencyContact = emergencyId == widget.caregiver.id;
+        });
+      }
+    } catch (_) {
+      // Keep existing state on failure
+    }
   }
 
   String _formatDate(DateTime? date) {
@@ -40,6 +78,21 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
       await caregiver_api.updateCaregiverPermissions(widget.caregiver.id, dailySummary: value);
     } catch (_) {
       if (mounted) setState(() => _dailySummary = !value);
+    }
+  }
+
+  Future<void> _toggleEmergencyContact(bool value) async {
+    final previousValue = _isEmergencyContact;
+    setState(() => _isEmergencyContact = value);
+    try {
+      if (value) {
+        await caregiver_api.setEmergencyContact(widget.caregiver.id);
+      } else {
+        // Clear emergency contact by setting to empty — backend clears the field
+        await caregiver_api.clearEmergencyContact();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isEmergencyContact = previousValue);
     }
   }
 
@@ -282,9 +335,11 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
           _buildSectionHeader('NOTIFICATIONS'),
           EllaPermissionToggle(
             title: context.l10n.ellaPermissionEmergencyAlerts,
-            description: context.l10n.ellaPermissionEmergencyAlertsDescription,
-            isOn: true,
-            locked: true,
+            description: _isEmergencyContact
+                ? '${cg.name} is your emergency contact and will receive critical alerts'
+                : 'Tap to make ${cg.name} your emergency contact for critical alerts',
+            isOn: _isEmergencyContact,
+            onChanged: _loadingEmergency ? null : _toggleEmergencyContact,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
           ),
           const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),

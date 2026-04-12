@@ -16,10 +16,8 @@ class EllaEmergencyContactPage extends StatefulWidget {
 
 class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
   List<Caregiver> _caregivers = [];
-  String? _selectedId;
-  String? _originalId;
+  String? _emergencyContactId;
   bool _loading = true;
-  bool _saving = false;
 
   @override
   void initState() {
@@ -34,8 +32,7 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
       if (mounted) {
         setState(() {
           _caregivers = caregivers;
-          _selectedId = emergencyId;
-          _originalId = emergencyId;
+          _emergencyContactId = emergencyId;
           _loading = false;
         });
       }
@@ -45,15 +42,20 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
     }
   }
 
-  Future<void> _save() async {
-    if (_selectedId == null || _selectedId == _originalId || _saving) return;
-    setState(() => _saving = true);
+  Future<void> _toggleEmergencyContact(Caregiver caregiver, bool isSelected) async {
+    final previousId = _emergencyContactId;
+    setState(() {
+      _emergencyContactId = isSelected ? caregiver.id : null;
+    });
     try {
-      await caregiver_api.setEmergencyContact(_selectedId!);
-      if (mounted) Navigator.of(context).pop();
+      if (isSelected) {
+        await caregiver_api.setEmergencyContact(caregiver.id);
+      } else {
+        await caregiver_api.clearEmergencyContact();
+      }
     } catch (_) {
       if (mounted) {
-        setState(() => _saving = false);
+        setState(() => _emergencyContactId = previousId);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
         );
@@ -160,40 +162,74 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
         ),
         const SizedBox(height: 16),
         ..._caregivers.map((caregiver) {
-          final isSelected = caregiver.id == _selectedId;
+          final isSelected = caregiver.id == _emergencyContactId;
           return Padding(
-            padding: const EdgeInsets.only(bottom: 4),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Semantics(
               button: true,
-              label: '${caregiver.name}, ${caregiver.displayRelationship}${isSelected ? ', selected' : ''}',
+              label: '${caregiver.name}, ${caregiver.displayRelationship}${isSelected ? ', emergency contact' : ''}',
+              hint: isSelected ? 'Double tap to remove as emergency contact' : 'Double tap to set as emergency contact',
               child: InkWell(
-                onTap: () => setState(() => _selectedId = caregiver.id),
+                onTap: () => _toggleEmergencyContact(caregiver, !isSelected),
                 borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
                 child: Container(
-                  height: 56,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
                     color: EllaColors.bgSecondary,
                     borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+                    border: isSelected
+                        ? Border.all(color: EllaColors.primary, width: 2)
+                        : null,
                   ),
                   child: Row(
                     children: [
-                      Radio<String>(
-                        value: caregiver.id,
-                        groupValue: _selectedId,
-                        onChanged: (value) => setState(() => _selectedId = value),
-                        activeColor: EllaColors.primary,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          '${caregiver.name} \u2014 ${caregiver.displayRelationship}',
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w400,
-                            color: EllaColors.textPrimary,
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isSelected ? EllaColors.primary.withOpacity(0.15) : EllaColors.bgTertiary,
+                        ),
+                        child: Center(
+                          child: Text(
+                            caregiver.initial,
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: isSelected ? EllaColors.primary : EllaColors.textSecondary,
+                            ),
                           ),
                         ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              caregiver.name,
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                                color: isSelected ? EllaColors.primary : EllaColors.textPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              caregiver.displayRelationship,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w400,
+                                color: EllaColors.textTertiary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                        color: isSelected ? EllaColors.primary : EllaColors.textDisabled,
+                        size: 28,
                       ),
                     ],
                   ),
@@ -202,34 +238,15 @@ class _EllaEmergencyContactPageState extends State<EllaEmergencyContactPage> {
             ),
           );
         }),
-        const SizedBox(height: 24),
-        Semantics(
-          button: true,
-          label: context.l10n.ellaSave,
-          child: InkWell(
-            onTap: (_selectedId != null && _selectedId != _originalId && !_saving) ? _save : null,
-            borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-            child: Container(
-              height: 56,
-              decoration: BoxDecoration(
-                color: (_selectedId != null && _selectedId != _originalId) ? EllaColors.primary : EllaColors.bgTertiary,
-                borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-              ),
-              child: Center(
-                child: Text(
-                  context.l10n.ellaSave,
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    color: (_selectedId != null && _selectedId != _originalId)
-                        ? EllaColors.textPrimary
-                        : EllaColors.textDisabled,
-                  ),
-                ),
-              ),
+        if (_emergencyContactId == null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'No emergency contact selected — tap a caregiver above to set one',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary),
             ),
           ),
-        ),
         const SizedBox(height: 32),
       ],
     );
