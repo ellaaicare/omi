@@ -235,7 +235,14 @@ class GuardianModeManager: NSObject {
 
     /// Fire-and-forget POST to backend recording the current audio output route.
     /// Called on each audio injection and on route changes so backend knows echo risk.
-    func reportPlaybackEvent(durationMs: Int = 0) {
+    func reportPlaybackEvent(
+        eventType: String = "started",
+        queueItemId: String? = nil,
+        traceId: String? = nil,
+        triggerType: String? = nil,
+        durationMs: Int = 0,
+        metadata: [String: Any]? = nil
+    ) {
         let session = AVAudioSession.sharedInstance()
         guard let port = session.currentRoute.outputs.first else { return }
 
@@ -256,24 +263,45 @@ class GuardianModeManager: NSObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 3.0
 
-        let body: [String: Any] = [
+        var eventMetadata = metadata ?? [:]
+        if let triggerType = triggerType {
+            eventMetadata["trigger_type"] = triggerType
+        }
+
+        var body: [String: Any] = [
             "uid": uid,
+            "event_type": eventType,
             "port_type": portType,
             "port_name": portName,
             "device_uid": deviceUID,
             "duration_ms": durationMs
         ]
+        if let queueItemId = queueItemId {
+            body["queue_item_id"] = queueItemId
+        }
+        if let traceId = traceId {
+            body["trace_id"] = traceId
+        }
+        if !eventMetadata.isEmpty {
+            body["metadata"] = eventMetadata
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
         request.httpBody = data
 
         URLSession.shared.dataTask(with: request) { _, _, _ in }.resume()
-        NSLog("PLAYBACK_EVENT port=\(portType) device=\(portName.isEmpty ? "unknown" : portName) uid=\(uid)")
+        NSLog("PLAYBACK_EVENT type=\(eventType) trace=\(traceId ?? "none") item=\(queueItemId ?? "none") port=\(portType) device=\(portName.isEmpty ? "unknown" : portName) uid=\(uid)")
     }
 
     // MARK: - Audio Injection with Pre-download + Retry
 
     /// Inject remote audio with pre-download and retry logic
-    func injectRemoteAudio(audioURL: URL, eventId: String) {
+    func injectRemoteAudio(
+        audioURL: URL,
+        eventId: String,
+        traceId: String? = nil,
+        triggerType: String? = nil,
+        metadata: [String: Any]? = nil
+    ) {
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
             guard let self = self else { return }
@@ -281,25 +309,49 @@ class GuardianModeManager: NSObject {
             self.totalInjections += 1
             let seq = self.injectionSequence
             let filename = audioURL.lastPathComponent
-
-            // Report current output route to backend for echo risk tracking
-            self.reportPlaybackEvent()
+            var playbackMetadata = metadata ?? [:]
+            playbackMetadata["playback_source"] = playbackMetadata["playback_source"] ?? "remote_audio_url"
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
 
             // Inject remote audio directly (no download - progressive streaming)
             Task {
-                await self.injectRemoteAudioDirect(remoteURL: audioURL, eventId: eventId, seq: seq, filename: filename, attempt: 1)
+                await self.injectRemoteAudioDirect(
+                    remoteURL: audioURL,
+                    eventId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: playbackMetadata,
+                    seq: seq,
+                    filename: filename,
+                    attempt: 1
+                )
             }
         }
     }
 
     /// Inject remote audio directly into the player queue (progressive streaming)
     /// KEY: Inserts FIRST (triggers loading), THEN waits for .readyToPlay
-    private func injectRemoteAudioDirect(remoteURL: URL, eventId: String, seq: Int, filename: String, attempt: Int) async {
+    private func injectRemoteAudioDirect(
+        remoteURL: URL,
+        eventId: String,
+        traceId: String?,
+        triggerType: String?,
+        metadata: [String: Any]?,
+        seq: Int,
+        filename: String,
+        attempt: Int
+    ) async {
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "not_active"
+            )
             await MainActor.run { self.failedInjections += 1 }
             return
         }
@@ -320,6 +372,13 @@ class GuardianModeManager: NSObject {
             // Check for error
             if let error = audioItem.error {
                 NSLog("❌ ITEM_ERROR #\(seq) (\(filename)) - \(error.localizedDescription)")
+                reportGuardianPlaybackFailure(
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    error: error.localizedDescription
+                )
                 await MainActor.run { self.failedInjections += 1 }
                 return
             }
@@ -327,6 +386,13 @@ class GuardianModeManager: NSObject {
             // Check timeout
             if Date().timeIntervalSince(startTime) > timeout {
                 NSLog("❌ TIMEOUT #\(seq) (\(filename)) after 10s - status: \(audioItem.status.rawValue)")
+                reportGuardianPlaybackFailure(
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    error: "ready_timeout"
+                )
                 await MainActor.run { self.failedInjections += 1 }
                 return
             }
@@ -344,12 +410,26 @@ class GuardianModeManager: NSObject {
         if audioItem.status == .failed {
             let errorMsg = audioItem.error?.localizedDescription ?? "unknown"
             NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(errorMsg)")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: errorMsg
+            )
             await MainActor.run { self.failedInjections += 1 }
             return
         }
 
         guard audioItem.status == .readyToPlay else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=unexpected_status_\(audioItem.status.rawValue)")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "unexpected_status_\(audioItem.status.rawValue)"
+            )
             await MainActor.run { self.failedInjections += 1 }
             return
         }
@@ -363,6 +443,14 @@ class GuardianModeManager: NSObject {
             NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         }
         // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
+        reportPlaybackEvent(
+            eventType: "started",
+            queueItemId: eventId,
+            traceId: traceId,
+            triggerType: triggerType,
+            durationMs: Int(readyTime * 1000),
+            metadata: metadata
+        )
 
         // Observe when playback completes
         NotificationCenter.default
@@ -371,6 +459,14 @@ class GuardianModeManager: NSObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 NSLog("PLAYBACK_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+                self.reportPlaybackEvent(
+                    eventType: "completed",
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    durationMs: Int(Date().timeIntervalSince(startTime) * 1000),
+                    metadata: metadata
+                )
                 self.queue.async { self.successfulInjections += 1 }
             }
             .store(in: &cancellables)
@@ -379,6 +475,25 @@ class GuardianModeManager: NSObject {
         if player.rate == 0 {
             player.play()
         }
+    }
+
+    private func reportGuardianPlaybackFailure(
+        queueItemId: String,
+        traceId: String?,
+        triggerType: String?,
+        metadata: [String: Any]?,
+        error: String
+    ) {
+        var eventMetadata = metadata ?? [:]
+        eventMetadata["error"] = error
+        reportPlaybackEvent(
+            eventType: "failed",
+            queueItemId: queueItemId,
+            traceId: traceId,
+            triggerType: triggerType,
+            durationMs: 0,
+            metadata: eventMetadata
+        )
     }
 
     // MARK: - Cache Cleanup
