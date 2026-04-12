@@ -15555,6 +15555,12 @@ abstract class AppLocalizations {
   /// **'CARE TEAM'**
   String get ellaCareTeamSection;
 
+  /// No description provided for @ellaCaptureSection.
+  ///
+  /// In en, this message translates to:
+  /// **'CAPTURE'**
+  String get ellaCaptureSection;
+
   /// No description provided for @ellaDeviceSection.
   ///
   /// In en, this message translates to:
@@ -15566,6 +15572,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'ABOUT'**
   String get ellaAboutSection;
+
+  /// No description provided for @ellaMaxConversationLengthTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Maximum Conversation Length'**
+  String get ellaMaxConversationLengthTitle;
+
+  /// No description provided for @ellaMaxConversationLengthConfig.
+  ///
+  /// In en, this message translates to:
+  /// **'Split long captures on the backend'**
+  String get ellaMaxConversationLengthConfig;
+
+  /// No description provided for @ellaMaxConversationLengthDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.'**
+  String get ellaMaxConversationLengthDescription;
+
+  /// No description provided for @ellaMaxConversationLengthBackendDefault.
+  ///
+  /// In en, this message translates to:
+  /// **'Backend default'**
+  String get ellaMaxConversationLengthBackendDefault;
+
+  /// No description provided for @ellaMaxConversationLengthBackendDefaultDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Use Ella\'s current default: 30 minutes.'**
+  String get ellaMaxConversationLengthBackendDefaultDesc;
+
+  /// No description provided for @ellaMaxConversationLengthDisabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Disabled'**
+  String get ellaMaxConversationLengthDisabled;
+
+  /// No description provided for @ellaMaxConversationLengthDisabledDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Do not split conversations just because a recording is long.'**
+  String get ellaMaxConversationLengthDisabledDesc;
+
+  /// No description provided for @ellaMaxConversationLengthMinutesDesc.
+  ///
+  /// In en, this message translates to:
+  /// **'Split after {minutes} minutes of continuous recording.'**
+  String ellaMaxConversationLengthMinutesDesc(int minutes);
+
+  /// No description provided for @ellaMaxConversationLengthSaved.
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation length setting saved.'**
+  String get ellaMaxConversationLengthSaved;
+
+  /// No description provided for @ellaMaxConversationLengthSaveFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t save conversation length setting.'**
+  String get ellaMaxConversationLengthSaveFailed;
 
   /// No description provided for @ellaJoinedDate.
   ///

@@ -9,6 +9,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
+import 'package:omi/ella/pages/conversation_lifecycle_settings_page.dart';
 import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
@@ -21,6 +22,7 @@ import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
@@ -100,6 +102,14 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     return context.l10n.ellaFamilyCaregiversSubtitle(_caregivers.length);
   }
 
+  String _conversationMaxDurationSubtitle(UserProvider userProvider) {
+    final enabled = userProvider.conversationMaxDurationEnabled;
+    final seconds = userProvider.conversationMaxDurationSeconds;
+    if (enabled == false) return context.l10n.ellaMaxConversationLengthDisabled;
+    if (enabled == true && seconds != null) return context.l10n.minLabel(seconds ~/ 60);
+    return context.l10n.ellaMaxConversationLengthBackendDefault;
+  }
+
   Future<void> _signOut() async {
     showDialog(
       context: context,
@@ -124,14 +134,15 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               Navigator.of(ctx).pop();
               await signOutAndClearUserData(context);
               if (mounted) {
-                Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (context) => const AppShell()),
-                  (route) => false,
-                );
+                Navigator.of(
+                  context,
+                ).pushAndRemoveUntil(MaterialPageRoute(builder: (context) => const AppShell()), (route) => false);
               }
             },
-            child:
-                Text(context.l10n.ellaSettingsSignOut, style: const TextStyle(fontSize: 18, color: EllaColors.error)),
+            child: Text(
+              context.l10n.ellaSettingsSignOut,
+              style: const TextStyle(fontSize: 18, color: EllaColors.error),
+            ),
           ),
         ],
       ),
@@ -144,6 +155,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
     final deviceName = context.watch<DeviceProvider>().connectedDevice?.name ?? 'Not connected';
+    final userProvider = context.watch<UserProvider>();
 
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -170,10 +182,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               title: context.l10n.ellaSettingsProfile,
               subtitle: _profileSubtitle(userName),
               onTap: () async {
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const EllaProfilePage()),
-                );
+                await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaProfilePage()));
                 setState(() {}); // refresh after profile edits
               },
             ),
@@ -189,7 +198,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               onTap: () async {
                 final updated = await Navigator.push<GuardianModeState>(
                   context,
-                  MaterialPageRoute(builder: (context) => GuardianModePage(showDemo: true)),
+                  MaterialPageRoute(builder: (context) => const GuardianModePage(showDemo: true)),
                 );
                 if (updated != null && mounted) {
                   _loadData(); // refresh mode display
@@ -207,10 +216,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 onTap: () {
                   Clipboard.setData(ClipboardData(text: SharedPreferencesUtil().ellaKey));
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Ella Key copied to clipboard'),
-                      duration: Duration(seconds: 2),
-                    ),
+                    const SnackBar(content: Text('Ella Key copied to clipboard'), duration: Duration(seconds: 2)),
                   );
                 },
               ),
@@ -223,10 +229,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               title: context.l10n.ellaFamilyCaregivers,
               subtitle: _caregiverCountSubtitle(),
               onTap: () async {
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const EllaCareTeamPage()),
-                );
+                await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaCareTeamPage()));
                 _loadData();
               },
             ),
@@ -246,6 +249,20 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
 
+            // CAPTURE section
+            _buildSectionHeader(context.l10n.ellaCaptureSection),
+            EllaSettingsRow(
+              icon: Icons.schedule,
+              title: context.l10n.ellaMaxConversationLengthTitle,
+              subtitle: _conversationMaxDurationSubtitle(userProvider),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const ConversationLifecycleSettingsPage()),
+                );
+              },
+            ),
+
             // DEVICE section
             _buildSectionHeader(context.l10n.ellaDeviceSection),
             EllaSettingsRow(
@@ -253,10 +270,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               title: context.l10n.ellaSettingsDevice,
               subtitle: deviceName,
               onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const ConnectDevicePage()),
-                );
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const ConnectDevicePage()));
               },
             ),
 
@@ -273,10 +287,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               icon: Icons.timeline,
               title: 'Debug Event Log',
               subtitle: 'Real-time scanner decisions and escalations',
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const DebugEventLogPage()),
-              ),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DebugEventLogPage())),
             ),
             const SizedBox(height: 8),
 
@@ -307,10 +318,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             const SizedBox(height: 24),
             if (_appVersion.isNotEmpty)
               Center(
-                child: Text(
-                  _appVersion,
-                  style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled),
-                ),
+                child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
               ),
             const SizedBox(height: 32),
           ],

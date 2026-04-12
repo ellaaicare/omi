@@ -10025,8 +10025,26 @@
   "ellaSave": "Save",
   "ellaCancel": "Cancel",
   "ellaCareTeamSection": "CARE TEAM",
+  "ellaCaptureSection": "CAPTURE",
   "ellaDeviceSection": "DEVICE",
   "ellaAboutSection": "ABOUT",
+  "ellaMaxConversationLengthTitle": "Maximum Conversation Length",
+  "ellaMaxConversationLengthConfig": "Split long captures on the backend",
+  "ellaMaxConversationLengthDescription": "Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.",
+  "ellaMaxConversationLengthBackendDefault": "Backend default",
+  "ellaMaxConversationLengthBackendDefaultDesc": "Use Ella's current default: 30 minutes.",
+  "ellaMaxConversationLengthDisabled": "Disabled",
+  "ellaMaxConversationLengthDisabledDesc": "Do not split conversations just because a recording is long.",
+  "ellaMaxConversationLengthMinutesDesc": "Split after {minutes} minutes of continuous recording.",
+  "@ellaMaxConversationLengthMinutesDesc": {
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "ellaMaxConversationLengthSaved": "Conversation length setting saved.",
+  "ellaMaxConversationLengthSaveFailed": "Couldn't save conversation length setting.",
   "ellaJoinedDate": "Joined {date}",
   "@ellaJoinedDate": {
     "placeholders": {
