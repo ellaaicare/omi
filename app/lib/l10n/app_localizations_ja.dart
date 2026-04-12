@@ -8204,10 +8204,46 @@ class AppLocalizationsJa extends AppLocalizations {
   String get ellaCareTeamSection => 'CARE TEAM';
 
   @override
+  String get ellaCaptureSection => 'CAPTURE';
+
+  @override
   String get ellaDeviceSection => 'DEVICE';
 
   @override
   String get ellaAboutSection => 'ABOUT';
+
+  @override
+  String get ellaMaxConversationLengthTitle => 'Maximum Conversation Length';
+
+  @override
+  String get ellaMaxConversationLengthConfig => 'Split long captures on the backend';
+
+  @override
+  String get ellaMaxConversationLengthDescription =>
+      'Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.';
+
+  @override
+  String get ellaMaxConversationLengthBackendDefault => 'Backend default';
+
+  @override
+  String get ellaMaxConversationLengthBackendDefaultDesc => 'Use Ella\'s current default: 30 minutes.';
+
+  @override
+  String get ellaMaxConversationLengthDisabled => 'Disabled';
+
+  @override
+  String get ellaMaxConversationLengthDisabledDesc => 'Do not split conversations just because a recording is long.';
+
+  @override
+  String ellaMaxConversationLengthMinutesDesc(int minutes) {
+    return 'Split after $minutes minutes of continuous recording.';
+  }
+
+  @override
+  String get ellaMaxConversationLengthSaved => 'Conversation length setting saved.';
+
+  @override
+  String get ellaMaxConversationLengthSaveFailed => 'Couldn\'t save conversation length setting.';
 
   @override
   String ellaJoinedDate(String date) {

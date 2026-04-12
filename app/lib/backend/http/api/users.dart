@@ -142,7 +142,7 @@ Future<bool> deletePermissionAndRecordings() async {
   return response.statusCode == 200;
 }
 
-/**/
+//
 
 Future<bool> setPrivateCloudSyncEnabled(bool value) async {
   var response = await makeApiCall(
@@ -298,12 +298,7 @@ Future<bool> setMessageResponseRating(String messageId, int value, {String? reas
     url += '&reason=$reason';
   }
 
-  var response = await makeApiCall(
-    url: url,
-    headers: {},
-    method: 'POST',
-    body: '',
-  );
+  var response = await makeApiCall(url: url, headers: {}, method: 'POST', body: '');
   if (response == null) return false;
   Logger.debug('setMessageResponseRating response: ${response.body}');
   return response.statusCode == 200;
@@ -329,12 +324,7 @@ Future<bool> getHasConversationSummaryRating(String conversationId) async {
 
 // User language preference API calls
 Future<String?> getUserPrimaryLanguage() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/users/language',
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/users/language', headers: {}, method: 'GET', body: '');
   if (response == null) return null;
   Logger.debug('getUserPrimaryLanguage response: ${response.body}');
 
@@ -434,10 +424,7 @@ Future<Map<String, dynamic>?> getTranscriptionPreferences() async {
   return null;
 }
 
-Future<bool> setTranscriptionPreferences({
-  bool? singleLanguageMode,
-  List<String>? vocabulary,
-}) async {
+Future<bool> setTranscriptionPreferences({bool? singleLanguageMode, List<String>? vocabulary}) async {
   Map<String, dynamic> body = {};
   if (singleLanguageMode != null) {
     body['single_language_mode'] = singleLanguageMode;
@@ -454,6 +441,58 @@ Future<bool> setTranscriptionPreferences({
   );
   if (response == null) return false;
   Logger.debug('setTranscriptionPreferences response: ${response.body}');
+  return response.statusCode == 200;
+}
+
+class ConversationLifecyclePreferences {
+  final bool? conversationMaxDurationEnabled;
+  final int? conversationMaxDurationSeconds;
+
+  const ConversationLifecyclePreferences({
+    required this.conversationMaxDurationEnabled,
+    required this.conversationMaxDurationSeconds,
+  });
+
+  factory ConversationLifecyclePreferences.fromJson(Map<String, dynamic> json) {
+    return ConversationLifecyclePreferences(
+      conversationMaxDurationEnabled: json['conversation_max_duration_enabled'] as bool?,
+      conversationMaxDurationSeconds: json['conversation_max_duration_seconds'] as int?,
+    );
+  }
+}
+
+Future<ConversationLifecyclePreferences?> getConversationLifecyclePreferences() async {
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/users/conversation-lifecycle-preferences',
+    headers: {},
+    method: 'GET',
+    body: '',
+  );
+  if (response == null) return null;
+  Logger.debug('getConversationLifecyclePreferences response: ${response.body}');
+  if (response.statusCode == 200) {
+    return ConversationLifecyclePreferences.fromJson(jsonDecode(response.body));
+  }
+  return null;
+}
+
+Future<bool> setConversationLifecyclePreferences({
+  bool? conversationMaxDurationEnabled,
+  int? conversationMaxDurationSeconds,
+}) async {
+  final body = {
+    'conversation_max_duration_enabled': conversationMaxDurationEnabled,
+    'conversation_max_duration_seconds': conversationMaxDurationSeconds,
+  };
+
+  var response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/users/conversation-lifecycle-preferences',
+    headers: {},
+    method: 'PATCH',
+    body: jsonEncode(body),
+  );
+  if (response == null) return false;
+  Logger.debug('setConversationLifecyclePreferences response: ${response.body}');
   return response.statusCode == 200;
 }
 
@@ -595,12 +634,7 @@ Future<String?> generateDailySummary({String? date}) async {
 // Onboarding State
 
 Future<Map<String, dynamic>?> getUserOnboardingState() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/users/onboarding',
-    headers: {},
-    method: 'GET',
-    body: '',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/users/onboarding', headers: {}, method: 'GET', body: '');
   if (response == null) return null;
   Logger.debug('getUserOnboardingState response: ${response.body}');
   if (response.statusCode == 200) {
@@ -694,12 +728,7 @@ Future<EllaProvisionResult> provisionEllaUser({
         .post(
           Uri.parse('$_ellaDashboardBase/api/onboarding'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'firebaseUid': firebaseUid,
-            'email': email,
-            'name': name,
-            'timezone': timezone,
-          }),
+          body: jsonEncode({'firebaseUid': firebaseUid, 'email': email, 'name': name, 'timezone': timezone}),
         )
         .timeout(const Duration(seconds: 60));
 
@@ -735,7 +764,8 @@ Future<EllaProvisionResult> provisionEllaUser({
       final provisioned = data['provisioned'] as bool? ?? true;
       final isPreProvisioned = !provisioned && agents != null;
       Logger.debug(
-          'Ella provisioning success: userId=$userId provisioned=$provisioned preProvisioned=$isPreProvisioned');
+        'Ella provisioning success: userId=$userId provisioned=$provisioned preProvisioned=$isPreProvisioned',
+      );
       return EllaProvisionResult(isPreProvisioned: isPreProvisioned);
     } else {
       Logger.debug('Ella provisioning failed: ${response.statusCode} ${response.body}');
