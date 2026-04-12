@@ -8206,6 +8206,14 @@ class AppLocalizationsRo extends AppLocalizations {
   String get ellaCaregiverStatusInvited => 'Invited — waiting to join';
 
   @override
+  String get ellaCaregiverStatusExpired => 'Invite expired';
+
+  @override
+  String ellaInviteExpiredDate(String date) {
+    return 'Invite expired $date';
+  }
+
+  @override
   String get ellaFamilyCaregivers => 'Family & Caregivers';
 
   @override

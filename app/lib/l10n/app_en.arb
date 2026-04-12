@@ -9925,6 +9925,15 @@
   "ellaCareTeamFullDialog": "Your care team is full (5 people). Remove someone to add a new member.",
   "ellaCaregiverStatusActive": "Active — receives alerts",
   "ellaCaregiverStatusInvited": "Invited — waiting to join",
+  "ellaCaregiverStatusExpired": "Invite expired",
+  "ellaInviteExpiredDate": "Invite expired {date}",
+  "@ellaInviteExpiredDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "ellaFamilyCaregivers": "Family & Caregivers",
   "ellaFamilyCaregiversSubtitle": "{count, plural, =1{1 person} other{{count} people}}",
   "@ellaFamilyCaregiversSubtitle": {

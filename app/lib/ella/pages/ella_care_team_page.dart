@@ -16,7 +16,7 @@ class EllaCareTeamPage extends StatefulWidget {
   State<EllaCareTeamPage> createState() => _EllaCareTeamPageState();
 }
 
-class _EllaCareTeamPageState extends State<EllaCareTeamPage> {
+class _EllaCareTeamPageState extends State<EllaCareTeamPage> with WidgetsBindingObserver {
   List<Caregiver> _caregivers = [];
   bool _loading = true;
   static const int _maxCaregivers = 5;
@@ -24,7 +24,21 @@ class _EllaCareTeamPageState extends State<EllaCareTeamPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadCaregivers();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadCaregivers();
+    }
   }
 
   Future<void> _loadCaregivers() async {

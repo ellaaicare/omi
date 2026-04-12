@@ -15255,6 +15255,18 @@ abstract class AppLocalizations {
   /// **'Invited — waiting to join'**
   String get ellaCaregiverStatusInvited;
 
+  /// No description provided for @ellaCaregiverStatusExpired.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite expired'**
+  String get ellaCaregiverStatusExpired;
+
+  /// No description provided for @ellaInviteExpiredDate.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite expired {date}'**
+  String ellaInviteExpiredDate(String date);
+
   /// No description provided for @ellaFamilyCaregivers.
   ///
   /// In en, this message translates to:
