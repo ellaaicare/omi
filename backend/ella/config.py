@@ -42,7 +42,7 @@ class EllaConfig:
     caregiver_enabled: bool = field(
         default_factory=lambda: os.getenv("ELLA_CAREGIVER_ENABLED", "true").lower() == "true"
     )
-    summary_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_SUMMARY_ENABLED", "true").lower() == "true")
+    summary_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_SUMMARY_ENABLED", "false").lower() == "true")
     memory_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_MEMORY_ENABLED", "true").lower() == "true")
     scanner_enabled: bool = field(default_factory=lambda: os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "true")
 

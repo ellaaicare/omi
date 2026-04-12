@@ -11,7 +11,7 @@ Usage in main.py:
 
 Environment Variables:
     ELLA_ENABLED=true           Master switch
-    ELLA_SUMMARY_ENABLED=true   n8n summary generation
+    ELLA_SUMMARY_ENABLED=false  Legacy n8n summarize-transcript generation
     ELLA_MEMORY_ENABLED=true    n8n memory extraction
     ELLA_VOICE_V2_ENABLED=true  Grok V2V endpoint
 
@@ -26,7 +26,7 @@ from typing import Optional, Callable, Dict
 # =============================================================================
 
 ELLA_ENABLED = os.getenv("ELLA_ENABLED", "true").lower() == "true"
-ELLA_SUMMARY_ENABLED = os.getenv("ELLA_SUMMARY_ENABLED", "true").lower() == "true"
+ELLA_SUMMARY_ENABLED = os.getenv("ELLA_SUMMARY_ENABLED", "false").lower() == "true"
 ELLA_MEMORY_ENABLED = os.getenv("ELLA_MEMORY_ENABLED", "true").lower() == "true"
 ELLA_SCANNER_ENABLED = os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "true"
 ELLA_NOTIFICATIONS_ENABLED = os.getenv("ELLA_NOTIFICATIONS_ENABLED", "true").lower() == "true"
