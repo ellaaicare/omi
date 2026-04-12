@@ -14,10 +14,18 @@ class EllaCaregiverRow extends StatelessWidget {
     this.onTap,
   });
 
-  Color get _statusColor => caregiver.isActive ? EllaColors.success : EllaColors.warning;
+  Color get _statusColor => caregiver.isActive
+      ? EllaColors.success
+      : caregiver.isExpired
+          ? EllaColors.error
+          : EllaColors.warning;
 
   String _statusLabel(BuildContext context) {
-    return caregiver.isActive ? context.l10n.ellaCaregiverStatusActive : context.l10n.ellaCaregiverStatusInvited;
+    return caregiver.isActive
+        ? context.l10n.ellaCaregiverStatusActive
+        : caregiver.isExpired
+            ? context.l10n.ellaCaregiverStatusExpired
+            : context.l10n.ellaCaregiverStatusInvited;
   }
 
   @override

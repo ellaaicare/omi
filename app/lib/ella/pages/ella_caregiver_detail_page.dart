@@ -86,7 +86,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   }
 
   Future<void> _resendInvite() async {
-    if (_resending || _caregiver.phone == null) return;
+    if (_resending) return;
     setState(() => _resending = true);
     try {
       await caregiver_api.resendInvite(
@@ -97,6 +97,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))),
         );
+        await _refreshFromBackend();
       }
     } catch (_) {
       if (mounted) {
@@ -158,11 +159,21 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   @override
   Widget build(BuildContext context) {
     final cg = _caregiver;
-    final statusColor = cg.isActive ? EllaColors.success : EllaColors.warning;
-    final statusLabel = cg.isActive ? context.l10n.ellaCaregiverStatusActive : context.l10n.ellaCaregiverStatusInvited;
+    final statusColor = cg.isActive
+        ? EllaColors.success
+        : cg.isExpired
+            ? EllaColors.error
+            : EllaColors.warning;
+    final statusLabel = cg.isActive
+        ? context.l10n.ellaCaregiverStatusActive
+        : cg.isExpired
+            ? context.l10n.ellaCaregiverStatusExpired
+            : context.l10n.ellaCaregiverStatusInvited;
     final dateLabel = cg.isActive
         ? context.l10n.ellaJoinedDate(_formatDate(cg.joinedAt))
-        : context.l10n.ellaInvitedDate(_formatDate(cg.invitedAt));
+        : cg.isExpired
+            ? context.l10n.ellaInviteExpiredDate(_formatDate(cg.inviteExpiresAt))
+            : context.l10n.ellaInvitedDate(_formatDate(cg.invitedAt));
 
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -239,7 +250,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
                 const SizedBox(height: 4),
                 Text(dateLabel,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary)),
-                if (cg.isInvited) ...[
+                if (cg.isInvited || cg.isExpired) ...[
                   const SizedBox(height: 12),
                   Semantics(
                     button: true,
