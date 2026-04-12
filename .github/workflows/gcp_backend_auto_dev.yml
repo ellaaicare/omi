@@ -26,6 +26,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate deploy environment config
+        env:
+          GCP_CREDENTIALS_PRESENT: ${{ secrets.GCP_CREDENTIALS != '' }}
+          GCP_SERVICE_ACCOUNT_PRESENT: ${{ secrets.GCP_SERVICE_ACCOUNT != '' }}
+          GCP_PROJECT_ID_PRESENT: ${{ vars.GCP_PROJECT_ID != '' }}
+          GKE_CLUSTER_PRESENT: ${{ vars.GKE_CLUSTER != '' }}
+          ENV_PRESENT: ${{ vars.ENV != '' }}
+        run: |
+          missing=0
+          if [[ "$GCP_CREDENTIALS_PRESENT" != "true" ]]; then
+            echo "::error::Missing environment secret GCP_CREDENTIALS."
+            missing=1
+          fi
+          if [[ "$GCP_SERVICE_ACCOUNT_PRESENT" != "true" ]]; then
+            echo "::error::Missing environment secret GCP_SERVICE_ACCOUNT."
+            missing=1
+          fi
+          if [[ "$GCP_PROJECT_ID_PRESENT" != "true" ]]; then
+            echo "::error::Missing environment variable GCP_PROJECT_ID."
+            missing=1
+          fi
+          if [[ "$GKE_CLUSTER_PRESENT" != "true" ]]; then
+            echo "::error::Missing environment variable GKE_CLUSTER."
+            missing=1
+          fi
+          if [[ "$ENV_PRESENT" != "true" ]]; then
+            echo "::error::Missing environment variable ENV."
+            missing=1
+          fi
+          exit "$missing"
+
       - name: Google Auth
         id: auth
         uses: 'google-github-actions/auth@v2'
