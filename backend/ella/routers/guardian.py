@@ -107,10 +107,14 @@ def _verify_key(
 class PlaybackEventRequest(BaseModel):
     """JSON body for /playback-event endpoint."""
     uid: str
+    queue_item_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    event_type: str = "started"  # started, completed, failed
     port_type: str       # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
     port_name: str = ""  # human-readable device name (e.g. "AirPods Pro")
     device_uid: str = "" # unique device ID from AVAudioSessionPortDescription
     duration_ms: int = 0 # estimated audio duration in ms
+    metadata: Optional[dict] = None
 
 
 class EnqueueRequest(BaseModel):
@@ -123,6 +127,48 @@ class EnqueueRequest(BaseModel):
     message: Optional[str] = None
     trigger: Optional[str] = None
     metadata: Optional[dict] = None
+
+
+def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
+    """Resolve the shared guardian pipeline trace id from queue metadata."""
+    if isinstance(metadata, dict):
+        for key in ("trace_id", "traceId", "conversation_id", "conversationId"):
+            value = metadata.get(key)
+            if value:
+                return str(value)
+    return fallback
+
+
+async def _log_pipeline_event(
+    trace_id: str,
+    uid: str,
+    stage: str,
+    status: str = "success",
+    latency_ms: Optional[int] = None,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Best-effort durable trace write for scanner/audio lifecycle events."""
+    if not trace_id or not stage:
+        return
+    try:
+        pool = await _get_pool()
+        await pool.execute(
+            """
+            INSERT INTO guardian_pipeline_events (trace_id, uid, stage, status, latency_ms, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+            """,
+            trace_id,
+            uid or "",
+            stage,
+            status,
+            latency_ms,
+            json.dumps(metadata or {}),
+        )
+    except Exception as e:
+        print(
+            f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} stage={stage} failed={e}",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +405,10 @@ async def next_audio(uid: str):
 
             # Enqueue consolidated message so it plays next
             new_id = str(uuid.uuid4())
+            source_trace_id = _trace_id_from_metadata(
+                dict(pending_rows[0]).get("metadata") if pending_rows else None,
+                new_id,
+            )
             await pool.execute(
                 """
                 INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
@@ -367,6 +417,19 @@ async def next_audio(uid: str):
                 new_id,
                 uid,
                 consolidated_msg,
+            )
+            await pool.execute(
+                """
+                UPDATE guardian_queue
+                SET metadata = $2::jsonb
+                WHERE id = $1
+                """,
+                new_id,
+                json.dumps({
+                    "trace_id": source_trace_id,
+                    "queue_item_id": new_id,
+                    "consolidated_from": pending_ids,
+                }),
             )
             # Fall through to pop the newly-inserted consolidated item
 
@@ -409,14 +472,33 @@ async def next_audio(uid: str):
             meta = json.loads(meta)
         except (ValueError, TypeError):
             meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    trace_id = _trace_id_from_metadata(meta, row["id"])
+    meta.setdefault("trace_id", trace_id)
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="audio_consumed",
+        status="success",
+        latency_ms=_elapsed,
+        metadata={
+            "queue_item_id": row["id"],
+            "priority": row["priority"],
+            "trigger_type": row["trigger_type"],
+            "route": "ios_next_audio",
+        },
+    )
 
     return {
         "url": row["url"],
         "id": row["id"],
+        "trace_id": trace_id,
         "priority": row["priority"],
         "message": row["message"],
         "trigger_type": row["trigger_type"],
-        "metadata": meta if isinstance(meta, dict) else {},
+        "metadata": meta,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
@@ -443,6 +525,7 @@ async def enqueue(
         raise HTTPException(status_code=400, detail="uid (or userID) is required")
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
+    trace_id = _trace_id_from_metadata(req.metadata, item_id)
 
     pool = await _get_pool()
     mode_row = await pool.fetchrow(
@@ -460,6 +543,19 @@ async def enqueue(
                 f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED guardian_mode=NULL latency={_elapsed}ms",
                 flush=True,
             )
+            await _log_pipeline_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="queue_rejected",
+                status="rejected",
+                latency_ms=_elapsed,
+                metadata={
+                    "queue_item_id": item_id,
+                    "priority": req.priority,
+                    "trigger_type": req.trigger,
+                    "reason": "guardian_mode is OFF (NULL)",
+                },
+            )
             return {
                 "ok": False,
                 "rejected": True,
@@ -468,7 +564,10 @@ async def enqueue(
             }
 
     # Serialize metadata to JSON string for the JSONB column
-    metadata_str = json.dumps(req.metadata) if req.metadata else "{}"
+    metadata = dict(req.metadata or {})
+    metadata.setdefault("trace_id", trace_id)
+    metadata.setdefault("queue_item_id", item_id)
+    metadata_str = json.dumps(metadata)
 
     await pool.execute(
         """
@@ -492,13 +591,26 @@ async def enqueue(
     )
 
     _elapsed = int((time.time() - _start) * 1000)
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="queue_inserted",
+        status="success",
+        latency_ms=_elapsed,
+        metadata={
+            "queue_item_id": item_id,
+            "priority": req.priority,
+            "trigger_type": req.trigger,
+            "queued": count,
+        },
+    )
     print(
         f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} "
-        f"trigger={req.trigger} queued={count} latency={_elapsed}ms",
+        f"trigger={req.trigger} trace={trace_id} queued={count} latency={_elapsed}ms",
         flush=True,
     )
 
-    return {"ok": True, "id": item_id, "queued": count}
+    return {"ok": True, "id": item_id, "trace_id": trace_id, "queued": count}
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +820,7 @@ async def get_pipeline_trace(conversation_id: str):
             for r in rows
         )
         audio_delivered = any(
-            r["stage"] == "audio_consumed"
+            r["stage"] in ("audio_consumed", "ios_playback_started", "ios_playback_completed")
             for r in rows
         )
 
@@ -751,18 +863,13 @@ async def log_pipeline_event(request: Request):
     if not trace_id or not stage:
         raise HTTPException(status_code=400, detail="trace_id and stage required")
 
-    pool = await _get_pool()
-    await pool.execute(
-        """
-        INSERT INTO guardian_pipeline_events (trace_id, uid, stage, status, latency_ms, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-        """,
-        trace_id,
-        uid,
-        stage,
-        status,
-        latency_ms,
-        json.dumps(metadata),
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage=stage,
+        status=status,
+        latency_ms=latency_ms,
+        metadata=metadata,
     )
 
     print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
@@ -783,17 +890,43 @@ async def record_playback_event(req: PlaybackEventRequest):
     Records output route so the consolidator knows echo risk."""
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
     _playback_events[req.uid] = {
+        "queue_item_id": req.queue_item_id,
+        "trace_id": req.trace_id,
+        "event_type": req.event_type,
         "port_type": req.port_type,
         "port_name": req.port_name,
         "device_uid": req.device_uid,
         "echo_risk": echo_risk,
+        "duration_ms": req.duration_ms,
         "recorded_at": time.time(),
     }
+
+    trace_id = req.trace_id or req.queue_item_id
+    if trace_id:
+        event_type = (req.event_type or "started").strip().lower().replace(" ", "_")
+        status = "error" if event_type == "failed" else "success"
+        await _log_pipeline_event(
+            trace_id=trace_id,
+            uid=req.uid,
+            stage=f"ios_playback_{event_type}",
+            status=status,
+            latency_ms=req.duration_ms if event_type in ("completed", "failed") else None,
+            metadata={
+                "queue_item_id": req.queue_item_id,
+                "port_type": req.port_type,
+                "port_name": req.port_name,
+                "device_uid": req.device_uid,
+                "echo_risk": echo_risk,
+                "duration_ms": req.duration_ms,
+                **(req.metadata or {}),
+            },
+        )
+
     print(
-        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
+        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} trace={trace_id} item={req.queue_item_id} event={req.event_type} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
         flush=True,
     )
-    return {"echo_risk": echo_risk}
+    return {"ok": True, "trace_id": trace_id, "echo_risk": echo_risk}
 
 
 def get_playback_event(uid: str) -> dict | None:
