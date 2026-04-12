@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
+import 'package:omi/ella/pages/ella_add_caregiver_page.dart';
+import 'package:omi/ella/pages/ella_caregiver_detail_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_caregiver_row.dart';
 import 'package:omi/utils/l10n_extensions.dart';
