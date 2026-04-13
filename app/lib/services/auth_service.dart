@@ -18,7 +18,6 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
-import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 /// Detects if the app is running in an iOS simulator
@@ -28,7 +27,7 @@ bool isSimulator() {
 
   // Check for simulator environment variables
   return Platform.environment['SIMULATOR_DEVICE_NAME'] != null ||
-         Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
+      Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
 }
 
 class AuthService {

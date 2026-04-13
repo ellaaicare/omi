@@ -25,6 +25,7 @@ class _MobileAppState extends State<MobileApp> {
 
   /// True while attempting to restore onboarding state from server.
   bool _restoringOnboarding = false;
+  bool _attemptedOnboardingRestore = false;
 
   @override
   Widget build(BuildContext context) {
@@ -49,23 +50,29 @@ class _MobileAppState extends State<MobileApp> {
           // Also pre-set language flag to prevent language dialog from
           // appearing during the restore (issue #633).
           if (authProvider.isSignedIn() && !SharedPreferencesUtil().onboardingCompleted) {
-            if (!_restoringOnboarding) {
+            if (!_restoringOnboarding && !_attemptedOnboardingRestore) {
               _restoringOnboarding = true;
               // Prevent language dialog from firing during restore
               if (!SharedPreferencesUtil().hasSetPrimaryLanguage) {
                 SharedPreferencesUtil().hasSetPrimaryLanguage = true;
                 SharedPreferencesUtil().userPrimaryLanguage = 'en';
               }
-              AuthService.instance.restoreOnboardingState().then((_) {
-                if (mounted) setState(() {});
-              }).catchError((e) {
+              AuthService.instance.restoreOnboardingState().catchError((e) {
                 Logger.debug('MobileApp: failed to restore onboarding state: $e');
+              }).whenComplete(() {
+                if (!mounted) return;
+                setState(() {
+                  _restoringOnboarding = false;
+                  _attemptedOnboardingRestore = true;
+                });
               });
             }
             // Show loading while checking server — avoids flashing onboarding
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
-            );
+            if (_restoringOnboarding) {
+              return const Scaffold(
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
           }
 
           return const EllaOnboarding();
