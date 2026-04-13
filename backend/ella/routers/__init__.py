@@ -14,7 +14,7 @@ These add endpoints that don't exist in vanilla OMI:
 - /v1/ella/chat/* - Grok streaming chat
 - /v1/ella/guardian/* - Guardian Mode audio queue
 - /v1/ella/resolve - User-to-agent resolution
-- /v1/conversations/{id}/corrections - iOS Correct Summary
+- /v1/ella/conversations/{id}/corrections - iOS Correct Summary
 - /v1/voice/* - Voice session management
 """
 

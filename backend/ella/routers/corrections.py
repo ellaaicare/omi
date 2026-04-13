@@ -6,7 +6,6 @@ of the upstream OMI conversation router so future upstream syncs do not have to
 carry this custom app contract as a core patch.
 """
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +18,6 @@ from pydantic import BaseModel, Field, field_validator
 import database.conversations as conversations_db
 from database._client import db
 from ella.config import ELLA_CONFIG
-from ella.routers.resolve import resolve_user_routing
 from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
@@ -140,49 +138,7 @@ def _append_correction_event(
     ref.set({"events": events, "updated_at": event.get("at") or _now_iso()}, merge=True)
 
 
-def _correction_markdown(
-    *,
-    uid: str,
-    conversation_id: str,
-    correction_id: str,
-    request: ConversationCorrectionRequest,
-    structured: dict[str, Any],
-    transcript: str,
-    submitted_at: str,
-) -> str:
-    context_json = json.dumps(request.summary_context.model_dump(), indent=2, sort_keys=True)
-    structured_json = json.dumps(structured, indent=2, sort_keys=True)
-    return f"""# Conversation Summary Correction
-
-- correction_id: {correction_id}
-- uid: {uid}
-- conversation_id: {conversation_id}
-- source: {request.source}
-- submitted_at: {submitted_at}
-
-## Correction Text
-
-{request.correction_text}
-
-## iOS Summary Context
-
-```json
-{context_json}
-```
-
-## Current Backend Summary
-
-```json
-{structured_json}
-```
-
-## Full Transcript
-
-{transcript or "(No transcript text was available from OMI.)"}
-"""
-
-
-async def _enqueue_correction(
+async def _submit_correction_to_n8n(
     *,
     uid: str,
     conversation_id: str,
@@ -193,94 +149,38 @@ async def _enqueue_correction(
     transcript: str,
     segment_count: int,
 ) -> dict[str, Any]:
-    routing_info = await resolve_user_routing(uid)
-    routing = (routing_info or {}).get("routing") or {}
-    agent_id = routing.get("agentId")
-    provision_url = (routing.get("provisionUrl") or "").rstrip("/")
-    provision_token = routing.get("provisionToken") or ""
-
-    if not agent_id or not provision_url:
-        raise RuntimeError("OpenClaw routing is missing agentId or provisionUrl")
-
-    correction_file = f"corrections/{correction_id}.md"
-    submitted_at = _now_iso()
-    markdown = _correction_markdown(
-        uid=uid,
-        conversation_id=conversation_id,
-        correction_id=correction_id,
-        request=request,
-        structured=structured,
-        transcript=transcript,
-        submitted_at=submitted_at,
-    )
-    headers = {}
-    if provision_token:
-        headers = {"Authorization": f"Bearer {provision_token}", "x-api-key": provision_token}
-
+    webhook_url = f"{ELLA_CONFIG.n8n_base_url.rstrip('/')}/webhook/conversation-correction"
+    payload = {
+        "uid": uid,
+        "conversation_id": conversation_id,
+        "correction_id": correction_id,
+        "trace_id": trace_id,
+        "correction_text": request.correction_text,
+        "text": request.correction_text,
+        "correction_type": _correction_category(request.correction_text, request.summary_context),
+        "source": request.source,
+        "summary_context": request.summary_context.model_dump(),
+        "current_summary": structured,
+        "transcript": transcript,
+        "segments_count": segment_count,
+    }
     async with httpx.AsyncClient(timeout=20.0) as client:
-        write_resp = await client.put(
-            f"{provision_url}/workspace/{agent_id}/write",
-            headers=headers,
-            json={"filepath": correction_file, "content": markdown},
-        )
-        write_resp.raise_for_status()
-
-        observe_resp = await client.post(
-            f"{provision_url}/workspace/{agent_id}/observe",
-            headers=headers,
-            json={
-                "trigger": "correction_submitted",
-                "turn_count": 0,
-                "conversation_id": conversation_id,
-                "uid": uid,
-                "omi_uid": uid,
-                "title": structured.get("title") or "",
-                "emoji": structured.get("emoji") or "",
-                "category": structured.get("category") or "other",
-                "segments_count": segment_count,
-                "correction_id": correction_id,
-                "correction_text": request.correction_text,
-                "correction_source": request.source,
-                "correction_file": correction_file,
-                "summary_context": request.summary_context.model_dump(),
-                "trace_id": trace_id,
-            },
-        )
-        observe_resp.raise_for_status()
-
-        n8n_status = "accepted"
-        try:
-            n8n_resp = await client.post(
-                f"{ELLA_CONFIG.n8n_base_url.rstrip('/')}/webhook/reprocess-queue",
-                json={
-                    "uid": uid,
-                    "conversations": [
-                        {
-                            "conversation_id": conversation_id,
-                            "reason": f"iOS summary correction {correction_id}",
-                            "correction_id": correction_id,
-                        }
-                    ],
-                },
-            )
-            n8n_resp.raise_for_status()
-        except Exception as exc:
-            logger.warning(
-                "Correction queued in OpenClaw but n8n reprocess-queue webhook failed",
-                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
-            )
-            n8n_status = f"failed: {exc}"
+        response = await client.post(webhook_url, json=payload)
+        response.raise_for_status()
+    try:
+        response_body = response.json()
+    except Exception:
+        response_body = {}
 
     return {
-        "agent_id": agent_id,
-        "correction_file": correction_file,
-        "provision_observe": "accepted",
-        "n8n_reprocess_queue": n8n_status,
+        "n8n_webhook": "conversation-correction",
+        "n8n_status_code": response.status_code,
+        "n8n_response": response_body,
     }
 
 
 @router.post(
-    "/v1/conversations/{conversation_id}/corrections",
+    "/v1/ella/conversations/{conversation_id}/corrections",
     response_model=ConversationCorrectionResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
@@ -321,7 +221,7 @@ async def submit_conversation_correction(
     _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
 
     try:
-        queue_result = await _enqueue_correction(
+        queue_result = await _submit_correction_to_n8n(
             uid=uid,
             conversation_id=conversation_id,
             correction_id=correction_id,
@@ -333,7 +233,7 @@ async def submit_conversation_correction(
         )
     except Exception as exc:
         logger.exception(
-            "Failed to enqueue conversation correction",
+            "Failed to submit conversation correction to n8n",
             extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
         )
         _persist_correction_audit(

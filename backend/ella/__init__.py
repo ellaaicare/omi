@@ -298,7 +298,7 @@ def _register_routers(app) -> None:
         from ella.routers.corrections import router as corrections_router
 
         app.include_router(corrections_router, tags=["Conversation Corrections"])
-        print("  🌐 /v1/conversations/*/corrections - Summary correction loop", flush=True)
+        print("  🌐 /v1/ella/conversations/*/corrections - Summary correction loop", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella corrections not available: {e}", flush=True)
 
