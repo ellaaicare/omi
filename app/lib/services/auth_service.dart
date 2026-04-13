@@ -703,7 +703,10 @@ class AuthService {
     final newUserId = FirebaseAuth.instance.currentUser?.uid;
     await getIdToken();
 
-    SharedPreferencesUtil().onboardingCompleted = false;
+    // Restore onboarding state from server instead of resetting to false.
+    // Setting onboardingCompleted=false here was causing existing users to
+    // see the new-user flow after re-authentication (issue #633).
+    await restoreOnboardingState();
     SharedPreferencesUtil().uid = newUserId ?? '';
     SharedPreferencesUtil().email = FirebaseAuth.instance.currentUser?.email ?? '';
     SharedPreferencesUtil().givenName = FirebaseAuth.instance.currentUser?.displayName?.split(' ')[0] ?? '';
