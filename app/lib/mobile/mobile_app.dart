@@ -46,9 +46,16 @@ class _MobileAppState extends State<MobileApp> {
           // Self-healing: if signed in but onboardingCompleted is false,
           // try restoring from server before showing onboarding.
           // This handles SharedPreferences data loss after iOS app updates.
+          // Also pre-set language flag to prevent language dialog from
+          // appearing during the restore (issue #633).
           if (authProvider.isSignedIn() && !SharedPreferencesUtil().onboardingCompleted) {
             if (!_restoringOnboarding) {
               _restoringOnboarding = true;
+              // Prevent language dialog from firing during restore
+              if (!SharedPreferencesUtil().hasSetPrimaryLanguage) {
+                SharedPreferencesUtil().hasSetPrimaryLanguage = true;
+                SharedPreferencesUtil().userPrimaryLanguage = 'en';
+              }
               AuthService.instance.restoreOnboardingState().then((_) {
                 if (mounted) setState(() {});
               }).catchError((e) {
