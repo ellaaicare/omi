@@ -472,6 +472,9 @@ class AuthService {
     }
   }
 
+  /// Public wrapper for _restoreOnboardingState — used by MobileApp self-healing.
+  Future<void> restoreOnboardingState() => _restoreOnboardingState();
+
   Future<void> _restoreOnboardingState() async {
     try {
       final state = await getUserOnboardingState();
