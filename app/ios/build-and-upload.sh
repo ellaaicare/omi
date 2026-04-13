@@ -198,11 +198,19 @@ if [ "${SKIP_UPLOAD:-0}" = "1" ]; then
 fi
 
 log "Uploading to TestFlight"
-xcrun altool --upload-app \
+UPLOAD_LOG="/tmp/ella-altool-upload.log"
+if ! xcrun altool --upload-app \
   -f "$IPA_PATH" \
   -t ios \
   --apiKey "$ASC_KEY_ID" \
   --apiIssuer "$ASC_ISSUER_ID" \
-  2>&1
+  2>&1 | tee "$UPLOAD_LOG"; then
+  echo "ERROR: altool upload failed. Full log at $UPLOAD_LOG"
+  exit 1
+fi
+if grep -Eq "ERROR:|Failed to upload|ENTITY_ERROR" "$UPLOAD_LOG"; then
+  echo "ERROR: altool reported an upload failure. Full log at $UPLOAD_LOG"
+  exit 1
+fi
 
 log "Done! Build uploaded to TestFlight."
