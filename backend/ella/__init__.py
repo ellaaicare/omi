@@ -293,6 +293,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella debug metadata not available: {e}", flush=True)
 
+    # App-facing conversation correction endpoint (iOS Correct Summary)
+    try:
+        from ella.routers.corrections import router as corrections_router
+
+        app.include_router(corrections_router, tags=["Conversation Corrections"])
+        print("  🌐 /v1/conversations/*/corrections - Summary correction loop", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella corrections not available: {e}", flush=True)
+
     # Escalation policy resolver (classifier output -> deterministic delivery plan)
     try:
         from ella.routers.escalations import router as escalations_router
