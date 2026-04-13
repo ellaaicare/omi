@@ -102,8 +102,30 @@ fi
 if [ ! -f lib/firebase_options_dev.dart ]; then
   cp setup/prebuilt/firebase_options.dart lib/firebase_options_dev.dart
 fi
-bash scripts/generate_ios_custom_config.sh ios/Config/Dev/GoogleService-Info.plist ios/Flutter
+# Generate Custom.xcconfig from the plist matching the flavor
+# Dev -> "Dev", Prod -> "Prod"
+case "$FLAVOR" in
+  prod) PLIST_FLAVOR="Prod" ;;
+  dev)  PLIST_FLAVOR="Dev" ;;
+  *)    echo "ERROR: Unknown FLAVOR=$FLAVOR (expected prod or dev)"; exit 1 ;;
+esac
+PLIST_PATH="ios/Config/${PLIST_FLAVOR}/GoogleService-Info.plist"
+if [ ! -f "$PLIST_PATH" ]; then
+  echo "ERROR: $PLIST_PATH not found for FLAVOR=$FLAVOR"
+  exit 1
+fi
+bash scripts/generate_ios_custom_config.sh "$PLIST_PATH" ios/Flutter
 echo "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" >> ios/Flutter/Custom.xcconfig
+
+# ── Step 3b: Validate generated config ──────────────────────
+XCCONFIG="ios/Flutter/Custom.xcconfig"
+if ! grep -q "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" "$XCCONFIG" 2>/dev/null; then
+  echo "ERROR: Custom.xcconfig APP_BUNDLE_IDENTIFIER mismatch (expected $BUNDLE_ID)"
+  exit 1
+fi
+PLIST_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$PLIST_PATH" 2>/dev/null || true)"
+PLIST_PROJECT_ID="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$PLIST_PATH" 2>/dev/null || true)"
+log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PLIST_PROJECT_ID"
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign"
