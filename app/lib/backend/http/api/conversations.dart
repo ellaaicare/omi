@@ -91,7 +91,7 @@ Future<bool> submitConversationCorrection({
   String? appSummary,
 }) async {
   var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/conversations/$conversationId/corrections',
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections',
     headers: {},
     method: 'POST',
     body: jsonEncode({
