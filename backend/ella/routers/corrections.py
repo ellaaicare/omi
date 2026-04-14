@@ -138,6 +138,15 @@ def _append_correction_event(
     ref.set({"events": events, "updated_at": event.get("at") or _now_iso()}, merge=True)
 
 
+def _n8n_correction_response_is_accepted(response_body: Any) -> bool:
+    if not isinstance(response_body, dict):
+        return False
+    if response_body.get("queued") is True or response_body.get("success") is True:
+        return True
+    status_value = str(response_body.get("status") or "").lower()
+    return status_value in {"accepted", "ok", "processing", "queued", "success"}
+
+
 async def _submit_correction_to_n8n(
     *,
     uid: str,
@@ -166,11 +175,12 @@ async def _submit_correction_to_n8n(
     }
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(webhook_url, json=payload)
-        response.raise_for_status()
     try:
         response_body = response.json()
     except Exception:
         response_body = {}
+    if response.status_code >= 400 and not _n8n_correction_response_is_accepted(response_body):
+        response.raise_for_status()
 
     return {
         "n8n_webhook": "conversation-correction",

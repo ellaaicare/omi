@@ -258,3 +258,53 @@ def test_submit_to_n8n_posts_single_structured_workflow_payload(monkeypatch):
             "timeout": 20.0,
         }
     ]
+
+
+def test_submit_to_n8n_accepts_async_success_body_even_with_bad_http_status(monkeypatch):
+    class FakeResponse:
+        status_code = 500
+        content = b'{"status":"processing","queued":true}'
+
+        def raise_for_status(self):
+            raise AssertionError("raise_for_status should not run for accepted n8n async responses")
+
+        def json(self):
+            return {"status": "processing", "queued": True, "trace_id": "trace-123"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return FakeResponse()
+
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        corrections._submit_correction_to_n8n(
+            uid="user-123",
+            conversation_id="conv-123",
+            correction_id="corr-123",
+            trace_id="trace-123",
+            request=corrections.ConversationCorrectionRequest(
+                correction_text="This was background TV audio.",
+                source="ios",
+                summary_context={"title": "Memory concern"},
+            ),
+            structured={"title": "Memory concern"},
+            transcript="Speaker: transcript",
+            segment_count=1,
+        )
+    )
+
+    assert result == {
+        "n8n_webhook": "conversation-correction",
+        "n8n_status_code": 500,
+        "n8n_response": {"status": "processing", "queued": True, "trace_id": "trace-123"},
+    }
