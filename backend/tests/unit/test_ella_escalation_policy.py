@@ -6,6 +6,14 @@ from ella.services.escalation_policy import (
     DECISION_LOG_ONLY,
     DECISION_NOTIFY_NOW,
     DECISION_QUEUE_FOR_REPORT,
+    DECISION_SUPPRESS,
+    REASON_CAREGIVER_NOT_ACTIVE,
+    REASON_CAREGIVER_PERMISSION_DENIED,
+    REASON_CHANNEL_DISABLED_BY_USER,
+    REASON_GUARDIAN_DISABLED,
+    REASON_NO_EMAIL,
+    REASON_NO_PHONE,
+    REASON_MODE_SUPPRESSED,
     CaregiverPolicyContext,
     EscalationEvent,
     UserPolicyContext,
@@ -56,6 +64,10 @@ def _caregiver(**overrides):
     return CaregiverPolicyContext(**data)
 
 
+def _reason_codes(decision):
+    return {item.reason_code for item in decision.suppressed_channels}
+
+
 def test_critical_event_notifies_user_audio_and_emergency_caregiver_imessage():
     decision = evaluate_escalation_policy(
         _event(severity="critical"),
@@ -67,24 +79,161 @@ def test_critical_event_notifies_user_audio_and_emergency_caregiver_imessage():
     assert decision.requires_ack is True
     assert [step.channel for step in decision.delivery_plan] == [CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE]
     assert decision.delivery_plan[1].fallback == CHANNEL_EMAIL
+    payload = decision.to_dict()
+    assert payload["selected_channels"] == payload["delivery_plan"]
+    assert payload["policy_snapshot"]["mode"] == "maximum_awareness"
+
+
+def test_guardian_off_critical_suppresses_audio_but_allows_user_and_caregiver_fallbacks():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(guardian_mode="off"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_NOTIFY_NOW
+    assert decision.delivery_plan[0].target == "user"
+    assert decision.delivery_plan[0].channel == CHANNEL_IMESSAGE
+    assert decision.delivery_plan[0].fallback == CHANNEL_EMAIL
+    assert REASON_GUARDIAN_DISABLED in _reason_codes(decision)
+
+
+def test_guardian_off_routine_is_suppressed_and_logged():
+    decision = evaluate_escalation_policy(
+        _event(severity="medium", event_type="routine_report"),
+        _user(guardian_mode="off"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_SUPPRESS
+    assert decision.delivery_plan == ()
+    assert decision.reason == REASON_GUARDIAN_DISABLED
+
+
+def test_cyborg_useful_context_is_user_only_guardian_audio():
+    decision = evaluate_escalation_policy(
+        _event(severity="high", event_type="useful_context"),
+        _user(guardian_mode="cyborg"),
+        [_caregiver(caregiver_id="caregiver-2")],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert decision.delivery_plan[0].channel == CHANNEL_GUARDIAN_AUDIO
+    assert decision.reason == "cyborg_context_user_only"
+
+
+def test_cyborg_critical_uses_normal_critical_path():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical", event_type="safety"),
+        _user(guardian_mode="cyborg"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_NOTIFY_NOW
+    assert [step.target for step in decision.delivery_plan] == ["user", "emergency_caregiver"]
+
+
+def test_emergency_only_medium_has_no_delivery():
+    decision = evaluate_escalation_policy(
+        _event(severity="medium"),
+        _user(guardian_mode="emergency_only"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_SUPPRESS
+    assert decision.delivery_plan == ()
+    assert decision.reason == REASON_MODE_SUPPRESSED
+    assert REASON_MODE_SUPPRESSED in _reason_codes(decision)
+
+
+def test_maximum_awareness_high_is_user_first_and_caregiver_only_when_allowed():
+    decision = evaluate_escalation_policy(
+        _event(severity="high"),
+        _user(
+            guardian_mode="maximum_awareness",
+            caregiver_alert_preferences={"allow_high": True},
+        ),
+        [_caregiver(permissions={"receive_high_alerts": True})],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert [step.target for step in decision.delivery_plan] == ["user", "emergency_caregiver"]
+    assert decision.delivery_plan[0].channel == CHANNEL_GUARDIAN_AUDIO
+    assert decision.delivery_plan[1].channel == CHANNEL_IMESSAGE
+
+
+def test_maximum_awareness_high_suppresses_caregiver_when_policy_denies_high_alerts():
+    decision = evaluate_escalation_policy(
+        _event(severity="high"),
+        _user(guardian_mode="maximum_awareness"),
+        [_caregiver()],
+    )
+
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert REASON_CAREGIVER_PERMISSION_DENIED in _reason_codes(decision)
+
+
+def test_imessage_disabled_uses_email_fallback_path():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(
+            guardian_mode="off",
+            channel_preferences={CHANNEL_IMESSAGE: {"enabled": False}},
+        ),
+        [],
+    )
+
+    assert decision.decision == DECISION_NOTIFY_NOW
+    assert [step.channel for step in decision.delivery_plan] == [CHANNEL_EMAIL]
+    assert REASON_CHANNEL_DISABLED_BY_USER in _reason_codes(decision)
+
+
+def test_email_disabled_removes_email_fallback():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(
+            guardian_mode="off",
+            channel_preferences={CHANNEL_EMAIL: {"enabled": False}},
+        ),
+        [_caregiver()],
+    )
+
+    user_step = next(step for step in decision.delivery_plan if step.target == "user")
+    caregiver_step = next(step for step in decision.delivery_plan if step.target == "emergency_caregiver")
+    assert user_step.channel == CHANNEL_IMESSAGE
+    assert user_step.fallback is None
+    assert caregiver_step.fallback is None
+
+
+def test_caregiver_inactive_returns_suppressed_reason():
+    decision = evaluate_escalation_policy(
+        _event(severity="critical"),
+        _user(guardian_mode="cyborg"),
+        [_caregiver(status="REMOVED")],
+    )
+
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert REASON_CAREGIVER_NOT_ACTIVE in _reason_codes(decision)
 
 
 def test_critical_event_respects_disabled_caregiver_emergency_alert_permission():
     decision = evaluate_escalation_policy(
         _event(severity="critical"),
-        _user(guardian_mode="alert"),
+        _user(guardian_mode="emergency_only"),
         [_caregiver(permissions={"receive_emergency_alerts": False})],
     )
 
     assert decision.decision == DECISION_NOTIFY_NOW
     assert len(decision.delivery_plan) == 1
     assert decision.delivery_plan[0].target == "user"
+    assert REASON_CAREGIVER_PERMISSION_DENIED in _reason_codes(decision)
 
 
 def test_critical_event_uses_email_when_caregiver_has_no_phone():
     decision = evaluate_escalation_policy(
         _event(severity="critical"),
-        _user(guardian_mode=None),
+        _user(guardian_mode=None, user_phone=None, user_email=None),
         [_caregiver(phone=None)],
     )
 
@@ -92,19 +241,7 @@ def test_critical_event_uses_email_when_caregiver_has_no_phone():
     assert len(decision.delivery_plan) == 1
     assert decision.delivery_plan[0].target == "emergency_caregiver"
     assert decision.delivery_plan[0].channel == CHANNEL_EMAIL
-
-
-def test_high_event_asks_user_first_without_contacting_caregiver():
-    decision = evaluate_escalation_policy(
-        _event(severity="high"),
-        _user(guardian_mode="cyborg"),
-        [_caregiver()],
-    )
-
-    assert decision.decision == DECISION_ASK_USER_FIRST
-    assert decision.requires_ack is True
-    assert len(decision.delivery_plan) == 1
-    assert decision.delivery_plan[0].target == "user"
+    assert {REASON_GUARDIAN_DISABLED, REASON_NO_PHONE, REASON_NO_EMAIL}.issubset(_reason_codes(decision))
 
 
 def test_ambiguous_medium_event_queues_for_report():
@@ -135,8 +272,11 @@ def test_plain_language_policy_view_summarizes_effective_channels_and_rules():
         [_caregiver(permissions={"receive_emergency_alerts": True, "receive_daily_summary": True})],
     )
 
-    assert policy["policy_version"] == "ella.escalation_policy.v1"
+    assert policy["policy_version"] == "ella.escalation_policy.v2"
     assert policy["source"] == "omi_backend"
+    assert policy["mode"] == "cyborg"
+    assert policy["channel_preference_version"] == "ella.channel_preferences.v1"
+    assert policy["effective_policy"]["caregiver_alert_preferences"]["emergency_contact_only"] is True
     assert policy["emergency_contact"] == {
         "configured": True,
         "caregiver_id": "caregiver-1",
@@ -153,7 +293,7 @@ def test_plain_language_policy_view_summarizes_effective_channels_and_rules():
     assert policy["caregivers"][0]["permissions"]["emergency_alerts"] is True
     assert policy["caregivers"][0]["permissions"]["daily_summary"] is True
     assert policy["rules"][0]["severity"] == "critical"
-    assert "notify you and your selected emergency caregiver" in policy["rules"][0]["text"]
+    assert "configured emergency caregivers" in policy["rules"][0]["text"]
     assert "not raw private chats" in policy["display"]["rules"][-1]
 
 

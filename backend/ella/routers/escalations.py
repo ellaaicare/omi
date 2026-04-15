@@ -102,6 +102,16 @@ def _resolve_policy_view_uid(
     return authenticated_uid
 
 
+def _dict_value(data: Any, *keys: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPolicyContext]]:
     pool = await _get_pool()
     user_row = await pool.fetchrow(
@@ -124,6 +134,25 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         guardian_mode=user_row["guardian_mode"],
         user_email=user_row["email"],
         user_phone=identities.get("phone") if isinstance(identities, dict) else None,
+        guardian_audio_enabled=identities.get("guardian_audio_enabled") if isinstance(identities, dict) else None,
+        channel_preferences=_dict_value(
+            identities,
+            "escalation_channel_preferences",
+            "channel_preferences",
+            "notification_channel_preferences",
+        ),
+        caregiver_alert_preferences=_dict_value(
+            identities,
+            "caregiver_alert_preferences",
+            "caregiver_alerts",
+        ),
+        recap_preferences=_dict_value(
+            identities,
+            "recap_preferences",
+            "daily_recap_preferences",
+        ),
+        provider_health=_dict_value(identities, "provider_health", "channel_provider_health"),
+        quiet_hours_active=bool(identities.get("quiet_hours_active", False)) if isinstance(identities, dict) else False,
     )
 
     caregiver_rows = await pool.fetch(
@@ -131,7 +160,6 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         SELECT id, status::text AS status, is_emergency_contact, name, relationship, email, phone, permissions
         FROM caregivers
         WHERE user_id = $1
-          AND status::text = 'ACTIVE'
         ORDER BY is_emergency_contact DESC, created_at ASC
         """,
         user_row["id"],

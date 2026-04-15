@@ -1,8 +1,23 @@
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+
+sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
+firebase_admin = types.ModuleType("firebase_admin")
+firebase_auth = types.ModuleType("firebase_admin.auth")
+
+
+class InvalidIdTokenError(Exception):
+    pass
+
+
+firebase_auth.InvalidIdTokenError = InvalidIdTokenError
+sys.modules.setdefault("firebase_admin", firebase_admin)
+sys.modules.setdefault("firebase_admin.auth", firebase_auth)
 
 _ROUTER_PATH = Path(__file__).resolve().parents[2] / "ella" / "routers" / "escalations.py"
 _SPEC = importlib.util.spec_from_file_location("ella_escalations_under_test", _ROUTER_PATH)
