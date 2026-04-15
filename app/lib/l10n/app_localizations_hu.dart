@@ -8502,4 +8502,56 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get ellaProfileSaved => 'Profile saved';
+
+  @override
+  String get ellaAlertChannels => 'Alert Channels';
+
+  @override
+  String get ellaAlertChannelsSubtitle => 'How Ella handles alerts and notifications';
+
+  @override
+  String get ellaAlertChannelsUnavailable => 'Unable to load alert policy';
+
+  @override
+  String get ellaAlertChannelsPullRetry => 'Pull down to retry';
+
+  @override
+  String get ellaAlertChannelsRetry => 'Retry';
+
+  @override
+  String get ellaAlertChannelsYourChannels => 'YOUR CHANNELS';
+
+  @override
+  String get ellaAlertChannelsNoChannels => 'No channels configured';
+
+  @override
+  String get ellaAlertChannelsEmergencyContact => 'EMERGENCY CONTACT';
+
+  @override
+  String get ellaAlertChannelsNotConfigured => 'No emergency contact selected';
+
+  @override
+  String get ellaAlertChannelsSetUpContact => 'Set up an emergency contact';
+
+  @override
+  String get ellaAlertChannelsCaregiverNotifications => 'CAREGIVER NOTIFICATIONS';
+
+  @override
+  String get ellaAlertChannelsAlertRules => 'ALERT RULES';
+
+  @override
+  String get ellaAlertChannelsPrivacyNotes => 'PRIVACY NOTES';
+
+  @override
+  String get ellaAlertChannelsEnabled => 'Enabled';
+
+  @override
+  String get ellaAlertChannelsDisabled => 'Disabled';
+
+  @override
+  String get ellaGuardianOffTooltip =>
+      'Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.';
+
+  @override
+  String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
 }
