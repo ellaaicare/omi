@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -93,3 +94,62 @@ def test_policy_view_uid_requires_authorization_without_internal_key():
         )
 
     assert exc.value.status_code == 401
+
+
+class _FakePool:
+    def __init__(self, user_row):
+        self.user_row = user_row
+
+    async def fetchrow(self, *_args):
+        return self.user_row
+
+    async def fetch(self, *_args):
+        return []
+
+
+def test_load_context_uses_canonical_phone_number_for_user_imessage(monkeypatch):
+    monkeypatch.setattr(
+        escalations,
+        "_pool",
+        _FakePool(
+            {
+                "id": "user-1",
+                "omi_uid": "canonical-uid",
+                "guardian_mode": "off",
+                "email": "user@example.test",
+                "phone_number": "+15550000001",
+                "identities": {},
+            }
+        ),
+    )
+
+    user, caregivers = asyncio.run(escalations._load_context("canonical-uid"))
+    policy = escalations.build_plain_language_policy_view(user, caregivers)
+
+    assert user.user_phone == "+15550000001"
+    assert policy["user"]["channels"][1] == {
+        "channel": "imessage",
+        "enabled": True,
+        "reason": "Phone number on file",
+    }
+
+
+def test_load_context_allows_identities_phone_override(monkeypatch):
+    monkeypatch.setattr(
+        escalations,
+        "_pool",
+        _FakePool(
+            {
+                "id": "user-1",
+                "omi_uid": "canonical-uid",
+                "guardian_mode": "off",
+                "email": "user@example.test",
+                "phone_number": "+15550000001",
+                "identities": {"phone": "+15550000099"},
+            }
+        ),
+    )
+
+    user, _caregivers = asyncio.run(escalations._load_context("canonical-uid"))
+
+    assert user.user_phone == "+15550000099"

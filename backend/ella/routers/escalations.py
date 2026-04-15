@@ -112,11 +112,17 @@ def _dict_value(data: Any, *keys: str) -> dict[str, Any]:
     return {}
 
 
+def _identity_phone(identities: Any, canonical_phone: Optional[str]) -> Optional[str]:
+    if isinstance(identities, dict) and identities.get("phone"):
+        return identities.get("phone")
+    return canonical_phone
+
+
 async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPolicyContext]]:
     pool = await _get_pool()
     user_row = await pool.fetchrow(
         """
-        SELECT id, omi_uid, guardian_mode, email, identities
+        SELECT id, omi_uid, guardian_mode, email, phone_number, identities
         FROM users
         WHERE LOWER(omi_uid) = LOWER($1)
         """,
@@ -133,7 +139,7 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         user_id=str(user_row["id"]),
         guardian_mode=user_row["guardian_mode"],
         user_email=user_row["email"],
-        user_phone=identities.get("phone") if isinstance(identities, dict) else None,
+        user_phone=_identity_phone(identities, user_row["phone_number"]),
         guardian_audio_enabled=identities.get("guardian_audio_enabled") if isinstance(identities, dict) else None,
         channel_preferences=_dict_value(
             identities,
