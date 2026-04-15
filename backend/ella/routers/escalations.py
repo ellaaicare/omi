@@ -102,11 +102,27 @@ def _resolve_policy_view_uid(
     return authenticated_uid
 
 
+def _dict_value(data: Any, *keys: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _identity_phone(identities: Any, canonical_phone: Optional[str]) -> Optional[str]:
+    if isinstance(identities, dict) and identities.get("phone"):
+        return identities.get("phone")
+    return canonical_phone
+
+
 async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPolicyContext]]:
     pool = await _get_pool()
     user_row = await pool.fetchrow(
         """
-        SELECT id, omi_uid, guardian_mode, email, identities
+        SELECT id, omi_uid, guardian_mode, email, phone_number, identities
         FROM users
         WHERE LOWER(omi_uid) = LOWER($1)
         """,
@@ -123,7 +139,26 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         user_id=str(user_row["id"]),
         guardian_mode=user_row["guardian_mode"],
         user_email=user_row["email"],
-        user_phone=identities.get("phone") if isinstance(identities, dict) else None,
+        user_phone=_identity_phone(identities, user_row["phone_number"]),
+        guardian_audio_enabled=identities.get("guardian_audio_enabled") if isinstance(identities, dict) else None,
+        channel_preferences=_dict_value(
+            identities,
+            "escalation_channel_preferences",
+            "channel_preferences",
+            "notification_channel_preferences",
+        ),
+        caregiver_alert_preferences=_dict_value(
+            identities,
+            "caregiver_alert_preferences",
+            "caregiver_alerts",
+        ),
+        recap_preferences=_dict_value(
+            identities,
+            "recap_preferences",
+            "daily_recap_preferences",
+        ),
+        provider_health=_dict_value(identities, "provider_health", "channel_provider_health"),
+        quiet_hours_active=bool(identities.get("quiet_hours_active", False)) if isinstance(identities, dict) else False,
     )
 
     caregiver_rows = await pool.fetch(
@@ -131,7 +166,6 @@ async def _load_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPoli
         SELECT id, status::text AS status, is_emergency_contact, name, relationship, email, phone, permissions
         FROM caregivers
         WHERE user_id = $1
-          AND status::text = 'ACTIVE'
         ORDER BY is_emergency_contact DESC, created_at ASC
         """,
         user_row["id"],

@@ -10,10 +10,15 @@ from typing import Any, Optional
 Severity = str
 Decision = str
 
+POLICY_VERSION = "ella.escalation_policy.v2"
+CHANNEL_PREFERENCE_VERSION = "ella.channel_preferences.v1"
+
 SEVERITY_CRITICAL = "critical"
 SEVERITY_HIGH = "high"
 SEVERITY_MEDIUM = "medium"
 SEVERITY_LOW = "low"
+SEVERITY_CYBORG = "cyborg"
+SEVERITY_DAILY_RECAP = "daily_recap"
 
 DECISION_NOTIFY_NOW = "notify_now"
 DECISION_ASK_USER_FIRST = "ask_user_first"
@@ -24,6 +29,87 @@ DECISION_SUPPRESS = "suppress"
 CHANNEL_GUARDIAN_AUDIO = "guardian_audio"
 CHANNEL_IMESSAGE = "imessage"
 CHANNEL_EMAIL = "email"
+CHANNEL_TWILIO_SMS = "twilio_sms"
+CHANNEL_TWILIO_VOICE = "twilio_voice"
+CHANNEL_IOS_VOICE_CALL = "ios_voice_call"
+
+REASON_SELECTED = "selected"
+REASON_GUARDIAN_DISABLED = "guardian_disabled"
+REASON_CHANNEL_DISABLED_BY_USER = "channel_disabled_by_user"
+REASON_PROVIDER_UNHEALTHY = "provider_unhealthy"
+REASON_NO_PHONE = "no_phone"
+REASON_NO_EMAIL = "no_email"
+REASON_QUIET_HOURS = "quiet_hours"
+REASON_CAREGIVER_NOT_ACTIVE = "caregiver_not_active"
+REASON_CAREGIVER_PERMISSION_DENIED = "caregiver_permission_denied"
+REASON_MODE_SUPPRESSED = "mode_suppressed"
+REASON_DUPLICATE_SUPPRESSED = "duplicate_suppressed"
+
+MODE_OFF = "off"
+MODE_CYBORG = "cyborg"
+MODE_EMERGENCY_ONLY = "emergency_only"
+MODE_MAXIMUM_AWARENESS = "maximum_awareness"
+
+USER_CHANNELS = (
+    CHANNEL_GUARDIAN_AUDIO,
+    CHANNEL_IMESSAGE,
+    CHANNEL_EMAIL,
+    CHANNEL_TWILIO_SMS,
+    CHANNEL_TWILIO_VOICE,
+    CHANNEL_IOS_VOICE_CALL,
+)
+
+PHONE_CHANNELS = {
+    CHANNEL_IMESSAGE,
+    CHANNEL_TWILIO_SMS,
+    CHANNEL_TWILIO_VOICE,
+    CHANNEL_IOS_VOICE_CALL,
+}
+
+DEFAULT_CHANNEL_PREFERENCES: dict[str, dict[str, Any]] = {
+    CHANNEL_GUARDIAN_AUDIO: {
+        "enabled": True,
+        "severities": [SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_CYBORG],
+        "order": 10,
+    },
+    CHANNEL_IMESSAGE: {
+        "enabled": True,
+        "severities": [SEVERITY_CRITICAL, SEVERITY_HIGH],
+        "order": 20,
+    },
+    CHANNEL_EMAIL: {
+        "enabled": True,
+        "severities": [SEVERITY_CRITICAL, SEVERITY_DAILY_RECAP],
+        "order": 30,
+    },
+    CHANNEL_TWILIO_SMS: {
+        "enabled": False,
+        "severities": [SEVERITY_CRITICAL],
+        "order": 40,
+    },
+    CHANNEL_TWILIO_VOICE: {
+        "enabled": False,
+        "severities": [SEVERITY_CRITICAL],
+        "order": 50,
+    },
+    CHANNEL_IOS_VOICE_CALL: {
+        "enabled": False,
+        "severities": [SEVERITY_CRITICAL],
+        "order": 60,
+    },
+}
+
+DEFAULT_CAREGIVER_ALERT_PREFERENCES: dict[str, Any] = {
+    "enabled": True,
+    "emergency_contact_only": True,
+    "channels": [CHANNEL_IMESSAGE, CHANNEL_EMAIL],
+    "allow_high": False,
+}
+
+DEFAULT_RECAP_PREFERENCES: dict[str, Any] = {
+    "user_daily": {"enabled": True, "channels": [CHANNEL_EMAIL]},
+    "caregiver_daily": {"enabled": False, "channels": [CHANNEL_EMAIL], "privacy_filtered": True},
+}
 
 
 @dataclass(frozen=True)
@@ -47,6 +133,12 @@ class UserPolicyContext:
     guardian_mode: Optional[str] = None
     user_email: Optional[str] = None
     user_phone: Optional[str] = None
+    guardian_audio_enabled: Optional[bool] = None
+    channel_preferences: dict[str, Any] = field(default_factory=dict)
+    caregiver_alert_preferences: dict[str, Any] = field(default_factory=dict)
+    recap_preferences: dict[str, Any] = field(default_factory=dict)
+    provider_health: dict[str, bool] = field(default_factory=dict)
+    quiet_hours_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,6 +161,7 @@ class DeliveryStep:
     caregiver_id: Optional[str] = None
     fallback: Optional[str] = None
     reason: str = ""
+    reason_code: str = REASON_SELECTED
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -76,11 +169,33 @@ class DeliveryStep:
             "channel": self.channel,
             "priority": self.priority,
             "reason": self.reason,
+            "reason_code": self.reason_code,
         }
         if self.caregiver_id:
             data["caregiver_id"] = self.caregiver_id
         if self.fallback:
             data["fallback"] = self.fallback
+        return data
+
+
+@dataclass(frozen=True)
+class SuppressedChannel:
+    target: str
+    channel: str
+    reason_code: str
+    caregiver_id: Optional[str] = None
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "target": self.target,
+            "channel": self.channel,
+            "reason_code": self.reason_code,
+        }
+        if self.caregiver_id:
+            data["caregiver_id"] = self.caregiver_id
+        if self.detail:
+            data["detail"] = self.detail
         return data
 
 
@@ -91,14 +206,22 @@ class EscalationPolicyDecision:
     trace_id: str
     requires_ack: bool = False
     delivery_plan: tuple[DeliveryStep, ...] = ()
+    suppressed_channels: tuple[SuppressedChannel, ...] = ()
+    policy_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        selected_channels = [step.to_dict() for step in self.delivery_plan]
         return {
             "decision": self.decision,
             "reason": self.reason,
             "trace_id": self.trace_id,
             "requires_ack": self.requires_ack,
-            "delivery_plan": [step.to_dict() for step in self.delivery_plan],
+            "delivery_plan": selected_channels,
+            "selected_channels": selected_channels,
+            "suppressed_channels": [suppressed.to_dict() for suppressed in self.suppressed_channels],
+            "policy_snapshot": self.policy_snapshot,
+            "mode": self.policy_snapshot.get("mode"),
+            "channel_preference_version": self.policy_snapshot.get("channel_preference_version"),
         }
 
 
@@ -109,11 +232,25 @@ def _normalize_severity(value: str) -> Severity:
     return SEVERITY_LOW
 
 
-def _guardian_audio_enabled(guardian_mode: Optional[str]) -> bool:
-    if guardian_mode is None:
-        return False
-    normalized = str(guardian_mode).strip().lower()
-    return normalized not in {"", "off", "none", "disabled", "null"}
+def _normalize_mode(guardian_mode: Optional[str]) -> str:
+    normalized = str(guardian_mode or "").strip().lower()
+    if normalized in {"", "off", "none", "disabled", "null", "guardian_off"}:
+        return MODE_OFF
+    if normalized in {"emergency", "emergency_only", "alert", "alerts_only"}:
+        return MODE_EMERGENCY_ONLY
+    if normalized in {"maximum", "maximum_awareness", "max_awareness", "max"}:
+        return MODE_MAXIMUM_AWARENESS
+    if normalized in {"cyborg", "active", "active_support", "support"}:
+        return MODE_CYBORG
+    return normalized
+
+
+def _guardian_audio_enabled(user: UserPolicyContext | Optional[str]) -> bool:
+    if isinstance(user, UserPolicyContext):
+        if user.guardian_audio_enabled is not None:
+            return bool(user.guardian_audio_enabled)
+        return _normalize_mode(user.guardian_mode) != MODE_OFF
+    return _normalize_mode(user) != MODE_OFF
 
 
 def _permission_enabled(permissions: dict[str, Any], keys: tuple[str, ...], default: bool = False) -> bool:
@@ -123,59 +260,296 @@ def _permission_enabled(permissions: dict[str, Any], keys: tuple[str, ...], defa
     return default
 
 
-def _emergency_caregivers(caregivers: list[CaregiverPolicyContext]) -> list[CaregiverPolicyContext]:
-    return [
-        caregiver for caregiver in caregivers if caregiver.status.upper() == "ACTIVE" and caregiver.is_emergency_contact
-    ]
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
-def _critical_delivery_plan(
+def _list_value(value: Any, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, tuple):
+        return [str(item) for item in value]
+    return list(default)
+
+
+def _merge_channel_preferences(raw_preferences: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_preferences = _as_dict(raw_preferences)
+    merged: dict[str, dict[str, Any]] = {}
+    for channel, default in DEFAULT_CHANNEL_PREFERENCES.items():
+        override = _as_dict(raw_preferences.get(channel))
+        merged[channel] = {
+            "enabled": bool(override.get("enabled", default["enabled"])),
+            "severities": _list_value(override.get("severities"), default["severities"]),
+            "order": int(override.get("order", default["order"])),
+        }
+    return merged
+
+
+def _merge_caregiver_alert_preferences(raw_preferences: dict[str, Any]) -> dict[str, Any]:
+    raw_preferences = _as_dict(raw_preferences)
+    return {
+        "enabled": bool(raw_preferences.get("enabled", DEFAULT_CAREGIVER_ALERT_PREFERENCES["enabled"])),
+        "emergency_contact_only": bool(
+            raw_preferences.get(
+                "emergency_contact_only",
+                DEFAULT_CAREGIVER_ALERT_PREFERENCES["emergency_contact_only"],
+            )
+        ),
+        "channels": _list_value(
+            raw_preferences.get("channels"),
+            DEFAULT_CAREGIVER_ALERT_PREFERENCES["channels"],
+        ),
+        "allow_high": bool(raw_preferences.get("allow_high", DEFAULT_CAREGIVER_ALERT_PREFERENCES["allow_high"])),
+    }
+
+
+def _merge_recap_preferences(raw_preferences: dict[str, Any]) -> dict[str, Any]:
+    raw_preferences = _as_dict(raw_preferences)
+    merged = {
+        "user_daily": dict(DEFAULT_RECAP_PREFERENCES["user_daily"]),
+        "caregiver_daily": dict(DEFAULT_RECAP_PREFERENCES["caregiver_daily"]),
+    }
+    for key in merged:
+        override = _as_dict(raw_preferences.get(key))
+        merged[key].update(override)
+        merged[key]["enabled"] = bool(merged[key].get("enabled"))
+        merged[key]["channels"] = _list_value(merged[key].get("channels"), DEFAULT_RECAP_PREFERENCES[key]["channels"])
+    return merged
+
+
+def _provider_healthy(user: UserPolicyContext, channel: str) -> bool:
+    provider_health = user.provider_health or {}
+    if channel in provider_health:
+        return bool(provider_health[channel])
+    return True
+
+
+def _severity_allowed(channel_pref: dict[str, Any], severity: str, event_type: str) -> bool:
+    severities = set(channel_pref.get("severities") or [])
+    delivery_class = SEVERITY_DAILY_RECAP if event_type in {"daily_recap", "routine_report"} else severity
+    return delivery_class in severities
+
+
+def _target_has_contact(user: UserPolicyContext, channel: str) -> tuple[bool, str]:
+    if channel in PHONE_CHANNELS:
+        return bool(user.user_phone), REASON_NO_PHONE
+    if channel == CHANNEL_EMAIL:
+        return bool(user.user_email), REASON_NO_EMAIL
+    return True, ""
+
+
+def _caregiver_has_contact(caregiver: CaregiverPolicyContext, channel: str) -> tuple[bool, str]:
+    if channel in PHONE_CHANNELS:
+        return bool(caregiver.phone), REASON_NO_PHONE
+    if channel == CHANNEL_EMAIL:
+        return bool(caregiver.email), REASON_NO_EMAIL
+    return True, ""
+
+
+def _fallback_channel(primary: str, email_enabled: bool, contact_email: Optional[str]) -> Optional[str]:
+    if primary != CHANNEL_EMAIL and email_enabled and contact_email:
+        return CHANNEL_EMAIL
+    return None
+
+
+def _email_fallback_enabled(snapshot: dict[str, Any], severity: str, event_type: str) -> bool:
+    email_pref = snapshot["channel_preferences"][CHANNEL_EMAIL]
+    return bool(email_pref["enabled"]) and _severity_allowed(email_pref, severity, event_type)
+
+
+def _policy_snapshot(user: UserPolicyContext, caregivers: list[CaregiverPolicyContext]) -> dict[str, Any]:
+    mode = _normalize_mode(user.guardian_mode)
+    channel_preferences = _merge_channel_preferences(user.channel_preferences)
+    caregiver_alerts = _merge_caregiver_alert_preferences(user.caregiver_alert_preferences)
+    recap_preferences = _merge_recap_preferences(user.recap_preferences)
+    return {
+        "policy_version": POLICY_VERSION,
+        "channel_preference_version": CHANNEL_PREFERENCE_VERSION,
+        "mode": mode,
+        "raw_guardian_mode": user.guardian_mode,
+        "guardian_audio_enabled": _guardian_audio_enabled(user),
+        "channel_preferences": channel_preferences,
+        "caregiver_alert_preferences": caregiver_alerts,
+        "recap_preferences": recap_preferences,
+        "provider_health": dict(user.provider_health or {}),
+        "quiet_hours_active": bool(user.quiet_hours_active),
+        "caregivers": [
+            {
+                "caregiver_id": caregiver.caregiver_id,
+                "status": caregiver.status,
+                "is_emergency_contact": caregiver.is_emergency_contact,
+                "permissions": dict(caregiver.permissions or {}),
+                "has_phone": bool(caregiver.phone),
+                "has_email": bool(caregiver.email),
+            }
+            for caregiver in caregivers
+        ],
+    }
+
+
+def _suppress(
+    suppressed: list[SuppressedChannel],
+    target: str,
+    channel: str,
+    reason_code: str,
+    caregiver_id: Optional[str] = None,
+    detail: str = "",
+) -> None:
+    suppressed.append(
+        SuppressedChannel(
+            target=target,
+            channel=channel,
+            caregiver_id=caregiver_id,
+            reason_code=reason_code,
+            detail=detail,
+        )
+    )
+
+
+def _consider_user_channel(
+    event: EscalationEvent,
     user: UserPolicyContext,
-    caregivers: list[CaregiverPolicyContext],
-) -> tuple[DeliveryStep, ...]:
-    steps: list[DeliveryStep] = []
+    snapshot: dict[str, Any],
+    channel: str,
+    priority: str,
+    reason: str,
+    selected: list[DeliveryStep],
+    suppressed: list[SuppressedChannel],
+) -> bool:
+    severity = _normalize_severity(event.severity)
+    channel_pref = snapshot["channel_preferences"][channel]
+    mode = snapshot["mode"]
+    if channel == CHANNEL_GUARDIAN_AUDIO and (mode == MODE_OFF or not snapshot["guardian_audio_enabled"]):
+        _suppress(suppressed, "user", channel, REASON_GUARDIAN_DISABLED)
+        return False
+    if not channel_pref["enabled"] or not _severity_allowed(channel_pref, severity, event.event_type):
+        _suppress(suppressed, "user", channel, REASON_CHANNEL_DISABLED_BY_USER)
+        return False
+    if not _provider_healthy(user, channel):
+        _suppress(suppressed, "user", channel, REASON_PROVIDER_UNHEALTHY)
+        return False
+    if user.quiet_hours_active and severity != SEVERITY_CRITICAL:
+        _suppress(suppressed, "user", channel, REASON_QUIET_HOURS)
+        return False
+    has_contact, reason_code = _target_has_contact(user, channel)
+    if not has_contact:
+        _suppress(suppressed, "user", channel, reason_code)
+        return False
+    selected.append(
+        DeliveryStep(
+            target="user",
+            channel=channel,
+            priority=priority,
+            fallback=_fallback_channel(
+                channel,
+                _email_fallback_enabled(snapshot, severity, event.event_type),
+                user.user_email,
+            ),
+            reason=reason,
+        )
+    )
+    return True
 
-    if _guardian_audio_enabled(user.guardian_mode):
-        steps.append(
-            DeliveryStep(
-                target="user",
-                channel=CHANNEL_GUARDIAN_AUDIO,
-                priority="urgent",
-                reason="guardian_mode_active",
+
+def _caregiver_alert_allowed(
+    caregiver: CaregiverPolicyContext,
+    caregiver_alerts: dict[str, Any],
+    severity: str,
+) -> tuple[bool, str]:
+    if caregiver.status.upper() != "ACTIVE":
+        return False, REASON_CAREGIVER_NOT_ACTIVE
+    if caregiver_alerts["emergency_contact_only"] and not caregiver.is_emergency_contact:
+        return False, REASON_CAREGIVER_PERMISSION_DENIED
+    if severity == SEVERITY_HIGH and not caregiver_alerts.get("allow_high"):
+        return False, REASON_CAREGIVER_PERMISSION_DENIED
+    permission_keys = (
+        ("receive_emergency_alerts", "emergency_alerts", "urgent_alerts")
+        if severity == SEVERITY_CRITICAL
+        else ("receive_high_alerts", "high_alerts")
+    )
+    default_allowed = severity == SEVERITY_CRITICAL
+    if not _permission_enabled(caregiver.permissions, permission_keys, default=default_allowed):
+        return False, REASON_CAREGIVER_PERMISSION_DENIED
+    return True, ""
+
+
+def _consider_caregiver_channels(
+    caregiver: CaregiverPolicyContext,
+    severity: str,
+    user: UserPolicyContext,
+    snapshot: dict[str, Any],
+    priority: str,
+    selected: list[DeliveryStep],
+    suppressed: list[SuppressedChannel],
+) -> None:
+    caregiver_alerts = snapshot["caregiver_alert_preferences"]
+    if not caregiver_alerts["enabled"]:
+        for channel in caregiver_alerts["channels"]:
+            _suppress(
+                suppressed,
+                "emergency_caregiver",
+                channel,
+                REASON_CAREGIVER_PERMISSION_DENIED,
+                caregiver.caregiver_id,
+                "caregiver alert delivery disabled",
             )
-        )
+        return
 
-    for caregiver in _emergency_caregivers(caregivers):
-        urgent_allowed = _permission_enabled(
-            caregiver.permissions,
-            ("receive_emergency_alerts", "emergency_alerts", "urgent_alerts"),
-            default=True,
-        )
-        if not urgent_allowed:
+    allowed, deny_reason = _caregiver_alert_allowed(caregiver, caregiver_alerts, severity)
+    if not allowed:
+        for channel in caregiver_alerts["channels"]:
+            _suppress(suppressed, "emergency_caregiver", channel, deny_reason, caregiver.caregiver_id)
+        return
+
+    selected_caregiver_primary = False
+    for channel in caregiver_alerts["channels"]:
+        if channel == CHANNEL_EMAIL and selected_caregiver_primary:
             continue
-        if caregiver.phone:
-            steps.append(
-                DeliveryStep(
-                    target="emergency_caregiver",
-                    caregiver_id=caregiver.caregiver_id,
-                    channel=CHANNEL_IMESSAGE,
-                    fallback=CHANNEL_EMAIL if caregiver.email else None,
-                    priority="urgent",
-                    reason="selected_emergency_contact",
-                )
+        channel_pref = snapshot["channel_preferences"].get(channel)
+        if not channel_pref or not channel_pref["enabled"] or severity not in set(channel_pref.get("severities") or []):
+            _suppress(
+                suppressed,
+                "emergency_caregiver",
+                channel,
+                REASON_CHANNEL_DISABLED_BY_USER,
+                caregiver.caregiver_id,
             )
-        elif caregiver.email:
-            steps.append(
-                DeliveryStep(
-                    target="emergency_caregiver",
-                    caregiver_id=caregiver.caregiver_id,
-                    channel=CHANNEL_EMAIL,
-                    priority="urgent",
-                    reason="selected_emergency_contact_no_phone",
-                )
+            continue
+        if not _provider_healthy(user, channel):
+            _suppress(
+                suppressed,
+                "emergency_caregiver",
+                channel,
+                REASON_PROVIDER_UNHEALTHY,
+                caregiver.caregiver_id,
             )
+            continue
+        has_contact, reason_code = _caregiver_has_contact(caregiver, channel)
+        if not has_contact:
+            _suppress(suppressed, "emergency_caregiver", channel, reason_code, caregiver.caregiver_id)
+            continue
+        selected.append(
+            DeliveryStep(
+                target="emergency_caregiver",
+                caregiver_id=caregiver.caregiver_id,
+                channel=channel,
+                fallback=_fallback_channel(
+                    channel,
+                    CHANNEL_EMAIL in caregiver_alerts["channels"]
+                    and _email_fallback_enabled(snapshot, severity, "safety"),
+                    caregiver.email,
+                ),
+                priority=priority,
+                reason="selected_emergency_contact" if severity == SEVERITY_CRITICAL else "selected_high_alert_contact",
+            )
+        )
+        selected_caregiver_primary = True
 
-    return tuple(steps)
+
+def _is_cyborg_context_event(event: EscalationEvent) -> bool:
+    return event.event_type in {"cyborg_context", "useful_context", "context"} or str(
+        event.evidence.get("delivery_class", "")
+    ).lower() == SEVERITY_CYBORG
 
 
 def evaluate_escalation_policy(
@@ -187,22 +561,67 @@ def evaluate_escalation_policy(
     severity = _normalize_severity(event.severity)
     trace_id = event.trace_id or event.uid
     ambiguous = event.ambiguity >= 0.7 or event.confidence < 0.5
+    snapshot = _policy_snapshot(user, caregivers)
+    selected: list[DeliveryStep] = []
+    suppressed: list[SuppressedChannel] = []
+
+    if bool(event.evidence.get("duplicate_suppressed") or event.evidence.get("duplicate")):
+        for channel in USER_CHANNELS:
+            _suppress(suppressed, "user", channel, REASON_DUPLICATE_SUPPRESSED)
+        return EscalationPolicyDecision(
+            decision=DECISION_SUPPRESS,
+            reason=REASON_DUPLICATE_SUPPRESSED,
+            trace_id=trace_id,
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
+        )
+
+    mode = snapshot["mode"]
+    if severity in {SEVERITY_HIGH, SEVERITY_MEDIUM} and mode == MODE_EMERGENCY_ONLY:
+        for channel in USER_CHANNELS:
+            _suppress(suppressed, "user", channel, REASON_MODE_SUPPRESSED)
+        return EscalationPolicyDecision(
+            decision=DECISION_SUPPRESS,
+            reason=REASON_MODE_SUPPRESSED,
+            trace_id=trace_id,
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
+        )
 
     if severity == SEVERITY_CRITICAL:
-        plan = _critical_delivery_plan(user, caregivers)
-        if plan:
-            return EscalationPolicyDecision(
-                decision=DECISION_NOTIFY_NOW,
-                reason="critical_event",
-                trace_id=trace_id,
-                requires_ack=True,
-                delivery_plan=plan,
-            )
+        _consider_user_channel(
+            event,
+            user,
+            snapshot,
+            CHANNEL_GUARDIAN_AUDIO,
+            "urgent",
+            "critical_user_guardian_audio",
+            selected,
+            suppressed,
+        )
+        if not any(step.target == "user" for step in selected):
+            for channel in (CHANNEL_IMESSAGE, CHANNEL_EMAIL):
+                if _consider_user_channel(
+                    event,
+                    user,
+                    snapshot,
+                    channel,
+                    "urgent",
+                    "critical_user_fallback",
+                    selected,
+                    suppressed,
+                ):
+                    break
+        for caregiver in caregivers:
+            _consider_caregiver_channels(caregiver, severity, user, snapshot, "urgent", selected, suppressed)
         return EscalationPolicyDecision(
-            decision=DECISION_LOG_ONLY,
-            reason="critical_event_no_reachable_targets",
+            decision=DECISION_NOTIFY_NOW if selected else DECISION_LOG_ONLY,
+            reason="critical_event" if selected else "critical_event_no_reachable_targets",
             trace_id=trace_id,
             requires_ack=True,
+            delivery_plan=tuple(selected),
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
         )
 
     if ambiguous:
@@ -210,49 +629,79 @@ def evaluate_escalation_policy(
             decision=DECISION_QUEUE_FOR_REPORT,
             reason="ambiguous_or_low_confidence",
             trace_id=trace_id,
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
         )
 
     if severity == SEVERITY_HIGH:
-        plan: list[DeliveryStep] = []
-        if _guardian_audio_enabled(user.guardian_mode):
-            plan.append(
-                DeliveryStep(
-                    target="user",
-                    channel=CHANNEL_GUARDIAN_AUDIO,
-                    priority="high",
-                    reason="ask_user_before_caregiver_escalation",
-                )
-            )
-        elif user.phone:
-            plan.append(
-                DeliveryStep(
-                    target="user",
-                    channel=CHANNEL_IMESSAGE,
-                    fallback=CHANNEL_EMAIL if user.user_email else None,
-                    priority="high",
-                    reason="guardian_audio_unavailable",
-                )
-            )
+        is_cyborg_context = _is_cyborg_context_event(event) or mode == MODE_CYBORG
+        _consider_user_channel(
+            event,
+            user,
+            snapshot,
+            CHANNEL_GUARDIAN_AUDIO,
+            "high",
+            "ask_user_before_caregiver_escalation",
+            selected,
+            suppressed,
+        )
+        if not selected:
+            for channel in (CHANNEL_IMESSAGE, CHANNEL_EMAIL):
+                if _consider_user_channel(
+                    event,
+                    user,
+                    snapshot,
+                    channel,
+                    "high",
+                    "guardian_audio_unavailable",
+                    selected,
+                    suppressed,
+                ):
+                    break
+        if mode == MODE_MAXIMUM_AWARENESS and not is_cyborg_context:
+            for caregiver in caregivers:
+                _consider_caregiver_channels(caregiver, severity, user, snapshot, "high", selected, suppressed)
         return EscalationPolicyDecision(
-            decision=DECISION_ASK_USER_FIRST if plan else DECISION_QUEUE_FOR_REPORT,
-            reason="high_event_user_first",
+            decision=DECISION_ASK_USER_FIRST if selected else DECISION_QUEUE_FOR_REPORT,
+            reason="cyborg_context_user_only" if is_cyborg_context else "high_event_user_first",
             trace_id=trace_id,
-            requires_ack=bool(plan),
-            delivery_plan=tuple(plan),
+            requires_ack=bool(selected),
+            delivery_plan=tuple(selected),
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
         )
 
     if severity == SEVERITY_MEDIUM or event.event_type == "routine_report":
+        if mode == MODE_OFF:
+            _suppress(suppressed, "user", CHANNEL_GUARDIAN_AUDIO, REASON_GUARDIAN_DISABLED)
+            return EscalationPolicyDecision(
+                decision=DECISION_SUPPRESS,
+                reason=REASON_GUARDIAN_DISABLED,
+                trace_id=trace_id,
+                suppressed_channels=tuple(suppressed),
+                policy_snapshot=snapshot,
+            )
         return EscalationPolicyDecision(
             decision=DECISION_QUEUE_FOR_REPORT,
             reason="reportable_nonurgent_event",
             trace_id=trace_id,
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
         )
 
     return EscalationPolicyDecision(
         decision=DECISION_LOG_ONLY,
         reason="low_severity_event",
         trace_id=trace_id,
+        suppressed_channels=tuple(suppressed),
+        policy_snapshot=snapshot,
     )
+
+
+def _emergency_caregivers(caregivers: list[CaregiverPolicyContext]) -> list[CaregiverPolicyContext]:
+    return [
+        caregiver for caregiver in caregivers if caregiver.status.upper() == "ACTIVE" and caregiver.is_emergency_contact
+    ]
 
 
 def build_plain_language_policy_view(
@@ -260,9 +709,9 @@ def build_plain_language_policy_view(
     caregivers: list[CaregiverPolicyContext],
 ) -> dict[str, Any]:
     """Return the read-only effective escalation policy for UI display."""
+    snapshot = _policy_snapshot(user, caregivers)
     emergency_caregivers = _emergency_caregivers(caregivers)
     emergency_caregiver = emergency_caregivers[0] if emergency_caregivers else None
-    guardian_audio_enabled = _guardian_audio_enabled(user.guardian_mode)
 
     def channel_status(channel: str, enabled: bool, reason: str) -> dict[str, Any]:
         return {
@@ -272,6 +721,7 @@ def build_plain_language_policy_view(
         }
 
     caregiver_views: list[dict[str, Any]] = []
+    caregiver_alerts = snapshot["caregiver_alert_preferences"]
     for caregiver in caregivers:
         permissions = caregiver.permissions or {}
         emergency_alerts = _permission_enabled(
@@ -299,12 +749,12 @@ def build_plain_language_policy_view(
                 "channels": [
                     channel_status(
                         CHANNEL_IMESSAGE,
-                        bool(caregiver.phone),
+                        bool(caregiver.phone) and CHANNEL_IMESSAGE in caregiver_alerts["channels"],
                         "Phone number on file" if caregiver.phone else "No phone number on file",
                     ),
                     channel_status(
                         CHANNEL_EMAIL,
-                        bool(caregiver.email),
+                        bool(caregiver.email) and CHANNEL_EMAIL in caregiver_alerts["channels"],
                         "Email on file" if caregiver.email else "No email on file",
                     ),
                 ],
@@ -315,7 +765,7 @@ def build_plain_language_policy_view(
                 },
                 "plain_language": (
                     "This caregiver can receive urgent safety alerts."
-                    if caregiver.is_emergency_contact and emergency_alerts
+                    if caregiver.status.upper() == "ACTIVE" and caregiver.is_emergency_contact and emergency_alerts
                     else "This caregiver will not receive immediate emergency alerts unless you enable it."
                 ),
             }
@@ -327,32 +777,31 @@ def build_plain_language_policy_view(
         else "No active emergency caregiver is selected."
     )
 
-    critical_targets = ["you"]
-    if emergency_caregiver:
-        critical_targets.append("your selected emergency caregiver")
+    mode_text = {
+        MODE_OFF: "Guardian audio is off. Critical events can still use configured non-audio fallback channels.",
+        MODE_CYBORG: "Cyborg mode sends useful context to the user first and does not notify caregivers unless an event is critical.",
+        MODE_EMERGENCY_ONLY: "Emergency Only suppresses non-critical delivery while preserving critical safety escalation.",
+        MODE_MAXIMUM_AWARENESS: "Maximum Awareness uses user-first delivery and can include caregivers for high alerts when policy allows.",
+    }.get(snapshot["mode"], "The configured mode is applied after channel consent and contact checks.")
 
     rules = [
         {
             "severity": SEVERITY_CRITICAL,
-            "decision": DECISION_NOTIFY_NOW if emergency_caregiver or guardian_audio_enabled else DECISION_LOG_ONLY,
+            "decision": DECISION_NOTIFY_NOW,
             "title": "Critical safety concerns",
-            "text": (
-                "Critical safety concerns notify "
-                + " and ".join(critical_targets)
-                + " immediately when those channels are available."
-            ),
+            "text": "Critical safety concerns notify you and configured emergency caregivers through allowed channels.",
         },
         {
             "severity": SEVERITY_HIGH,
             "decision": DECISION_ASK_USER_FIRST,
             "title": "High concern events",
-            "text": "High concern events try to ask you first before notifying a caregiver.",
+            "text": "High concern events ask you first; caregiver delivery is only added by explicit policy.",
         },
         {
             "severity": SEVERITY_MEDIUM,
             "decision": DECISION_QUEUE_FOR_REPORT,
             "title": "Medium or ambiguous events",
-            "text": "Medium or ambiguous events are saved for review or a recap unless they repeat or get worse.",
+            "text": "Medium or ambiguous events are saved for review or a recap unless a stricter mode suppresses them.",
         },
         {
             "severity": SEVERITY_LOW,
@@ -362,31 +811,35 @@ def build_plain_language_policy_view(
         },
     ]
 
-    display_rules = [rule["text"] for rule in rules]
+    display_rules = [mode_text] + [rule["text"] for rule in rules]
     display_rules.append(
         "Caregiver reports are privacy-filtered and should include trends or concerns, not raw private chats."
     )
 
+    channel_preferences = snapshot["channel_preferences"]
     return {
-        "policy_version": "ella.escalation_policy.v1",
+        "policy_version": POLICY_VERSION,
         "source": "omi_backend",
         "uid": user.uid,
+        "mode": snapshot["mode"],
+        "channel_preference_version": CHANNEL_PREFERENCE_VERSION,
+        "effective_policy": snapshot,
         "user": {
             "guardian_mode": user.guardian_mode,
             "channels": [
                 channel_status(
                     CHANNEL_GUARDIAN_AUDIO,
-                    guardian_audio_enabled,
-                    "Guardian audio mode is active" if guardian_audio_enabled else "Guardian audio mode is off",
+                    snapshot["guardian_audio_enabled"] and channel_preferences[CHANNEL_GUARDIAN_AUDIO]["enabled"],
+                    "Guardian audio mode is active" if snapshot["guardian_audio_enabled"] else "Guardian audio mode is off",
                 ),
                 channel_status(
                     CHANNEL_IMESSAGE,
-                    bool(user.user_phone),
+                    bool(user.user_phone) and channel_preferences[CHANNEL_IMESSAGE]["enabled"],
                     "Phone number on file" if user.user_phone else "No phone number on file",
                 ),
                 channel_status(
                     CHANNEL_EMAIL,
-                    bool(user.user_email),
+                    bool(user.user_email) and channel_preferences[CHANNEL_EMAIL]["enabled"],
                     "Email on file" if user.user_email else "No email on file",
                 ),
             ],
@@ -401,13 +854,14 @@ def build_plain_language_policy_view(
         "caregivers": caregiver_views,
         "rules": rules,
         "privacy_notes": [
-            "Emergency alerts can contact the selected emergency caregiver when policy allows it.",
+            "Emergency alerts can contact selected emergency caregivers when policy allows it.",
             "Caregiver reports should include trends, concerns, and escalations, not raw private chats.",
             "The backend owns these rules so app displays do not drift from delivery behavior.",
         ],
         "display": {
             "title": "How Ella handles alerts",
             "subtitle": "These rules are resolved by the server from your current caregiver and channel settings.",
+            "mode": mode_text,
             "emergency_contact": emergency_contact_text,
             "rules": display_rules,
         },
