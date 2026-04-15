@@ -11,6 +11,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/pages/conversation_lifecycle_settings_page.dart';
 import 'package:omi/ella/pages/ella_care_team_page.dart';
+import 'package:omi/ella/pages/alert_channels_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
@@ -246,6 +247,15 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                   MaterialPageRoute(builder: (context) => const EllaEmergencyContactPage()),
                 );
                 _loadData();
+              },
+            ),
+            const SizedBox(height: 8),
+            EllaSettingsRow(
+              icon: Icons.notifications_active,
+              title: context.l10n.ellaAlertChannels,
+              subtitle: context.l10n.ellaAlertChannelsSubtitle,
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const AlertChannelsPage()));
               },
             ),
 

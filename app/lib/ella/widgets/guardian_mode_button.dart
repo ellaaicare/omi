@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 class GuardianModeButton extends StatefulWidget {
   const GuardianModeButton({super.key});
@@ -106,7 +107,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
   String _getStatusText() {
     switch (_guardianService.currentState) {
       case GuardianModeState.idle:
-        return 'Guardian Mode OFF';
+        return 'Guardian OFF';
       case GuardianModeState.active:
         return 'Guardian Mode ON';
       case GuardianModeState.error:
@@ -122,37 +123,40 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
       mainAxisSize: MainAxisSize.min,
       children: [
         // Button
-        GestureDetector(
-          onTap: _onTap,
-          child: AnimatedBuilder(
-            animation: _pulseController,
-            builder: (context, child) {
-              final pulseValue = isActive ? _pulseController.value : 0.0;
-              final glowRadius = 20.0 + (pulseValue * 10.0);
+        Tooltip(
+          message: isActive ? context.l10n.ellaGuardianOnTooltip : context.l10n.ellaGuardianOffTooltip,
+          child: GestureDetector(
+            onTap: _onTap,
+            child: AnimatedBuilder(
+              animation: _pulseController,
+              builder: (context, child) {
+                final pulseValue = isActive ? _pulseController.value : 0.0;
+                final glowRadius = 20.0 + (pulseValue * 10.0);
 
-              return Container(
-                width: 80,
-                height: 80,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _getButtonColor(),
-                  boxShadow: isActive
-                      ? [
-                          BoxShadow(
-                            color: EllaColors.primary.withOpacity(0.6),
-                            blurRadius: glowRadius,
-                            spreadRadius: glowRadius / 4,
-                          ),
-                        ]
-                      : null,
-                ),
-                child: Icon(
-                  _getIcon(),
-                  color: Colors.white,
-                  size: 40,
-                ),
-              );
-            },
+                return Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _getButtonColor(),
+                    boxShadow: isActive
+                        ? [
+                            BoxShadow(
+                              color: EllaColors.primary.withValues(alpha: 0.6),
+                              blurRadius: glowRadius,
+                              spreadRadius: glowRadius / 4,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Icon(
+                    _getIcon(),
+                    color: Colors.white,
+                    size: 40,
+                  ),
+                );
+              },
+            ),
           ),
         ),
         const SizedBox(height: 12),

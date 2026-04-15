@@ -15794,6 +15794,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Profile saved'**
   String get ellaProfileSaved;
+
+  /// No description provided for @ellaAlertChannels.
+  ///
+  /// In en, this message translates to:
+  /// **'Alert Channels'**
+  String get ellaAlertChannels;
+
+  /// No description provided for @ellaAlertChannelsSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'How Ella handles alerts and notifications'**
+  String get ellaAlertChannelsSubtitle;
+
+  /// No description provided for @ellaAlertChannelsUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to load alert policy'**
+  String get ellaAlertChannelsUnavailable;
+
+  /// No description provided for @ellaAlertChannelsPullRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down to retry'**
+  String get ellaAlertChannelsPullRetry;
+
+  /// No description provided for @ellaAlertChannelsRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Retry'**
+  String get ellaAlertChannelsRetry;
+
+  /// No description provided for @ellaAlertChannelsYourChannels.
+  ///
+  /// In en, this message translates to:
+  /// **'YOUR CHANNELS'**
+  String get ellaAlertChannelsYourChannels;
+
+  /// No description provided for @ellaAlertChannelsNoChannels.
+  ///
+  /// In en, this message translates to:
+  /// **'No channels configured'**
+  String get ellaAlertChannelsNoChannels;
+
+  /// No description provided for @ellaAlertChannelsEmergencyContact.
+  ///
+  /// In en, this message translates to:
+  /// **'EMERGENCY CONTACT'**
+  String get ellaAlertChannelsEmergencyContact;
+
+  /// No description provided for @ellaAlertChannelsNotConfigured.
+  ///
+  /// In en, this message translates to:
+  /// **'No emergency contact selected'**
+  String get ellaAlertChannelsNotConfigured;
+
+  /// No description provided for @ellaAlertChannelsSetUpContact.
+  ///
+  /// In en, this message translates to:
+  /// **'Set up an emergency contact'**
+  String get ellaAlertChannelsSetUpContact;
+
+  /// No description provided for @ellaAlertChannelsCaregiverNotifications.
+  ///
+  /// In en, this message translates to:
+  /// **'CAREGIVER NOTIFICATIONS'**
+  String get ellaAlertChannelsCaregiverNotifications;
+
+  /// No description provided for @ellaAlertChannelsAlertRules.
+  ///
+  /// In en, this message translates to:
+  /// **'ALERT RULES'**
+  String get ellaAlertChannelsAlertRules;
+
+  /// No description provided for @ellaAlertChannelsPrivacyNotes.
+  ///
+  /// In en, this message translates to:
+  /// **'PRIVACY NOTES'**
+  String get ellaAlertChannelsPrivacyNotes;
+
+  /// No description provided for @ellaAlertChannelsEnabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Enabled'**
+  String get ellaAlertChannelsEnabled;
+
+  /// No description provided for @ellaAlertChannelsDisabled.
+  ///
+  /// In en, this message translates to:
+  /// **'Disabled'**
+  String get ellaAlertChannelsDisabled;
+
+  /// No description provided for @ellaGuardianOffTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.'**
+  String get ellaGuardianOffTooltip;
+
+  /// No description provided for @ellaGuardianOnTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Guardian ON: Audio monitoring and care features active.'**
+  String get ellaGuardianOnTooltip;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
