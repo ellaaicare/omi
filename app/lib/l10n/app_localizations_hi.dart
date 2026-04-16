@@ -3720,6 +3720,9 @@ class AppLocalizationsHi extends AppLocalizations {
   String get paused => 'रोका गया';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'आरंभ हो रहा है...';
 
   @override

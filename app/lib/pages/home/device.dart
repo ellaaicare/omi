@@ -546,6 +546,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   @override
   Widget build(BuildContext context) {
     return Consumer2<DeviceProvider, CaptureProvider>(builder: (context, provider, captureProvider, child) {
+      final isStalled = captureProvider.recordingWatchdogStale;
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,
         appBar: AppBar(
@@ -577,9 +578,11 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: provider.connectedDevice != null
-                          ? Colors.green.withValues(alpha: 0.2)
-                          : Colors.grey.withValues(alpha: 0.2),
+                      color: isStalled
+                          ? const Color(0xFFFFB800).withValues(alpha: 0.2)
+                          : provider.connectedDevice != null
+                              ? Colors.green.withValues(alpha: 0.2)
+                              : Colors.grey.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Row(
@@ -589,18 +592,31 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                           width: 6,
                           height: 6,
                           decoration: BoxDecoration(
-                            color: provider.connectedDevice != null ? Colors.green : Colors.grey,
+                            color: isStalled
+                                ? const Color(0xFFFFB800)
+                                : provider.connectedDevice != null
+                                    ? Colors.green
+                                    : Colors.grey,
                             shape: BoxShape.circle,
                           ),
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          provider.connectedDevice != null ? context.l10n.connected : context.l10n.offline,
+                          isStalled
+                              ? context.l10n.recordingStalled
+                              : provider.connectedDevice != null
+                                  ? context.l10n.connected
+                                  : context.l10n.offline,
                           style: TextStyle(
-                            color: provider.connectedDevice != null ? Colors.green : Colors.grey,
+                            color: isStalled
+                                ? const Color(0xFFFFB800)
+                                : provider.connectedDevice != null
+                                    ? Colors.green
+                                    : Colors.grey,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                           ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ],
                     ),

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:omi/gen/pigeon_communicator.g.dart';
 import 'package:omi/services/bridges/ble_bridge.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 import 'device_transport.dart';
 
@@ -56,6 +57,7 @@ class NativeBleTransport extends DeviceTransport {
       _hostApi.manageDevice(_peripheralUuid, requiresBond);
     } catch (e) {
       Logger.debug('[NativeBleTransport] manageDevice failed: $e');
+      DebugLogManager.logWarning('ble_manage_device_failed', {'peripheral': _peripheralUuid, 'error': e.toString()});
       _deviceReadyCompleter = null;
       _updateState(DeviceTransportState.disconnected);
       rethrow;
@@ -68,8 +70,11 @@ class NativeBleTransport extends DeviceTransport {
       );
       _deviceReadyCompleter = null;
       _updateState(DeviceTransportState.connected);
+      DebugLogManager.logEvent('ble_transport_connected', {'peripheral': _peripheralUuid});
     } catch (e) {
       Logger.debug('[NativeBleTransport] connect failed: $e');
+      DebugLogManager.logWarning(
+          'ble_transport_connect_failed', {'peripheral': _peripheralUuid, 'error': e.toString()});
       _deviceReadyCompleter = null;
       _updateState(DeviceTransportState.disconnected);
       rethrow;
@@ -102,6 +107,7 @@ class NativeBleTransport extends DeviceTransport {
     }
 
     _updateState(DeviceTransportState.disconnected);
+    DebugLogManager.logEvent('ble_transport_disconnected', {'peripheral': _peripheralUuid});
   }
 
   @override
@@ -232,6 +238,10 @@ class NativeBleTransport extends DeviceTransport {
 
   void _handleConnectionState(bool connected, String? error) {
     if (!connected) {
+      DebugLogManager.logEvent('ble_transport_native_disconnect', {
+        'peripheral': _peripheralUuid,
+        'error': error ?? 'none',
+      });
       // Remember active subscriptions before closing streams
       _activeSubscriptionKeys.clear();
       _activeSubscriptionKeys.addAll(_streamControllers.keys);
@@ -248,6 +258,10 @@ class NativeBleTransport extends DeviceTransport {
   }
 
   void _handleDeviceReady(List<BleService> services) {
+    DebugLogManager.logEvent('ble_transport_device_ready', {
+      'peripheral': _peripheralUuid,
+      'service_count': services.length,
+    });
     if (_deviceReadyCompleter != null && !_deviceReadyCompleter!.isCompleted) {
       // Initial connection
       _deviceReadyCompleter!.complete(services);
@@ -262,6 +276,10 @@ class NativeBleTransport extends DeviceTransport {
   void _resubscribeAfterReconnect(List<BleService> services) {
     if (_isResubscribing) return;
     _isResubscribing = true;
+    DebugLogManager.logEvent('ble_transport_resubscribe', {
+      'peripheral': _peripheralUuid,
+      'active_subs': _activeSubscriptionKeys.length,
+    });
 
     try {
       _services = services;

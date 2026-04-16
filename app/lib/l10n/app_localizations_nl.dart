@@ -3755,6 +3755,9 @@ class AppLocalizationsNl extends AppLocalizations {
   String get paused => 'Gepauzeerd';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Initialiseren...';
 
   @override

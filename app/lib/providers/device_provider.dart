@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/http/api/device.dart';
+import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
@@ -338,6 +339,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   void onDeviceDisconnected() async {
     Logger.debug('onDisconnected inside: $connectedDevice');
+    DebugLogManager.logEvent('ble_device_disconnected', {
+      'device_id': connectedDevice?.id ?? 'unknown',
+      'device_name': connectedDevice?.name ?? 'unknown',
+    });
     _havingNewFirmware = false;
     setConnectedDevice(null);
     setisDeviceStorageSupport();
@@ -387,6 +392,11 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   void _onDeviceConnected(BtDevice device) async {
     Logger.debug('_onConnected inside: $connectedDevice');
+    DebugLogManager.logEvent('ble_device_connected', {
+      'device_id': device.id,
+      'device_name': device.name,
+      'device_type': device.type.name,
+    });
     _disconnectNotificationTimer?.cancel();
     NotificationService.instance.clearNotification(1);
     setConnectedDevice(device);

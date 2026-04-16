@@ -3776,6 +3776,9 @@ class AppLocalizationsFr extends AppLocalizations {
   String get paused => 'En pause';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Initialisation...';
 
   @override

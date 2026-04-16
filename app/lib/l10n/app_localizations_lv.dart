@@ -3749,6 +3749,9 @@ class AppLocalizationsLv extends AppLocalizations {
   String get paused => 'Apturēts';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Inicializēšana...';
 
   @override

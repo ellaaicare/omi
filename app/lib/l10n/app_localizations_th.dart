@@ -3722,6 +3722,9 @@ class AppLocalizationsTh extends AppLocalizations {
   String get paused => 'หยุดชั่วคราว';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'กำลังเริ่มต้น...';
 
   @override

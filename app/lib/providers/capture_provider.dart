@@ -962,31 +962,35 @@ class CaptureProvider extends ChangeNotifier
         _recordingWatchdogStale = false;
         _watchdogStaleCount = 0;
         notifyListeners();
-        DebugLogManager.logInfo('[CAPTURE] watchdog_recovered after ${elapsed}s');
+        DebugLogManager.logEvent('watchdog_recovered', {'elapsed_s': elapsed});
       }
       return;
     }
 
     // Stale detected — no audio for >60s while "recording"
     _watchdogStaleCount++;
-    DebugLogManager.logInfo('[CAPTURE] watchdog_stale: no audio for ${elapsed}s (attempt $_watchdogStaleCount)');
+    DebugLogManager.logWarning('watchdog_stale', {
+      'elapsed_s': elapsed,
+      'attempt': _watchdogStaleCount,
+      'max_rearms': _watchdogMaxAutoRearms,
+    });
 
     if (_watchdogStaleCount <= _watchdogMaxAutoRearms) {
       // Auto-rearm: tear down and re-establish the audio pipeline
-      DebugLogManager.logInfo('[CAPTURE] watchdog_auto_rearm: resetting audio stream');
+      DebugLogManager.logEvent('watchdog_auto_rearm', {'attempt': _watchdogStaleCount});
       _resetState();
     } else {
       // Max auto-rearms exceeded — show user-facing warning
       _recordingWatchdogStale = true;
       updateRecordingState(RecordingState.stale);
-      DebugLogManager.logInfo('[CAPTURE] watchdog_escalate: showing stalled warning to user');
+      DebugLogManager.logEvent('watchdog_escalated', {'elapsed_s': elapsed, 'attempts': _watchdogStaleCount});
     }
   }
 
   /// User-initiated re-arm from the "Recording Stalled" UI.
   /// Does a full disconnect + reconnect cycle.
   Future<void> rearmRecordingFromStale() async {
-    DebugLogManager.logInfo('[CAPTURE] watchdog_user_rearm: full reconnect');
+    DebugLogManager.logEvent('watchdog_user_rearm', {});
     _recordingWatchdogStale = false;
     _watchdogStaleCount = 0;
 
