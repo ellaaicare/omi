@@ -3,6 +3,12 @@
 -- Apply against the Ella Postgres database:
 --   psql "$ELLA_POSTGRES_DSN" -f backend/migrations/006_create_guardian_delivery_log.sql
 
+-- PR #98 and this dispatcher both read users.phone_number as the durable
+-- profile-phone fallback after identities.phone. Older VPS databases may not
+-- have the column yet, so create it before deploying the routes that select it.
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS phone_number TEXT;
+
 CREATE TABLE IF NOT EXISTS guardian_delivery_log (
     id BIGSERIAL PRIMARY KEY,
     trace_id TEXT NOT NULL,
