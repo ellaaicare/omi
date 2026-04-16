@@ -75,6 +75,15 @@ class CaptureProvider extends ChangeNotifier
   Timer? _keepAliveTimer;
   DateTime? _keepAliveLastExecutedAt;
 
+  // Recording health watchdog — detects "connected but no audio" stalls
+  Timer? _recordingWatchdogTimer;
+  DateTime? _lastBleByteReceivedAt;
+  int _watchdogStaleCount = 0;
+  static const int _watchdogStaleThreshold = 60; // seconds before declaring stale
+  static const int _watchdogMaxAutoRearms = 2;
+  bool _recordingWatchdogStale = false;
+  bool get recordingWatchdogStale => _recordingWatchdogStale;
+
   // Method channel for system audio permissions
   static late MethodChannel _screenCaptureChannel;
   static late MethodChannel _controlBarChannel;
@@ -638,9 +647,13 @@ class CaptureProvider extends ChangeNotifier
     Logger.debug('streamAudioToWs in capture_provider');
     _bleBytesStream?.cancel();
     _startMetricsTracking();
+    _startRecordingWatchdog();
     _bleBytesStream = await _getBleAudioBytesListener(deviceId, onAudioBytesReceived: (List<int> value) {
       final snapshot = List<int>.from(value);
       if (snapshot.isEmpty || snapshot.length < 3) return;
+
+      // Feed the recording watchdog
+      _lastBleByteReceivedAt = DateTime.now();
 
       // Track bytes received from BLE
       _blesBytesReceived += snapshot.length;
@@ -902,6 +915,7 @@ class CaptureProvider extends ChangeNotifier
     await _bleBytesStream?.cancel();
     await _blePhotoStream?.cancel();
     _stopMetricsTracking();
+    _stopRecordingWatchdog();
     if (_recordingDevice != null) {
       var connection = await ServiceManager.instance().device.ensureConnection(_recordingDevice!.id);
       if (connection != null && await connection.hasPhotoStreamingCharacteristic()) {
@@ -911,12 +925,87 @@ class CaptureProvider extends ChangeNotifier
     notifyListeners();
   }
 
+  // ── Recording Health Watchdog ──────────────────────────────────────────────
+
+  /// Start the recording watchdog. Called when BLE audio streaming begins.
+  void _startRecordingWatchdog() {
+    _stopRecordingWatchdog();
+    _lastBleByteReceivedAt = DateTime.now();
+    _watchdogStaleCount = 0;
+    _recordingWatchdogStale = false;
+    _recordingWatchdogTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _checkRecordingHealth();
+    });
+  }
+
+  /// Stop the recording watchdog. Called when streaming ends.
+  void _stopRecordingWatchdog() {
+    _recordingWatchdogTimer?.cancel();
+    _recordingWatchdogTimer = null;
+    if (_recordingWatchdogStale) {
+      _recordingWatchdogStale = false;
+      notifyListeners();
+    }
+  }
+
+  /// Check if audio frames are still flowing. If stale for >60s, auto-rearm
+  /// or escalate to user-facing warning.
+  void _checkRecordingHealth() {
+    if (_lastBleByteReceivedAt == null) return;
+    if (recordingState != RecordingState.deviceRecord) return;
+    if (_isPaused) return;
+
+    final elapsed = DateTime.now().difference(_lastBleByteReceivedAt!).inSeconds;
+    if (elapsed < _watchdogStaleThreshold) {
+      // Audio is flowing — clear stale state if it was set
+      if (_recordingWatchdogStale) {
+        _recordingWatchdogStale = false;
+        _watchdogStaleCount = 0;
+        notifyListeners();
+        DebugLogManager.logInfo('[CAPTURE] watchdog_recovered after ${elapsed}s');
+      }
+      return;
+    }
+
+    // Stale detected — no audio for >60s while "recording"
+    _watchdogStaleCount++;
+    DebugLogManager.logInfo('[CAPTURE] watchdog_stale: no audio for ${elapsed}s (attempt $_watchdogStaleCount)');
+
+    if (_watchdogStaleCount <= _watchdogMaxAutoRearms) {
+      // Auto-rearm: tear down and re-establish the audio pipeline
+      DebugLogManager.logInfo('[CAPTURE] watchdog_auto_rearm: resetting audio stream');
+      _resetState();
+    } else {
+      // Max auto-rearms exceeded — show user-facing warning
+      _recordingWatchdogStale = true;
+      updateRecordingState(RecordingState.stale);
+      DebugLogManager.logInfo('[CAPTURE] watchdog_escalate: showing stalled warning to user');
+    }
+  }
+
+  /// User-initiated re-arm from the "Recording Stalled" UI.
+  /// Does a full disconnect + reconnect cycle.
+  Future<void> rearmRecordingFromStale() async {
+    DebugLogManager.logInfo('[CAPTURE] watchdog_user_rearm: full reconnect');
+    _recordingWatchdogStale = false;
+    _watchdogStaleCount = 0;
+
+    // Full disconnect + reconnect
+    final device = _recordingDevice;
+    if (device == null) return;
+
+    await _cleanupCurrentState();
+    await ServiceManager.instance().device.ensureConnection(device.id, force: true);
+    await streamDeviceRecording(device: device);
+  }
+
   @override
   void dispose() {
     _bleBytesStream?.cancel();
     _blePhotoStream?.cancel();
     _socket?.unsubscribe(this);
     _keepAliveTimer?.cancel();
+    _recordingWatchdogTimer?.cancel();
     _connectionStateListener?.cancel();
     _recordingTimer?.cancel();
     _metricsTimer?.cancel();
@@ -1840,6 +1929,7 @@ class CaptureProvider extends ChangeNotifier
 
     // Pause the BLE stream but keep the device connection
     await _bleBytesStream?.cancel();
+    _stopRecordingWatchdog();
     _isPaused = true;
     updateRecordingState(RecordingState.pause);
     notifyListeners();

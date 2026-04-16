@@ -412,6 +412,9 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     updateConnectingStatus(false);
     await captureProvider?.streamDeviceRecording(device: device);
 
+    // Recover any orphaned WAL files from previous sessions
+    ServiceManager.instance().wal.recoverOrphanedWals();
+
     await getDeviceInfo();
     SharedPreferencesUtil().deviceName = device.name;
 

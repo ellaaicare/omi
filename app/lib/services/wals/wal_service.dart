@@ -2,6 +2,7 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/services/wals/wal.dart';
 import 'package:omi/services/wals/wal_interfaces.dart';
 import 'package:omi/services/wals/wal_syncs.dart';
+import 'package:omi/utils/logger.dart';
 
 class WalService implements IWalService, IWalSyncListener {
   final Map<Object, IWalServiceListener> _subscriptions = {};
@@ -32,6 +33,9 @@ class WalService implements IWalService, IWalSyncListener {
   void start() {
     _syncs.start();
     _status = WalServiceStatus.ready;
+
+    // Recover any orphaned WAL files from previous sessions
+    recoverOrphanedWals();
   }
 
   @override
@@ -41,6 +45,21 @@ class WalService implements IWalService, IWalSyncListener {
     _status = WalServiceStatus.stop;
     _onStatusChanged(_status);
     _subscriptions.clear();
+  }
+
+  /// Attempt to sync any WAL files left in "miss" status from
+  /// previous sessions or interrupted syncs. Called on startup
+  /// and on BLE reconnect.
+  Future<void> recoverOrphanedWals() async {
+    try {
+      // Retry upload of any unsynced WAL files
+      final result = await _syncs.phone.syncAll();
+      if (result != null) {
+        Logger.debug('[WAL] recoverOrphanedWals: ${result.newConversationIds.length} new, ${result.updatedConversationIds.length} updated');
+      }
+    } catch (e) {
+      Logger.debug('[WAL] recoverOrphanedWals error: $e');
+    }
   }
 
   void _onStatusChanged(WalServiceStatus status) {

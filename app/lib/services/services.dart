@@ -13,6 +13,8 @@ import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/sockets.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/services/bridges/ble_bridge.dart';
+import 'package:omi/gen/pigeon_communicator.g.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
@@ -68,6 +70,10 @@ class ServiceManager {
       throw Exception("Service manager is initiated");
     }
     _instance = ServiceManager._create();
+
+    // Register BleBridge as the native→Dart BLE callback handler
+    BleFlutterApi.setUp(BleBridge.instance);
+
     await ConnectivityService().init();
   }
 
