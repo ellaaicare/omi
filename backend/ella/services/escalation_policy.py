@@ -50,6 +50,42 @@ MODE_CYBORG = "cyborg"
 MODE_EMERGENCY_ONLY = "emergency_only"
 MODE_MAXIMUM_AWARENESS = "maximum_awareness"
 
+USER_DIRECT_RESPONSE_TYPES = {
+    "assistant_request",
+    "direct_question",
+    "gentle_guidance",
+    "guidance",
+    "memory_recall",
+    "medication_question",
+    "question",
+    "routine_guidance",
+    "user_request",
+    "wake_word",
+}
+
+USER_GUIDANCE_RESPONSE_TYPES = {
+    "cognitive",
+    "emotional",
+    "health",
+    "medication",
+    "memory",
+    "schedule",
+}
+
+CRITICAL_SAFETY_TYPES = {
+    "abuse",
+    "chest_pain",
+    "emergency",
+    "fall",
+    "fall_detection",
+    "fire",
+    "intruder",
+    "medical_emergency",
+    "safety",
+    "self_harm",
+    "wandering",
+}
+
 USER_CHANNELS = (
     CHANNEL_GUARDIAN_AUDIO,
     CHANNEL_IMESSAGE,
@@ -357,6 +393,11 @@ def _email_fallback_enabled(snapshot: dict[str, Any], severity: str, event_type:
     return bool(email_pref["enabled"]) and _severity_allowed(email_pref, severity, event_type)
 
 
+def _email_fallback_enabled_for_user_response(snapshot: dict[str, Any]) -> bool:
+    email_pref = snapshot["channel_preferences"][CHANNEL_EMAIL]
+    return bool(email_pref["enabled"])
+
+
 def _policy_snapshot(user: UserPolicyContext, caregivers: list[CaregiverPolicyContext]) -> dict[str, Any]:
     mode = _normalize_mode(user.guardian_mode)
     channel_preferences = _merge_channel_preferences(user.channel_preferences)
@@ -443,6 +484,46 @@ def _consider_user_channel(
             fallback=_fallback_channel(
                 channel,
                 _email_fallback_enabled(snapshot, severity, event.event_type),
+                user.user_email,
+            ),
+            reason=reason,
+        )
+    )
+    return True
+
+
+def _consider_user_response_channel(
+    user: UserPolicyContext,
+    snapshot: dict[str, Any],
+    channel: str,
+    priority: str,
+    reason: str,
+    selected: list[DeliveryStep],
+    suppressed: list[SuppressedChannel],
+) -> bool:
+    channel_pref = snapshot["channel_preferences"][channel]
+    mode = snapshot["mode"]
+    if channel == CHANNEL_GUARDIAN_AUDIO and (mode == MODE_OFF or not snapshot["guardian_audio_enabled"]):
+        _suppress(suppressed, "user", channel, REASON_GUARDIAN_DISABLED)
+        return False
+    if not channel_pref["enabled"]:
+        _suppress(suppressed, "user", channel, REASON_CHANNEL_DISABLED_BY_USER)
+        return False
+    if not _provider_healthy(user, channel):
+        _suppress(suppressed, "user", channel, REASON_PROVIDER_UNHEALTHY)
+        return False
+    has_contact, reason_code = _target_has_contact(user, channel)
+    if not has_contact:
+        _suppress(suppressed, "user", channel, reason_code)
+        return False
+    selected.append(
+        DeliveryStep(
+            target="user",
+            channel=channel,
+            priority=priority,
+            fallback=_fallback_channel(
+                channel,
+                _email_fallback_enabled_for_user_response(snapshot),
                 user.user_email,
             ),
             reason=reason,
@@ -552,6 +633,81 @@ def _is_cyborg_context_event(event: EscalationEvent) -> bool:
     ).lower() == SEVERITY_CYBORG
 
 
+def _normalized_event_labels(event: EscalationEvent) -> set[str]:
+    labels = {event.event_type}
+    for key in (
+        "category",
+        "delivery_class",
+        "intent",
+        "route",
+        "scanner_category",
+        "type",
+        "urgency_type",
+    ):
+        value = event.evidence.get(key)
+        if value is not None:
+            labels.add(str(value))
+    return {label.strip().lower() for label in labels if str(label).strip()}
+
+
+def _is_critical_safety_event(event: EscalationEvent, severity: str) -> bool:
+    if severity != SEVERITY_CRITICAL:
+        return False
+    if bool(event.evidence.get("emergency") or event.evidence.get("safety_critical")):
+        return True
+    return bool(_normalized_event_labels(event) & CRITICAL_SAFETY_TYPES)
+
+
+def _is_user_first_response_event(event: EscalationEvent, severity: str) -> bool:
+    labels = _normalized_event_labels(event)
+    if labels & USER_DIRECT_RESPONSE_TYPES:
+        return not _is_critical_safety_event(event, severity)
+    if severity == SEVERITY_MEDIUM and labels & USER_GUIDANCE_RESPONSE_TYPES:
+        return True
+    if bool(event.evidence.get("user_response") or event.evidence.get("answer_user")):
+        return not _is_critical_safety_event(event, severity)
+    return False
+
+
+def _user_response_priority(severity: str) -> str:
+    if severity == SEVERITY_CRITICAL:
+        return "urgent"
+    if severity == SEVERITY_HIGH:
+        return "high"
+    return "normal"
+
+
+def _select_user_first_response(
+    event: EscalationEvent,
+    user: UserPolicyContext,
+    snapshot: dict[str, Any],
+    selected: list[DeliveryStep],
+    suppressed: list[SuppressedChannel],
+) -> None:
+    priority = _user_response_priority(_normalize_severity(event.severity))
+    _consider_user_response_channel(
+        user,
+        snapshot,
+        CHANNEL_GUARDIAN_AUDIO,
+        priority,
+        "user_first_response_guardian_audio",
+        selected,
+        suppressed,
+    )
+    if not any(step.target == "user" for step in selected):
+        for channel in (CHANNEL_IMESSAGE, CHANNEL_EMAIL):
+            if _consider_user_response_channel(
+                user,
+                snapshot,
+                channel,
+                priority,
+                "user_first_response_fallback",
+                selected,
+                suppressed,
+            ):
+                break
+
+
 def evaluate_escalation_policy(
     event: EscalationEvent,
     user: UserPolicyContext,
@@ -572,6 +728,17 @@ def evaluate_escalation_policy(
             decision=DECISION_SUPPRESS,
             reason=REASON_DUPLICATE_SUPPRESSED,
             trace_id=trace_id,
+            suppressed_channels=tuple(suppressed),
+            policy_snapshot=snapshot,
+        )
+
+    if _is_user_first_response_event(event, severity):
+        _select_user_first_response(event, user, snapshot, selected, suppressed)
+        return EscalationPolicyDecision(
+            decision=DECISION_ASK_USER_FIRST if selected else DECISION_QUEUE_FOR_REPORT,
+            reason="user_first_response" if selected else "user_first_response_no_reachable_user_channel",
+            trace_id=trace_id,
+            delivery_plan=tuple(selected),
             suppressed_channels=tuple(suppressed),
             policy_snapshot=snapshot,
         )
@@ -801,7 +968,10 @@ def build_plain_language_policy_view(
             "severity": SEVERITY_MEDIUM,
             "decision": DECISION_QUEUE_FOR_REPORT,
             "title": "Medium or ambiguous events",
-            "text": "Medium or ambiguous events are saved for review or a recap unless a stricter mode suppresses them.",
+            "text": (
+                "User-addressed questions and guidance are answered to the user first; other medium or ambiguous "
+                "events are saved for review or a recap unless a stricter mode suppresses them."
+            ),
         },
         {
             "severity": SEVERITY_LOW,
