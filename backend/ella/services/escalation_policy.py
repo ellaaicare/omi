@@ -46,29 +46,51 @@ REASON_MODE_SUPPRESSED = "mode_suppressed"
 REASON_DUPLICATE_SUPPRESSED = "duplicate_suppressed"
 
 MODE_OFF = "off"
+MODE_ACTIVE_SUPPORT = "active_support"
 MODE_CYBORG = "cyborg"
+MODE_DEMO = "demo"
+MODE_CHATBOT = "chatbot"
 MODE_EMERGENCY_ONLY = "emergency_only"
+MODE_MEMORY_SUPPORT = "memory_support"
 MODE_MAXIMUM_AWARENESS = "maximum_awareness"
+
+EVENT_CLASS_DIRECT_USER_REQUEST = "direct_user_request"
+EVENT_CLASS_MEMORY_SUPPORT = "memory_support"
+EVENT_CLASS_MEDICATION_SUPPORT = "medication_support"
+EVENT_CLASS_GENTLE_GUIDANCE = "gentle_guidance"
+EVENT_CLASS_CRITICAL_SAFETY = "critical_safety"
+EVENT_CLASS_CYBORG_CONTEXT = "cyborg_context"
+EVENT_CLASS_REPORTABLE_TREND = "reportable_trend"
+EVENT_CLASS_AMBIGUOUS_OR_LOW_CONFIDENCE = "ambiguous_or_low_confidence"
 
 USER_DIRECT_RESPONSE_TYPES = {
     "assistant_request",
     "direct_question",
-    "gentle_guidance",
-    "guidance",
-    "memory_recall",
-    "medication_question",
     "question",
-    "routine_guidance",
     "user_request",
     "wake_word",
 }
 
-USER_GUIDANCE_RESPONSE_TYPES = {
+MEMORY_SUPPORT_TYPES = {
+    "memory",
+    "memory_recall",
+    "recall",
+    "recall_assistance",
+}
+
+MEDICATION_SUPPORT_TYPES = {
+    "medication",
+    "medication_question",
+    "medication_support",
+}
+
+GENTLE_GUIDANCE_TYPES = {
     "cognitive",
     "emotional",
     "health",
-    "medication",
-    "memory",
+    "gentle_guidance",
+    "guidance",
+    "routine_guidance",
     "schedule",
 }
 
@@ -190,6 +212,125 @@ class CaregiverPolicyContext:
 
 
 @dataclass(frozen=True)
+class DeliveryRule:
+    rule_id: str
+    event_class: str
+    decision: Decision
+    target_policy: str
+    caregiver_policy: str
+    preferred_channels: tuple[str, ...]
+    applies_in_modes: tuple[str, ...]
+    description: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "event_class": self.event_class,
+            "decision": self.decision,
+            "target_policy": self.target_policy,
+            "caregiver_policy": self.caregiver_policy,
+            "preferred_channels": list(self.preferred_channels),
+            "applies_in_modes": list(self.applies_in_modes),
+            "description": self.description,
+        }
+
+
+ALL_ACTIVE_MODES = (
+    MODE_ACTIVE_SUPPORT,
+    MODE_CYBORG,
+    MODE_DEMO,
+    MODE_CHATBOT,
+    MODE_EMERGENCY_ONLY,
+    MODE_MEMORY_SUPPORT,
+    MODE_MAXIMUM_AWARENESS,
+)
+
+USER_FIRST_MODES = (
+    MODE_ACTIVE_SUPPORT,
+    MODE_CYBORG,
+    MODE_DEMO,
+    MODE_CHATBOT,
+    MODE_EMERGENCY_ONLY,
+    MODE_MEMORY_SUPPORT,
+    MODE_MAXIMUM_AWARENESS,
+    MODE_OFF,
+)
+
+DEFAULT_DELIVERY_RULES: tuple[DeliveryRule, ...] = (
+    DeliveryRule(
+        rule_id="direct-user-request-user-first",
+        event_class=EVENT_CLASS_DIRECT_USER_REQUEST,
+        decision=DECISION_ASK_USER_FIRST,
+        target_policy="user_first",
+        caregiver_policy="never",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=USER_FIRST_MODES,
+        description="Wake words and direct questions are answered to the user, not sent to caregivers.",
+    ),
+    DeliveryRule(
+        rule_id="memory-support-user-first",
+        event_class=EVENT_CLASS_MEMORY_SUPPORT,
+        decision=DECISION_ASK_USER_FIRST,
+        target_policy="user_first",
+        caregiver_policy="never",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=USER_FIRST_MODES,
+        description="Memory recall and orientation support are delivered to the user first.",
+    ),
+    DeliveryRule(
+        rule_id="medication-support-user-first",
+        event_class=EVENT_CLASS_MEDICATION_SUPPORT,
+        decision=DECISION_ASK_USER_FIRST,
+        target_policy="user_first",
+        caregiver_policy="never",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=USER_FIRST_MODES,
+        description="Medication questions are answered to the user first without immediate caregiver delivery.",
+    ),
+    DeliveryRule(
+        rule_id="gentle-guidance-user-first",
+        event_class=EVENT_CLASS_GENTLE_GUIDANCE,
+        decision=DECISION_ASK_USER_FIRST,
+        target_policy="user_first",
+        caregiver_policy="never",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=USER_FIRST_MODES,
+        description="Routine guidance and noncritical support are routed to the user first.",
+    ),
+    DeliveryRule(
+        rule_id="critical-safety-notify-now",
+        event_class=EVENT_CLASS_CRITICAL_SAFETY,
+        decision=DECISION_NOTIFY_NOW,
+        target_policy="user_and_active_emergency_caregiver",
+        caregiver_policy="active_emergency_only",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=ALL_ACTIVE_MODES + (MODE_OFF,),
+        description="Critical safety events notify the user and configured active emergency caregivers.",
+    ),
+    DeliveryRule(
+        rule_id="cyborg-context-user-only",
+        event_class=EVENT_CLASS_CYBORG_CONTEXT,
+        decision=DECISION_ASK_USER_FIRST,
+        target_policy="user_first",
+        caregiver_policy="never",
+        preferred_channels=(CHANNEL_GUARDIAN_AUDIO, CHANNEL_IMESSAGE, CHANNEL_EMAIL),
+        applies_in_modes=(MODE_CYBORG, MODE_DEMO, MODE_MAXIMUM_AWARENESS),
+        description="Useful context in intelligence modes is delivered to the user only.",
+    ),
+    DeliveryRule(
+        rule_id="reportable-trend-report-only",
+        event_class=EVENT_CLASS_REPORTABLE_TREND,
+        decision=DECISION_QUEUE_FOR_REPORT,
+        target_policy="report",
+        caregiver_policy="report_only",
+        preferred_channels=(CHANNEL_EMAIL,),
+        applies_in_modes=ALL_ACTIVE_MODES,
+        description="Nonurgent trends are saved for review or recap instead of immediate caregiver alerts.",
+    ),
+)
+
+
+@dataclass(frozen=True)
 class DeliveryStep:
     target: str
     channel: str
@@ -272,12 +413,20 @@ def _normalize_mode(guardian_mode: Optional[str]) -> str:
     normalized = str(guardian_mode or "").strip().lower()
     if normalized in {"", "off", "none", "disabled", "null", "guardian_off"}:
         return MODE_OFF
+    if normalized in {"active", "active_support", "support"}:
+        return MODE_ACTIVE_SUPPORT
     if normalized in {"emergency", "emergency_only", "alert", "alerts_only"}:
         return MODE_EMERGENCY_ONLY
+    if normalized in {"memory", "memory_support"}:
+        return MODE_MEMORY_SUPPORT
     if normalized in {"maximum", "maximum_awareness", "max_awareness", "max"}:
         return MODE_MAXIMUM_AWARENESS
-    if normalized in {"cyborg", "active", "active_support", "support"}:
+    if normalized in {"cyborg"}:
         return MODE_CYBORG
+    if normalized in {"demo"}:
+        return MODE_DEMO
+    if normalized in {"chatbot", "chat"}:
+        return MODE_CHATBOT
     return normalized
 
 
@@ -398,6 +547,17 @@ def _email_fallback_enabled_for_user_response(snapshot: dict[str, Any]) -> bool:
     return bool(email_pref["enabled"])
 
 
+def _delivery_rules_for_mode(mode: str) -> list[dict[str, Any]]:
+    return [rule.to_dict() for rule in DEFAULT_DELIVERY_RULES if mode in rule.applies_in_modes]
+
+
+def _delivery_rule_for_event_class(event_class: str, mode: str) -> Optional[DeliveryRule]:
+    for rule in DEFAULT_DELIVERY_RULES:
+        if rule.event_class == event_class and mode in rule.applies_in_modes:
+            return rule
+    return None
+
+
 def _policy_snapshot(user: UserPolicyContext, caregivers: list[CaregiverPolicyContext]) -> dict[str, Any]:
     mode = _normalize_mode(user.guardian_mode)
     channel_preferences = _merge_channel_preferences(user.channel_preferences)
@@ -414,6 +574,7 @@ def _policy_snapshot(user: UserPolicyContext, caregivers: list[CaregiverPolicyCo
         "recap_preferences": recap_preferences,
         "provider_health": dict(user.provider_health or {}),
         "quiet_hours_active": bool(user.quiet_hours_active),
+        "delivery_rules": _delivery_rules_for_mode(mode),
         "caregivers": [
             {
                 "caregiver_id": caregiver.caregiver_id,
@@ -658,15 +819,35 @@ def _is_critical_safety_event(event: EscalationEvent, severity: str) -> bool:
     return bool(_normalized_event_labels(event) & CRITICAL_SAFETY_TYPES)
 
 
-def _is_user_first_response_event(event: EscalationEvent, severity: str) -> bool:
+def _classify_event(event: EscalationEvent, severity: str) -> str:
     labels = _normalized_event_labels(event)
+    critical_safety = _is_critical_safety_event(event, severity)
     if labels & USER_DIRECT_RESPONSE_TYPES:
-        return not _is_critical_safety_event(event, severity)
-    if severity == SEVERITY_MEDIUM and labels & USER_GUIDANCE_RESPONSE_TYPES:
-        return True
+        return EVENT_CLASS_CRITICAL_SAFETY if critical_safety else EVENT_CLASS_DIRECT_USER_REQUEST
+    if labels & MEMORY_SUPPORT_TYPES:
+        return EVENT_CLASS_CRITICAL_SAFETY if critical_safety else EVENT_CLASS_MEMORY_SUPPORT
+    if labels & MEDICATION_SUPPORT_TYPES:
+        return EVENT_CLASS_CRITICAL_SAFETY if critical_safety else EVENT_CLASS_MEDICATION_SUPPORT
+    if severity == SEVERITY_MEDIUM and labels & GENTLE_GUIDANCE_TYPES:
+        return EVENT_CLASS_GENTLE_GUIDANCE
     if bool(event.evidence.get("user_response") or event.evidence.get("answer_user")):
-        return not _is_critical_safety_event(event, severity)
-    return False
+        return EVENT_CLASS_CRITICAL_SAFETY if critical_safety else EVENT_CLASS_DIRECT_USER_REQUEST
+    if critical_safety:
+        return EVENT_CLASS_CRITICAL_SAFETY
+    if _is_cyborg_context_event(event):
+        return EVENT_CLASS_CYBORG_CONTEXT
+    if severity in {SEVERITY_MEDIUM, SEVERITY_HIGH}:
+        return EVENT_CLASS_REPORTABLE_TREND
+    return EVENT_CLASS_AMBIGUOUS_OR_LOW_CONFIDENCE
+
+
+def _is_user_first_response_event(event_class: str) -> bool:
+    return event_class in {
+        EVENT_CLASS_DIRECT_USER_REQUEST,
+        EVENT_CLASS_MEMORY_SUPPORT,
+        EVENT_CLASS_MEDICATION_SUPPORT,
+        EVENT_CLASS_GENTLE_GUIDANCE,
+    }
 
 
 def _user_response_priority(severity: str) -> str:
@@ -718,6 +899,8 @@ def evaluate_escalation_policy(
     trace_id = event.trace_id or event.uid
     ambiguous = event.ambiguity >= 0.7 or event.confidence < 0.5
     snapshot = _policy_snapshot(user, caregivers)
+    mode = snapshot["mode"]
+    event_class = _classify_event(event, severity)
     selected: list[DeliveryStep] = []
     suppressed: list[SuppressedChannel] = []
 
@@ -732,7 +915,7 @@ def evaluate_escalation_policy(
             policy_snapshot=snapshot,
         )
 
-    if _is_user_first_response_event(event, severity):
+    if _is_user_first_response_event(event_class) and _delivery_rule_for_event_class(event_class, mode):
         _select_user_first_response(event, user, snapshot, selected, suppressed)
         return EscalationPolicyDecision(
             decision=DECISION_ASK_USER_FIRST if selected else DECISION_QUEUE_FOR_REPORT,
@@ -743,7 +926,6 @@ def evaluate_escalation_policy(
             policy_snapshot=snapshot,
         )
 
-    mode = snapshot["mode"]
     if severity in {SEVERITY_HIGH, SEVERITY_MEDIUM} and mode == MODE_EMERGENCY_ONLY:
         for channel in USER_CHANNELS:
             _suppress(suppressed, "user", channel, REASON_MODE_SUPPRESSED)
@@ -801,7 +983,10 @@ def evaluate_escalation_policy(
         )
 
     if severity == SEVERITY_HIGH:
-        is_cyborg_context = _is_cyborg_context_event(event) or mode == MODE_CYBORG
+        is_cyborg_context = (
+            event_class == EVENT_CLASS_CYBORG_CONTEXT
+            and _delivery_rule_for_event_class(EVENT_CLASS_CYBORG_CONTEXT, mode) is not None
+        ) or mode == MODE_CYBORG
         _consider_user_channel(
             event,
             user,
@@ -946,8 +1131,12 @@ def build_plain_language_policy_view(
 
     mode_text = {
         MODE_OFF: "Guardian audio is off. Critical events can still use configured non-audio fallback channels.",
+        MODE_ACTIVE_SUPPORT: "Active Support answers user requests and routes safety/care events through user-first delivery before caregiver escalation.",
         MODE_CYBORG: "Cyborg mode sends useful context to the user first and does not notify caregivers unless an event is critical.",
+        MODE_DEMO: "Demo mode uses user-first delivery for assistance and reserves caregiver escalation for critical safety demonstrations.",
+        MODE_CHATBOT: "Chatbot mode is conversation-first and does not notify caregivers unless a critical safety event is produced.",
         MODE_EMERGENCY_ONLY: "Emergency Only suppresses non-critical delivery while preserving critical safety escalation.",
+        MODE_MEMORY_SUPPORT: "Memory Support focuses on recall, orientation, medication, and routine guidance delivered to the user first.",
         MODE_MAXIMUM_AWARENESS: "Maximum Awareness uses user-first delivery and can include caregivers for high alerts when policy allows.",
     }.get(snapshot["mode"], "The configured mode is applied after channel consent and contact checks.")
 
@@ -994,6 +1183,7 @@ def build_plain_language_policy_view(
         "mode": snapshot["mode"],
         "channel_preference_version": CHANNEL_PREFERENCE_VERSION,
         "effective_policy": snapshot,
+        "delivery_rules": snapshot["delivery_rules"],
         "user": {
             "guardian_mode": user.guardian_mode,
             "channels": [

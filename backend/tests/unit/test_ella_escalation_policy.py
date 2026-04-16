@@ -123,6 +123,24 @@ def test_cyborg_useful_context_is_user_only_guardian_audio():
     assert decision.reason == "cyborg_context_user_only"
 
 
+def test_active_support_is_distinct_from_cyborg_mode():
+    active_decision = evaluate_escalation_policy(
+        _event(severity="high", event_type="useful_context"),
+        _user(guardian_mode="ACTIVE_SUPPORT"),
+        [_caregiver()],
+    )
+    cyborg_decision = evaluate_escalation_policy(
+        _event(severity="high", event_type="useful_context"),
+        _user(guardian_mode="CYBORG"),
+        [_caregiver()],
+    )
+
+    assert active_decision.policy_snapshot["mode"] == "active_support"
+    assert cyborg_decision.policy_snapshot["mode"] == "cyborg"
+    assert active_decision.reason == "high_event_user_first"
+    assert cyborg_decision.reason == "cyborg_context_user_only"
+
+
 def test_cyborg_critical_uses_normal_critical_path():
     decision = evaluate_escalation_policy(
         _event(severity="critical", event_type="safety"),
@@ -338,6 +356,9 @@ def test_plain_language_policy_view_summarizes_effective_channels_and_rules():
     assert policy["source"] == "omi_backend"
     assert policy["mode"] == "cyborg"
     assert policy["channel_preference_version"] == "ella.channel_preferences.v1"
+    assert policy["delivery_rules"]
+    assert policy["delivery_rules"][0]["event_class"] == "direct_user_request"
+    assert policy["delivery_rules"][0]["caregiver_policy"] == "never"
     assert policy["effective_policy"]["caregiver_alert_preferences"]["emergency_contact_only"] is True
     assert policy["emergency_contact"] == {
         "configured": True,
