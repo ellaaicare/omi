@@ -2119,7 +2119,12 @@ async def listen_handler(
 
     # Ella sidecar: auto-provision check
     try:
-        from ella.routers.auto_provision import get_agent_cluster, auto_provision_user
+        from ella.routers.auto_provision import (
+            auto_provision_user,
+            ensure_firestore_user_document,
+            get_agent_cluster,
+        )
+        await ensure_firestore_user_document(uid)
         cluster = await get_agent_cluster(uid)
         if not cluster:
             logger = logging.getLogger(__name__)

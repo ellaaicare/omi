@@ -13,6 +13,7 @@ Two-phase flow:
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -95,6 +96,54 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
     except Exception as e:
         logger.error(f"Error checking agent cluster for uid={uid}: {e}")
         return None
+
+
+async def ensure_firestore_user_document(uid: str) -> bool:
+    """Create the minimal upstream OMI Firestore user doc for a known Ella user.
+
+    The websocket transcription path still gates on database/users.py, which
+    checks Firestore users/{uid}. Ella onboarding provisions Postgres and
+    OpenClaw first, so a newly onboarded user can be valid for Ella but rejected
+    by /v4/listen until this compatibility document exists.
+    """
+    try:
+        pool = await _get_pool()
+        row = await pool.fetchrow(
+            """
+            SELECT name, email, timezone
+            FROM users
+            WHERE omi_uid = $1
+            """,
+            uid,
+        )
+        if not row:
+            return False
+
+        from database._client import db
+
+        user_ref = db.collection("users").document(uid)
+        if user_ref.get().exists:
+            return True
+
+        now = datetime.now(timezone.utc)
+        user_ref.set(
+            {
+                "uid": uid,
+                "name": row["name"] or "User",
+                "email": row["email"],
+                "time_zone": row["timezone"] or "America/Los_Angeles",
+                "created_at": now,
+                "updated_at": now,
+                "private_cloud_sync_enabled": True,
+                "store_recording_permission": True,
+            },
+            merge=True,
+        )
+        logger.info(f"Created Firestore OMI user document for uid={uid}")
+        return True
+    except Exception as e:
+        logger.error(f"Error ensuring Firestore user document for uid={uid}: {e}", exc_info=True)
+        return False
 
 
 async def auto_provision_user(uid: str, name: str = "User") -> dict:
