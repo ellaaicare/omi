@@ -134,6 +134,68 @@ def test_cyborg_critical_uses_normal_critical_path():
     assert [step.target for step in decision.delivery_plan] == ["user", "emergency_caregiver"]
 
 
+def test_wake_word_response_is_user_only_even_when_classifier_marks_critical():
+    decision = evaluate_escalation_policy(
+        _event(
+            severity="critical",
+            event_type="wake_word",
+            evidence={"category": "wake_word"},
+        ),
+        _user(guardian_mode="cyborg"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert decision.reason == "user_first_response"
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert decision.delivery_plan[0].channel == CHANNEL_GUARDIAN_AUDIO
+
+
+def test_medication_question_routes_to_user_without_caregiver_alert():
+    decision = evaluate_escalation_policy(
+        _event(
+            severity="medium",
+            event_type="medication",
+            evidence={"category": "medication"},
+            summary="What medications am I supposed to take today?",
+        ),
+        _user(guardian_mode="cyborg"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert decision.delivery_plan[0].channel == CHANNEL_GUARDIAN_AUDIO
+    assert decision.delivery_plan[0].priority == "normal"
+
+
+def test_memory_recall_and_gentle_guidance_route_to_user_first():
+    for event_type in ("memory_recall", "gentle_guidance"):
+        decision = evaluate_escalation_policy(
+            _event(severity="medium", event_type=event_type),
+            _user(guardian_mode="cyborg"),
+            [_caregiver()],
+        )
+
+        assert decision.decision == DECISION_ASK_USER_FIRST
+        assert [step.target for step in decision.delivery_plan] == ["user"]
+        assert decision.delivery_plan[0].channel == CHANNEL_GUARDIAN_AUDIO
+
+
+def test_user_first_response_falls_back_to_user_imessage_when_guardian_audio_off():
+    decision = evaluate_escalation_policy(
+        _event(severity="medium", event_type="direct_question"),
+        _user(guardian_mode="off"),
+        [_caregiver()],
+    )
+
+    assert decision.decision == DECISION_ASK_USER_FIRST
+    assert [step.target for step in decision.delivery_plan] == ["user"]
+    assert decision.delivery_plan[0].channel == CHANNEL_IMESSAGE
+    assert decision.delivery_plan[0].fallback == CHANNEL_EMAIL
+    assert REASON_GUARDIAN_DISABLED in _reason_codes(decision)
+
+
 def test_emergency_only_medium_has_no_delivery():
     decision = evaluate_escalation_policy(
         _event(severity="medium"),
