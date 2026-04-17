@@ -14,7 +14,7 @@ sys.modules.setdefault("database.users", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.notifications", MagicMock())
 sys.modules.setdefault("utils.other.storage", MagicMock())
-sys.modules.setdefault("ella.config", MagicMock())
+sys.modules.pop("ella.config", None)
 sys.modules.setdefault("database.ella_contacts", MagicMock())
 
 _backend_path = Path(__file__).resolve().parents[2]
