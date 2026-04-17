@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import asyncpg
 from firebase_admin.auth import InvalidIdTokenError
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from utils.other import endpoints as auth_endpoints
 
@@ -20,6 +20,7 @@ from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
     UserPolicyContext,
+    build_policy_markdown_view,
     build_plain_language_policy_view,
     evaluate_escalation_policy,
 )
@@ -251,3 +252,18 @@ async def get_escalation_policy(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         **policy,
     }
+
+
+@router.get("/policy.md")
+async def get_escalation_policy_markdown(
+    uid: Optional[str] = None,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    x_escalation_key: Optional[str] = Header(None, alias="X-Escalation-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Return the effective policy as generated Markdown for agents/workspaces."""
+    resolved_uid = _resolve_policy_view_uid(uid, authorization, x_guardian_key, x_escalation_key, key)
+    user, caregivers = await _load_context(resolved_uid)
+    markdown = build_policy_markdown_view(user, caregivers)
+    return Response(content=markdown, media_type="text/markdown; charset=utf-8")
