@@ -17,6 +17,7 @@ from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
     UserPolicyContext,
+    build_policy_markdown_view,
     build_plain_language_policy_view,
     evaluate_escalation_policy,
 )
@@ -378,6 +379,32 @@ def test_plain_language_policy_view_summarizes_effective_channels_and_rules():
     assert policy["rules"][0]["severity"] == "critical"
     assert "configured emergency caregivers" in policy["rules"][0]["text"]
     assert "not raw private chats" in policy["display"]["rules"][-1]
+
+
+def test_policy_markdown_view_matches_structured_delivery_rules():
+    user = _user(guardian_mode="memory_support")
+    caregivers = [_caregiver(permissions={"receive_emergency_alerts": True, "receive_daily_summary": True})]
+    policy = build_plain_language_policy_view(user, caregivers)
+    markdown = build_policy_markdown_view(user, caregivers)
+
+    assert "# Ella Escalation Policy" in markdown
+    assert "Generated from the OMI backend structured policy" in markdown
+    assert "- guardian_mode: `memory_support`" in markdown
+    assert (
+        "Wake words, direct questions, medication support, memory recall, and gentle guidance are user-first."
+        in markdown
+    )
+    assert "`direct_user_request`" in markdown
+    assert "`medication_support`" in markdown
+    assert "`critical_safety`" in markdown
+    assert "`never`" in markdown
+    assert "`active_emergency_only`" in markdown
+    assert "not raw private chats" in markdown
+
+    for rule in policy["delivery_rules"]:
+        assert rule["rule_id"] in markdown
+        assert f"`{rule['event_class']}`" in markdown
+        assert f"`{rule['caregiver_policy']}`" in markdown
 
 
 def test_plain_language_policy_view_handles_missing_emergency_contact():

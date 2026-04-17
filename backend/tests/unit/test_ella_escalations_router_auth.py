@@ -153,3 +153,44 @@ def test_load_context_allows_identities_phone_override(monkeypatch):
     user, _caregivers = asyncio.run(escalations._load_context("canonical-uid"))
 
     assert user.user_phone == "+15550000099"
+
+
+def test_policy_markdown_endpoint_uses_same_auth_and_context(monkeypatch):
+    async def fake_load_context(uid):
+        return (
+            escalations.UserPolicyContext(
+                uid=uid,
+                guardian_mode="memory_support",
+                user_email="user@example.test",
+                user_phone="+15550000001",
+            ),
+            [
+                escalations.CaregiverPolicyContext(
+                    caregiver_id="caregiver-1",
+                    status="ACTIVE",
+                    is_emergency_contact=True,
+                    name="Emily",
+                    email="caregiver@example.test",
+                    phone="+15550000002",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(escalations, "_load_context", fake_load_context)
+
+    response = asyncio.run(
+        escalations.get_escalation_policy_markdown(
+            uid="uid-1",
+            authorization=None,
+            x_guardian_key=escalations.ESCALATION_WEBHOOK_KEY,
+            x_escalation_key=None,
+            key=None,
+        )
+    )
+
+    assert response.media_type == "text/markdown; charset=utf-8"
+    body = response.body.decode("utf-8")
+    assert "- uid: `uid-1`" in body
+    assert "- guardian_mode: `memory_support`" in body
+    assert "`direct_user_request`" in body
+    assert "`critical_safety`" in body
