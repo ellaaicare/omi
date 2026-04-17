@@ -436,12 +436,15 @@ async def _stream_handler(
         audio_ring_buffer = AudioRingBuffer(RING_BUFFER_DURATION, sample_rate)
 
     # Conversation timeout (to process the conversation after x seconds of silence)
-    # Max: 4h, min 2m
+    # Binary audio sessions keep the legacy 2m minimum. Custom STT sessions can
+    # finalize faster because the app has already provided transcript segments.
     conversation_creation_timeout = conversation_timeout
     if conversation_creation_timeout == -1:
         conversation_creation_timeout = 4 * 60 * 60
-    if conversation_creation_timeout < 120:
-        conversation_creation_timeout = 120
+    min_conversation_timeout = 10 if use_custom_stt else 120
+    if conversation_creation_timeout < min_conversation_timeout:
+        conversation_creation_timeout = min_conversation_timeout
+    inactivity_timeout_seconds = max(inactivity_timeout_seconds, conversation_creation_timeout + 30)
 
     # Stream transcript
     # Callback for when pusher finishes processing a conversation
