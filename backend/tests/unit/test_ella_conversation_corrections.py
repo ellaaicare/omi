@@ -12,7 +12,7 @@ sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.other.endpoints", MagicMock())
-sys.modules.setdefault("ella.config", MagicMock(ELLA_CONFIG=SimpleNamespace(n8n_base_url="https://n8n.test")))
+sys.modules.pop("ella.config", None)
 
 _backend_path = Path(__file__).resolve().parents[2]
 if str(_backend_path) not in sys.path:
@@ -23,6 +23,7 @@ _corrections_spec = importlib.util.spec_from_file_location("ella_corrections_tes
 corrections = importlib.util.module_from_spec(_corrections_spec)
 assert _corrections_spec is not None and _corrections_spec.loader is not None
 _corrections_spec.loader.exec_module(corrections)
+corrections.ELLA_CONFIG = SimpleNamespace(n8n_base_url="https://n8n.test")
 
 
 def _conversation():

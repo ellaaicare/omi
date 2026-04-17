@@ -1858,6 +1858,9 @@ async def _stream_handler(
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
                                 if suggested_segments:
+                                    if first_audio_byte_timestamp is None:
+                                        first_audio_byte_timestamp = last_activity_time
+                                        last_usage_record_timestamp = first_audio_byte_timestamp
                                     # Attach stt_provider to each segment
                                     if stt_provider:
                                         for seg in suggested_segments:

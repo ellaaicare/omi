@@ -10,6 +10,7 @@ os.environ.setdefault(
 
 # Mock the database client to avoid needing GCP credentials
 sys.modules["database._client"] = MagicMock()
+sys.modules.pop("database.users", None)
 sys.modules["stripe"] = MagicMock()
 
 
