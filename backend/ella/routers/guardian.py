@@ -12,6 +12,8 @@ Queue: ella-postgres guardian_queue table.
 Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 """
 
+import base64
+import binascii
 import json
 import os
 import time
@@ -403,6 +405,14 @@ class EnqueueRequest(BaseModel):
     message: Optional[str] = None
     trigger: Optional[str] = None
     metadata: Optional[dict] = None
+
+
+class UploadJsonRequest(BaseModel):
+    """JSON body for trusted n8n audio uploads."""
+
+    uid: str
+    audio_base64: str
+    filename: Optional[str] = None
 
 
 def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
@@ -900,6 +910,26 @@ async def enqueue(
 # ---------------------------------------------------------------------------
 
 
+def _store_audio_content(uid: str, content: bytes, filename: Optional[str] = None) -> dict:
+    user_dir = os.path.join(AUDIO_BASE_DIR, uid)
+    os.makedirs(user_dir, exist_ok=True)
+
+    ts = int(time.time())
+    fname = filename or f"{ts}-{uuid.uuid4().hex[:12]}.mp3"
+    filepath = os.path.join(user_dir, fname)
+
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
+    return {
+        "url": public_url,
+        "path": filepath,
+        "size_bytes": len(content),
+        "filename": fname,
+    }
+
+
 @router.post("/upload")
 async def upload_audio(
     file: UploadFile = File(...),
@@ -912,33 +942,44 @@ async def upload_audio(
     _start = time.time()
     _verify_key(x_guardian_key, key)
 
-    # Create user directory
-    user_dir = os.path.join(AUDIO_BASE_DIR, uid)
-    os.makedirs(user_dir, exist_ok=True)
-
-    # Generate filename
-    ts = int(time.time())
-    fname = filename or f"{ts}-{uuid.uuid4().hex[:12]}.mp3"
-    filepath = os.path.join(user_dir, fname)
-
-    # Write file
     content = await file.read()
-    with open(filepath, "wb") as f:
-        f.write(content)
-
-    public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
+    result = _store_audio_content(uid, content, filename)
 
     _elapsed = int((time.time() - _start) * 1000)
     print(
-        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}",
+        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={result['filename']} size={result['size_bytes']}B "
+        f"latency={_elapsed}ms url={result['url']}",
         flush=True,
     )
 
-    return {
-        "url": public_url,
-        "path": filepath,
-        "size_bytes": len(content),
-    }
+    return {k: v for k, v in result.items() if k != "filename"}
+
+
+@router.post("/upload-json")
+async def upload_audio_json(
+    req: UploadJsonRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Upload a base64-encoded audio file and return its public URL."""
+    _start = time.time()
+    _verify_key(x_guardian_key, key)
+
+    try:
+        content = base64.b64decode(req.audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio") from exc
+
+    result = _store_audio_content(req.uid, content, req.filename)
+
+    _elapsed = int((time.time() - _start) * 1000)
+    print(
+        f"[FLOW:GUARDIAN-UPLOAD-JSON] uid={req.uid} file={result['filename']} size={result['size_bytes']}B "
+        f"latency={_elapsed}ms url={result['url']}",
+        flush=True,
+    )
+
+    return {k: v for k, v in result.items() if k != "filename"}
 
 
 # ---------------------------------------------------------------------------
