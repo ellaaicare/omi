@@ -141,6 +141,53 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
     }
   }
 
+  Future<bool> _showSourceSwitchDialog(BuildContext context, String fromSource, String toSource) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('Switch to $toSource?'),
+            content: Text('$fromSource recording will stop and save.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Switch'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  _switchToPhoneMic(BuildContext context, CaptureProvider provider) async {
+    if (provider.havingRecordingDevice) {
+      bool confirmed = await _showSourceSwitchDialog(context, 'Necklace', 'Phone Mic');
+      if (!confirmed) return;
+      await provider.stopStreamDeviceRecording();
+    }
+    setState(() {
+      _isPhoneMicPaused = false;
+    });
+    await provider.streamRecording();
+    MixpanelManager().phoneMicRecordingStarted();
+  }
+
+  _switchToNecklace(BuildContext context, CaptureProvider provider) async {
+    bool confirmed = await _showSourceSwitchDialog(context, 'Phone Mic', 'Necklace');
+    if (!confirmed) return;
+    if (_isPhoneMicPaused) {
+      setState(() {
+        _isPhoneMicPaused = false;
+      });
+    }
+    await provider.stopStreamRecording();
+    MixpanelManager().phoneMicRecordingStopped();
+    await provider.streamDeviceRecording();
+  }
+
   Widget? _getConversationHeader(BuildContext context) {
     var captureProvider = context.read<CaptureProvider>();
     var connectivityProvider = context.read<ConnectivityProvider>();
@@ -182,13 +229,13 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
           isPhoneMicPaused: _isPhoneMicPaused,
         ),
       );
-    } else if (!isAnyRecordingActive &&
-        !deviceServiceStateOk &&
-        !transcriptServiceStateOk &&
-        !isHavingTranscript &&
-        !isHavingDesireDevice) {
-      return null; // not recording and not ready
-    } else if (!deviceServiceStateOk) {
+    } else if (!isHavingRecordingDevice) {
+      // Necklace paired but not recording — show device status + phone mic option
+      String statusText = !deviceServiceStateOk
+          ? context.l10n.waitingForDevice
+          : (isHavingTranscript || isHavingPhotos)
+              ? context.l10n.inProgress
+              : context.l10n.saySomething;
       left = Row(
         children: [
           const SizedBox(width: 14),
@@ -201,9 +248,24 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
             ),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Text(
-              context.l10n.waitingForDevice,
+              statusText,
               style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: EllaColors.textPrimary),
               maxLines: 1,
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => _switchToPhoneMic(context, captureProvider),
+            child: Container(
+              decoration: BoxDecoration(
+                color: EllaColors.primary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: const Text(
+                'Use Phone Mic',
+                style: TextStyle(color: EllaColors.primary, fontSize: 13, fontWeight: FontWeight.w600),
+              ),
             ),
           ),
           if (isHavingTranscript || isHavingPhotos) const Flexible(child: LiteCaptureWidget()),
@@ -475,13 +537,50 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
         ],
       );
 
+      // Audio source indicator pill
+      bool isHavingDesireDevice = SharedPreferencesUtil().btDevice.id.isNotEmpty;
+      Widget sourcePill = GestureDetector(
+        onTap: () {
+          if (isDeviceRecording && !PlatformService.isDesktop) {
+            _switchToPhoneMic(context, provider);
+          } else if (isPhoneRecording && isHavingDesireDevice && !PlatformService.isDesktop) {
+            _switchToNecklace(context, provider);
+          }
+        },
+        child: Container(
+          margin: const EdgeInsets.only(top: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: EllaColors.bgTertiary,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isDeviceRecording ? Icons.watch_outlined : Icons.phone_android_outlined,
+                size: 11,
+                color: EllaColors.textSecondary,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                isDeviceRecording ? 'Necklace' : 'Phone Mic',
+                style: const TextStyle(color: EllaColors.textSecondary, fontSize: 11, fontWeight: FontWeight.w500),
+              ),
+            ],
+          ),
+        ),
+      );
+
       if (hasPhotos) {
         return Padding(
           padding: const EdgeInsets.only(left: 8, right: 6),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               statusRow,
+              sourcePill,
               const SizedBox(height: 12),
               PhotosPreviewWidget(photos: provider.photos),
             ],
@@ -491,7 +590,14 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
 
       return Padding(
         padding: const EdgeInsets.only(left: 8, right: 6),
-        child: statusRow,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            statusRow,
+            sourcePill,
+          ],
+        ),
       );
     } else {
       // For non-recording states, show the original header-based UI
@@ -584,10 +690,6 @@ class _PausedStatusIndicatorState extends State<PausedStatusIndicator> with Sing
 
 getPhoneMicRecordingButton(BuildContext context, VoidCallback toggleRecordingCb, RecordingState currentActualState,
     {bool isPhoneMicPaused = false}) {
-  if (SharedPreferencesUtil().btDevice.id.isNotEmpty && (!PlatformService.isDesktop)) {
-    // If a BT device is configured and we are NOT on desktop, don't show this button.
-    return const SizedBox.shrink();
-  }
   // If on desktop, AND a BT device is connected, this button should still be hidden
   // as the primary interaction should be via the BT device, not system audio as a fallback to phone mic.
   // This button is primarily for when NO BT device is the target.
