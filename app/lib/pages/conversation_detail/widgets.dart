@@ -775,13 +775,18 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
-    final ok = await submitConversationCorrection(
-      conversationId: widget.conversation.id,
-      correctionText: correctionText,
-      summaryTitle: widget.conversation.structured.title,
-      summaryOverview: widget.conversation.structured.overview,
-      appSummary: widget.appSummary,
-    );
+    bool ok = false;
+    try {
+      ok = await submitConversationCorrection(
+        conversationId: widget.conversation.id,
+        correctionText: correctionText,
+        summaryTitle: widget.conversation.structured.title,
+        summaryOverview: widget.conversation.structured.overview,
+        appSummary: widget.appSummary,
+      );
+    } catch (e) {
+      debugPrint('CorrectSummarySheet _submit exception: $e');
+    }
 
     if (!mounted) return;
     setState(() => _isSubmitting = false);
@@ -839,7 +844,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
               ),
               const SizedBox(height: 8),
               const Text(
-                'Tell Ella what was wrong in your own words. The conversation ID and current summary are attached in the background.',
+                'Tell Ella what was wrong in your own words. She will review and update the summary.',
                 style: TextStyle(
                   color: EllaColors.textSecondary,
                   fontSize: 15,

@@ -90,23 +90,33 @@ Future<bool> submitConversationCorrection({
   String? summaryOverview,
   String? appSummary,
 }) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections',
-    headers: {},
-    method: 'POST',
-    body: jsonEncode({
-      'correction_text': correctionText,
-      'source': 'ios',
-      'summary_context': {
-        if (summaryTitle != null) 'title': summaryTitle,
-        if (summaryOverview != null) 'overview': summaryOverview,
-        if (appSummary != null) 'app_summary': appSummary,
-      },
-    }),
-  );
-  if (response == null) return false;
-  Logger.debug('submitConversationCorrection: ${response.statusCode} ${response.body}');
-  return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
+  final url = '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections';
+  Logger.debug('submitConversationCorrection URL: $url');
+  try {
+    var response = await makeApiCall(
+      url: url,
+      headers: {},
+      method: 'POST',
+      body: jsonEncode({
+        'correction_text': correctionText,
+        'source': 'ios',
+        'summary_context': {
+          if (summaryTitle != null) 'title': summaryTitle,
+          if (summaryOverview != null) 'overview': summaryOverview,
+          if (appSummary != null) 'app_summary': appSummary,
+        },
+      }),
+    );
+    if (response == null) {
+      Logger.debug('submitConversationCorrection: response was null');
+      return false;
+    }
+    Logger.debug('submitConversationCorrection: ${response.statusCode} ${response.body}');
+    return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
+  } catch (e, st) {
+    Logger.debug('submitConversationCorrection EXCEPTION: $e $st');
+    return false;
+  }
 }
 
 Future<bool> deleteConversationServer(String conversationId) async {
