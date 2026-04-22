@@ -184,7 +184,13 @@ def test_router_uses_custom_ella_namespace_only():
     paths = {route.path for route in corrections.router.routes}
 
     assert "/v1/ella/conversations/{conversation_id}/corrections" in paths
-    assert "/v1/conversations/{conversation_id}/corrections" not in paths
+    assert "/v1/conversations/{conversation_id}/corrections" in paths
+
+
+def test_submit_correction_accepts_text_alias():
+    request = corrections.ConversationCorrectionRequest(text="Please fix the doctor name.")
+
+    assert request.correction_text == "Please fix the doctor name."
 
 
 def test_submit_to_n8n_posts_single_structured_workflow_payload(monkeypatch):

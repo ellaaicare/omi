@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
 from database._client import db
@@ -32,7 +32,13 @@ class SummaryContext(BaseModel):
 
 
 class ConversationCorrectionRequest(BaseModel):
-    correction_text: str = Field(..., min_length=1, max_length=4000)
+    correction_text: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        validation_alias=AliasChoices("correction_text", "text"),
+        serialization_alias="correction_text",
+    )
     source: str = Field(default="ios", min_length=1, max_length=64)
     summary_context: SummaryContext = Field(default_factory=SummaryContext)
 
@@ -189,12 +195,7 @@ async def _submit_correction_to_n8n(
     }
 
 
-@router.post(
-    "/v1/ella/conversations/{conversation_id}/corrections",
-    response_model=ConversationCorrectionResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def submit_conversation_correction(
+async def _submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     uid: str = Depends(auth.get_current_user_uid),
@@ -291,3 +292,29 @@ async def submit_conversation_correction(
         status="queued",
         queued=True,
     )
+
+
+@router.post(
+    "/v1/ella/conversations/{conversation_id}/corrections",
+    response_model=ConversationCorrectionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_conversation_correction_ella(
+    conversation_id: str,
+    request: ConversationCorrectionRequest,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionResponse:
+    return await _submit_conversation_correction(conversation_id, request, uid)
+
+
+@router.post(
+    "/v1/conversations/{conversation_id}/corrections",
+    response_model=ConversationCorrectionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_conversation_correction(
+    conversation_id: str,
+    request: ConversationCorrectionRequest,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionResponse:
+    return await _submit_conversation_correction(conversation_id, request, uid)
