@@ -13,6 +13,7 @@ Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 
 import json
 import os
+import re
 import time
 import uuid
 from typing import Optional
@@ -32,12 +33,12 @@ router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
 AUDIO_BASE_DIR = "/var/www/ella-ai-care.com/audio"
 AUDIO_PUBLIC_URL = "https://ella-ai-care.com/audio"
-GUARDIAN_WEBHOOK_KEY = os.getenv(
-    "GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"
-)
+GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
+QUEUE_DEDUPE_WINDOW_SECONDS = int(os.getenv("GUARDIAN_QUEUE_DEDUPE_WINDOW_SECONDS", "90"))
+WAKE_WORD_ACK_TEXT = os.getenv("GUARDIAN_WAKE_WORD_ACK_TEXT", "I heard you. Give me a moment.")
 
 # Provision API for chat history lookups
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
@@ -61,17 +62,18 @@ _playback_events: dict[str, dict] = {}
 
 # Echo risk by iOS AVAudioSession portType rawValue
 _ECHO_RISK = {
-    "Speaker": "high",        # builtInSpeaker
-    "Receiver": "none",       # builtInReceiver
-    "Headphones": "none",     # headphones
-    "BluetoothHFP": "none",   # BT headset (hands-free)
+    "Speaker": "high",  # builtInSpeaker
+    "Receiver": "none",  # builtInReceiver
+    "Headphones": "none",  # headphones
+    "BluetoothHFP": "none",  # BT headset (hands-free)
     "BluetoothA2DP": "high",  # BT speaker/headphones
     "BluetoothLE": "medium",  # BT LE audio
-    "AirPlay": "very_high",   # AirPlay / Apple TV
+    "AirPlay": "very_high",  # AirPlay / Apple TV
     "HDMI": "very_high",
     "CarAudio": "high",
     "USBAudio": "low",
 }
+
 
 async def _get_pool() -> asyncpg.Pool:
     """Get or create the asyncpg connection pool."""
@@ -106,19 +108,21 @@ def _verify_key(
 
 class PlaybackEventRequest(BaseModel):
     """JSON body for /playback-event endpoint."""
+
     uid: str
     queue_item_id: Optional[str] = None
     trace_id: Optional[str] = None
     event_type: str = "started"  # started, completed, failed
-    port_type: str       # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
+    port_type: str  # AVAudioSession portType rawValue (e.g. "Speaker", "BluetoothA2DP")
     port_name: str = ""  # human-readable device name (e.g. "AirPods Pro")
-    device_uid: str = "" # unique device ID from AVAudioSessionPortDescription
-    duration_ms: int = 0 # estimated audio duration in ms
+    device_uid: str = ""  # unique device ID from AVAudioSessionPortDescription
+    duration_ms: int = 0  # estimated audio duration in ms
     metadata: Optional[dict] = None
 
 
 class EnqueueRequest(BaseModel):
     """JSON body for enqueue endpoint."""
+
     uid: Optional[str] = None
     userID: Optional[str] = None  # alias accepted from n8n
     url: str
@@ -137,6 +141,31 @@ def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
             if value:
                 return str(value)
     return fallback
+
+
+def _coerce_metadata_dict(metadata: Optional[dict]) -> dict:
+    """Return queue metadata as a plain dict."""
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _normalize_guardian_message(message: Optional[str]) -> str:
+    """Normalize queue text for duplicate detection."""
+    if not message:
+        return ""
+    normalized = str(message).strip().lower()
+    if normalized.startswith("i heard you. i am checking that now:"):
+        normalized = normalized.split(":", 1)[1].strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
+    return normalized.strip()
 
 
 async def _log_pipeline_event(
@@ -425,11 +454,13 @@ async def next_audio(uid: str):
                 WHERE id = $1
                 """,
                 new_id,
-                json.dumps({
-                    "trace_id": source_trace_id,
-                    "queue_item_id": new_id,
-                    "consolidated_from": pending_ids,
-                }),
+                json.dumps(
+                    {
+                        "trace_id": source_trace_id,
+                        "queue_item_id": new_id,
+                        "consolidated_from": pending_ids,
+                    }
+                ),
             )
             # Fall through to pop the newly-inserted consolidated item
 
@@ -464,7 +495,10 @@ async def next_audio(uid: str):
         # Don't log empty polls (too noisy — iOS polls every 3s)
         return {"url": None}
 
-    print(f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-POLL] uid={uid} popped id={row['id']} priority={row['priority']} latency={_elapsed}ms",
+        flush=True,
+    )
 
     meta = row["metadata"]
     if isinstance(meta, str):
@@ -526,6 +560,14 @@ async def enqueue(
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
     trace_id = _trace_id_from_metadata(req.metadata, item_id)
+    trigger_type = (req.trigger or "").strip()
+    priority = (req.priority or "normal").strip()
+    message = req.message
+
+    # Wake-word acknowledgements should be deterministic and never quote
+    # transcript fragments back to the user.
+    if trigger_type == "wake_word":
+        message = WAKE_WORD_ACK_TEXT
 
     pool = await _get_pool()
     mode_row = await pool.fetchrow(
@@ -567,7 +609,109 @@ async def enqueue(
     metadata = dict(req.metadata or {})
     metadata.setdefault("trace_id", trace_id)
     metadata.setdefault("queue_item_id", item_id)
+    metadata.setdefault("dedupe_window_seconds", QUEUE_DEDUPE_WINDOW_SECONDS)
     metadata_str = json.dumps(metadata)
+
+    recent_rows = await pool.fetch(
+        """
+        SELECT id, priority, message, trigger_type, metadata, consumed_at, created_at
+        FROM guardian_queue
+        WHERE uid = $1
+          AND created_at > NOW() - make_interval(secs => $2)
+        ORDER BY created_at DESC
+        LIMIT 25
+        """,
+        uid,
+        QUEUE_DEDUPE_WINDOW_SECONDS,
+    )
+
+    normalized_message = _normalize_guardian_message(message)
+    same_trace_rows = []
+    pending_same_trace_rows = []
+    for row in recent_rows:
+        row_meta = _coerce_metadata_dict(row["metadata"])
+        row_trace_id = _trace_id_from_metadata(row_meta, row["id"])
+        if row_trace_id != trace_id:
+            continue
+        same_trace_rows.append(row)
+        if row["consumed_at"] is None:
+            pending_same_trace_rows.append(row)
+
+    duplicate_row = next(
+        (
+            row
+            for row in same_trace_rows
+            if row["trigger_type"] == trigger_type and _normalize_guardian_message(row["message"]) == normalized_message
+        ),
+        None,
+    )
+    if duplicate_row is not None:
+        _elapsed = int((time.time() - _start) * 1000)
+        await _log_pipeline_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="queue_rejected",
+            status="skipped",
+            latency_ms=_elapsed,
+            metadata={
+                "queue_item_id": item_id,
+                "priority": priority,
+                "trigger_type": trigger_type,
+                "reason": "duplicate_message_same_trace",
+                "existing_queue_item_id": duplicate_row["id"],
+            },
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "duplicate_message_same_trace",
+            "existing_id": duplicate_row["id"],
+            "trace_id": trace_id,
+        }
+
+    if trigger_type == "wake_word":
+        actionable_pending_row = next(
+            (
+                row
+                for row in pending_same_trace_rows
+                if row["trigger_type"] in ("policy_dispatch", "scanner-escalation", "consolidated")
+            ),
+            None,
+        )
+        if actionable_pending_row is not None:
+            _elapsed = int((time.time() - _start) * 1000)
+            await _log_pipeline_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="queue_rejected",
+                status="skipped",
+                latency_ms=_elapsed,
+                metadata={
+                    "queue_item_id": item_id,
+                    "priority": priority,
+                    "trigger_type": trigger_type,
+                    "reason": "wake_word_suppressed_same_trace_has_actionable_audio",
+                    "existing_queue_item_id": actionable_pending_row["id"],
+                    "existing_trigger_type": actionable_pending_row["trigger_type"],
+                },
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "wake_word_suppressed_same_trace_has_actionable_audio",
+                "existing_id": actionable_pending_row["id"],
+                "trace_id": trace_id,
+            }
+
+    if priority == "urgent" and trigger_type in ("policy_dispatch", "scanner-escalation", "consolidated"):
+        superseded_ids = [row["id"] for row in pending_same_trace_rows if row["trigger_type"] == "wake_word"]
+        if superseded_ids:
+            await pool.execute(
+                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
+                superseded_ids,
+            )
+            metadata["superseded_wake_word_ids"] = superseded_ids
+            metadata_str = json.dumps(metadata)
 
     await pool.execute(
         """
@@ -578,9 +722,9 @@ async def enqueue(
         item_id,
         uid,
         req.url,
-        req.priority,
-        req.message,
-        req.trigger,
+        priority,
+        message,
+        trigger_type,
         metadata_str,
     )
 
@@ -599,14 +743,14 @@ async def enqueue(
         latency_ms=_elapsed,
         metadata={
             "queue_item_id": item_id,
-            "priority": req.priority,
-            "trigger_type": req.trigger,
+            "priority": priority,
+            "trigger_type": trigger_type,
             "queued": count,
         },
     )
     print(
-        f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} "
-        f"trigger={req.trigger} trace={trace_id} queued={count} latency={_elapsed}ms",
+        f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={priority} "
+        f"trigger={trigger_type} trace={trace_id} queued={count} latency={_elapsed}ms",
         flush=True,
     )
 
@@ -648,7 +792,10 @@ async def upload_audio(
     public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
 
     _elapsed = int((time.time() - _start) * 1000)
-    print(f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}",
+        flush=True,
+    )
 
     return {
         "url": public_url,
@@ -700,6 +847,7 @@ async def view_queue(uid: str):
     print(f"[FLOW:GUARDIAN-QUEUE] uid={uid} pending={len(items)}", flush=True)
 
     return {"uid": uid, "count": len(items), "items": items}
+
 
 # ---------------------------------------------------------------------------
 # POST /v1/ella/guardian/activate
@@ -800,13 +948,15 @@ async def get_pipeline_trace(conversation_id: str):
         stages = []
         for r in rows:
             meta = _parse_meta(r["metadata"])
-            stages.append({
-                "stage": r["stage"],
-                "status": r["status"],
-                "latency_ms": r["latency_ms"],
-                "metadata": meta,
-                "at": r["created_at"].isoformat() if r["created_at"] else None,
-            })
+            stages.append(
+                {
+                    "stage": r["stage"],
+                    "status": r["status"],
+                    "latency_ms": r["latency_ms"],
+                    "metadata": meta,
+                    "at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+            )
 
         # Calculate total latency
         first_ts = rows[0]["created_at"]
@@ -815,18 +965,17 @@ async def get_pipeline_trace(conversation_id: str):
         if first_ts and last_ts:
             total_ms = int((last_ts - first_ts).total_seconds() * 1000)
 
-        escalated = any(
-            _parse_meta(r["metadata"]).get("escalate") is True
-            for r in rows
-        )
+        escalated = any(_parse_meta(r["metadata"]).get("escalate") is True for r in rows)
         audio_delivered = any(
-            r["stage"] in ("audio_consumed", "ios_playback_started", "ios_playback_completed")
-            for r in rows
+            r["stage"] in ("audio_consumed", "ios_playback_started", "ios_playback_completed") for r in rows
         )
 
         uid = rows[0]["uid"] if rows else ""
 
-        print(f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} uid={uid} stages={len(stages)} total_ms={total_ms} escalated={escalated}", flush=True)
+        print(
+            f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} uid={uid} stages={len(stages)} total_ms={total_ms} escalated={escalated}",
+            flush=True,
+        )
 
         return {
             "trace_id": conversation_id,
@@ -872,7 +1021,10 @@ async def log_pipeline_event(request: Request):
         metadata=metadata,
     )
 
-    print(f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms", flush=True)
+    print(
+        f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms",
+        flush=True,
+    )
 
     return {"logged": True, "trace_id": trace_id, "stage": stage}
 
