@@ -8165,6 +8165,14 @@ class AppLocalizationsEn extends AppLocalizations {
   String get ellaCaregiverStatusInvited => 'Invited — waiting to join';
 
   @override
+  String get ellaCaregiverStatusExpired => 'Invite expired';
+
+  @override
+  String ellaInviteExpiredDate(String date) {
+    return 'Invite expired $date';
+  }
+
+  @override
   String get ellaFamilyCaregivers => 'Family & Caregivers';
 
   @override
@@ -8335,10 +8343,46 @@ class AppLocalizationsEn extends AppLocalizations {
   String get ellaCareTeamSection => 'CARE TEAM';
 
   @override
+  String get ellaCaptureSection => 'CAPTURE';
+
+  @override
   String get ellaDeviceSection => 'DEVICE';
 
   @override
   String get ellaAboutSection => 'ABOUT';
+
+  @override
+  String get ellaMaxConversationLengthTitle => 'Maximum Conversation Length';
+
+  @override
+  String get ellaMaxConversationLengthConfig => 'Split long captures on the backend';
+
+  @override
+  String get ellaMaxConversationLengthDescription =>
+      'Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.';
+
+  @override
+  String get ellaMaxConversationLengthBackendDefault => 'Backend default';
+
+  @override
+  String get ellaMaxConversationLengthBackendDefaultDesc => 'Use Ella\'s current default: 30 minutes.';
+
+  @override
+  String get ellaMaxConversationLengthDisabled => 'Disabled';
+
+  @override
+  String get ellaMaxConversationLengthDisabledDesc => 'Do not split conversations just because a recording is long.';
+
+  @override
+  String ellaMaxConversationLengthMinutesDesc(int minutes) {
+    return 'Split after $minutes minutes of continuous recording.';
+  }
+
+  @override
+  String get ellaMaxConversationLengthSaved => 'Conversation length setting saved.';
+
+  @override
+  String get ellaMaxConversationLengthSaveFailed => 'Couldn\'t save conversation length setting.';
 
   @override
   String ellaJoinedDate(String date) {
@@ -8418,4 +8462,56 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get ellaProfileSaved => 'Profile saved';
+
+  @override
+  String get ellaAlertChannels => 'Alert Channels';
+
+  @override
+  String get ellaAlertChannelsSubtitle => 'How Ella handles alerts and notifications';
+
+  @override
+  String get ellaAlertChannelsUnavailable => 'Unable to load alert policy';
+
+  @override
+  String get ellaAlertChannelsPullRetry => 'Pull down to retry';
+
+  @override
+  String get ellaAlertChannelsRetry => 'Retry';
+
+  @override
+  String get ellaAlertChannelsYourChannels => 'YOUR CHANNELS';
+
+  @override
+  String get ellaAlertChannelsNoChannels => 'No channels configured';
+
+  @override
+  String get ellaAlertChannelsEmergencyContact => 'EMERGENCY CONTACT';
+
+  @override
+  String get ellaAlertChannelsNotConfigured => 'No emergency contact selected';
+
+  @override
+  String get ellaAlertChannelsSetUpContact => 'Set up an emergency contact';
+
+  @override
+  String get ellaAlertChannelsCaregiverNotifications => 'CAREGIVER NOTIFICATIONS';
+
+  @override
+  String get ellaAlertChannelsAlertRules => 'ALERT RULES';
+
+  @override
+  String get ellaAlertChannelsPrivacyNotes => 'PRIVACY NOTES';
+
+  @override
+  String get ellaAlertChannelsEnabled => 'Enabled';
+
+  @override
+  String get ellaAlertChannelsDisabled => 'Disabled';
+
+  @override
+  String get ellaGuardianOffTooltip =>
+      'Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.';
+
+  @override
+  String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
 }

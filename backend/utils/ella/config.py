@@ -34,6 +34,7 @@ class EllaConfig:
     # Feature flags
     ella_only_mode: bool = True  # If True, don't fall back to local LLM
     scanner_enabled: bool = True  # Enable real-time scanning
+    summary_enabled: bool = False  # Legacy summarize-transcript webhook; use postprocess hooks by default
     async_mode: bool = True  # Use async callbacks instead of sync
 
     @property
@@ -74,6 +75,9 @@ def load_config() -> EllaConfig:
 
     if os.getenv('ELLA_SCANNER_ENABLED'):
         config.scanner_enabled = os.getenv('ELLA_SCANNER_ENABLED', 'true').lower() == 'true'
+
+    if os.getenv('ELLA_SUMMARY_ENABLED'):
+        config.summary_enabled = os.getenv('ELLA_SUMMARY_ENABLED', 'false').lower() == 'true'
 
     if os.getenv('ELLA_SCANNER_TIMEOUT'):
         config.scanner_timeout = float(os.getenv('ELLA_SCANNER_TIMEOUT', '2.0'))

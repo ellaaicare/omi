@@ -1,10 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:awesome_notifications/awesome_notifications.dart';
-import 'package:geolocator/geolocator.dart';
-
 import 'package:omi/backend/http/api/privacy.dart';
-import 'package:omi/backend/http/api/users.dart' as users_api;
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/geolocation.dart';
@@ -39,15 +36,23 @@ class UserProvider with ChangeNotifier {
   bool _singleLanguageMode = false;
   List<String> _transcriptionVocabulary = [];
 
+  // Conversation lifecycle preferences. Null means use the backend default.
+  bool? _conversationMaxDurationEnabled;
+  int? _conversationMaxDurationSeconds;
+
   // Loading states for transcription settings
   bool _isUpdatingSingleLanguageMode = false;
   bool _isUpdatingVocabulary = false;
+  bool _isUpdatingConversationLifecyclePreferences = false;
 
   // Transcription preferences getters
   bool get singleLanguageMode => _singleLanguageMode;
   List<String> get transcriptionVocabulary => _transcriptionVocabulary;
+  bool? get conversationMaxDurationEnabled => _conversationMaxDurationEnabled;
+  int? get conversationMaxDurationSeconds => _conversationMaxDurationSeconds;
   bool get isUpdatingSingleLanguageMode => _isUpdatingSingleLanguageMode;
   bool get isUpdatingVocabulary => _isUpdatingVocabulary;
+  bool get isUpdatingConversationLifecyclePreferences => _isUpdatingConversationLifecyclePreferences;
 
   String get dataProtectionLevel => _dataProtectionLevel;
   bool get isLoading => _isLoading;
@@ -121,6 +126,9 @@ class UserProvider with ChangeNotifier {
       // Load transcription preferences (will sync with API and update cache)
       await _loadTranscriptionPreferences();
 
+      // Load server-owned conversation splitting preferences.
+      await _loadConversationLifecyclePreferences();
+
       final migrationStatus = userProfile['migration_status'];
       if (migrationStatus != null && migrationStatus['status'] == 'in_progress') {
         final targetLevel = migrationStatus['target_level'];
@@ -184,6 +192,19 @@ class UserProvider with ChangeNotifier {
     }
   }
 
+  Future<void> _loadConversationLifecyclePreferences() async {
+    try {
+      final prefs = await getConversationLifecyclePreferences();
+      if (prefs != null) {
+        _conversationMaxDurationEnabled = prefs.conversationMaxDurationEnabled;
+        _conversationMaxDurationSeconds = prefs.conversationMaxDurationSeconds;
+        notifyListeners();
+      }
+    } catch (e) {
+      Logger.error('Failed to load conversation lifecycle preferences: $e');
+    }
+  }
+
   Future<void> optInForTrainingData() async {
     try {
       final success = await setTrainingDataOptIn();
@@ -238,6 +259,31 @@ class UserProvider with ChangeNotifier {
       return false;
     } finally {
       _isUpdatingVocabulary = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> updateConversationMaxDuration({required bool? enabled, required int? seconds}) async {
+    if (_isUpdatingConversationLifecyclePreferences) return false;
+
+    _isUpdatingConversationLifecyclePreferences = true;
+    notifyListeners();
+
+    try {
+      final success = await setConversationLifecyclePreferences(
+        conversationMaxDurationEnabled: enabled,
+        conversationMaxDurationSeconds: seconds,
+      );
+      if (success) {
+        _conversationMaxDurationEnabled = enabled;
+        _conversationMaxDurationSeconds = seconds;
+      }
+      return success;
+    } catch (e, stackTrace) {
+      Logger.error('Failed to update conversation lifecycle preferences: $e\n$stackTrace');
+      return false;
+    } finally {
+      _isUpdatingConversationLifecyclePreferences = false;
       notifyListeners();
     }
   }

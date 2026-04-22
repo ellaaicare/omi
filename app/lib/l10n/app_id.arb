@@ -2624,5 +2624,22 @@
   "coworker": "Coworker",
   "linkedIn": "LinkedIn",
   "appStore": "App Store",
-  "googleSearch": "Google Search"
+  "googleSearch": "Google Search",
+  "ellaAlertChannels": "Alert Channels",
+  "ellaAlertChannelsSubtitle": "How Ella handles alerts and notifications",
+  "ellaAlertChannelsUnavailable": "Unable to load alert policy",
+  "ellaAlertChannelsPullRetry": "Pull down to retry",
+  "ellaAlertChannelsRetry": "Retry",
+  "ellaAlertChannelsYourChannels": "YOUR CHANNELS",
+  "ellaAlertChannelsNoChannels": "No channels configured",
+  "ellaAlertChannelsEmergencyContact": "EMERGENCY CONTACT",
+  "ellaAlertChannelsNotConfigured": "No emergency contact selected",
+  "ellaAlertChannelsSetUpContact": "Set up an emergency contact",
+  "ellaAlertChannelsCaregiverNotifications": "CAREGIVER NOTIFICATIONS",
+  "ellaAlertChannelsAlertRules": "ALERT RULES",
+  "ellaAlertChannelsPrivacyNotes": "PRIVACY NOTES",
+  "ellaAlertChannelsEnabled": "Enabled",
+  "ellaAlertChannelsDisabled": "Disabled",
+  "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
+  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active."
 }

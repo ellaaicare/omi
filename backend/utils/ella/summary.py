@@ -44,6 +44,10 @@ def call_summary_agent(
     _start = time.time()
     conv_short = conversation_id[:8] if conversation_id else "unknown"
 
+    if not ELLA_CONFIG.summary_enabled:
+        print(f"[FLOW:SUMMARY] DISABLED legacy summarizer uid={uid} conv={conv_short}", flush=True)
+        return False, None, "Ella legacy summary webhook disabled"
+
     payload = {
         "uid": uid,
         "conversation_id": conversation_id,

@@ -32,7 +32,7 @@ from utils.speaker_assignment import (
 import database.conversations as conversations_db
 import database.calendar_meetings as calendar_db
 import database.users as user_db
-from database.users import get_user_transcription_preferences
+from database.users import get_user_conversation_lifecycle_preferences, get_user_transcription_preferences
 from database import redis_db
 from database.redis_db import (
     get_cached_user_geolocation,
@@ -193,6 +193,12 @@ async def _stream_handler(
     transcription_prefs = get_user_transcription_preferences(uid)
     single_language_mode = transcription_prefs.get('single_language_mode', False)
     vocabulary = transcription_prefs.get('vocabulary', [])
+
+    try:
+        conversation_lifecycle_prefs = get_user_conversation_lifecycle_preferences(uid)
+    except Exception as e:
+        print(f"Error fetching conversation lifecycle preferences: {e}", uid, session_id)
+        conversation_lifecycle_prefs = {}
 
     # Onboarding mode: force single language for better accuracy
     if onboarding_mode:
@@ -1236,11 +1242,32 @@ async def _stream_handler(
                 continue
 
             # Check if conversation should be processed
+            now = datetime.now(timezone.utc)
             finished_at = datetime.fromisoformat(conversation['finished_at'].isoformat())
-            seconds_since_last_update = (datetime.now(timezone.utc) - finished_at).total_seconds()
+            seconds_since_last_update = (now - finished_at).total_seconds()
+
+            split_reason = None
+            split_elapsed_seconds = seconds_since_last_update
+            split_limit_seconds = conversation_creation_timeout
             if seconds_since_last_update >= conversation_creation_timeout:
+                split_reason = "silence_timeout"
+            else:
+                try:
+                    from ella.services.conversation_lifecycle import should_split_for_max_duration
+
+                    decision = should_split_for_max_duration(conversation, now, conversation_lifecycle_prefs)
+                    if decision.should_split:
+                        split_reason = decision.reason or "max_duration"
+                        split_elapsed_seconds = decision.elapsed_seconds
+                        split_limit_seconds = decision.limit_seconds or 0
+                except ImportError:
+                    pass
+                except Exception as e:
+                    print(f"Error checking max conversation duration: {e}", uid, session_id)
+
+            if split_reason:
                 print(
-                    f"Conversation {current_conversation_id} timeout reached ({seconds_since_last_update:.1f}s). Processing...",
+                    f"Conversation {current_conversation_id} split triggered ({split_reason}: {split_elapsed_seconds:.1f}s/{split_limit_seconds}s). Processing...",
                     uid,
                     session_id,
                 )
@@ -1831,6 +1858,9 @@ async def _stream_handler(
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
                                 if suggested_segments:
+                                    if first_audio_byte_timestamp is None:
+                                        first_audio_byte_timestamp = last_activity_time
+                                        last_usage_record_timestamp = first_audio_byte_timestamp
                                     # Attach stt_provider to each segment
                                     if stt_provider:
                                         for seg in suggested_segments:
@@ -2092,7 +2122,12 @@ async def listen_handler(
 
     # Ella sidecar: auto-provision check
     try:
-        from ella.routers.auto_provision import get_agent_cluster, auto_provision_user
+        from ella.routers.auto_provision import (
+            auto_provision_user,
+            ensure_firestore_user_document,
+            get_agent_cluster,
+        )
+        await ensure_firestore_user_document(uid)
         cluster = await get_agent_cluster(uid)
         if not cluster:
             logger = logging.getLogger(__name__)

@@ -17,6 +17,7 @@ Endpoints:
 - POST   /v1/ella/chat/stream                           - Stream chat response from Grok (xAI)
 NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n webhooks directly.
 - GET    /v1/ella/health                               - Health check
+- GET    /v1/ella/conversation/{id}/data               - Fetch conversation data with transcript (internal)
 """
 
 import hashlib
@@ -37,10 +38,12 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from models.conversation import CategoryEnum
 
 
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
 from utils.notifications import send_notification
 from utils.other.storage import storage_client
 
@@ -168,16 +171,39 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
 
+    try:
+        sanitized_update = sanitize_summary_update(
+            title=update.title,
+            overview=update.overview,
+            emoji=update.emoji,
+            category=update.category,
+        )
+    except SummarySanitizationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Unsafe conversation summary", "violations": e.violations},
+        )
+
     # Build Firestore dot-notation update dict
     update_data = {}
-    if update.title is not None:
-        update_data["structured.title"] = update.title
+    if sanitized_update.title is not None:
+        update_data["structured.title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        update_data["structured.overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        update_data["structured.emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
+        try:
+            CategoryEnum(sanitized_update.category)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid category: '{sanitized_update.category}'")
+        update_data["structured.category"] = sanitized_update.category
+
+    # Keep this internal callback in parity with the MCP tool path so the app
+    # will surface the refreshed structured overview instead of stale app output.
     if update.overview is not None:
-        update_data["structured.overview"] = update.overview
-    if update.emoji is not None:
-        update_data["structured.emoji"] = update.emoji
-    if update.category is not None:
-        update_data["structured.category"] = update.category
+        update_data["apps_results"] = []
+        update_data["plugins_results"] = []
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -192,6 +218,151 @@ async def update_conversation_summary(
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "sanitizer_warnings": sanitized_update.warnings,
+    }
+
+
+# ============================================================================
+# Conversation Data Fetch (for reprocessing pipeline)
+# ============================================================================
+
+
+def _conversation_field(conversation, key: str, default=None):
+    if isinstance(conversation, dict):
+        return conversation.get(key, default)
+    return getattr(conversation, key, default)
+
+
+def _structured_field(structured, key: str):
+    if isinstance(structured, dict):
+        return structured.get(key)
+    return getattr(structured, key, None)
+
+
+@router.get("/conversation/{conversation_id}/data")
+async def get_conversation_data(
+    conversation_id: str,
+    uid: Optional[str] = None,
+):
+    """
+    Fetch conversation data used by the reprocessing pipeline when re-firing the
+    conversation-ready webhook. Internal endpoint; requires uid as query param.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_parts = []
+    for segment in segments:
+        if isinstance(segment, dict):
+            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
+            text = segment.get("text", "")
+        else:
+            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
+            text = getattr(segment, "text", "")
+        transcript_parts.append(f"{speaker}: {text}")
+
+    structured_src = _conversation_field(conversation, "structured", {}) or {}
+    structured = {}
+    if structured_src:
+        structured = {
+            "title": _structured_field(structured_src, "title"),
+            "overview": _structured_field(structured_src, "overview"),
+            "emoji": _structured_field(structured_src, "emoji"),
+            "category": _structured_field(structured_src, "category"),
+        }
+        if structured.get("category") and hasattr(structured["category"], "value"):
+            structured["category"] = structured["category"].value
+
+    return {
+        "conversation_id": conversation_id,
+        "uid": uid,
+        "transcript": "\n\n".join(transcript_parts),
+        "segment_count": len(segments),
+        "structured": structured,
+        "started_at": str(_conversation_field(conversation, "started_at", "")),
+        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
+    }
+
+
+# ============================================================================
+# Conversation Data Fetch (for reprocessing pipeline)
+# ============================================================================
+
+
+def _conversation_field(conversation, key: str, default=None):
+    if isinstance(conversation, dict):
+        return conversation.get(key, default)
+    return getattr(conversation, key, default)
+
+
+def _structured_field(structured, key: str):
+    if isinstance(structured, dict):
+        return structured.get(key)
+    return getattr(structured, key, None)
+
+
+@router.get("/conversation/{conversation_id}/data")
+async def get_conversation_data(
+    conversation_id: str,
+    uid: Optional[str] = None,
+):
+    """
+    Fetch conversation data used by the reprocessing pipeline when re-firing the
+    conversation-ready webhook. Internal endpoint; requires uid as query param.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_parts = []
+    for segment in segments:
+        if isinstance(segment, dict):
+            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
+            text = segment.get("text", "")
+        else:
+            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
+            text = getattr(segment, "text", "")
+        transcript_parts.append(f"{speaker}: {text}")
+
+    structured_src = _conversation_field(conversation, "structured", {}) or {}
+    structured = {}
+    if structured_src:
+        structured = {
+            "title": _structured_field(structured_src, "title"),
+            "overview": _structured_field(structured_src, "overview"),
+            "emoji": _structured_field(structured_src, "emoji"),
+            "category": _structured_field(structured_src, "category"),
+        }
+        if structured.get("category") and hasattr(structured["category"], "value"):
+            structured["category"] = structured["category"].value
+
+    return {
+        "conversation_id": conversation_id,
+        "uid": uid,
+        "transcript": "\n\n".join(transcript_parts),
+        "segment_count": len(segments),
+        "structured": structured,
+        "started_at": str(_conversation_field(conversation, "started_at", "")),
+        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }
 
 
@@ -216,6 +387,7 @@ async def ella_health():
             "/v1/ella/generate-dashboard-token",
             "# Caregiver CRUD: n8n.ella-ai-care.com/webhook/caregiver-*",
             "/v1/ella/chat/stream",
+            "/v1/ella/conversation/{id}/data",
             "/v1/ella/health",
         ],
     }
@@ -809,4 +981,3 @@ async def generate_dashboard_token_endpoint(uid: str, caregiver_id: str):
 # All caregiver data in ella-ai-care Postgres, not OMI Firestore.
 # See: https://github.com/ellaaicare/ella-ai/issues/55
 # ============================================================================
-

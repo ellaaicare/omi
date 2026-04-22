@@ -87,6 +87,7 @@ Future<void> updateCaregiverPermissions(String caregiverId, {required bool daily
       'uid': _uid,
       'caregiver_id': caregiverId,
       'receive_daily_summary': dailySummary,
+      'daily_summary_email': dailySummary,
     }),
   );
   if (response.statusCode != 200) {
@@ -108,6 +109,21 @@ Future<void> setEmergencyContact(String caregiverId) async {
     throw CaregiverApiException(
       statusCode: response.statusCode,
       message: 'Failed to set emergency contact',
+    );
+  }
+}
+
+/// Clear emergency contact (set to none)
+Future<void> clearEmergencyContact() async {
+  final response = await http.post(
+    Uri.parse('$_n8nBase/caregiver-set-emergency'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'uid': _uid, 'caregiver_id': ''}),
+  );
+  if (response.statusCode != 200) {
+    throw CaregiverApiException(
+      statusCode: response.statusCode,
+      message: 'Failed to clear emergency contact',
     );
   }
 }

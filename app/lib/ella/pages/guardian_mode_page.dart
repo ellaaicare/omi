@@ -19,7 +19,9 @@ class _GuardianModePageState extends State<GuardianModePage> {
   List<GuardianPreset> _allPresets = [];
 
   // Current saved state (from server).
-  GuardianModeState _currentState = const GuardianModeState(features: ['ACTIVE_SUPPORT']);
+  GuardianModeState _currentState = const GuardianModeState(
+    features: ['ACTIVE_SUPPORT'],
+  );
 
   // Pending selection state (user has made changes but not saved).
   String? _selectedOverride; // 'CYBORG' | 'DEMO' | null
@@ -79,8 +81,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
   bool get _hasChanges {
     final pending = _pendingState;
-    return pending.override != _currentState.override ||
-        !_sameFeatures(pending.features, _currentState.features);
+    return pending.override != _currentState.override || !_sameFeatures(pending.features, _currentState.features);
   }
 
   bool _sameFeatures(List<String> a, List<String> b) {
@@ -153,7 +154,10 @@ class _GuardianModePageState extends State<GuardianModePage> {
                 onPressed: () => Navigator.of(ctx).pop(false),
                 child: const Text(
                   'Cancel',
-                  style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: EllaColors.textTertiary,
+                  ),
                 ),
               ),
               TextButton(
@@ -183,9 +187,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
         name: _fallbackLabel(key),
         description: '',
         detailsBullets: const [],
-        color: GuardianModeKey.fromString(key).isOverride
-            ? const Color(0xFFEC4899)
-            : const Color(0xFF14B8A6),
+        color: GuardianModeKey.fromString(key).isOverride ? const Color(0xFFEC4899) : const Color(0xFF14B8A6),
       ),
     );
   }
@@ -194,6 +196,8 @@ class _GuardianModePageState extends State<GuardianModePage> {
     switch (key) {
       case 'CYBORG':
         return 'Cyborg';
+      case 'CHATBOT':
+        return 'Chatbot';
       case 'DEMO':
         return 'Demo';
       case 'EMERGENCY_ONLY':
@@ -212,7 +216,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
   // ── Intelligence mode rows (exclusive radio) ──────────────────────────────
 
   List<String> get _overrideModes {
-    final modes = ['CYBORG'];
+    final modes = ['CYBORG', 'CHATBOT'];
     if (widget.showDemo) modes.add('DEMO');
     return modes;
   }
@@ -248,18 +252,26 @@ class _GuardianModePageState extends State<GuardianModePage> {
         centerTitle: false,
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
+          ? const Center(
+              child: CircularProgressIndicator(color: EllaColors.primary),
+            )
           : Column(
               children: [
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
                     children: [
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 16),
                         child: Text(
                           'Choose how closely Ella monitors and supports your loved one.',
-                          style: TextStyle(fontSize: 16, color: EllaColors.textTertiary),
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
 
@@ -268,8 +280,11 @@ class _GuardianModePageState extends State<GuardianModePage> {
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
-                          'Replaces the care system entirely.',
-                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                          'Controls how Ella detects and processes conversations. Does not change who receives alerts.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
                       ..._overrideModes.map((key) {
@@ -297,24 +312,38 @@ class _GuardianModePageState extends State<GuardianModePage> {
                           onTap: () => Navigator.push(
                             context,
                             MaterialPageRoute(
-                                builder: (_) => const EllaDemoScenariosPage()),
+                              builder: (_) => const EllaDemoScenariosPage(),
+                            ),
                           ),
-                          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                          borderRadius: BorderRadius.circular(
+                            EllaSizes.radiusMedium,
+                          ),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 10,
+                            ),
                             child: Row(
                               children: [
-                                const Icon(Icons.list_alt,
-                                    color: EllaColors.primary, size: 20),
+                                const Icon(
+                                  Icons.list_alt,
+                                  color: EllaColors.primary,
+                                  size: 20,
+                                ),
                                 const SizedBox(width: 10),
                                 const Text(
                                   'View Demo Scenarios',
                                   style: TextStyle(
-                                      fontSize: 16, color: EllaColors.primary),
+                                    fontSize: 16,
+                                    color: EllaColors.primary,
+                                  ),
                                 ),
                                 const Spacer(),
-                                const Icon(Icons.chevron_right,
-                                    color: EllaColors.textTertiary, size: 20),
+                                const Icon(
+                                  Icons.chevron_right,
+                                  color: EllaColors.textTertiary,
+                                  size: 20,
+                                ),
                               ],
                             ),
                           ),
@@ -327,8 +356,11 @@ class _GuardianModePageState extends State<GuardianModePage> {
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
-                          'Combine multiple features simultaneously.',
-                          style: TextStyle(fontSize: 13, color: EllaColors.textTertiary),
+                          'Choose which care features are active. Critical alerts to your emergency contact remain active even when Guardian is off.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
+                          ),
                         ),
                       ),
                       ..._careFeatureKeys.map((key) {
@@ -449,9 +481,7 @@ class _OverrideRow extends StatelessWidget {
                     width: 2,
                   ),
                 ),
-                child: isSelected
-                    ? const Icon(Icons.check, size: 12, color: Colors.white)
-                    : null,
+                child: isSelected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -517,9 +547,7 @@ class _FeatureRow extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isChecked && !dimmed
-                ? preset.color.withValues(alpha: 0.08)
-                : EllaColors.bgSecondary,
+            color: isChecked && !dimmed ? preset.color.withValues(alpha: 0.08) : EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
             border: Border.all(
               color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
@@ -541,9 +569,7 @@ class _FeatureRow extends StatelessWidget {
                     width: 2,
                   ),
                 ),
-                child: isChecked && !dimmed
-                    ? const Icon(Icons.check, size: 12, color: Colors.white)
-                    : null,
+                child: isChecked && !dimmed ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -565,9 +591,7 @@ class _FeatureRow extends StatelessWidget {
                           preset.description,
                           style: TextStyle(
                             fontSize: 13,
-                            color: dimmed
-                                ? EllaColors.textTertiary.withValues(alpha: 0.5)
-                                : EllaColors.textTertiary,
+                            color: dimmed ? EllaColors.textTertiary.withValues(alpha: 0.5) : EllaColors.textTertiary,
                           ),
                         ),
                       ),
@@ -606,13 +630,26 @@ class _TurnOffButton extends StatelessWidget {
           ),
           padding: const EdgeInsets.symmetric(vertical: 14),
         ),
-        child: Text(
-          isOff ? 'Guardian Off' : 'Turn Guardian Off',
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w500,
-            color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF),
-          ),
+        child: Column(
+          children: [
+            Text(
+              isOff ? 'Guardian Off' : 'Turn Guardian Off',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'Disables audio and non-critical check-ins. Emergency alerts stay active.',
+              style: TextStyle(
+                fontSize: 12,
+                color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF).withValues(alpha: 0.7),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );

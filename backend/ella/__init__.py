@@ -11,7 +11,7 @@ Usage in main.py:
 
 Environment Variables:
     ELLA_ENABLED=true           Master switch
-    ELLA_SUMMARY_ENABLED=true   n8n summary generation
+    ELLA_SUMMARY_ENABLED=false  Legacy n8n summarize-transcript generation
     ELLA_MEMORY_ENABLED=true    n8n memory extraction
     ELLA_VOICE_V2_ENABLED=true  Grok V2V endpoint
 
@@ -26,7 +26,7 @@ from typing import Optional, Callable, Dict
 # =============================================================================
 
 ELLA_ENABLED = os.getenv("ELLA_ENABLED", "true").lower() == "true"
-ELLA_SUMMARY_ENABLED = os.getenv("ELLA_SUMMARY_ENABLED", "true").lower() == "true"
+ELLA_SUMMARY_ENABLED = os.getenv("ELLA_SUMMARY_ENABLED", "false").lower() == "true"
 ELLA_MEMORY_ENABLED = os.getenv("ELLA_MEMORY_ENABLED", "true").lower() == "true"
 ELLA_SCANNER_ENABLED = os.getenv("ELLA_SCANNER_ENABLED", "true").lower() == "true"
 ELLA_NOTIFICATIONS_ENABLED = os.getenv("ELLA_NOTIFICATIONS_ENABLED", "true").lower() == "true"
@@ -284,6 +284,33 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella trace not available: {e}", flush=True)
 
+    # Debug metadata proxy (Observer sidecars)
+    try:
+        from ella.routers.debug_metadata import router as debug_metadata_router
+
+        app.include_router(debug_metadata_router, tags=["Ella Debug"])
+        print("  🌐 /v1/ella/debug/conversations/* - Observer metadata", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella debug metadata not available: {e}", flush=True)
+
+    # App-facing conversation correction endpoint (iOS Correct Summary)
+    try:
+        from ella.routers.corrections import router as corrections_router
+
+        app.include_router(corrections_router, tags=["Conversation Corrections"])
+        print("  🌐 /v1/ella/conversations/*/corrections - Summary correction loop", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella corrections not available: {e}", flush=True)
+
+    # Escalation policy resolver (classifier output -> deterministic delivery plan)
+    try:
+        from ella.routers.escalations import router as escalations_router
+
+        app.include_router(escalations_router, tags=["Ella Escalations"])
+        print("  🌐 /v1/ella/escalations/* - Escalation policy", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella escalation policy not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
@@ -293,7 +320,6 @@ def _register_routers(app) -> None:
             print("  🌐 /v1/voice/* - Voice session endpoints", flush=True)
         except ImportError as e:
             print(f"  ⚠️ Voice endpoints not available: {e}", flush=True)
-
 
     # Guardian Mode (audio queue for iOS)
     if ELLA_GUARDIAN_ENABLED:

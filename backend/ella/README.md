@@ -255,6 +255,8 @@ print('Adapters:', list(get_all_adapters().keys()))
 | `ELLA_TESTING_ENABLED` | `false` | E2E testing endpoints |
 | `GROK_V2V_PROXY_URL` | `wss://voice.ella-ai-care.com/ws` | Grok proxy WebSocket URL |
 
+Upstream-managed patch points are tracked in `docs/POST_MERGE_PATCHES.md`. Review that file after every Basehardware upstream sync.
+
 ---
 
 ## Rollback

@@ -1014,3 +1014,65 @@ def set_user_transcription_preferences(uid: str, single_language_mode: bool = No
 
     if update_data:
         user_ref.update(update_data)
+
+
+# **************************************
+# ** Conversation Lifecycle Preferences
+# **************************************
+
+
+def get_user_conversation_lifecycle_preferences(uid: str) -> dict:
+    """
+    Get user-specific conversation lifecycle preferences.
+
+    None means "use the server default" for nullable fields.
+    """
+    user_ref = db.collection('users').document(uid)
+    user_doc = user_ref.get()
+
+    if user_doc.exists:
+        user_data = user_doc.to_dict()
+        prefs = user_data.get('conversation_lifecycle_preferences', {})
+        return {
+            'conversation_max_duration_enabled': prefs.get('conversation_max_duration_enabled'),
+            'conversation_max_duration_seconds': prefs.get('conversation_max_duration_seconds'),
+        }
+
+    return {'conversation_max_duration_enabled': None, 'conversation_max_duration_seconds': None}
+
+
+def set_user_conversation_lifecycle_preferences(
+    uid: str,
+    conversation_max_duration_enabled: bool = None,
+    conversation_max_duration_seconds: int = None,
+    update_enabled: bool = False,
+    update_seconds: bool = False,
+) -> None:
+    """Set user-specific conversation lifecycle preferences.
+
+    Passing update_* with a None value clears that override so server defaults
+    apply again.
+    """
+    user_ref = db.collection('users').document(uid)
+    update_data = {}
+
+    if update_enabled:
+        update_data[
+            'conversation_lifecycle_preferences.conversation_max_duration_enabled'
+        ] = (
+            conversation_max_duration_enabled
+            if conversation_max_duration_enabled is not None
+            else firestore.DELETE_FIELD
+        )
+
+    if update_seconds:
+        update_data[
+            'conversation_lifecycle_preferences.conversation_max_duration_seconds'
+        ] = (
+            conversation_max_duration_seconds
+            if conversation_max_duration_seconds is not None
+            else firestore.DELETE_FIELD
+        )
+
+    if update_data:
+        user_ref.update(update_data)
