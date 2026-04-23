@@ -775,7 +775,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
-    final ok = await submitConversationCorrection(
+    final result = await submitConversationCorrection(
       conversationId: widget.conversation.id,
       correctionText: correctionText,
       summaryTitle: widget.conversation.structured.title,
@@ -786,16 +786,25 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     if (!mounted) return;
     setState(() => _isSubmitting = false);
 
-    if (ok) {
+    if (result.success) {
       HapticFeedback.mediumImpact();
+      final traceInfo = result.traceId != null ? '\nTrace: ${result.traceId}' : '';
       messenger.showSnackBar(
-        const SnackBar(content: Text('Correction submitted. Ella will recheck this summary.')),
+        SnackBar(
+          content: Text(
+            'Queued for review. Ella will update this summary shortly.$traceInfo',
+          ),
+          backgroundColor: const Color(0xFF2D7A3A),
+        ),
       );
       navigator.pop();
     } else {
       HapticFeedback.lightImpact();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Could not submit correction yet. Please try again later.')),
+        SnackBar(
+          content: Text('Could not submit correction: ${result.error ?? "Unknown error"}'),
+          backgroundColor: const Color(0xFFB33A3A),
+        ),
       );
     }
   }

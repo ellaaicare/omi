@@ -83,7 +83,29 @@ Future<ServerConversation?> reProcessConversationServer(String conversationId, {
   return null;
 }
 
-Future<bool> submitConversationCorrection({
+class CorrectionSubmitResult {
+  final bool success;
+  final String? correctionId;
+  final String? traceId;
+  final String? error;
+
+  CorrectionSubmitResult({
+    required this.success,
+    this.correctionId,
+    this.traceId,
+    this.error,
+  });
+
+  factory CorrectionSubmitResult.fromJson(Map<String, dynamic> json) {
+    return CorrectionSubmitResult(
+      success: true,
+      correctionId: json['correction_id'] as String?,
+      traceId: json['trace_id'] as String?,
+    );
+  }
+}
+
+Future<CorrectionSubmitResult> submitConversationCorrection({
   required String conversationId,
   required String correctionText,
   String? summaryTitle,
@@ -104,9 +126,20 @@ Future<bool> submitConversationCorrection({
       },
     }),
   );
-  if (response == null) return false;
+  if (response == null) {
+    Logger.debug('submitConversationCorrection: response was null');
+    return CorrectionSubmitResult(success: false, error: 'Network error');
+  }
   Logger.debug('submitConversationCorrection: ${response.statusCode} ${response.body}');
-  return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
+  if (response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202) {
+    try {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      return CorrectionSubmitResult.fromJson(body);
+    } catch (_) {
+      return CorrectionSubmitResult(success: true);
+    }
+  }
+  return CorrectionSubmitResult(success: false, error: 'HTTP ${response.statusCode}');
 }
 
 Future<bool> deleteConversationServer(String conversationId) async {
