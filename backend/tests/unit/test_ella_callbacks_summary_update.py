@@ -204,6 +204,7 @@ def test_get_conversation_data_404s_when_missing(monkeypatch):
 
 def test_update_conversation_summary_records_version_and_marks_correction_applied(monkeypatch):
     captured = {}
+    audit_updates = []
 
     monkeypatch.setattr(
         callbacks.conversations_db,
@@ -214,7 +215,12 @@ def test_update_conversation_summary_records_version_and_marks_correction_applie
                 "overview": "[Ella] Original overview with enough detail to preserve.",
                 "emoji": "🧠",
                 "category": callbacks.CategoryEnum.health,
-            }
+            },
+            "correction_state": {
+                "correction_id": "corr-123",
+                "source": "ios",
+                "submitted_at": "2026-04-22T17:00:00+00:00",
+            },
         },
     )
     monkeypatch.setattr(
@@ -233,6 +239,11 @@ def test_update_conversation_summary_records_version_and_marks_correction_applie
         callbacks.conversations_db,
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "_update_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audit_updates.append(payload),
     )
 
     result = asyncio.run(
@@ -254,4 +265,8 @@ def test_update_conversation_summary_records_version_and_marks_correction_applie
     assert captured["update_data"]["correction_state"]["status"] == "applied"
     assert captured["update_data"]["correction_state"]["pending"] is False
     assert captured["update_data"]["correction_state"]["correction_id"] == "corr-123"
+    assert captured["update_data"]["correction_state"]["source"] == "ios"
+    assert captured["update_data"]["correction_state"]["submitted_at"] == "2026-04-22T17:00:00+00:00"
+    assert audit_updates[0]["status"] == "applied"
+    assert audit_updates[0]["applied_summary_version_id"] == "corr-v2"
     assert result["active_summary_version_id"] == "corr-v2"
