@@ -155,6 +155,11 @@ class ConversationSummaryUpdate(BaseModel):
     overview: Optional[str] = None
     emoji: Optional[str] = None
     category: Optional[str] = None
+    summary_source: str = "observer"
+    summary_kind: str = "observer_enriched"
+    correction_id: Optional[str] = None
+    based_on_version_id: Optional[str] = None
+    set_active: bool = True
 
 
 @router.patch("/conversation/{conversation_id}/summary")
@@ -170,6 +175,10 @@ async def update_conversation_summary(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     try:
         sanitized_update = sanitize_summary_update(
@@ -208,6 +217,36 @@ async def update_conversation_summary(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    structured = dict((conversation.get("structured") or {}))
+    if sanitized_update.title is not None:
+        structured["title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        structured["overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        structured["emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
+        structured["category"] = sanitized_update.category
+
+    version_update = conversations_db.build_summary_version_update(
+        conversation,
+        next_structured=structured,
+        source=update.summary_source,
+        kind=update.summary_kind,
+        correction_id=update.correction_id,
+        based_on_version_id=update.based_on_version_id,
+        activate=update.set_active,
+    )
+    update_data["summary_versions"] = version_update["summary_versions"]
+    update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
+    if update.correction_id:
+        update_data["correction_state"] = {
+            "correction_id": update.correction_id,
+            "status": "applied",
+            "pending": False,
+            "updated_at": datetime.now(timezone.utc),
+            "active_summary_version_id": version_update["active_summary_version_id"],
+        }
+
     try:
         conversations_db.update_conversation(uid, conversation_id, update_data)
     except Exception as e:
@@ -218,6 +257,7 @@ async def update_conversation_summary(
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "active_summary_version_id": version_update["active_summary_version_id"],
         "sanitizer_warnings": sanitized_update.warnings,
     }
 
