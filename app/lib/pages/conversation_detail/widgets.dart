@@ -760,6 +760,10 @@ class _CorrectSummarySheet extends StatefulWidget {
 class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
   final TextEditingController _controller = TextEditingController();
   bool _isSubmitting = false;
+  bool _isPolling = false;
+  int _pollCount = 0;
+  static const int _maxPolls = 10;
+  static const Duration _pollInterval = Duration(seconds: 3);
 
   @override
   void dispose() {
@@ -784,26 +788,80 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     );
 
     if (!mounted) return;
-    setState(() => _isSubmitting = false);
 
-    if (result.success) {
-      HapticFeedback.mediumImpact();
-      final traceInfo = result.traceId != null ? '\nTrace: ${result.traceId}' : '';
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            'Queued for review. Ella will update this summary shortly.$traceInfo',
-          ),
-          backgroundColor: const Color(0xFF2D7A3A),
-        ),
-      );
-      navigator.pop();
-    } else {
+    if (!result.success) {
+      setState(() => _isSubmitting = false);
       HapticFeedback.lightImpact();
       messenger.showSnackBar(
         SnackBar(
           content: Text('Could not submit correction: ${result.error ?? "Unknown error"}'),
           backgroundColor: const Color(0xFFB33A3A),
+        ),
+      );
+      return;
+    }
+
+    // Start polling for correction completion
+    setState(() {
+      _isSubmitting = false;
+      _isPolling = true;
+      _pollCount = 0;
+    });
+
+    HapticFeedback.mediumImpact();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          'Queued for review. Checking for updated summary...',
+          style: const TextStyle(color: Colors.white),
+        ),
+        backgroundColor: const Color(0xFF2D7A3A),
+        duration: const Duration(seconds: 4),
+      ),
+    );
+
+    await _pollForCorrection();
+    if (!mounted) return;
+    navigator.pop();
+  }
+
+  Future<void> _pollForCorrection() async {
+    while (_pollCount < _maxPolls) {
+      await Future.delayed(_pollInterval);
+      if (!mounted || !_isPolling) return;
+
+      _pollCount++;
+      try {
+        final updated = await getConversationById(widget.conversation.id);
+        if (!mounted || !_isPolling) return;
+
+        if (updated?.correctionState == null || !updated!.correctionState!.pending) {
+          // Correction processed — refresh the conversation detail
+          if (mounted) {
+            final provider = Provider.of<ConversationDetailProvider>(context, listen: false);
+            provider.refreshConversation();
+          }
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Summary updated!'),
+                backgroundColor: Color(0xFF2D7A3A),
+              ),
+            );
+          }
+          return;
+        }
+      } catch (_) {
+        // Continue polling on error
+      }
+    }
+
+    // Max polls reached — give up but don't show error
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Correction submitted. Refresh to see updated summary.'),
+          backgroundColor: Color(0xFF2D7A3A),
         ),
       );
     }
@@ -886,7 +944,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: _isSubmitting ? null : _submit,
+                  onPressed: (_isSubmitting || _isPolling) ? null : _submit,
                   style: FilledButton.styleFrom(
                     backgroundColor: EllaColors.primary,
                     foregroundColor: Colors.white,
@@ -894,7 +952,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   ),
-                  child: _isSubmitting
+                  child: _isSubmitting || _isPolling
                       ? const SizedBox(
                           width: 18,
                           height: 18,

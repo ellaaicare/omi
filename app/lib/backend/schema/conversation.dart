@@ -171,6 +171,38 @@ class AudioFile {
       };
 }
 
+class CorrectionState {
+  final String? correctionId;
+  final bool pending;
+  final String? status;
+  final String? source;
+  final DateTime? submittedAt;
+  final DateTime? updatedAt;
+  final String? error;
+
+  CorrectionState({
+    this.correctionId,
+    this.pending = false,
+    this.status,
+    this.source,
+    this.submittedAt,
+    this.updatedAt,
+    this.error,
+  });
+
+  factory CorrectionState.fromJson(Map<String, dynamic> json) {
+    return CorrectionState(
+      correctionId: json['correction_id'] as String?,
+      pending: json['pending'] as bool? ?? false,
+      status: json['status'] as String?,
+      source: json['source'] as String?,
+      submittedAt: json['submitted_at'] != null ? DateTime.parse(json['submitted_at']).toLocal() : null,
+      updatedAt: json['updated_at'] != null ? DateTime.parse(json['updated_at']).toLocal() : null,
+      error: json['error'] as String?,
+    );
+  }
+}
+
 class ServerConversation {
   final String id;
   final DateTime createdAt;
@@ -200,6 +232,9 @@ class ServerConversation {
   // local label
   bool isNew = false;
 
+  // Correction state from summary correction pipeline
+  CorrectionState? correctionState;
+
   ServerConversation({
     required this.id,
     required this.createdAt,
@@ -221,6 +256,7 @@ class ServerConversation {
     this.isLocked = false,
     this.starred = false,
     this.folderId,
+    this.correctionState,
   });
 
   factory ServerConversation.fromJson(Map<String, dynamic> json) {
@@ -254,6 +290,9 @@ class ServerConversation {
       isLocked: json['is_locked'] ?? false,
       starred: json['starred'] ?? false,
       folderId: json['folder_id'],
+      correctionState: json['correction_state'] != null
+          ? CorrectionState.fromJson(json['correction_state'])
+          : null,
     );
   }
 
@@ -278,6 +317,17 @@ class ServerConversation {
       'is_locked': isLocked,
       'starred': starred,
       'folder_id': folderId,
+      'correction_state': correctionState != null
+          ? {
+              'correction_id': correctionState!.correctionId,
+              'pending': correctionState!.pending,
+              'status': correctionState!.status,
+              'source': correctionState!.source,
+              'submitted_at': correctionState!.submittedAt?.toUtc().toIso8601String(),
+              'updated_at': correctionState!.updatedAt?.toUtc().toIso8601String(),
+              'error': correctionState!.error,
+            }
+          : null,
     };
   }
 
