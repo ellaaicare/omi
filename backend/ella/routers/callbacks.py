@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from database._client import db
 from models.conversation import CategoryEnum
 
 
@@ -162,6 +163,23 @@ class ConversationSummaryUpdate(BaseModel):
     set_active: bool = True
 
 
+def _update_correction_audit(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    payload: dict,
+) -> None:
+    (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("corrections")
+        .document(correction_id)
+        .set(payload, merge=True)
+    )
+
+
 @router.patch("/conversation/{conversation_id}/summary")
 async def update_conversation_summary(
     conversation_id: str,
@@ -239,10 +257,13 @@ async def update_conversation_summary(
     update_data["summary_versions"] = version_update["summary_versions"]
     update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
     if update.correction_id:
+        existing_state = conversation.get("correction_state") or {}
         update_data["correction_state"] = {
             "correction_id": update.correction_id,
             "status": "applied",
             "pending": False,
+            "source": existing_state.get("source"),
+            "submitted_at": existing_state.get("submitted_at"),
             "updated_at": datetime.now(timezone.utc),
             "active_summary_version_id": version_update["active_summary_version_id"],
         }
@@ -252,6 +273,28 @@ async def update_conversation_summary(
     except Exception as e:
         logging.error(f"Failed to update conversation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+    if update.correction_id:
+        try:
+            _update_correction_audit(
+                uid,
+                conversation_id,
+                update.correction_id,
+                {
+                    "status": "applied",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_summary_version_id": version_update["active_summary_version_id"],
+                    "summary_version_kind": update.summary_kind,
+                    "summary_version_source": update.summary_source,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update correction audit after summary apply",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": update.correction_id},
+            )
+            logger.warning(str(e))
 
     return {
         "status": "ok",
