@@ -204,6 +204,33 @@ class Structured(BaseModel):
         return result.strip()
 
 
+class SummaryVersion(BaseModel):
+    id: str = Field(description="Unique identifier for this summary version")
+    created_at: datetime = Field(description="When this summary version was created")
+    source: str = Field(default="observer", description="Producer of this summary version")
+    kind: str = Field(default="observer_enriched", description="Semantic type of this summary version")
+    title: str = Field(default="", description="Summary title for this version")
+    overview: str = Field(default="", description="Summary overview for this version")
+    emoji: str = Field(default="🧠", description="Summary emoji for this version")
+    category: CategoryEnum = Field(default=CategoryEnum.other, description="Summary category for this version")
+    correction_id: Optional[str] = Field(default=None, description="Correction event that produced this version")
+    based_on_version_id: Optional[str] = Field(default=None, description="Parent summary version identifier")
+    is_active: bool = Field(default=False, description="Whether this version is currently active")
+
+
+class CorrectionState(BaseModel):
+    correction_id: Optional[str] = Field(default=None, description="Latest correction event identifier")
+    status: Optional[str] = Field(default=None, description="Correction lifecycle status")
+    pending: bool = Field(default=False, description="Whether a correction is still pending")
+    source: Optional[str] = Field(default=None, description="Where the correction came from")
+    submitted_at: Optional[datetime] = Field(default=None, description="When the correction was first submitted")
+    updated_at: Optional[datetime] = Field(default=None, description="When the correction state last changed")
+    active_summary_version_id: Optional[str] = Field(
+        default=None, description="Currently active summary version while this state applies"
+    )
+    error: Optional[str] = Field(default=None, description="Last correction processing error if any")
+
+
 class Geolocation(BaseModel):
     google_place_id: Optional[str] = None
     latitude: float
@@ -297,6 +324,9 @@ class Conversation(BaseModel):
     language: Optional[str] = None  # applies only to Friend # TODO: once released migrate db to default 'en'
 
     structured: Structured
+    summary_versions: List[SummaryVersion] = []
+    active_summary_version_id: Optional[str] = None
+    correction_state: Optional[CorrectionState] = None
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None
