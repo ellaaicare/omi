@@ -35,6 +35,7 @@ import 'package:omi/widgets/extensions/string.dart';
 import 'conversation_detail_provider.dart';
 import 'test_prompts.dart';
 import 'widgets/audio_download_progress_sheet.dart';
+import 'widgets/internal_assessment_debug_sheet.dart';
 import 'widgets/name_speaker_sheet.dart';
 import 'widgets/share_to_contacts_sheet.dart';
 import 'package:omi/ella/ella_theme.dart';
@@ -1324,6 +1325,24 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
   @override
   bool get wantKeepAlive => true;
 
+  void _maybeShowInternalAssessment(BuildContext context) {
+    final conversation = context.read<ConversationDetailProvider>().conversation;
+    if (!DebugInternalAssessmentSheet.isSupported(
+      conversation,
+      isDebugMode: kDebugMode,
+      isIOS: PlatformService.isIOS,
+    )) {
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DebugInternalAssessmentSheet(conversation: conversation),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -1343,6 +1362,7 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
               widget.onTapWhenSearchEmpty!();
             }
           },
+          onLongPress: () => _maybeShowInternalAssessment(context),
           child: Selector<ConversationDetailProvider, Tuple3<bool, bool, Function(int)>>(
             selector: (context, provider) =>
                 Tuple3(provider.conversation.discarded, provider.showRatingUI, provider.setConversationRating),
