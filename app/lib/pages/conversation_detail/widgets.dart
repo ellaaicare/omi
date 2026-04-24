@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -683,7 +684,97 @@ class AppResultDetailWidget extends StatelessWidget {
               appSummary: content,
             ),
           ],
+          if (kDebugMode && conversation.internalAssessment != null) ...[
+            const SizedBox(height: 18),
+            _InternalAssessmentDebugWidget(
+              conversation: conversation,
+            ),
+          ],
         ],
+      ),
+    );
+  }
+}
+
+/// Debug-only widget that renders internal_assessment fields.
+/// Hidden in release builds — not visible to caregivers.
+class _InternalAssessmentDebugWidget extends StatelessWidget {
+  final ServerConversation conversation;
+
+  const _InternalAssessmentDebugWidget({required this.conversation});
+
+  @override
+  Widget build(BuildContext context) {
+    final a = conversation.internalAssessment!;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFFB300)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.bug_report, size: 16, color: Color(0xFFFF8F00)),
+              SizedBox(width: 6),
+              Text(
+                'INTERNAL ASSESSMENT (debug)',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFFFF8F00),
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              if (a.riskLevel != null) _debugChip('Risk: ${a.riskLevel}', const Color(0xFFE53935)),
+              if (a.mediaLikelihood != null)
+                _debugChip('Media: ${(a.mediaLikelihood! * 100).toStringAsFixed(0)}%', const Color(0xFF1565C0)),
+              if (a.speakerConfidence != null) _debugChip('Speaker: ${a.speakerConfidence}', const Color(0xFF6A1B9A)),
+              if (a.caregiverRelevance != null) _debugChip('CG Relevance: ${a.caregiverRelevance}', const Color(0xFF2E7D32)),
+              if (a.escalationRecommendation != null)
+                _debugChip('Escalation: ${a.escalationRecommendation}', const Color(0xFFD84315)),
+            ],
+          ),
+          if (a.reasonCodes.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Reasons: ${a.reasonCodes.join(", ")}',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF5D4037)),
+            ),
+          ],
+          if (a.notes != null && a.notes!.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Notes: ${a.notes}',
+              style: const TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: Color(0xFF5D4037)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _debugChip(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color),
       ),
     );
   }

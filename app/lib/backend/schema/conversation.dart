@@ -203,6 +203,40 @@ class CorrectionState {
   }
 }
 
+/// Internal assessment payload from observer dual-pass pipeline.
+/// Debug/operator use only — NOT shown to caregivers by default.
+class InternalAssessment {
+  final double? mediaLikelihood;
+  final String? speakerConfidence;
+  final String? riskLevel;
+  final String? caregiverRelevance;
+  final String? escalationRecommendation;
+  final List<String> reasonCodes;
+  final String? notes;
+
+  InternalAssessment({
+    this.mediaLikelihood,
+    this.speakerConfidence,
+    this.riskLevel,
+    this.caregiverRelevance,
+    this.escalationRecommendation,
+    this.reasonCodes = const [],
+    this.notes,
+  });
+
+  factory InternalAssessment.fromJson(Map<String, dynamic> json) {
+    return InternalAssessment(
+      mediaLikelihood: (json['media_likelihood'] as num?)?.toDouble(),
+      speakerConfidence: json['speaker_confidence'] as String?,
+      riskLevel: json['risk_level'] as String?,
+      caregiverRelevance: json['caregiver_relevance'] as String?,
+      escalationRecommendation: json['escalation_recommendation'] as String?,
+      reasonCodes: (json['reason_codes'] as List<dynamic>?)?.cast<String>() ?? [],
+      notes: json['notes'] as String?,
+    );
+  }
+}
+
 class ServerConversation {
   final String id;
   final DateTime createdAt;
@@ -235,6 +269,9 @@ class ServerConversation {
   // Correction state from summary correction pipeline
   CorrectionState? correctionState;
 
+  // Internal assessment from observer dual-pass pipeline (debug only)
+  InternalAssessment? internalAssessment;
+
   ServerConversation({
     required this.id,
     required this.createdAt,
@@ -257,6 +294,7 @@ class ServerConversation {
     this.starred = false,
     this.folderId,
     this.correctionState,
+    this.internalAssessment,
   });
 
   factory ServerConversation.fromJson(Map<String, dynamic> json) {
@@ -293,6 +331,9 @@ class ServerConversation {
       correctionState: json['correction_state'] != null
           ? CorrectionState.fromJson(json['correction_state'])
           : null,
+      internalAssessment: json['internal_assessment'] != null
+          ? InternalAssessment.fromJson(json['internal_assessment'])
+          : null,
     );
   }
 
@@ -326,6 +367,17 @@ class ServerConversation {
               'submitted_at': correctionState!.submittedAt?.toUtc().toIso8601String(),
               'updated_at': correctionState!.updatedAt?.toUtc().toIso8601String(),
               'error': correctionState!.error,
+            }
+          : null,
+      'internal_assessment': internalAssessment != null
+          ? {
+              'media_likelihood': internalAssessment!.mediaLikelihood,
+              'speaker_confidence': internalAssessment!.speakerConfidence,
+              'risk_level': internalAssessment!.riskLevel,
+              'caregiver_relevance': internalAssessment!.caregiverRelevance,
+              'escalation_recommendation': internalAssessment!.escalationRecommendation,
+              'reason_codes': internalAssessment!.reasonCodes,
+              'notes': internalAssessment!.notes,
             }
           : null,
     };
