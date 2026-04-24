@@ -270,3 +270,107 @@ def test_update_conversation_summary_records_version_and_marks_correction_applie
     assert audit_updates[0]["status"] == "applied"
     assert audit_updates[0]["applied_summary_version_id"] == "corr-v2"
     assert result["active_summary_version_id"] == "corr-v2"
+
+
+def test_update_conversation_summary_records_enrichment_state(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "structured": {
+                "title": "Original title",
+                "overview": "[Ella] Original overview with enough detail to preserve.",
+                "emoji": "🧠",
+                "category": callbacks.CategoryEnum.health,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "build_summary_version_update",
+        lambda conversation, **kwargs: {
+            "summary_versions": [{"id": "obs-v2", "title": kwargs["next_structured"]["title"]}],
+            "active_summary_version_id": "obs-v2",
+            "new_summary_version_id": "obs-v2",
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
+    )
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Observer title",
+                overview="[Ella] Observer overview with enough detail to safely replace the summary.",
+                summary_source="observer",
+                summary_kind="observer_enriched",
+                trace_id="trace-123",
+            ),
+            uid="user-123",
+        )
+    )
+
+    enrichment_state = captured["update_data"]["enrichment_state"]
+    assert enrichment_state["status"] == "writeback_applied"
+    assert enrichment_state["pending"] is False
+    assert enrichment_state["source"] == "observer"
+    assert enrichment_state["kind"] == "observer_enriched"
+    assert enrichment_state["trace_id"] == "trace-123"
+    assert enrichment_state["error"] is None
+    assert result["active_summary_version_id"] == "obs-v2"
+
+
+def test_list_enrichment_reconcile_candidates_filters_to_unenriched_recent_conversations(monkeypatch):
+    fixture = [
+        {
+            "id": "conv-enriched",
+            "created_at": "2026-04-23T18:00:00Z",
+            "structured": {"title": "Enriched"},
+            "active_summary_version_id": "v1",
+            "summary_versions": [
+                {"id": "v1", "source": "observer", "kind": "observer_enriched", "is_active": True}
+            ],
+            "enrichment_state": {"status": "writeback_applied"},
+        },
+        {
+            "id": "conv-missing",
+            "created_at": "2026-04-23T18:05:00Z",
+            "structured": {"title": "Missing enrich"},
+            "active_summary_version_id": "v2",
+            "summary_versions": [{"id": "v2", "source": "legacy", "kind": "legacy_current", "is_active": True}],
+        },
+        {
+            "id": "conv-failed",
+            "created_at": "2026-04-23T18:10:00Z",
+            "structured": {"title": "Failed enrich"},
+            "active_summary_version_id": "v3",
+            "summary_versions": [
+                {"id": "v3", "source": "observer", "kind": "observer_enriched", "is_active": True}
+            ],
+            "enrichment_state": {"status": "failed", "error": "timeout"},
+        },
+    ]
+
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversations_without_photos", lambda uid, **kwargs: fixture)
+    monkeypatch.setattr(callbacks.conversations_db, "get_conversations", lambda uid, **kwargs: fixture)
+
+    result = asyncio.run(
+        callbacks.list_enrichment_reconcile_candidates(
+            uid="user-123",
+            lookback_minutes=180,
+            limit=25,
+        )
+    )
+
+    assert result["uid"] == "user-123"
+    assert result["total_scanned"] == 3
+    assert result["candidate_count"] == 2
+    assert [candidate["conversation_id"] for candidate in result["candidates"]] == ["conv-missing", "conv-failed"]
+    assert result["candidates"][0]["reason"] == "active_summary_not_enriched"
+    assert result["candidates"][1]["reason"] == "enrichment_failed"

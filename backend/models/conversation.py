@@ -231,6 +231,16 @@ class CorrectionState(BaseModel):
     error: Optional[str] = Field(default=None, description="Last correction processing error if any")
 
 
+class EnrichmentState(BaseModel):
+    status: Optional[str] = Field(default=None, description="Normal enrichment lifecycle status")
+    pending: bool = Field(default=False, description="Whether enrichment is still pending")
+    source: Optional[str] = Field(default=None, description="Producer of the active enriched summary")
+    kind: Optional[str] = Field(default=None, description="Semantic type of the active enriched summary")
+    trace_id: Optional[str] = Field(default=None, description="Trace identifier for the last enrichment attempt")
+    updated_at: Optional[datetime] = Field(default=None, description="When enrichment state last changed")
+    error: Optional[str] = Field(default=None, description="Last enrichment processing error if any")
+
+
 class Geolocation(BaseModel):
     google_place_id: Optional[str] = None
     latitude: float
@@ -327,6 +337,7 @@ class Conversation(BaseModel):
     summary_versions: List[SummaryVersion] = []
     active_summary_version_id: Optional[str] = None
     correction_state: Optional[CorrectionState] = None
+    enrichment_state: Optional[EnrichmentState] = None
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None
