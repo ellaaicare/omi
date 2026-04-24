@@ -15,6 +15,7 @@ import 'package:omi/services/devices.dart';
 import 'package:omi/services/notifications.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/battery_activity_policy.dart';
 import 'package:omi/utils/device.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/debouncer.dart';
@@ -215,6 +216,17 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
   Future periodicConnect(String printer, {bool boundDeviceOnly = false}) async {
     _reconnectionTimer?.cancel();
+    if (!_shouldStartPeriodicReconnect(
+      boundDeviceOnly: boundDeviceOnly,
+      pairingActive: _isPairingReconnectTrigger(printer),
+    )) {
+      Logger.debug(
+        'Skipping BLE periodic reconnect: trigger=$printer, '
+        'savedDevice=${_hasSavedBtDevice()}, boundDeviceOnly=$boundDeviceOnly, '
+        'isConnected=$isConnected, connectedDevice=${connectedDevice?.id}',
+      );
+      return;
+    }
     scan(t) async {
       debugPrint("Period connect seconds: $_connectionCheckSeconds, triggered timer at ${DateTime.now()}");
 
@@ -243,6 +255,41 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
 
     _reconnectionTimer = Timer.periodic(Duration(seconds: _connectionCheckSeconds), scan);
     scan(_reconnectionTimer);
+  }
+
+  bool _hasSavedBtDevice() => SharedPreferencesUtil().btDevice.id.isNotEmpty;
+
+  bool _isPairingReconnectTrigger(String trigger) {
+    final normalized = trigger.toLowerCase();
+    return normalized.contains('onboarding') || normalized.contains('founddevices');
+  }
+
+  bool _shouldStartPeriodicReconnect({
+    required bool boundDeviceOnly,
+    required bool pairingActive,
+    bool guardianActive = false,
+  }) {
+    return BatteryActivityPolicy.shouldStartPeriodicBleReconnect(
+      hasSavedDevice: _hasSavedBtDevice(),
+      boundDeviceOnly: boundDeviceOnly,
+      pairingActive: pairingActive,
+      guardianActive: guardianActive,
+      isConnected: isConnected,
+      hasConnectedDevice: connectedDevice != null,
+    );
+  }
+
+  @visibleForTesting
+  bool shouldStartPeriodicReconnectForTesting({
+    bool boundDeviceOnly = false,
+    bool pairingActive = false,
+    bool guardianActive = false,
+  }) {
+    return _shouldStartPeriodicReconnect(
+      boundDeviceOnly: boundDeviceOnly,
+      pairingActive: pairingActive,
+      guardianActive: guardianActive,
+    );
   }
 
   Future<BtDevice?> _scanConnectDevice() async {

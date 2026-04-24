@@ -1,9 +1,16 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:internet_connection_checker_plus/internet_connection_checker_plus.dart';
 
 class ConnectivityService {
+  @visibleForTesting
+  static const idleCheckInterval = Duration(seconds: 60);
+
+  @visibleForTesting
+  static const checkTimeout = Duration(seconds: 3);
+
   static final ConnectivityService _instance = ConnectivityService._internal();
   factory ConnectivityService() => _instance;
 
@@ -11,15 +18,15 @@ class ConnectivityService {
 
   final InternetConnection _internetConnection = InternetConnection.createInstance(
     useDefaultOptions: false,
-    checkInterval: const Duration(seconds: 10),
+    checkInterval: idleCheckInterval,
     customCheckOptions: [
       InternetCheckOption(
         uri: Uri.parse('https://one.one.one.one'),
-        timeout: const Duration(seconds: 3),
+        timeout: checkTimeout,
       ),
       InternetCheckOption(
         uri: Uri.parse('https://api.ella-ai-care.com/v1/health'),
-        timeout: const Duration(seconds: 3),
+        timeout: checkTimeout,
         responseStatusFn: (response) {
           return response.statusCode < 500;
         },
@@ -46,10 +53,14 @@ class ConnectivityService {
       _isConnected = false;
     } else {
       _isConnected = await _internetConnection.hasInternetAccess;
-      _internetSubscription = _internetConnection.onStatusChange.listen(_handleInternetStatusChange);
+      _internetSubscription = _internetConnection.onStatusChange.listen(
+        _handleInternetStatusChange,
+      );
     }
 
-    _connectivitySubscription = _connectivity.onConnectivityChanged.listen(_handleConnectivityChange);
+    _connectivitySubscription = _connectivity.onConnectivityChanged.listen(
+      _handleConnectivityChange,
+    );
     _isInitialized = true;
   }
 
@@ -64,7 +75,9 @@ class ConnectivityService {
         result.contains(ConnectivityResult.wifi) ||
         result.contains(ConnectivityResult.ethernet)) {
       _internetConnection.hasInternetAccess.then(_updateConnectionState);
-      _internetSubscription ??= _internetConnection.onStatusChange.listen(_handleInternetStatusChange);
+      _internetSubscription ??= _internetConnection.onStatusChange.listen(
+        _handleInternetStatusChange,
+      );
       return;
     }
 
