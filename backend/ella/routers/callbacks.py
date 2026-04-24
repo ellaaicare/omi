@@ -23,6 +23,7 @@ NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n w
 import hashlib
 import hmac
 import io
+import json
 import logging
 import os
 import secrets
@@ -31,6 +32,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+import asyncpg
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -51,6 +53,7 @@ from utils.other.storage import storage_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella"])
+_resolve_pool: Optional[asyncpg.Pool] = None
 
 # GCS bucket for Ella TTS audio files (defaults to project's Firebase Storage bucket)
 ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorage.app")
@@ -58,6 +61,8 @@ ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorag
 # OpenAI TTS configuration
 OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
+PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 
 
 # ============================================================================
@@ -180,6 +185,80 @@ def _update_correction_audit(
     )
 
 
+async def _get_resolve_pool() -> asyncpg.Pool:
+    global _resolve_pool
+    if _resolve_pool is None:
+        _resolve_pool = await asyncpg.create_pool(
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            database="ella_ai",
+            min_size=1,
+            max_size=4,
+        )
+    return _resolve_pool
+
+
+async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
+    pool = await _get_resolve_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT ac.agents
+        FROM users u
+        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+        WHERE u.omi_uid = $1
+        """,
+        uid,
+    )
+    if not row or not row["agents"]:
+        return None
+
+    agents = row["agents"]
+    if isinstance(agents, str):
+        try:
+            agents = json.loads(agents)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(agents, dict):
+        return None
+    return agents.get("userAgentId")
+
+
+async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional[dict]:
+    """Best-effort fetch of Observer sidecar internal_assessment.
+
+    This keeps the app-facing conversation payload aligned with the OpenClaw sidecar
+    without making the summary PATCH path depend on Mac Mini reachability.
+    """
+    try:
+        agent_id = await _resolve_agent_id_for_uid(uid)
+        if not agent_id:
+            return None
+
+        headers = {}
+        if PROVISION_API_KEY:
+            headers["Authorization"] = f"Bearer {PROVISION_API_KEY}"
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{PROVISION_API_URL}/workspace/{agent_id}/metadata/conversations/{conversation_id}",
+                headers=headers,
+            )
+
+        if resp.status_code >= 400:
+            return None
+
+        data = resp.json()
+        assessment = data.get("internal_assessment")
+        return assessment if isinstance(assessment, dict) else None
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch internal_assessment from Provision API",
+            extra={"uid": uid, "conversation_id": conversation_id},
+        )
+        logger.warning(str(e))
+        return None
 @router.patch("/conversation/{conversation_id}/summary")
 async def update_conversation_summary(
     conversation_id: str,
@@ -256,6 +335,9 @@ async def update_conversation_summary(
     )
     update_data["summary_versions"] = version_update["summary_versions"]
     update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
+    internal_assessment = await _fetch_internal_assessment(uid, conversation_id)
+    if internal_assessment:
+        update_data["internal_assessment"] = internal_assessment
     if update.correction_id:
         existing_state = conversation.get("correction_state") or {}
         update_data["correction_state"] = {
