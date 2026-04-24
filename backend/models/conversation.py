@@ -241,6 +241,16 @@ class EnrichmentState(BaseModel):
     error: Optional[str] = Field(default=None, description="Last enrichment processing error if any")
 
 
+class InternalAssessment(BaseModel):
+    media_likelihood: Optional[float] = Field(default=None, description="Likelihood the audio was primarily media")
+    speaker_confidence: Optional[str] = Field(default=None, description="Confidence in speaker attribution")
+    risk_level: Optional[str] = Field(default=None, description="Internal risk classification")
+    caregiver_relevance: Optional[str] = Field(default=None, description="How relevant this is to caregiver workflows")
+    escalation_recommendation: Optional[str] = Field(default=None, description="Recommended escalation action")
+    reason_codes: List[str] = Field(default_factory=list, description="Machine-readable internal assessment reasons")
+    notes: Optional[str] = Field(default=None, description="Short internal notes for debug/operator use")
+
+
 class Geolocation(BaseModel):
     google_place_id: Optional[str] = None
     latitude: float
@@ -338,6 +348,7 @@ class Conversation(BaseModel):
     active_summary_version_id: Optional[str] = None
     correction_state: Optional[CorrectionState] = None
     enrichment_state: Optional[EnrichmentState] = None
+    internal_assessment: Optional[InternalAssessment] = None
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None

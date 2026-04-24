@@ -12,6 +12,9 @@ sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("database.memories", MagicMock())
 sys.modules.setdefault("database.users", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
+sys.modules.setdefault("asyncpg", MagicMock())
+sys.modules.setdefault("firebase_admin", MagicMock())
+sys.modules.setdefault("utils.other.endpoints", MagicMock())
 sys.modules.setdefault("utils.notifications", MagicMock())
 sys.modules.setdefault("utils.other.storage", MagicMock())
 sys.modules.pop("ella.config", None)
@@ -324,6 +327,65 @@ def test_update_conversation_summary_records_enrichment_state(monkeypatch):
     assert enrichment_state["trace_id"] == "trace-123"
     assert enrichment_state["error"] is None
     assert result["active_summary_version_id"] == "obs-v2"
+
+
+def test_update_conversation_summary_persists_internal_assessment_when_available(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "structured": {
+                "title": "Original title",
+                "overview": "[Ella] Original overview with enough detail to preserve.",
+                "emoji": "🧠",
+                "category": callbacks.CategoryEnum.health,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "build_summary_version_update",
+        lambda conversation, **kwargs: {
+            "summary_versions": [{"id": "obs-v2", "title": kwargs["next_structured"]["title"]}],
+            "active_summary_version_id": "obs-v2",
+            "new_summary_version_id": "obs-v2",
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
+    )
+    async def fake_fetch_internal_assessment(uid, conversation_id):
+        return {
+            "media_likelihood": 0.92,
+            "speaker_confidence": "low",
+            "risk_level": "none",
+            "caregiver_relevance": "low",
+            "escalation_recommendation": "none",
+            "reason_codes": ["likely_media_or_background_audio"],
+            "notes": "Likely ambient media.",
+        }
+
+    monkeypatch.setattr(callbacks, "_fetch_internal_assessment", fake_fetch_internal_assessment)
+
+    asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Observer title",
+                overview="[Ella] Observer overview with enough detail to safely replace the summary.",
+                summary_source="observer",
+                summary_kind="observer_enriched",
+            ),
+            uid="user-123",
+        )
+    )
+
+    assert captured["update_data"]["internal_assessment"]["media_likelihood"] == 0.92
+    assert captured["update_data"]["internal_assessment"]["reason_codes"] == ["likely_media_or_background_audio"]
 
 
 def test_list_enrichment_reconcile_candidates_filters_to_unenriched_recent_conversations(monkeypatch):
