@@ -189,6 +189,7 @@ class ServerConversation {
   final String? language; // applies to friend/omi only
 
   final ConversationExternalData? externalIntegration;
+  final Object? internalAssessment;
 
   ConversationStatus status;
   bool discarded;
@@ -217,6 +218,7 @@ class ServerConversation {
     this.source,
     this.language,
     this.externalIntegration,
+    this.internalAssessment,
     this.status = ConversationStatus.completed,
     this.isLocked = false,
     this.starred = false,
@@ -248,6 +250,7 @@ class ServerConversation {
       deleted: json['deleted'] ?? false,
       externalIntegration:
           json['external_data'] != null ? ConversationExternalData.fromJson(json['external_data']) : null,
+      internalAssessment: json['internal_assessment'],
       status: json['status'] != null
           ? ConversationStatus.values.asNameMap()[json['status']] ?? ConversationStatus.completed
           : ConversationStatus.completed,
@@ -274,6 +277,7 @@ class ServerConversation {
       'source': source?.toString(),
       'language': language,
       'external_data': externalIntegration?.toJson(),
+      'internal_assessment': internalAssessment,
       'status': status.toString().split('.').last,
       'is_locked': isLocked,
       'starred': starred,
@@ -283,6 +287,29 @@ class ServerConversation {
 
   int unassignedSegmentsLength() {
     return transcriptSegments.where((element) => (element.personId == null && !element.isUser)).length;
+  }
+
+  bool get hasInternalAssessment {
+    final payload = internalAssessment;
+    if (payload == null) return false;
+    if (payload is String) return payload.trim().isNotEmpty;
+    if (payload is List) return payload.isNotEmpty;
+    if (payload is Map) return payload.isNotEmpty;
+    return true;
+  }
+
+  String? get internalAssessmentDebugText {
+    final payload = internalAssessment;
+    if (payload == null) return null;
+    if (payload is String) {
+      final trimmed = payload.trim();
+      return trimmed.isEmpty ? null : trimmed;
+    }
+    try {
+      return const JsonEncoder.withIndent('  ').convert(payload);
+    } catch (_) {
+      return payload.toString();
+    }
   }
 
   int speakerWithMostUnassignedSegments() {
