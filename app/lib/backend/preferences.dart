@@ -677,7 +677,7 @@ class SharedPreferencesUtil {
   String get pendingEmergency => getString('pendingEmergency');
   set pendingEmergency(String value) => saveString('pendingEmergency', value);
 
-  // TTS Provider (dev setting) — elevenlabs | fish-audio-s2 | kokoro
+  // Voice provider (dev setting) — TTS providers plus V2V session providers.
   String get ttsProvider => getString('devTtsProvider', defaultValue: 'elevenlabs');
   set ttsProvider(String value) => saveString('devTtsProvider', value);
 
