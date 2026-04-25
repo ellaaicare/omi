@@ -52,6 +52,9 @@ class V2VClient {
 
   bool get isConnected => _isConnected;
 
+  static bool isSessionProvider(String provider) =>
+      provider == 'openclaw-direct' || provider == 'grok-voice' || provider == 'gemini-live';
+
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
     final uid = SharedPreferencesUtil().uid;
@@ -76,7 +79,7 @@ class V2VClient {
 
     // 3. Connect WebSocket
     final wsUrl = '$endpoint&token=$token';
-    Logger.debug('[V2V] Connecting to WebSocket...');
+    Logger.debug('[V2V] Connecting to WebSocket for provider=$provider...');
 
     try {
       _channel = IOWebSocketChannel.connect(

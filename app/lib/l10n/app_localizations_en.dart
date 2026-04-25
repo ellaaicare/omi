@@ -8514,4 +8514,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
+
+  @override
+  String get openClawDirectVoiceMode => 'OpenClaw Direct';
 }
