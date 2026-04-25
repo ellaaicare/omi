@@ -15896,6 +15896,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Guardian ON: Audio monitoring and care features active.'**
   String get ellaGuardianOnTooltip;
+
+  /// No description provided for @openClawDirectVoiceMode.
+  ///
+  /// In en, this message translates to:
+  /// **'OpenClaw Direct'**
+  String get openClawDirectVoiceMode;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
