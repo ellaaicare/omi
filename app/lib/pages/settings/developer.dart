@@ -816,13 +816,15 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           dropdownColor: const Color(0xFF2A2A2E),
                           underline: const SizedBox.shrink(),
                           style: const TextStyle(color: Colors.white, fontSize: 14),
-                          items: const [
-                            DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
-                            DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
-                            DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
-                            DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
-                            DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
-                            DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
+                          items: [
+                            const DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
+                            const DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
+                            const DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
+                            const DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
+                            DropdownMenuItem(
+                                value: 'openclaw-direct', child: Text(context.l10n.openClawDirectVoiceMode)),
+                            const DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
+                            const DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
                           ],
                           onChanged: (value) {
                             if (value != null) {

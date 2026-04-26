@@ -80,6 +80,13 @@ fi
 # ── Step 2: Flutter setup ─────────────────────────────────────
 log "Flutter pub get + build_runner"
 cd "$APP_DIR"
+if [ ! -f .prod.env ]; then
+  cat > .prod.env <<'EOF'
+API_BASE_URL=https://api.ella-ai-care.com/
+USE_WEB_AUTH=false
+USE_AUTH_CUSTOM_TOKEN=false
+EOF
+fi
 $FLUTTER pub get
 $DART run build_runner build --delete-conflicting-outputs
 

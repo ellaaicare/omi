@@ -4,7 +4,7 @@ import 'env.dart';
 
 part 'prod_env.g.dart';
 
-@Envied(allowOptionalFields: true, path: '.env')
+@Envied(allowOptionalFields: true, path: '.prod.env')
 final class ProdEnv implements EnvFields {
   ProdEnv();
 

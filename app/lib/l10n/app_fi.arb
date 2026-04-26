@@ -2599,5 +2599,6 @@
   "ellaAlertChannelsEnabled": "Enabled",
   "ellaAlertChannelsDisabled": "Disabled",
   "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
-  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active."
+  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active.",
+  "openClawDirectVoiceMode": "OpenClaw Direct"
 }

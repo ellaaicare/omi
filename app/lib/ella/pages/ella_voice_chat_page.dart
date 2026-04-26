@@ -91,8 +91,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     unicode: true,
   );
 
-  /// Check if current TTS provider is a V2V provider.
-  static bool _isV2VProvider(String provider) => provider == 'grok-voice' || provider == 'gemini-live';
+  /// Check if current voice provider uses the V2V session endpoint.
+  static bool _isV2VProvider(String provider) => V2VClient.isSessionProvider(provider);
 
   @override
   bool get wantKeepAlive => true;

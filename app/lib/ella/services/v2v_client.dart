@@ -52,6 +52,11 @@ class V2VClient {
 
   bool get isConnected => _isConnected;
 
+  static bool isSessionProvider(String provider) =>
+      provider == 'openclaw-direct' || provider == 'grok-voice' || provider == 'gemini-live';
+
+  static String? sessionVoiceMode(String provider) => provider == 'openclaw-direct' ? 'openclaw-direct-v1' : null;
+
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
     final uid = SharedPreferencesUtil().uid;
@@ -75,8 +80,8 @@ class V2VClient {
     await _configureAudioSession();
 
     // 3. Connect WebSocket
-    final wsUrl = '$endpoint&token=$token';
-    Logger.debug('[V2V] Connecting to WebSocket...');
+    final wsUrl = _withSessionToken(endpoint, token);
+    Logger.debug('[V2V] Connecting to WebSocket for provider=$provider...');
 
     try {
       _channel = IOWebSocketChannel.connect(
@@ -173,10 +178,17 @@ class V2VClient {
 
   Future<Map<String, dynamic>?> _createSession(String uid, String provider) async {
     try {
+      final voiceMode = sessionVoiceMode(provider);
+      final requestBody = {
+        'uid': uid,
+        'provider': provider,
+        if (voiceMode != null) 'voice_mode': voiceMode,
+      };
+
       final response = await makeApiCall(
         url: '${Env.apiBaseUrl}v1/voice/session',
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'uid': uid, 'provider': provider}),
+        body: jsonEncode(requestBody),
         method: 'POST',
         timeout: const Duration(seconds: 10),
       );
@@ -187,12 +199,21 @@ class V2VClient {
       }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
-      Logger.debug('[V2V] Session created: provider=$provider');
+      Logger.debug('[V2V] Session created: provider=$provider voice_mode=${voiceMode ?? "default"}');
       return data;
     } catch (e) {
       Logger.error('[V2V] Session create error: $e');
       return null;
     }
+  }
+
+  static String _withSessionToken(String endpoint, String token) {
+    final uri = Uri.parse(endpoint);
+    if (uri.queryParameters.containsKey('token')) {
+      return endpoint;
+    }
+    final separator = uri.hasQuery ? '&' : '?';
+    return '$endpoint${separator}token=$token';
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
