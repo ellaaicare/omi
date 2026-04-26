@@ -311,6 +311,7 @@ async def get_voice_providers():
             "available": V2V_PROVIDERS["grok-voice"]["key_check"](),
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["grok-voice"]["default_mode"],
         },
         {
             "id": "openclaw-direct",
