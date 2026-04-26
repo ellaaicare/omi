@@ -105,6 +105,13 @@ V2V_PROVIDERS = {
         "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
         "key_check": lambda: bool(GEMINI_API_KEY),
     },
+    "openai-realtime": {
+        "name": "OpenAI Realtime (V2V)",
+        "description": "Voice-to-voice via the Ella voice proxy with full OpenClaw context",
+        "default_mode": "openai-realtime-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
 }
 
 
@@ -307,6 +314,15 @@ async def get_voice_providers():
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
         },
+        {
+            "id": "openai-realtime",
+            "name": "OpenAI Realtime (V2V)",
+            "type": "v2v",
+            "description": "Voice-to-voice via the Ella voice proxy with full OpenClaw context",
+            "available": V2V_PROVIDERS["openai-realtime"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+        },
     ]
     return {"providers": providers}
 
@@ -332,7 +348,7 @@ async def create_voice_session(
 
     Args:
         uid: User ID (required)
-        provider: V2V provider — "grok-voice" (default) or "gemini-live"
+        provider: V2V provider — "grok-voice" (default), "gemini-live", or "openai-realtime"
         voice_mode: Override mode (defaults to provider's default mode)
 
     Returns:
@@ -456,7 +472,7 @@ async def synthesize_speech(
       kokoro             — Kokoro-82M via local ella-tts server (Mac Mini :8930)
       inworld            — Inworld TTS WebSocket (~120-200ms, $5-10/1M chars)
 
-    V2V providers (grok-voice, gemini-live) return 422 directing iOS to use
+    V2V providers (grok-voice, gemini-live, openai-realtime) return 422 directing iOS to use
     the /session endpoint instead — V2V replaces the entire STT→LLM→TTS chain.
     """
     _start = time.time()
@@ -525,7 +541,7 @@ async def synthesize_speech(
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live")
+        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live, openai-realtime")
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
