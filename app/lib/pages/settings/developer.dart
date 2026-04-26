@@ -821,18 +821,14 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             const DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
                             const DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
                             const DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
-                            const DropdownMenuItem(
-                                value: 'openclaw-direct',
-                                child: Text('OpenClaw Direct (full context, STT/TTS)')),
-                            const DropdownMenuItem(
-                                value: 'grok-voice',
-                                child: Text('Grok Native Realtime (context consult)')),
-                            const DropdownMenuItem(
-                                value: 'openai-native-realtime',
-                                child: Text('OpenAI Native Realtime (context injected)')),
-                            const DropdownMenuItem(
-                                value: 'gemini-native-live',
-                                child: Text('Gemini Native Live (context injected)')),
+                            DropdownMenuItem(
+                                value: 'openclaw-direct', child: Text(context.l10n.openClawDirectVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'grok-voice', child: Text(context.l10n.grokNativeRealtimeVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'openai-native-realtime', child: Text(context.l10n.openAIRealtimeVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'gemini-native-live', child: Text(context.l10n.geminiNativeLiveVoiceMode)),
                           ],
                           onChanged: (value) {
                             if (value != null) {

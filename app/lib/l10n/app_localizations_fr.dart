@@ -8596,4 +8596,10 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get openAIRealtimeVoiceMode => 'OpenAI Realtime';
+
+  @override
+  String get grokNativeRealtimeVoiceMode => 'Grok Native Realtime';
+
+  @override
+  String get geminiNativeLiveVoiceMode => 'Gemini Native Live';
 }
