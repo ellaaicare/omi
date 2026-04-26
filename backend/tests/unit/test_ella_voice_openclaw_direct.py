@@ -16,9 +16,13 @@ if str(_backend_path) not in sys.path:
     sys.path.insert(0, str(_backend_path))
 
 
-def load_voice_module():
+def load_voice_module(openclaw_native_enabled: bool = False):
     os.environ["ELLA_SESSION_SECRET"] = "test-secret"
     os.environ["ELLA_VOICE_ENDPOINT"] = "wss://voice.ella-ai-care.com/ws"
+    if openclaw_native_enabled:
+        os.environ["OPENCLAW_NATIVE_VOICE_ENABLED"] = "true"
+    else:
+        os.environ.pop("OPENCLAW_NATIVE_VOICE_ENABLED", None)
     module_path = _backend_path / "ella" / "routers" / "voice.py"
     spec = importlib.util.spec_from_file_location("ella_voice_test_module", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -103,3 +107,44 @@ def test_create_openclaw_direct_voice_session(monkeypatch):
     assert response.audio_format["sample_rate"] == 24000
     assert "mode=openclaw-direct-v1" in response.voice_endpoint
     assert "token=" in response.voice_endpoint
+
+
+def test_openclaw_native_provider_is_registered_but_blocked_by_default():
+    voice = load_voice_module()
+
+    provider = voice.V2V_PROVIDERS["openclaw-native"]
+
+    assert provider["default_mode"] == "openclaw-native-v1"
+    assert provider["endpoint_env"] == "ELLA_VOICE_ENDPOINT"
+    assert provider["key_check"]() is False
+    assert "Twilio Media Streams" in provider["blocked_reason"]
+
+
+def test_openclaw_native_session_uses_proxy_contract_when_enabled(monkeypatch):
+    voice = load_voice_module(openclaw_native_enabled=True)
+
+    class FakePool:
+        async def fetchrow(self, query, uid):
+            return None
+
+    async def fake_get_pool():
+        return FakePool()
+
+    monkeypatch.setattr(voice, "_get_pool", fake_get_pool)
+
+    response = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(
+                uid="omi-user-1",
+                provider="openclaw-native",
+            )
+        )
+    )
+
+    parsed = urlparse(response.voice_endpoint)
+    query = parse_qs(parsed.query)
+    assert response.provider == "openclaw-native"
+    assert response.voice_mode == "openclaw-native-v1"
+    assert response.audio_format["sample_rate"] == 24000
+    assert query["mode"] == ["openclaw-native-v1"]
+    assert query["token"]
