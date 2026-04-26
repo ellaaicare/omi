@@ -80,7 +80,7 @@ class V2VClient {
     await _configureAudioSession();
 
     // 3. Connect WebSocket
-    final wsUrl = '$endpoint&token=$token';
+    final wsUrl = _withSessionToken(endpoint, token);
     Logger.debug('[V2V] Connecting to WebSocket for provider=$provider...');
 
     try {
@@ -205,6 +205,15 @@ class V2VClient {
       Logger.error('[V2V] Session create error: $e');
       return null;
     }
+  }
+
+  static String _withSessionToken(String endpoint, String token) {
+    final uri = Uri.parse(endpoint);
+    if (uri.queryParameters.containsKey('token')) {
+      return endpoint;
+    }
+    final separator = uri.hasQuery ? '&' : '?';
+    return '$endpoint${separator}token=$token';
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
