@@ -3,23 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde.apps.googleusercontent.com</string>
+	<string>374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde</string>
-	<key>ANDROID_CLIENT_ID</key>
-	<string>1031333818730-1cgqp3jc5p8n2rk467pl4t56qc4lnnbr.apps.googleusercontent.com</string>
+	<string>com.googleusercontent.apps.374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui</string>
 	<key>API_KEY</key>
-	<string>AIzaSyBK-G7KmEoC72mR10gmQyb2NFBbZyDvcqM</string>
+	<string>AIzaSyC7FO-lg7wlMYpU19G_6aEPwLaHVVaLnG8</string>
 	<key>GCM_SENDER_ID</key>
-	<string>1031333818730</string>
+	<string>374648418085</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.friend-app-with-wearable.ios12.development</string>
+	<string>com.ellaaicare.ella</string>
 	<key>PROJECT_ID</key>
-	<string>based-hardware-dev</string>
+	<string>omi-dev-ca005</string>
 	<key>STORAGE_BUCKET</key>
-	<string>based-hardware-dev.firebasestorage.app</string>
+	<string>omi-dev-ca005.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -31,6 +29,8 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:1031333818730:ios:3bea63d8e4f41dbfafb513</string>
+	<string>1:374648418085:ios:1b9e915bea2c5eb56874cc</string>
+	<key>DATABASE_URL</key>
+	<string>https://omi-dev-ca005-default-rtdb.firebaseio.com</string>
 </dict>
 </plist>

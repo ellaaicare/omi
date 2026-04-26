@@ -7,7 +7,7 @@ import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, Tar
 ///
 /// Example:
 /// ```dart
-/// import 'firebase_options_dev.dart';
+/// import 'firebase_options_prod.dart';
 /// // ...
 /// await Firebase.initializeApp(
 ///   options: DefaultFirebaseOptions.currentPlatform,
@@ -43,41 +43,39 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyCz33hNRKsSsWT_Kaxi5Q_9uB7EWGn3Dq0',
-    appId: '1:1031333818730:android:de181b5b4681b7a1afb513',
-    messagingSenderId: '1031333818730',
-    projectId: 'based-hardware-dev',
-    storageBucket: 'based-hardware-dev.firebasestorage.app',
+    apiKey: 'AIzaSyC7FO-lg7wlMYpU19G_6aEPwLaHVVaLnG8',
+    appId: '1:374648418085:android:de181b5b4681b7a1afb513',
+    messagingSenderId: '374648418085',
+    projectId: 'omi-dev-ca005',
+    storageBucket: 'omi-dev-ca005.firebasestorage.app',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyBK-G7KmEoC72mR10gmQyb2NFBbZyDvcqM',
-    appId: '1:1031333818730:ios:3bea63d8e4f41dbfafb513',
-    messagingSenderId: '1031333818730',
-    projectId: 'based-hardware-dev',
-    storageBucket: 'based-hardware-dev.firebasestorage.app',
-    androidClientId: '1031333818730-1cgqp3jc5p8n2rk467pl4t56qc4lnnbr.apps.googleusercontent.com',
-    iosClientId: '1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde.apps.googleusercontent.com',
+    apiKey: 'AIzaSyC7FO-lg7wlMYpU19G_6aEPwLaHVVaLnG8',
+    appId: '1:374648418085:ios:1b9e915bea2c5eb56874cc',
+    messagingSenderId: '374648418085',
+    projectId: 'omi-dev-ca005',
+    storageBucket: 'omi-dev-ca005.firebasestorage.app',
+    iosClientId: '374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui.apps.googleusercontent.com',
     iosBundleId: 'com.ellaaicare.ella',
   );
 
   static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyC1U6S-hp8x_utpVDHtZwwBDxobhzRZI1w',
-    appId: '1:1031333818730:web:e1b83d713c04245cafb513',
-    messagingSenderId: '1031333818730',
-    projectId: 'based-hardware-dev',
-    authDomain: 'based-hardware-dev.firebaseapp.com',
-    storageBucket: 'based-hardware-dev.firebasestorage.app',
+    apiKey: 'AIzaSyC7FO-lg7wlMYpU19G_6aEPwLaHVVaLnG8',
+    appId: '1:374648418085:web:e1b83d713c04245cafb513',
+    messagingSenderId: '374648418085',
+    projectId: 'omi-dev-ca005',
+    authDomain: 'omi-dev-ca005.firebaseapp.com',
+    storageBucket: 'omi-dev-ca005.firebasestorage.app',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
-    apiKey: 'AIzaSyBK-G7KmEoC72mR10gmQyb2NFBbZyDvcqM',
-    appId: '1:1031333818730:ios:3bea63d8e4f41dbfafb513',
-    messagingSenderId: '1031333818730',
-    projectId: 'based-hardware-dev',
-    storageBucket: 'based-hardware-dev.firebasestorage.app',
-    androidClientId: '1031333818730-1cgqp3jc5p8n2rk467pl4t56qc4lnnbr.apps.googleusercontent.com',
-    iosClientId: '1031333818730-dusn243nct6i5rgfpfkj5mchuj1qnmde.apps.googleusercontent.com',
+    apiKey: 'AIzaSyC7FO-lg7wlMYpU19G_6aEPwLaHVVaLnG8',
+    appId: '1:374648418085:ios:1b9e915bea2c5eb56874cc',
+    messagingSenderId: '374648418085',
+    projectId: 'omi-dev-ca005',
+    storageBucket: 'omi-dev-ca005.firebasestorage.app',
+    iosClientId: '374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui.apps.googleusercontent.com',
     iosBundleId: 'com.ellaaicare.ella',
   );
 }
