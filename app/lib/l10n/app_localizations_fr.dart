@@ -8593,4 +8593,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get openClawDirectVoiceMode => 'OpenClaw Direct';
+
+  @override
+  String get openAIRealtimeVoiceMode => 'OpenAI Realtime';
 }

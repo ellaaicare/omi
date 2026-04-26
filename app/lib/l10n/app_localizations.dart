@@ -15902,6 +15902,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'OpenClaw Direct'**
   String get openClawDirectVoiceMode;
+
+  /// No description provided for @openAIRealtimeVoiceMode.
+  ///
+  /// In en, this message translates to:
+  /// **'OpenAI Realtime'**
+  String get openAIRealtimeVoiceMode;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

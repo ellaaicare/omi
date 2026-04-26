@@ -53,9 +53,16 @@ class V2VClient {
   bool get isConnected => _isConnected;
 
   static bool isSessionProvider(String provider) =>
-      provider == 'openclaw-direct' || provider == 'grok-voice' || provider == 'gemini-live';
+      provider == 'openclaw-direct' ||
+      provider == 'openai-realtime' ||
+      provider == 'grok-voice' ||
+      provider == 'gemini-live';
 
-  static String? sessionVoiceMode(String provider) => provider == 'openclaw-direct' ? 'openclaw-direct-v1' : null;
+  static String? sessionVoiceMode(String provider) => switch (provider) {
+        'openclaw-direct' => 'openclaw-direct-v1',
+        'openai-realtime' => 'openai-realtime-v1',
+        _ => null,
+      };
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {

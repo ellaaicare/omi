@@ -823,6 +823,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             const DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
                             DropdownMenuItem(
                                 value: 'openclaw-direct', child: Text(context.l10n.openClawDirectVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'openai-realtime', child: Text(context.l10n.openAIRealtimeVoiceMode)),
                             const DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
                             const DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
                           ],
