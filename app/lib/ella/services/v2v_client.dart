@@ -54,13 +54,14 @@ class V2VClient {
 
   static bool isSessionProvider(String provider) =>
       provider == 'openclaw-direct' ||
-      provider == 'openai-realtime' ||
+      provider == 'openai-native-realtime' ||
       provider == 'grok-voice' ||
-      provider == 'gemini-live';
+      provider == 'gemini-native-live';
 
   static String? sessionVoiceMode(String provider) => switch (provider) {
         'openclaw-direct' => 'openclaw-direct-v1',
-        'openai-realtime' => 'openai-realtime-v1',
+        'openai-native-realtime' => 'openai-native-realtime-v1',
+        'gemini-native-live' => 'gemini-native-live-v1',
         _ => null,
       };
 
