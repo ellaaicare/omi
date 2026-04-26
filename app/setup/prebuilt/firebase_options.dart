@@ -56,6 +56,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '374648418085',
     projectId: 'omi-dev-ca005',
     storageBucket: 'omi-dev-ca005.firebasestorage.app',
+    databaseURL: 'https://omi-dev-ca005-default-rtdb.firebaseio.com',
     iosClientId: '374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui.apps.googleusercontent.com',
     iosBundleId: 'com.ellaaicare.ella',
   );
@@ -67,6 +68,7 @@ class DefaultFirebaseOptions {
     projectId: 'omi-dev-ca005',
     authDomain: 'omi-dev-ca005.firebaseapp.com',
     storageBucket: 'omi-dev-ca005.firebasestorage.app',
+    databaseURL: 'https://omi-dev-ca005-default-rtdb.firebaseio.com',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
@@ -75,6 +77,7 @@ class DefaultFirebaseOptions {
     messagingSenderId: '374648418085',
     projectId: 'omi-dev-ca005',
     storageBucket: 'omi-dev-ca005.firebasestorage.app',
+    databaseURL: 'https://omi-dev-ca005-default-rtdb.firebaseio.com',
     iosClientId: '374648418085-53ldb3s1gc83f557f83huc1q56t7k5ui.apps.googleusercontent.com',
     iosBundleId: 'com.ellaaicare.ella',
   );
