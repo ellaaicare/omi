@@ -58,6 +58,11 @@ PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:82
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+OPENCLAW_NATIVE_VOICE_ENABLED = os.getenv("OPENCLAW_NATIVE_VOICE_ENABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Database connection pool (lazy-initialized, shared pattern with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
@@ -113,6 +118,15 @@ V2V_PROVIDERS = {
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
         "include_token_in_endpoint": True,
+    },
+    "openclaw-native": {
+        "name": "OpenClaw Native (blocked)",
+        "description": "Investigated native voice-call path; blocked because current runtime is telephony/Twilio Media Streams only",
+        "default_mode": "openclaw-native-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET) and OPENCLAW_NATIVE_VOICE_ENABLED,
+        "include_token_in_endpoint": True,
+        "blocked_reason": "OpenClaw voice-call exposes /voice/webhook plus Twilio Media Streams JSON/G.711 mu-law, not an OMI PCM websocket.",
     },
 }
 
@@ -335,6 +349,17 @@ async def get_voice_providers():
             "session_endpoint": "/v1/voice/session",
             "default_mode": V2V_PROVIDERS["openclaw-direct"]["default_mode"],
         },
+        {
+            "id": "openclaw-native",
+            "name": "OpenClaw Native (blocked)",
+            "type": "v2v",
+            "description": V2V_PROVIDERS["openclaw-native"]["description"],
+            "available": V2V_PROVIDERS["openclaw-native"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["openclaw-native"]["default_mode"],
+            "blocked_reason": V2V_PROVIDERS["openclaw-native"]["blocked_reason"],
+        },
     ]
     return {"providers": providers}
 
@@ -360,7 +385,7 @@ async def create_voice_session(
 
     Args:
         uid: User ID (required)
-        provider: V2V provider — "grok-voice" (default), "gemini-live", or "openclaw-direct"
+        provider: V2V provider — "grok-voice" (default), "gemini-live", "openclaw-direct", or "openclaw-native"
         voice_mode: Override mode (defaults to provider's default mode)
 
     Returns:
@@ -421,7 +446,7 @@ async def create_voice_session(
         )
 
         # Build endpoint URL with mode query param. Existing providers keep token separate
-        # for backwards compatibility; openclaw-direct returns a ready-to-connect URL.
+        # for backwards compatibility; OpenClaw proxy-backed modes return a ready-to-connect URL.
         endpoint = os.getenv(provider_info["endpoint_env"], ELLA_VOICE_ENDPOINT)
         endpoint_with_mode = build_voice_endpoint(
             endpoint,
@@ -561,7 +586,7 @@ async def synthesize_speech(
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live, openclaw-direct",
+            detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live, openclaw-direct, openclaw-native",
         )
 
     # --- ElevenLabs ---
