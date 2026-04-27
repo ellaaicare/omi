@@ -14,6 +14,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
@@ -812,7 +813,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                         ),
                         DropdownButton<String>(
-                          value: SharedPreferencesUtil().ttsProvider,
+                          value: V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider),
                           dropdownColor: const Color(0xFF2A2A2E),
                           underline: const SizedBox.shrink(),
                           style: const TextStyle(color: Colors.white, fontSize: 14),
