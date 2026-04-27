@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:audio_session/audio_session.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:flutter_sound/flutter_sound.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -39,8 +38,11 @@ class V2VClient {
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
   int _chunkCount = 0;
 
-  /// just_audio player for WAV playback
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  /// Low-latency PCM stream player for provider-native V2V audio.
+  final FlutterSoundPlayer _streamPlayer = FlutterSoundPlayer();
+  bool _streamPlayerOpen = false;
+  bool _streamPlaybackStarted = false;
+  Future<void> _streamFeedFuture = Future.value();
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
@@ -125,13 +127,6 @@ class V2VClient {
       // 4. Start recording mic audio and streaming to WebSocket
       await _startMicStream();
 
-      // 5. Listen for playback completion
-      _audioPlayer.playerStateStream.listen((state) {
-        if (state.processingState == ProcessingState.completed && _isPlaying) {
-          _onPlaybackComplete();
-        }
-      });
-
       return true;
     } catch (e) {
       Logger.error('[V2V] WebSocket connect failed: $e');
@@ -154,8 +149,11 @@ class V2VClient {
 
     await _stopMicStream();
     try {
-      await _audioPlayer.stop();
-      await _audioPlayer.dispose();
+      await _stopStreamingPlayback();
+      if (_streamPlayerOpen) {
+        await _streamPlayer.closePlayer();
+        _streamPlayerOpen = false;
+      }
     } catch (_) {}
   }
 
@@ -163,7 +161,7 @@ class V2VClient {
   Future<void> interruptPlayback() async {
     if (_isPlaying) {
       try {
-        await _audioPlayer.stop();
+        await _stopStreamingPlayback();
       } catch (_) {}
       _isPlaying = false;
     }
@@ -280,146 +278,108 @@ class V2VClient {
     _recorder = null;
   }
 
-  // --- Audio playback using just_audio (WAV file) ---
+  // --- Low-latency PCM streaming playback ---
 
-  /// Buffer incoming PCM16 audio chunk.
-  void _bufferAudioChunk(Uint8List pcmData) {
+  /// Stream incoming PCM16 audio chunk to the platform player.
+  void _streamAudioChunk(Uint8List pcmData) {
     if (pcmData.isEmpty) return;
 
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
-    // Mute mic on first chunk
+    _streamFeedFuture = _streamFeedFuture.then((_) async {
+      await _ensureStreamingPlaybackStarted();
+      _streamPlayer.uint8ListSink?.add(pcmData);
+    }).catchError((error) {
+      Logger.error('[V2V] Stream playback feed error: $error');
+      onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
+    });
+
+    // Mute mic on first chunk to avoid echo/VAD self-interrupt.
     if (!_micMuted) {
       _micMuted = true;
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Buffering audio (mic muted)'));
-      Logger.debug('[V2V] First audio chunk, mic muted');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
+      Logger.debug('[V2V] First audio chunk, streaming playback started, mic muted');
     }
 
     if (_chunkCount % 20 == 0) {
-      Logger.debug('[V2V] Buffered $_chunkCount chunks, ${_pcmBuffer.length}B');
+      Logger.debug('[V2V] Streamed $_chunkCount chunks, ${_pcmBuffer.length}B');
     }
   }
 
-  /// Called on audio_done — write WAV and play with just_audio.
+  Future<void> _ensureStreamingPlaybackStarted() async {
+    if (!_streamPlayerOpen) {
+      await _streamPlayer.openPlayer();
+      _streamPlayerOpen = true;
+    }
+
+    if (_streamPlaybackStarted) return;
+
+    _isPlaying = true;
+    _streamPlaybackStarted = true;
+    await _streamPlayer.startPlayerFromStream(
+      codec: Codec.pcm16,
+      sampleRate: 24000,
+      numChannels: 1,
+      bufferSize: 4096,
+    );
+    Logger.debug('[V2V] PCM stream player started');
+  }
+
+  Future<void> _stopStreamingPlayback() async {
+    if (!_streamPlaybackStarted) return;
+    try {
+      await _streamPlayer.stopPlayer();
+    } catch (_) {}
+    _streamPlaybackStarted = false;
+  }
+
+  /// Called on audio_done — wait for queued PCM to drain, then return to listening.
   Future<void> _finishPlayback() async {
     final pcmBytes = _pcmBuffer.toBytes();
     final stats = '$_chunkCount chunks, ${(pcmBytes.length / 1024).toStringAsFixed(1)}KB';
-    Logger.debug('[V2V] Audio done: $stats');
-    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing: $stats'));
+    Logger.debug('[V2V] Audio stream done: $stats');
+    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Finishing audio: $stats'));
 
     _pcmBuffer.clear();
     _chunkCount = 0;
 
     if (pcmBytes.isEmpty) {
       Logger.debug('[V2V] No audio data to play');
-      _micMuted = false;
-      onEvent?.call(V2VEvent(type: 'playback_complete'));
+      await _onPlaybackComplete();
       return;
     }
 
-    // Stop mic recording before switching audio session to playback
-    await _stopMicStream();
-
-    // Write WAV file
-    final wavPath = '${Directory.systemTemp.path}/v2v_response.wav';
-    final wavBytes = _buildWav(Uint8List.fromList(pcmBytes), sampleRate: 24000, numChannels: 1, bitsPerSample: 16);
-    await File(wavPath).writeAsBytes(wavBytes);
-    final durationMs = (pcmBytes.length / (24000 * 2)) * 1000;
-    Logger.debug('[V2V] WAV written: ${wavBytes.length}B, ${durationMs.toStringAsFixed(0)}ms');
-
-    // Play with just_audio
     try {
-      _isPlaying = true;
-      await _audioPlayer.setVolume(1.0);
-      await _audioPlayer.setFilePath(wavPath);
-      await _audioPlayer.play();
-      Logger.debug('[V2V] Playback started');
-
-      // Safety timeout — if playerStateStream doesn't fire completion within
-      // expected duration + 3s buffer, force restart mic anyway
-      final timeoutMs = durationMs.toInt() + 3000;
-      Future.delayed(Duration(milliseconds: timeoutMs), () {
-        if (_isPlaying) {
-          Logger.debug('[V2V] Playback safety timeout after ${timeoutMs}ms, forcing mic restart');
-          _onPlaybackComplete();
-        }
-      });
+      await _streamFeedFuture.timeout(const Duration(seconds: 5));
+      await Future.delayed(const Duration(milliseconds: 250));
+      await _onPlaybackComplete();
     } catch (e) {
-      Logger.error('[V2V] Playback error: $e');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Play error: $e'));
+      Logger.error('[V2V] Stream playback error: $e');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Stream play error: $e'));
       _isPlaying = false;
       _micMuted = false;
-      // Restart mic even on error
-      if (_isConnected) await _startMicStream();
       onEvent?.call(V2VEvent(type: 'playback_complete'));
     }
   }
 
-  /// Called when just_audio finishes playing.
+  /// Called when streaming playback finishes.
   Future<void> _onPlaybackComplete() async {
     if (!_isPlaying && !_micMuted) return; // Already handled
     Logger.debug('[V2V] Playback complete, restarting mic');
+    await _stopStreamingPlayback();
     _isPlaying = false;
     _micMuted = false;
 
-    // Restart mic recording
-    if (_isConnected) {
-      await _startMicStream();
-    }
-
     onEvent?.call(V2VEvent(type: 'playback_complete'));
-  }
-
-  /// Build a WAV file from raw PCM16 data.
-  static Uint8List _buildWav(Uint8List pcmData, {int sampleRate = 24000, int numChannels = 1, int bitsPerSample = 16}) {
-    final byteRate = sampleRate * numChannels * (bitsPerSample ~/ 8);
-    final blockAlign = numChannels * (bitsPerSample ~/ 8);
-    final dataSize = pcmData.length;
-    final fileSize = 36 + dataSize;
-
-    final header = ByteData(44);
-    // RIFF header
-    header.setUint8(0, 0x52); // R
-    header.setUint8(1, 0x49); // I
-    header.setUint8(2, 0x46); // F
-    header.setUint8(3, 0x46); // F
-    header.setUint32(4, fileSize, Endian.little);
-    header.setUint8(8, 0x57); // W
-    header.setUint8(9, 0x41); // A
-    header.setUint8(10, 0x56); // V
-    header.setUint8(11, 0x45); // E
-    // fmt chunk
-    header.setUint8(12, 0x66); // f
-    header.setUint8(13, 0x6D); // m
-    header.setUint8(14, 0x74); // t
-    header.setUint8(15, 0x20); // (space)
-    header.setUint32(16, 16, Endian.little); // chunk size
-    header.setUint16(20, 1, Endian.little); // PCM format
-    header.setUint16(22, numChannels, Endian.little);
-    header.setUint32(24, sampleRate, Endian.little);
-    header.setUint32(28, byteRate, Endian.little);
-    header.setUint16(32, blockAlign, Endian.little);
-    header.setUint16(34, bitsPerSample, Endian.little);
-    // data chunk
-    header.setUint8(36, 0x64); // d
-    header.setUint8(37, 0x61); // a
-    header.setUint8(38, 0x74); // t
-    header.setUint8(39, 0x61); // a
-    header.setUint32(40, dataSize, Endian.little);
-
-    final wav = Uint8List(44 + dataSize);
-    wav.setRange(0, 44, header.buffer.asUint8List());
-    wav.setRange(44, 44 + dataSize, pcmData);
-    return wav;
   }
 
   // --- WebSocket message handling ---
 
   void _handleMessage(dynamic message) {
     if (message is List<int>) {
-      // Binary frame = raw PCM16 audio from proxy — buffer for WAV playback
-      _bufferAudioChunk(Uint8List.fromList(message));
+      // Binary frame = raw PCM16 audio from proxy — stream directly to playback.
+      _streamAudioChunk(Uint8List.fromList(message));
       return;
     }
 
