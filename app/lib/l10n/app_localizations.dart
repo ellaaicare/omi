@@ -15900,8 +15900,26 @@ abstract class AppLocalizations {
   /// No description provided for @openClawDirectVoiceMode.
   ///
   /// In en, this message translates to:
-  /// **'OpenClaw Direct'**
+  /// **'OpenClaw Direct (STT -> OpenClaw -> TTS)'**
   String get openClawDirectVoiceMode;
+
+  /// No description provided for @openAIRealtimeVoiceMode.
+  ///
+  /// In en, this message translates to:
+  /// **'OpenAI Native Realtime'**
+  String get openAIRealtimeVoiceMode;
+
+  /// No description provided for @grokNativeRealtimeVoiceMode.
+  ///
+  /// In en, this message translates to:
+  /// **'Grok Native Realtime'**
+  String get grokNativeRealtimeVoiceMode;
+
+  /// No description provided for @geminiNativeLiveVoiceMode.
+  ///
+  /// In en, this message translates to:
+  /// **'Gemini Native Live'**
+  String get geminiNativeLiveVoiceMode;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

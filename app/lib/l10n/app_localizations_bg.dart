@@ -8551,5 +8551,14 @@ class AppLocalizationsBg extends AppLocalizations {
   String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
 
   @override
-  String get openClawDirectVoiceMode => 'OpenClaw Direct';
+  String get openClawDirectVoiceMode => 'OpenClaw Direct (STT -> OpenClaw -> TTS)';
+
+  @override
+  String get openAIRealtimeVoiceMode => 'OpenAI Native Realtime';
+
+  @override
+  String get grokNativeRealtimeVoiceMode => 'Grok Native Realtime';
+
+  @override
+  String get geminiNativeLiveVoiceMode => 'Gemini Native Live';
 }

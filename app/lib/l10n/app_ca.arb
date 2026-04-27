@@ -2569,5 +2569,8 @@
   "ellaAlertChannelsDisabled": "Disabled",
   "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
   "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active.",
-  "openClawDirectVoiceMode": "OpenClaw Direct"
+  "openClawDirectVoiceMode": "OpenClaw Direct (STT -> OpenClaw -> TTS)",
+  "openAIRealtimeVoiceMode": "OpenAI Native Realtime",
+  "grokNativeRealtimeVoiceMode": "Grok Native Realtime",
+  "geminiNativeLiveVoiceMode": "Gemini Native Live"
 }

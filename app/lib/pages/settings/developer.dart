@@ -14,6 +14,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
@@ -812,7 +813,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                         ),
                         DropdownButton<String>(
-                          value: SharedPreferencesUtil().ttsProvider,
+                          value: V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider),
                           dropdownColor: const Color(0xFF2A2A2E),
                           underline: const SizedBox.shrink(),
                           style: const TextStyle(color: Colors.white, fontSize: 14),
@@ -823,8 +824,12 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             const DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
                             DropdownMenuItem(
                                 value: 'openclaw-direct', child: Text(context.l10n.openClawDirectVoiceMode)),
-                            const DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
-                            const DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
+                            DropdownMenuItem(
+                                value: 'grok-voice', child: Text(context.l10n.grokNativeRealtimeVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'openai-native-realtime', child: Text(context.l10n.openAIRealtimeVoiceMode)),
+                            DropdownMenuItem(
+                                value: 'gemini-native-live', child: Text(context.l10n.geminiNativeLiveVoiceMode)),
                           ],
                           onChanged: (value) {
                             if (value != null) {

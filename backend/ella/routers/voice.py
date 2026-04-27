@@ -90,19 +90,38 @@ Voice Interaction Rules:
 """
 
 # V2V provider registry — maps provider ID to endpoint and metadata
+V2V_PROVIDER_ALIASES = {
+    "gemini-live": "gemini-native-live",
+    "openai-realtime": "openai-native-realtime",
+}
+
 V2V_PROVIDERS = {
     "grok-voice": {
-        "name": "Grok Voice (V2V)",
-        "description": "Voice-to-voice via Grok Realtime API, sub-second latency",
+        "name": "Grok Native Realtime (V2V)",
+        "description": "Native Grok speech-to-speech with OpenClaw context consult",
         "default_mode": "v4",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
-    "gemini-live": {
-        "name": "Gemini Live (V2V)",
-        "description": "Voice-to-voice via Gemini Live API, multimodal",
-        "default_mode": "gemini-live",
-        "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
+    "openclaw-direct": {
+        "name": "OpenClaw Direct (full context, STT/TTS)",
+        "description": "Stable OMI websocket contract backed by STT -> OpenClaw -> TTS; not provider-native realtime",
+        "default_mode": "openclaw-direct-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "openai-native-realtime": {
+        "name": "OpenAI Native Realtime (V2V)",
+        "description": "Provider-native OpenAI Realtime speech-to-speech with injected OpenClaw context",
+        "default_mode": "openai-native-realtime-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "gemini-native-live": {
+        "name": "Gemini Native Live (V2V)",
+        "description": "Provider-native Gemini Live speech-to-speech with injected OpenClaw context",
+        "default_mode": "gemini-native-live-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
         "key_check": lambda: bool(GEMINI_API_KEY),
     },
 }
@@ -217,7 +236,7 @@ def create_session_token(
     - uid: Omi user ID
     - firebase_uid: Firebase UID for user lookup
     - name: Display name for personalization
-    - voice_mode: V2V mode (v3-rich, gemini-live, etc.)
+    - voice_mode: V2V mode (v4, openclaw-direct-v1, openai-native-realtime-v1, gemini-native-live-v1, etc.)
     - provider: V2V provider ID
     - context_url: Where proxy can fetch user context
     - callback_url: Where proxy posts session results
@@ -291,21 +310,43 @@ async def get_voice_providers():
         },
         {
             "id": "grok-voice",
-            "name": "Grok Voice (V2V)",
+            "name": "Grok Native Realtime (V2V)",
             "type": "v2v",
-            "description": "Voice-to-voice via Grok Realtime API, sub-second latency",
+            "description": "Native Grok speech-to-speech with OpenClaw context consult",
             "available": V2V_PROVIDERS["grok-voice"]["key_check"](),
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["grok-voice"]["default_mode"],
         },
         {
-            "id": "gemini-live",
-            "name": "Gemini Live (V2V)",
+            "id": "openclaw-direct",
+            "name": "OpenClaw Direct (full context, STT/TTS)",
             "type": "v2v",
-            "description": "Voice-to-voice via Gemini Live API, multimodal",
-            "available": V2V_PROVIDERS["gemini-live"]["key_check"](),
+            "description": "Stable OMI websocket contract backed by STT -> OpenClaw -> TTS; not provider-native realtime",
+            "available": V2V_PROVIDERS["openclaw-direct"]["key_check"](),
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["openclaw-direct"]["default_mode"],
+        },
+        {
+            "id": "openai-native-realtime",
+            "name": "OpenAI Native Realtime (V2V)",
+            "type": "v2v",
+            "description": "Provider-native OpenAI Realtime speech-to-speech with injected OpenClaw context",
+            "available": V2V_PROVIDERS["openai-native-realtime"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["openai-native-realtime"]["default_mode"],
+        },
+        {
+            "id": "gemini-native-live",
+            "name": "Gemini Native Live (V2V)",
+            "type": "v2v",
+            "description": "Provider-native Gemini Live speech-to-speech with injected OpenClaw context",
+            "available": V2V_PROVIDERS["gemini-native-live"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+            "default_mode": V2V_PROVIDERS["gemini-native-live"]["default_mode"],
         },
     ]
     return {"providers": providers}
@@ -332,7 +373,7 @@ async def create_voice_session(
 
     Args:
         uid: User ID (required)
-        provider: V2V provider — "grok-voice" (default) or "gemini-live"
+        provider: V2V provider — "grok-voice" (default), "openclaw-direct", "openai-native-realtime", or "gemini-native-live"
         voice_mode: Override mode (defaults to provider's default mode)
 
     Returns:
@@ -347,6 +388,7 @@ async def create_voice_session(
     uid = (body.uid if body else None) or uid
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
+    provider = V2V_PROVIDER_ALIASES.get(provider, provider)
 
     if not uid:
         raise HTTPException(status_code=400, detail="uid required")
@@ -456,12 +498,13 @@ async def synthesize_speech(
       kokoro             — Kokoro-82M via local ella-tts server (Mac Mini :8930)
       inworld            — Inworld TTS WebSocket (~120-200ms, $5-10/1M chars)
 
-    V2V providers (grok-voice, gemini-live) return 422 directing iOS to use
+    V2V providers (grok-voice, openclaw-direct, openai-native-realtime, gemini-native-live) return 422 directing iOS to use
     the /session endpoint instead — V2V replaces the entire STT→LLM→TTS chain.
     """
     _start = time.time()
     text_len = len(request.text)
     provider = (x_tts_provider or "elevenlabs").lower()
+    provider = V2V_PROVIDER_ALIASES.get(provider, provider)
     text = request.text[:500]  # Cap at 500 chars
     print(f"[FLOW:VOICE-TTS] header=X-TTS-Provider raw={x_tts_provider!r} resolved={provider}", flush=True)
 
@@ -525,7 +568,7 @@ async def synthesize_speech(
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live")
+        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, openclaw-direct, openai-native-realtime, gemini-native-live")
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
