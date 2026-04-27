@@ -92,7 +92,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   );
 
   /// Check if current voice provider uses the V2V session endpoint.
-  static bool _isV2VProvider(String provider) => V2VClient.isSessionProvider(provider);
+  static bool _isV2VProvider(String provider) => V2VClient.isSessionProvider(V2VClient.normalizeProvider(provider));
 
   @override
   bool get wantKeepAlive => true;
@@ -127,10 +127,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         debugPrint('[VoiceChat] Voice tab became active, auto-starting');
         _voiceModeActive = true;
         final provider = SharedPreferencesUtil().ttsProvider;
+        final normalizedProvider = V2VClient.normalizeProvider(provider);
+        if (normalizedProvider != provider) {
+          SharedPreferencesUtil().ttsProvider = normalizedProvider;
+        }
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && _orbState == VoiceOrbState.idle) {
-            if (_isV2VProvider(provider)) {
-              _startV2V(provider);
+            if (_isV2VProvider(normalizedProvider)) {
+              _startV2V(normalizedProvider);
             } else {
               _startListening();
             }
@@ -218,8 +222,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       // Resume voice mode — check if V2V provider is selected
       _voiceModeActive = true;
       final provider = SharedPreferencesUtil().ttsProvider;
-      if (_isV2VProvider(provider)) {
-        await _startV2V(provider);
+      final normalizedProvider = V2VClient.normalizeProvider(provider);
+      if (normalizedProvider != provider) {
+        SharedPreferencesUtil().ttsProvider = normalizedProvider;
+      }
+      if (_isV2VProvider(normalizedProvider)) {
+        await _startV2V(normalizedProvider);
       } else {
         _isV2VMode = false;
         await _startListening();

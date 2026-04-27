@@ -90,6 +90,11 @@ Voice Interaction Rules:
 """
 
 # V2V provider registry — maps provider ID to endpoint and metadata
+V2V_PROVIDER_ALIASES = {
+    "gemini-live": "gemini-native-live",
+    "openai-realtime": "openai-native-realtime",
+}
+
 V2V_PROVIDERS = {
     "grok-voice": {
         "name": "Grok Native Realtime (V2V)",
@@ -383,6 +388,7 @@ async def create_voice_session(
     uid = (body.uid if body else None) or uid
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
+    provider = V2V_PROVIDER_ALIASES.get(provider, provider)
 
     if not uid:
         raise HTTPException(status_code=400, detail="uid required")
@@ -498,6 +504,7 @@ async def synthesize_speech(
     _start = time.time()
     text_len = len(request.text)
     provider = (x_tts_provider or "elevenlabs").lower()
+    provider = V2V_PROVIDER_ALIASES.get(provider, provider)
     text = request.text[:500]  # Cap at 500 chars
     print(f"[FLOW:VOICE-TTS] header=X-TTS-Provider raw={x_tts_provider!r} resolved={provider}", flush=True)
 

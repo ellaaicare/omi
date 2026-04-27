@@ -52,13 +52,20 @@ class V2VClient {
 
   bool get isConnected => _isConnected;
 
-  static bool isSessionProvider(String provider) =>
-      provider == 'openclaw-direct' ||
-      provider == 'openai-native-realtime' ||
-      provider == 'grok-voice' ||
-      provider == 'gemini-native-live';
+  static String normalizeProvider(String provider) => switch (provider) {
+        // Legacy values may remain in SharedPreferences after TestFlight upgrades.
+        'gemini-live' => 'gemini-native-live',
+        'openai-realtime' => 'openai-native-realtime',
+        _ => provider,
+      };
 
-  static String? sessionVoiceMode(String provider) => switch (provider) {
+  static bool isSessionProvider(String provider) =>
+      normalizeProvider(provider) == 'openclaw-direct' ||
+      normalizeProvider(provider) == 'openai-native-realtime' ||
+      normalizeProvider(provider) == 'grok-voice' ||
+      normalizeProvider(provider) == 'gemini-native-live';
+
+  static String? sessionVoiceMode(String provider) => switch (normalizeProvider(provider)) {
         'openclaw-direct' => 'openclaw-direct-v1',
         'openai-native-realtime' => 'openai-native-realtime-v1',
         'gemini-native-live' => 'gemini-native-live-v1',
@@ -67,6 +74,7 @@ class V2VClient {
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
+    provider = normalizeProvider(provider);
     final uid = SharedPreferencesUtil().uid;
     if (uid.isEmpty) {
       Logger.debug('[V2V] No uid, cannot connect');
@@ -186,6 +194,7 @@ class V2VClient {
 
   Future<Map<String, dynamic>?> _createSession(String uid, String provider) async {
     try {
+      provider = normalizeProvider(provider);
       final voiceMode = sessionVoiceMode(provider);
       final requestBody = {
         'uid': uid,
