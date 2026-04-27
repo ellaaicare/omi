@@ -53,6 +53,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
@@ -99,11 +100,25 @@ V2V_PROVIDERS = {
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
     "gemini-live": {
-        "name": "Gemini Live (V2V)",
-        "description": "Voice-to-voice via Gemini Live API, multimodal",
+        "name": "Gemini Live compatibility (V2V)",
+        "description": "Compatibility label for older app builds; use gemini-native-live for provider-native voice",
         "default_mode": "gemini-live",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
-        "key_check": lambda: bool(GEMINI_API_KEY),
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "gemini-native-live": {
+        "name": "Gemini Native Live (V2V)",
+        "description": "Provider-native Gemini Live speech-to-speech through Ella voice proxy",
+        "default_mode": "gemini-native-live-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "openai-native-realtime": {
+        "name": "OpenAI Native Realtime (V2V)",
+        "description": "Provider-native OpenAI Realtime speech-to-speech through Ella voice proxy",
+        "default_mode": "openai-native-realtime-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
 }
 
@@ -300,10 +315,28 @@ async def get_voice_providers():
         },
         {
             "id": "gemini-live",
-            "name": "Gemini Live (V2V)",
+            "name": "Gemini Live compatibility (V2V)",
             "type": "v2v",
-            "description": "Voice-to-voice via Gemini Live API, multimodal",
+            "description": "Compatibility label for older app builds",
             "available": V2V_PROVIDERS["gemini-live"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+        },
+        {
+            "id": "gemini-native-live",
+            "name": "Gemini Native Live (V2V)",
+            "type": "v2v",
+            "description": "Provider-native Gemini Live speech-to-speech",
+            "available": V2V_PROVIDERS["gemini-native-live"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+        },
+        {
+            "id": "openai-native-realtime",
+            "name": "OpenAI Native Realtime (V2V)",
+            "type": "v2v",
+            "description": "Provider-native OpenAI Realtime speech-to-speech",
+            "available": V2V_PROVIDERS["openai-native-realtime"]["key_check"](),
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
         },
