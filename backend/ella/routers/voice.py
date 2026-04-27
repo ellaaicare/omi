@@ -653,7 +653,12 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
         return ""
 
 
-async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name: str = "user") -> str:
+async def _fetch_memory_context(
+    gateway_url: str,
+    gateway_token: str,
+    user_name: str = "user",
+    timeout_seconds: float = 2.0,
+) -> str:
     """Fetch recent memory/agent context via OpenClaw memory_search.
     Returns formatted string of relevant memory snippets."""
     if not gateway_token:
@@ -665,13 +670,10 @@ async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name:
     }
     
     results_all = []
-    queries = [
-        f"{user_name} recent activity today schedule important",
-        f"recent conversations events updates news",
-    ]
+    queries = [f"{user_name} recent activity today schedule important"]
     
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             for query in queries:
                 try:
                     resp = await client.post(
@@ -735,6 +737,7 @@ async def get_voice_context(request: Request):
     Request body:
         uid (str, required): OMI user ID (Firebase UID / omi_uid)
         context_budget (int, optional): Max chars for context sections (default: 8000)
+        memory_timeout_seconds (float, optional): Best-effort OpenClaw memory timeout (default: 2.0)
 
     Returns structured context: user info, soul, user profile, conditions,
     medications, recent voice summaries, dynamic rules, and voice rules.
@@ -745,6 +748,7 @@ async def get_voice_context(request: Request):
         raise HTTPException(status_code=400, detail="uid is required")
 
     budget = body.get("context_budget", 8000)
+    memory_timeout_seconds = float(body.get("memory_timeout_seconds", 2.0))
     _start = time.time()
 
     # 1. DB lookup — user + agent cluster
@@ -829,7 +833,14 @@ async def get_voice_context(request: Request):
         import asyncio as _aio
         # Run both fetches concurrently
         conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=5))
-        mem_task = _aio.create_task(_fetch_memory_context(gateway_url, gateway_token, row["name"] or "user"))
+        mem_task = _aio.create_task(
+            _fetch_memory_context(
+                gateway_url,
+                gateway_token,
+                row["name"] or "user",
+                timeout_seconds=memory_timeout_seconds,
+            )
+        )
         recent_conversations, memory_context = await _aio.gather(conv_task, mem_task)
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
