@@ -1,13 +1,26 @@
 import Foundation
 import AVFoundation
 
-class GuardianModePollingService {
+class GuardianModePollingService: NSObject, AVSpeechSynthesizerDelegate {
     static let shared = GuardianModePollingService()
 
     // Strong reference — AVSpeechSynthesizer must outlive the speak call
     private let speechSynthesizer = AVSpeechSynthesizer()
 
-    private init() {}
+    private var activeTtsContext: TTSPlaybackContext?
+
+    private override init() {
+        super.init()
+        speechSynthesizer.delegate = self
+    }
+
+    private struct TTSPlaybackContext {
+        let queueItemId: String
+        let traceId: String
+        let triggerType: String?
+        let metadata: [String: Any]
+        let startedAt: Date
+    }
 
     private var pollTimer: DispatchSourceTimer?
 
@@ -145,13 +158,66 @@ class GuardianModePollingService {
 
     // MARK: - On-Device TTS
 
-    private func speakText(_ text: String) {
+    private func speakText(
+        _ text: String,
+        queueItemId: String,
+        traceId: String,
+        triggerType: String?,
+        metadata: [String: Any]
+    ) {
+        activeTtsContext = TTSPlaybackContext(
+            queueItemId: queueItemId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: metadata,
+            startedAt: Date()
+        )
+
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
         utterance.pitchMultiplier = 1.0
         speechSynthesizer.speak(utterance)
-        NSLog("TTS_SPEAK: \(text.prefix(80))")
+        NSLog("TTS_SPEAK id=\(queueItemId) trace=\(traceId): \(text.prefix(80))")
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        guard let context = activeTtsContext else { return }
+        GuardianModeManager.shared.reportPlaybackEvent(
+            eventType: "started",
+            queueItemId: context.queueItemId,
+            traceId: context.traceId,
+            triggerType: context.triggerType,
+            metadata: context.metadata
+        )
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        guard let context = activeTtsContext else { return }
+        GuardianModeManager.shared.reportPlaybackEvent(
+            eventType: "completed",
+            queueItemId: context.queueItemId,
+            traceId: context.traceId,
+            triggerType: context.triggerType,
+            durationMs: Int(Date().timeIntervalSince(context.startedAt) * 1000),
+            metadata: context.metadata
+        )
+        activeTtsContext = nil
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        guard let context = activeTtsContext else { return }
+        var eventMetadata = context.metadata
+        eventMetadata["error"] = "tts_cancelled"
+        GuardianModeManager.shared.reportPlaybackEvent(
+            eventType: "failed",
+            queueItemId: context.queueItemId,
+            traceId: context.traceId,
+            triggerType: context.triggerType,
+            durationMs: Int(Date().timeIntervalSince(context.startedAt) * 1000),
+            metadata: eventMetadata
+        )
+        activeTtsContext = nil
     }
 
     // MARK: - Private Methods
@@ -207,14 +273,15 @@ class GuardianModePollingService {
                     NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
                     var ttsMetadata = metadata
                     ttsMetadata["playback_source"] = "on_device_tts"
-                    GuardianModeManager.shared.reportPlaybackEvent(
-                        eventType: "started",
+                    ttsMetadata["capture_policy"] = GuardianModeManager.capturePolicy
+                    ttsMetadata["loop_suppression_hook"] = "guardian_playback_span"
+                    speakText(
+                        message,
                         queueItemId: eventId,
-                        traceId: traceId,
+                        traceId: traceId ?? eventId,
                         triggerType: result.triggerType,
                         metadata: ttsMetadata
                     )
-                    speakText(message)
                 }
             }
         } catch {

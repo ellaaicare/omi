@@ -249,8 +249,8 @@ extension FlutterError: Error {}
           }
       }
 
-      // Report new route to backend so consolidator knows current echo risk
-      GuardianModeManager.shared.reportPlaybackEvent()
+      // Report route changes only while an exact Guardian playback span is active.
+      GuardianModeManager.shared.reportActivePlaybackRouteChange()
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
@@ -803,9 +803,17 @@ extension AppDelegate: WCSessionDelegate {
             }
 
             let eventId = args["eventId"] as? String ?? "manual-\(Int(Date().timeIntervalSince1970))"
+            let traceId = args["traceId"] as? String ?? args["trace_id"] as? String ?? eventId
+            var metadata = args["metadata"] as? [String: Any] ?? [:]
+            metadata["injection_source"] = metadata["injection_source"] ?? "flutter_method_channel"
 
             print("AppDelegate: Injecting remote audio: \(audioURL.absoluteString)")
-            GuardianModeManager.shared.injectRemoteAudio(audioURL: audioURL, eventId: eventId)
+            GuardianModeManager.shared.injectRemoteAudio(
+                audioURL: audioURL,
+                eventId: eventId,
+                traceId: traceId,
+                metadata: metadata
+            )
             result(["status": "injected", "url": audioURLString])
 
         default:
