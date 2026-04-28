@@ -73,11 +73,20 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
       final decoded = jsonDecode(payload) as Map<String, dynamic>;
       final choices = decoded['choices'] as List<dynamic>?;
       if (choices != null && choices.isNotEmpty) {
-        final delta = choices.first['delta'] as Map<String, dynamic>?;
+        final choice = choices.first as Map<String, dynamic>;
+        if (choice['finish_reason'] != null) {
+          return ServerMessageChunk(messageId, '', MessageChunkType.done);
+        }
+
+        final delta = choice['delta'] as Map<String, dynamic>?;
         final content = delta?['content'] as String?;
         if (content != null && content.isNotEmpty) {
           return ServerMessageChunk(messageId, content, MessageChunkType.data);
         }
+
+        // Some models stream reasoning_content or empty deltas. Never surface
+        // those raw provider JSON chunks in the user-facing chat UI.
+        return ServerMessageChunk(messageId, '', MessageChunkType.data);
       }
 
       final error = decoded['error'];
