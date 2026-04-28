@@ -38,9 +38,39 @@ void main() {
       expect(events.first['channel'], 'ios_voice');
       expect(events.first['provider'], 'gemini-native-live');
       expect(events.first['role'], 'user');
-      expect(events.first['scan_policy'], 'completion');
+      expect(events.first['scan_policy'], 'immediate');
       expect(events[1]['event_id'], 'ios_voice_test:1:assistant');
       expect(events[1]['scan_policy'], 'none');
+      expect(events.first['source_ref']['source_identity'], 'ios-app:ios_voice:ios_voice_test');
+    });
+
+    test('builds stable ios_chat event ids and source refs', () {
+      final events = UnifiedMemoryService.buildTurnEvents(
+        channel: 'ios_chat',
+        sessionId: 'ios_chat_test',
+        provider: 'openclaw',
+        turnIndex: 1,
+        userText: 'what did we discuss?',
+        assistantText: 'we discussed timing.',
+        startedAt: DateTime.utc(2026, 4, 28, 2),
+        endedAt: DateTime.utc(2026, 4, 28, 2, 0, 3),
+      );
+
+      final userEvent = events.first.toJson();
+      final assistantEvent = events[1].toJson();
+
+      expect(userEvent['event_id'], 'ios_chat_test:1:user');
+      expect(assistantEvent['event_id'], 'ios_chat_test:1:assistant');
+      expect(userEvent['channel'], 'ios_chat');
+      expect(userEvent['provider'], 'openclaw');
+      expect(userEvent['role'], 'user');
+      expect(userEvent['scan_policy'], 'immediate');
+      expect(assistantEvent['role'], 'assistant');
+      expect(assistantEvent['scan_policy'], 'none');
+      expect(userEvent['source_ref']['type'], 'ios_chat_turn');
+      expect(userEvent['source_ref']['source_identity'], 'ios-app:ios_chat:ios_chat_test');
+      expect(userEvent['privacy_scope'], 'user_private');
+      expect(userEvent['text'], 'what did we discuss?');
     });
 
     test('does nothing when writes are disabled', () async {

@@ -11,20 +11,93 @@ import 'package:omi/utils/logger.dart';
 const _pendingWritesKey = 'ellaUnifiedMemoryPendingWrites';
 const _writeEnabledKey = 'ellaUnifiedMemoryWriteEnabled';
 const _mockAdapterKey = 'ellaUnifiedMemoryMockAdapter';
+const _liveCanonicalBaseUrl = 'https://api.ella-ai-care.com/';
 
 /// Staged adapter for the canonical event/timeline APIs tracked by ella-ai#789.
 ///
-/// The adapter is default-off and mock-backed so this PR can land without
-/// changing current production voice/chat routing before the backend contract
-/// is deployed.
+/// Writes are live by default now that ella-ai#793 is deployed. The
+/// SharedPreferences flags remain as a kill switch / local mock mode.
 class UnifiedMemoryService {
   UnifiedMemoryService._();
 
-  static bool get isWriteEnabled => SharedPreferencesUtil().getBool(_writeEnabledKey);
+  static bool get isWriteEnabled => SharedPreferencesUtil().getBool(_writeEnabledKey, defaultValue: true);
 
-  static bool get isMockAdapter => SharedPreferencesUtil().getBool(_mockAdapterKey, defaultValue: true);
+  static bool get isMockAdapter => SharedPreferencesUtil().getBool(_mockAdapterKey);
 
   static String createVoiceSessionId() => 'ios_voice_${const Uuid().v4()}';
+
+  static String createChatSessionId() => 'ios_chat_${const Uuid().v4()}';
+
+  static List<CanonicalEllaEvent> buildTurnEvents({
+    required String channel,
+    required String sessionId,
+    required String provider,
+    required int turnIndex,
+    required String userText,
+    required String assistantText,
+    DateTime? startedAt,
+    DateTime? endedAt,
+  }) {
+    final now = DateTime.now().toUtc();
+    final started = (startedAt ?? now).toUtc();
+    final ended = (endedAt ?? now).toUtc();
+    final trimmedUserText = userText.trim();
+    final trimmedAssistantText = assistantText.trim();
+    final events = <CanonicalEllaEvent>[
+      if (trimmedUserText.isNotEmpty)
+        CanonicalEllaEvent.turn(
+          channel: channel,
+          sessionId: sessionId,
+          provider: provider,
+          eventId: '$sessionId:$turnIndex:user',
+          role: 'user',
+          text: trimmedUserText,
+          startedAt: started,
+          endedAt: ended,
+          scanPolicy: 'immediate',
+          metadata: {'turn_index': turnIndex},
+        ),
+      if (trimmedAssistantText.isNotEmpty)
+        CanonicalEllaEvent.turn(
+          channel: channel,
+          sessionId: sessionId,
+          provider: provider,
+          eventId: '$sessionId:$turnIndex:assistant',
+          role: 'assistant',
+          text: trimmedAssistantText,
+          startedAt: started,
+          endedAt: ended,
+          scanPolicy: 'none',
+          metadata: {'turn_index': turnIndex},
+        ),
+    ];
+    return events;
+  }
+
+  static Future<void> writeChatTurn({
+    required String sessionId,
+    required String userText,
+    required String assistantText,
+    DateTime? startedAt,
+    DateTime? endedAt,
+  }) async {
+    if (!isWriteEnabled) return;
+    if (_uid.isEmpty) return;
+
+    final events = buildTurnEvents(
+      channel: 'ios_chat',
+      sessionId: sessionId,
+      provider: 'openclaw',
+      turnIndex: 1,
+      userText: userText,
+      assistantText: assistantText,
+      startedAt: startedAt,
+      endedAt: endedAt,
+    );
+
+    if (events.isEmpty) return;
+    await _writePayload({'events': events.map((event) => event.toJson()).toList()});
+  }
 
   static Future<void> writeVoiceTurn({
     required String sessionId,
@@ -38,37 +111,16 @@ class UnifiedMemoryService {
     if (!isWriteEnabled) return;
     if (_uid.isEmpty) return;
 
-    final now = DateTime.now().toUtc();
-    final started = (startedAt ?? now).toUtc();
-    final ended = (endedAt ?? now).toUtc();
-    final trimmedUserText = userText.trim();
-    final trimmedAssistantText = assistantText.trim();
-    final events = <CanonicalEllaEvent>[
-      if (trimmedUserText.isNotEmpty)
-        CanonicalEllaEvent.voice(
-          sessionId: sessionId,
-          provider: provider,
-          eventId: '$sessionId:$turnIndex:user',
-          role: 'user',
-          text: trimmedUserText,
-          startedAt: started,
-          endedAt: ended,
-          scanPolicy: 'completion',
-          metadata: {'turn_index': turnIndex},
-        ),
-      if (trimmedAssistantText.isNotEmpty)
-        CanonicalEllaEvent.voice(
-          sessionId: sessionId,
-          provider: provider,
-          eventId: '$sessionId:$turnIndex:assistant',
-          role: 'assistant',
-          text: trimmedAssistantText,
-          startedAt: started,
-          endedAt: ended,
-          scanPolicy: 'none',
-          metadata: {'turn_index': turnIndex},
-        ),
-    ];
+    final events = buildTurnEvents(
+      channel: 'ios_voice',
+      sessionId: sessionId,
+      provider: provider,
+      turnIndex: turnIndex,
+      userText: userText,
+      assistantText: assistantText,
+      startedAt: startedAt,
+      endedAt: endedAt,
+    );
 
     if (events.isEmpty) return;
     await _writePayload({'events': events.map((event) => event.toJson()).toList()});
@@ -115,8 +167,8 @@ class UnifiedMemoryService {
 
     try {
       final response = await makeApiCall(
-        url: '${Env.apiBaseUrl}v1/ella/timeline?uid=$uid&limit=$limit&channels=ios_voice,ios_chat',
-        headers: {'Content-Type': 'application/json'},
+        url: '${_canonicalBaseUrl}v1/ella/timeline?uid=$uid&limit=$limit&channels=ios_voice,ios_chat',
+        headers: await _canonicalHeaders(),
         method: 'GET',
         body: '',
         timeout: const Duration(seconds: 10),
@@ -179,8 +231,8 @@ class UnifiedMemoryService {
   static Future<bool> _post({required String path, required Map<String, dynamic> payload}) async {
     try {
       final response = await makeApiCall(
-        url: '${Env.apiBaseUrl}$path',
-        headers: {'Content-Type': 'application/json'},
+        url: _canonicalBaseUrl + path,
+        headers: await _canonicalHeaders(),
         method: 'POST',
         body: jsonEncode(payload),
         timeout: const Duration(seconds: 10),
@@ -231,6 +283,22 @@ class UnifiedMemoryService {
   }
 
   static String get _uid => SharedPreferencesUtil().uid;
+
+  static String get _canonicalBaseUrl {
+    final configured = Env.apiBaseUrl ?? '';
+    if (configured.contains('api.ella-ai-care.com')) return configured;
+    return _liveCanonicalBaseUrl;
+  }
+
+  static Future<Map<String, String>> _canonicalHeaders() async {
+    final headers = {'Content-Type': 'application/json'};
+    try {
+      headers['Authorization'] = await getAuthHeader();
+    } catch (e) {
+      Logger.debug('[UnifiedMemory] Auth header unavailable: $e');
+    }
+    return headers;
+  }
 
   static String get _canonicalIdentity {
     final ellaUserId = SharedPreferencesUtil().ellaUserId;
@@ -285,7 +353,8 @@ class CanonicalEllaEvent {
   final Map<String, String> sourceRef;
   final Map<String, dynamic> metadata;
 
-  factory CanonicalEllaEvent.voice({
+  factory CanonicalEllaEvent.turn({
+    required String channel,
     required String sessionId,
     required String provider,
     required String eventId,
@@ -302,7 +371,7 @@ class CanonicalEllaEvent {
       canonicalIdentity: UnifiedMemoryService._canonicalIdentity,
       eventId: eventId,
       sessionId: sessionId,
-      channel: 'ios_voice',
+      channel: channel,
       provider: UnifiedMemoryService._normalizeProvider(provider),
       role: role,
       text: text,
@@ -310,7 +379,11 @@ class CanonicalEllaEvent {
       endedAt: endedAt,
       privacyScope: 'user_private',
       scanPolicy: scanPolicy,
-      sourceRef: {'type': 'ios_voice_session', 'id': sessionId},
+      sourceRef: {
+        'type': channel == 'ios_voice' ? 'ios_voice_session' : 'ios_chat_turn',
+        'id': sessionId,
+        'source_identity': 'ios-app:$channel:$sessionId',
+      },
       metadata: {
         'client': 'ios-app',
         'voice_mode': UnifiedMemoryService._voiceMode(provider),

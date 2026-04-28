@@ -657,6 +657,8 @@ class MessageProvider extends ChangeNotifier {
     clearUploadedFiles();
     String textBuffer = '';
     Timer? timer;
+    final chatSessionId = UnifiedMemoryService.createChatSessionId();
+    final chatStartedAt = DateTime.now();
 
     void flushBuffer() {
       if (textBuffer.isNotEmpty) {
@@ -715,6 +717,14 @@ class MessageProvider extends ChangeNotifier {
     } finally {
       timer?.cancel();
       flushBuffer();
+      final assistantText = isEllaOperationalChatText(message.text) ? '' : message.text;
+      await UnifiedMemoryService.writeChatTurn(
+        sessionId: chatSessionId,
+        userText: text,
+        assistantText: assistantText,
+        startedAt: chatStartedAt,
+        endedAt: DateTime.now(),
+      );
       if (isEllaOperationalChatText(message.text) && aiIndex >= 0 && aiIndex < messages.length) {
         messages.removeAt(aiIndex);
         Logger.debug('[EllaChat] Suppressed operational streaming response');
