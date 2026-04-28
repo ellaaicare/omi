@@ -14,6 +14,7 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/ella/services/unified_memory_service.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -62,6 +63,33 @@ class MessageProvider extends ChangeNotifier {
 
   List<ServerMessage> _withoutEllaOperationalMessages(List<ServerMessage> source) =>
       source.where((message) => !isEllaOperationalChatText(message.text)).toList();
+
+  Future<List<ServerMessage>> _withUnifiedTimelineMessages(List<ServerMessage> baseMessages) async {
+    final timelineMessages = await UnifiedMemoryService.fetchTimelineMessages(limit: 50);
+    if (timelineMessages.isEmpty) return baseMessages;
+
+    final merged = <ServerMessage>[...baseMessages];
+    final seenIds = baseMessages.map((message) => message.id).toSet();
+    for (final timelineMessage in timelineMessages) {
+      if (seenIds.contains(timelineMessage.id)) continue;
+      if (_hasNearDuplicateMessage(merged, timelineMessage)) continue;
+      merged.add(timelineMessage);
+      seenIds.add(timelineMessage.id);
+    }
+    merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return _withoutEllaOperationalMessages(merged);
+  }
+
+  bool _hasNearDuplicateMessage(List<ServerMessage> existingMessages, ServerMessage candidate) {
+    final normalizedText = candidate.text.trim();
+    if (normalizedText.isEmpty) return false;
+
+    return existingMessages.any((message) {
+      if (message.sender != candidate.sender) return false;
+      if (message.text.trim() != normalizedText) return false;
+      return message.createdAt.difference(candidate.createdAt).abs() <= const Duration(minutes: 2);
+    });
+  }
 
   void updateAppProvider(AppProvider p) {
     appProvider = p;
@@ -415,6 +443,8 @@ class MessageProvider extends ChangeNotifier {
           setHasCachedMessages(true);
         }
       }
+      messages = await _withUnifiedTimelineMessages(messages);
+      SharedPreferencesUtil().cachedMessages = messages;
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
       notifyListeners();
@@ -642,6 +672,8 @@ class MessageProvider extends ChangeNotifier {
     clearUploadedFiles();
     String textBuffer = '';
     Timer? timer;
+    final chatSessionId = UnifiedMemoryService.createChatSessionId();
+    final chatStartedAt = DateTime.now();
 
     void flushBuffer() {
       if (textBuffer.isNotEmpty) {
@@ -700,6 +732,14 @@ class MessageProvider extends ChangeNotifier {
     } finally {
       timer?.cancel();
       flushBuffer();
+      final assistantText = isEllaOperationalChatText(message.text) ? '' : message.text;
+      await UnifiedMemoryService.writeChatTurn(
+        sessionId: chatSessionId,
+        userText: text,
+        assistantText: assistantText,
+        startedAt: chatStartedAt,
+        endedAt: DateTime.now(),
+      );
       if (isEllaOperationalChatText(message.text) && aiIndex >= 0 && aiIndex < messages.length) {
         messages.removeAt(aiIndex);
         Logger.debug('[EllaChat] Suppressed operational streaming response');
