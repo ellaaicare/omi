@@ -14,6 +14,7 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
+import 'package:omi/ella/services/unified_memory_service.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
@@ -62,6 +63,18 @@ class MessageProvider extends ChangeNotifier {
 
   List<ServerMessage> _withoutEllaOperationalMessages(List<ServerMessage> source) =>
       source.where((message) => !isEllaOperationalChatText(message.text)).toList();
+
+  Future<List<ServerMessage>> _withUnifiedTimelineMessages(List<ServerMessage> baseMessages) async {
+    final timelineMessages = await UnifiedMemoryService.fetchTimelineMessages(limit: 50);
+    if (timelineMessages.isEmpty) return baseMessages;
+
+    final merged = <String, ServerMessage>{
+      for (final message in baseMessages) message.id: message,
+      for (final message in timelineMessages) message.id: message,
+    }.values.toList();
+    merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return _withoutEllaOperationalMessages(merged);
+  }
 
   void updateAppProvider(AppProvider p) {
     appProvider = p;
@@ -415,6 +428,8 @@ class MessageProvider extends ChangeNotifier {
           setHasCachedMessages(true);
         }
       }
+      messages = await _withUnifiedTimelineMessages(messages);
+      SharedPreferencesUtil().cachedMessages = messages;
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
       notifyListeners();

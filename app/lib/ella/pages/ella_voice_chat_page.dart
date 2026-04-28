@@ -12,12 +12,12 @@ import 'package:speech_to_text/speech_to_text.dart';
 
 import 'package:uuid/uuid.dart';
 
-import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/unified_memory_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -70,6 +70,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
   bool _isV2VMode = false;
+  String? _voiceSessionId;
+  DateTime? _voiceSessionStartedAt;
+  String _voiceSessionProvider = 'elevenlabs';
+  int _voiceTurnIndex = 0;
 
   /// Track whether we've injected chat messages for the current V2V turn
   bool _v2vTurnInjected = false;
@@ -195,6 +199,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (_speech.isListening) {
       _speech.stop();
     }
+    _completeUnifiedVoiceSession();
     _v2vClient?.disconnect();
     _v2vClient = null;
     super.dispose();
@@ -448,6 +453,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Future<void> _startV2V(String provider) async {
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
     _isV2VMode = true;
+    _startUnifiedVoiceSession(provider);
 
     // Stop any existing mic recording from CaptureProvider
     if (mounted) {
@@ -508,6 +514,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     debugPrint('[VoiceChat] Stopping V2V mode');
     await _v2vClient?.disconnect();
     _v2vClient = null;
+    await _completeUnifiedVoiceSession();
     _pauseVoiceMode();
   }
 
@@ -598,6 +605,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _injectV2VTurnIfReady() {
     if (_v2vTurnInjected || _lastUserText.trim().isEmpty || _lastEllaText.trim().isEmpty) return;
     _injectVoiceMessages(_lastUserText.trim(), _lastEllaText.trim());
+    _writeUnifiedVoiceTurn(_lastUserText.trim(), _lastEllaText.trim());
     _v2vTurnInjected = true;
   }
 
@@ -620,6 +628,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Future<void> _processTranscript(String transcript) async {
     debugPrint('[VoiceChat] Processing transcript: "$transcript"');
     _currentWords = '';
+    final provider = SharedPreferencesUtil().ttsProvider;
+    _startUnifiedVoiceSession(provider);
 
     if (!mounted) return;
     setState(() {
@@ -659,6 +669,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
       // Inject both messages into chat history so Chat tab shows them
       _injectVoiceMessages(transcript, fullReply);
+      _writeUnifiedVoiceTurn(transcript, fullReply);
 
       // Store full reply and start typewriter reveal
       _lastEllaText = fullReply;
@@ -754,6 +765,46 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     } catch (e) {
       debugPrint('[VoiceChat] Failed to inject messages: $e');
     }
+  }
+
+  void _startUnifiedVoiceSession(String provider) {
+    final normalizedProvider = V2VClient.normalizeProvider(provider);
+    if (_voiceSessionId != null && _voiceSessionProvider == normalizedProvider) return;
+
+    _voiceSessionId = UnifiedMemoryService.createVoiceSessionId();
+    _voiceSessionStartedAt = DateTime.now();
+    _voiceSessionProvider = normalizedProvider;
+    _voiceTurnIndex = 0;
+    UnifiedMemoryService.retryPendingWrites();
+  }
+
+  Future<void> _completeUnifiedVoiceSession() async {
+    final sessionId = _voiceSessionId;
+    if (sessionId == null) return;
+
+    _voiceSessionId = null;
+    await UnifiedMemoryService.completeVoiceSession(
+      sessionId: sessionId,
+      provider: _voiceSessionProvider,
+      turnCount: _voiceTurnIndex,
+      startedAt: _voiceSessionStartedAt,
+      endedAt: DateTime.now(),
+    );
+    _voiceSessionStartedAt = null;
+  }
+
+  void _writeUnifiedVoiceTurn(String userText, String ellaReply) {
+    final sessionId = _voiceSessionId;
+    if (sessionId == null) return;
+
+    _voiceTurnIndex++;
+    UnifiedMemoryService.writeVoiceTurn(
+      sessionId: sessionId,
+      provider: _voiceSessionProvider,
+      turnIndex: _voiceTurnIndex,
+      userText: userText,
+      assistantText: ellaReply,
+    );
   }
 
   /// Progressively reveals text with a typewriter effect.
