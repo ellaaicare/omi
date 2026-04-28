@@ -11,8 +11,18 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-/// Feature flag — set to false to disable direct chat and use proxy fallback.
-const bool _useDirectChat = true;
+/// Feature flag — set to false to use the backend production chat route.
+///
+/// Direct OpenClaw is currently too easy to expose operational write-back text
+/// and can stall on memory-heavy prompts. Keep iOS on the backend-owned route.
+const bool _useDirectChat = false;
+
+bool isEllaOperationalChatText(String text) {
+  final normalized = text.trim();
+  return normalized.startsWith('Processed and stored locally.') ||
+      normalized.contains('OMI write-back:') ||
+      normalized.contains('Local log: updated in `memory/omi/');
+}
 
 /// Build Ella-specific debug headers for routing observability (Issue #216).
 /// Backend trace.py captures these to correlate client requests with server routing decisions.
@@ -22,6 +32,7 @@ Map<String, String> _ellaDebugHeaders({required String routeSource}) {
     'X-Ella-Client': 'ios-app',
     'X-Ella-Client-Version': PlatformManager.instance.appVersion,
     'X-Ella-Route-Source': routeSource,
+    'X-Ella-Debug-Level': '0',
     'X-Ella-Session-Key': 'ella:$uid',
     'X-TTS-Provider': SharedPreferencesUtil().ttsProvider,
   };
@@ -210,6 +221,7 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
       final id = m['id'] as String? ?? const Uuid().v4();
       if (content.isEmpty) continue;
       if (content.startsWith('[SYSTEM:')) continue; // Filter scanner notifications from chat UI
+      if (isEllaOperationalChatText(content)) continue;
 
       result.add(ServerMessage(
         id,

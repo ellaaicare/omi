@@ -60,6 +60,9 @@ class MessageProvider extends ChangeNotifier {
   bool isUploadingFiles = false;
   Map<String, bool> uploadingFiles = {};
 
+  List<ServerMessage> _withoutEllaOperationalMessages(List<ServerMessage> source) =>
+      source.where((message) => !isEllaOperationalChatText(message.text)).toList();
+
   void updateAppProvider(AppProvider p) {
     appProvider = p;
   }
@@ -398,13 +401,16 @@ class MessageProvider extends ChangeNotifier {
     if (isEllaApp) {
       final cached = SharedPreferencesUtil().cachedMessages;
       if (cached.isNotEmpty) {
-        messages = cached;
+        messages = _withoutEllaOperationalMessages(cached);
+        if (messages.length != cached.length) {
+          SharedPreferencesUtil().cachedMessages = messages;
+        }
         setHasCachedMessages(true);
       } else {
         // Cache empty (e.g. after logout/login) — rehydrate from server
         final history = await fetchEllaChatHistory(limit: 50);
         if (history.isNotEmpty) {
-          messages = history;
+          messages = _withoutEllaOperationalMessages(history);
           SharedPreferencesUtil().cachedMessages = messages;
           setHasCachedMessages(true);
         }
@@ -439,7 +445,8 @@ class MessageProvider extends ChangeNotifier {
   void setMessagesFromCache() {
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
-      messages = SharedPreferencesUtil().cachedMessages;
+      messages = _withoutEllaOperationalMessages(SharedPreferencesUtil().cachedMessages);
+      SharedPreferencesUtil().cachedMessages = messages;
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
     notifyListeners();
@@ -512,6 +519,10 @@ class MessageProvider extends ChangeNotifier {
   }
 
   void addMessage(ServerMessage message) {
+    if (isEllaOperationalChatText(message.text)) {
+      Logger.debug('[EllaChat] Suppressed operational chat message');
+      return;
+    }
     if (messages.firstWhereOrNull((m) => m.id == message.id) != null) {
       return;
     }
@@ -689,6 +700,11 @@ class MessageProvider extends ChangeNotifier {
     } finally {
       timer?.cancel();
       flushBuffer();
+      if (isEllaOperationalChatText(message.text) && aiIndex >= 0 && aiIndex < messages.length) {
+        messages.removeAt(aiIndex);
+        Logger.debug('[EllaChat] Suppressed operational streaming response');
+        notifyListeners();
+      }
       aiStreamProgress = 1.0;
       setShowTypingIndicator(false);
       setSendingMessage(false);

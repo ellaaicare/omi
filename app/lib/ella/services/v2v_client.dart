@@ -231,6 +231,57 @@ class V2VClient {
     return '$endpoint${separator}token=$token';
   }
 
+  static String? _eventText(Map<String, dynamic> json) {
+    for (final key in ['text', 'transcript', 'delta', 'content', 'message']) {
+      final value = json[key];
+      if (value is String && value.isNotEmpty) return value;
+    }
+
+    final response = json['response'];
+    if (response is Map<String, dynamic>) {
+      return _eventText(response);
+    }
+
+    final item = json['item'];
+    if (item is Map<String, dynamic>) {
+      return _eventText(item);
+    }
+
+    return null;
+  }
+
+  static bool _isUserTranscriptEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'user_transcript' ||
+        normalized == 'input_transcript' ||
+        normalized == 'input_audio_transcription.completed' ||
+        normalized.contains('input_audio_transcription') ||
+        (normalized.contains('user') && normalized.contains('transcript'));
+  }
+
+  static bool _isAssistantTranscriptEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'transcript' ||
+        normalized == 'assistant_transcript' ||
+        normalized == 'output_transcript' ||
+        normalized == 'response_text' ||
+        normalized == 'response.audio_transcript.delta' ||
+        normalized == 'response.audio_transcript.done' ||
+        normalized == 'response.text.delta' ||
+        normalized == 'response.text.done' ||
+        normalized.contains('output_audio_transcription') ||
+        (normalized.contains('assistant') && normalized.contains('transcript'));
+  }
+
+  static bool _isAudioDoneEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'audio_done' ||
+        normalized == 'response.audio.done' ||
+        normalized == 'output_audio.done' ||
+        normalized == 'turn_complete' ||
+        normalized == 'response.done';
+  }
+
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
 
   Future<void> _startMicStream() async {
@@ -389,19 +440,25 @@ class V2VClient {
       try {
         final json = jsonDecode(message) as Map<String, dynamic>;
         final type = json['type'] as String? ?? 'unknown';
-        final text = json['text'] as String? ?? json['transcript'] as String?;
+        final text = _eventText(json);
+
+        if (_isUserTranscriptEvent(type)) {
+          onEvent?.call(V2VEvent(type: 'user_transcript', text: text));
+          return;
+        }
+
+        if (_isAssistantTranscriptEvent(type)) {
+          onEvent?.call(V2VEvent(type: 'transcript', text: text));
+          return;
+        }
+
+        if (_isAudioDoneEvent(type)) {
+          _finishPlayback();
+          onEvent?.call(V2VEvent(type: 'audio_done'));
+          return;
+        }
 
         switch (type) {
-          case 'user_transcript':
-            onEvent?.call(V2VEvent(type: 'user_transcript', text: text));
-            break;
-          case 'transcript':
-            onEvent?.call(V2VEvent(type: 'transcript', text: text));
-            break;
-          case 'audio_done':
-            _finishPlayback();
-            onEvent?.call(V2VEvent(type: 'audio_done'));
-            break;
           case 'speech_started':
             interruptPlayback();
             onEvent?.call(V2VEvent(type: 'speech_started'));

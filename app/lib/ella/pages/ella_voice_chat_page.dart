@@ -537,16 +537,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         break;
       case 'audio_done':
         // Inject into chat history once per turn (using final transcript)
-        if (!_v2vTurnInjected && _lastUserText.isNotEmpty && _lastEllaText.isNotEmpty) {
-          _injectVoiceMessages(_lastUserText, _lastEllaText);
-          _v2vTurnInjected = true;
-        }
+        _injectV2VTurnIfReady();
         // Audio is now being played via just_audio — wait for playback_complete
         setState(() {
           _statusText = 'Playing audio...';
         });
         break;
       case 'playback_complete':
+        _injectV2VTurnIfReady();
         // WAV file finished playing — transition back to listening
         if (_isV2VMode) {
           setState(() {
@@ -595,6 +593,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
         break;
     }
+  }
+
+  void _injectV2VTurnIfReady() {
+    if (_v2vTurnInjected || _lastUserText.trim().isEmpty || _lastEllaText.trim().isEmpty) return;
+    _injectVoiceMessages(_lastUserText.trim(), _lastEllaText.trim());
+    _v2vTurnInjected = true;
   }
 
   void _onSpeechResult(SpeechRecognitionResult result) {

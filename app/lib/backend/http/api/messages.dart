@@ -64,7 +64,37 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   }
 
   if (line.startsWith('data: ')) {
-    return ServerMessageChunk(messageId, line.substring(6).replaceAll("__CRLF__", "\n"), MessageChunkType.data);
+    final payload = line.substring(6).trim();
+    if (payload == '[DONE]') {
+      return ServerMessageChunk(messageId, '', MessageChunkType.done);
+    }
+
+    try {
+      final decoded = jsonDecode(payload) as Map<String, dynamic>;
+      final choices = decoded['choices'] as List<dynamic>?;
+      if (choices != null && choices.isNotEmpty) {
+        final delta = choices.first['delta'] as Map<String, dynamic>?;
+        final content = delta?['content'] as String?;
+        if (content != null && content.isNotEmpty) {
+          return ServerMessageChunk(messageId, content, MessageChunkType.data);
+        }
+      }
+
+      final error = decoded['error'];
+      if (error is String && error.isNotEmpty) {
+        return ServerMessageChunk(messageId, error, MessageChunkType.error);
+      }
+      if (error is Map<String, dynamic>) {
+        final message = error['message'] as String?;
+        if (message != null && message.isNotEmpty) {
+          return ServerMessageChunk(messageId, message, MessageChunkType.error);
+        }
+      }
+    } catch (_) {
+      // OMI streams plain text after data:, not JSON.
+    }
+
+    return ServerMessageChunk(messageId, payload.replaceAll("__CRLF__", "\n"), MessageChunkType.data);
   }
 
   if (line.startsWith('done: ')) {
@@ -119,6 +149,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(String text, {Map<String, Strin
   )) {
     // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
     if (line.startsWith(':')) continue;
+    if (line.trim() == 'data: [DONE]') break;
 
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
