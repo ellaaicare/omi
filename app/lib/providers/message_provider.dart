@@ -68,12 +68,27 @@ class MessageProvider extends ChangeNotifier {
     final timelineMessages = await UnifiedMemoryService.fetchTimelineMessages(limit: 50);
     if (timelineMessages.isEmpty) return baseMessages;
 
-    final merged = <String, ServerMessage>{
-      for (final message in baseMessages) message.id: message,
-      for (final message in timelineMessages) message.id: message,
-    }.values.toList();
+    final merged = <ServerMessage>[...baseMessages];
+    final seenIds = baseMessages.map((message) => message.id).toSet();
+    for (final timelineMessage in timelineMessages) {
+      if (seenIds.contains(timelineMessage.id)) continue;
+      if (_hasNearDuplicateMessage(merged, timelineMessage)) continue;
+      merged.add(timelineMessage);
+      seenIds.add(timelineMessage.id);
+    }
     merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
     return _withoutEllaOperationalMessages(merged);
+  }
+
+  bool _hasNearDuplicateMessage(List<ServerMessage> existingMessages, ServerMessage candidate) {
+    final normalizedText = candidate.text.trim();
+    if (normalizedText.isEmpty) return false;
+
+    return existingMessages.any((message) {
+      if (message.sender != candidate.sender) return false;
+      if (message.text.trim() != normalizedText) return false;
+      return message.createdAt.difference(candidate.createdAt).abs() <= const Duration(minutes: 2);
+    });
   }
 
   void updateAppProvider(AppProvider p) {
