@@ -12,8 +12,12 @@ const String _dashboardBase = 'https://ella-ai-care.com';
 List<GuardianPreset>? _cachedPresets;
 
 String get _userId {
-  final ellaId = SharedPreferencesUtil().ellaUserId;
-  return ellaId.isNotEmpty ? ellaId : SharedPreferencesUtil().uid;
+  // The dashboard route accepts the OMI/Firebase UID. Prefer that stable
+  // identity so stale cached Ella UUIDs cannot read or update a different row.
+  final uid = SharedPreferencesUtil().uid;
+  if (uid.isNotEmpty) return uid;
+
+  return SharedPreferencesUtil().ellaUserId;
 }
 
 /// GET /api/users/{userId}/guardian-mode
@@ -25,12 +29,10 @@ Future<GuardianModeInfo?> getGuardianMode() async {
   final uid = _userId;
   if (uid.isEmpty) return null;
   try {
-    final response = await http
-        .get(
-          Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await http.get(
+      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -103,20 +105,16 @@ Future<bool> setGuardianMode(GuardianModeKey mode) async {
 Future<List<GuardianPreset>> getGuardianPresets() async {
   if (_cachedPresets != null) return _cachedPresets!;
   try {
-    final response = await http
-        .get(
-          Uri.parse('$_dashboardBase/api/guardian/presets'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await http.get(
+      Uri.parse('$_dashboardBase/api/guardian/presets'),
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (data['success'] == true) {
         final list = data['presets'] as List;
-        _cachedPresets = list
-            .map((p) => GuardianPreset.fromJson(p as Map<String, dynamic>))
-            .toList();
+        _cachedPresets = list.map((p) => GuardianPreset.fromJson(p as Map<String, dynamic>)).toList();
         return _cachedPresets!;
       }
     }
@@ -129,80 +127,75 @@ Future<List<GuardianPreset>> getGuardianPresets() async {
 
 /// Hard-coded fallback so the UI works even if the presets endpoint is down.
 List<GuardianPreset> _fallbackPresets() => [
-  GuardianPreset(
-    presetKey: 'EMERGENCY_ONLY',
-    name: 'Emergency Alerts',
-    description:
-        'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
-    detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
-    color: const Color(0xFFF59E0B),
-  ),
-  GuardianPreset(
-    presetKey: 'ACTIVE_SUPPORT',
-    name: 'Active Support',
-    description:
-        'Emergency alerts + recall assistance + schedule reminders + pattern monitoring.',
-    detailsBullets: [
-      'Medical emergencies',
-      'Wake words (always active)',
-      'Recall assistance',
-    ],
-    color: const Color(0xFF14B8A6),
-  ),
-  GuardianPreset(
-    presetKey: 'MAXIMUM_AWARENESS',
-    name: 'Maximum Awareness',
-    description:
-        'High-sensitivity care monitoring for risk, vulnerability, health, cognitive, emotional, and social support signals.',
-    detailsBullets: [
-      'Broad care monitoring',
-      'Lower alert thresholds',
-      'Helpful during outings or recovery',
-    ],
-    color: const Color(0xFF6366F1),
-  ),
-  GuardianPreset(
-    presetKey: 'MEMORY_SUPPORT',
-    name: 'Memory Support',
-    description:
-        'Proactive memory cues and gentle recall assistance for cognitive support.',
-    detailsBullets: [
-      'Memory cues',
-      'Daily routine reminders',
-      'Cognitive pattern monitoring',
-    ],
-    color: const Color(0xFF10B981),
-  ),
-  GuardianPreset(
-    presetKey: 'CYBORG',
-    name: 'Cyborg',
-    description:
-        'Experimental ambient intelligence — Ella listens broadly and speaks only when she can add useful context, coaching, memory, or insight.',
-    detailsBullets: [
-      'Ambient world enhancement',
-      'Useful companion asides',
-      'Experimental brain-enhancer mode',
-    ],
-    color: const Color(0xFFEC4899),
-  ),
-  GuardianPreset(
-    presetKey: 'CHATBOT',
-    name: 'Chatbot',
-    description:
-        'Full two-way voice conversation with Ella, focused on primary-speaker user utterances.',
-    detailsBullets: [
-      'Conversational replies',
-      'Suppresses media/background audio',
-      'Best for direct voice chat',
-    ],
-    color: const Color(0xFFF97316),
-  ),
-  GuardianPreset(
-    presetKey: 'DEMO',
-    name: 'Demo',
-    description:
-        'Demonstration mode with scripted responses for showcasing Ella.',
-    detailsBullets: ['Scripted demo responses', 'Showcase mode'],
-    color: const Color(0xFF3B82F6),
-  ),
-];
+      GuardianPreset(
+        presetKey: 'EMERGENCY_ONLY',
+        name: 'Emergency Alerts',
+        description: 'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
+        detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
+        color: const Color(0xFFF59E0B),
+      ),
+      GuardianPreset(
+        presetKey: 'ACTIVE_SUPPORT',
+        name: 'Active Support',
+        description: 'Emergency alerts + recall assistance + schedule reminders + pattern monitoring.',
+        detailsBullets: [
+          'Medical emergencies',
+          'Wake words (always active)',
+          'Recall assistance',
+        ],
+        color: const Color(0xFF14B8A6),
+      ),
+      GuardianPreset(
+        presetKey: 'MAXIMUM_AWARENESS',
+        name: 'Maximum Awareness',
+        description:
+            'High-sensitivity care monitoring for risk, vulnerability, health, cognitive, emotional, and social support signals.',
+        detailsBullets: [
+          'Broad care monitoring',
+          'Lower alert thresholds',
+          'Helpful during outings or recovery',
+        ],
+        color: const Color(0xFF6366F1),
+      ),
+      GuardianPreset(
+        presetKey: 'MEMORY_SUPPORT',
+        name: 'Memory Support',
+        description: 'Proactive memory cues and gentle recall assistance for cognitive support.',
+        detailsBullets: [
+          'Memory cues',
+          'Daily routine reminders',
+          'Cognitive pattern monitoring',
+        ],
+        color: const Color(0xFF10B981),
+      ),
+      GuardianPreset(
+        presetKey: 'CYBORG',
+        name: 'Cyborg',
+        description:
+            'Experimental ambient intelligence — Ella listens broadly and speaks only when she can add useful context, coaching, memory, or insight.',
+        detailsBullets: [
+          'Ambient world enhancement',
+          'Useful companion asides',
+          'Experimental brain-enhancer mode',
+        ],
+        color: const Color(0xFFEC4899),
+      ),
+      GuardianPreset(
+        presetKey: 'CHATBOT',
+        name: 'Chatbot',
+        description: 'Full two-way voice conversation with Ella, focused on primary-speaker user utterances.',
+        detailsBullets: [
+          'Conversational replies',
+          'Suppresses media/background audio',
+          'Best for direct voice chat',
+        ],
+        color: const Color(0xFFF97316),
+      ),
+      GuardianPreset(
+        presetKey: 'DEMO',
+        name: 'Demo',
+        description: 'Demonstration mode with scripted responses for showcasing Ella.',
+        detailsBullets: ['Scripted demo responses', 'Showcase mode'],
+        color: const Color(0xFF3B82F6),
+      ),
+    ];
