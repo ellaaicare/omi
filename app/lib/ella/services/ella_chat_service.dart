@@ -11,11 +11,11 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-/// Feature flag — set to false to use the backend production chat route.
+/// Feature flag — production Ella chat uses Pattern C direct OpenClaw.
 ///
-/// Direct OpenClaw is currently too easy to expose operational write-back text
-/// and can stall on memory-heavy prompts. Keep iOS on the backend-owned route.
-const bool _useDirectChat = false;
+/// Any backend proxy fallback must also force OpenClaw; Level 0 is the legacy
+/// OMI/Grok path and is not valid for Ella chat.
+const bool _useDirectChat = true;
 
 bool isEllaOperationalChatText(String text) {
   final normalized = text.trim();
@@ -32,7 +32,7 @@ Map<String, String> _ellaDebugHeaders({required String routeSource}) {
     'X-Ella-Client': 'ios-app',
     'X-Ella-Client-Version': PlatformManager.instance.appVersion,
     'X-Ella-Route-Source': routeSource,
-    'X-Ella-Debug-Level': '0',
+    'X-Ella-Debug-Level': '4',
     'X-Ella-Session-Key': 'ella:$uid',
     'X-TTS-Provider': SharedPreferencesUtil().ttsProvider,
   };
@@ -268,8 +268,7 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
   }
 
   // Stream directly from OpenClaw gateway
-  final messageId = '1000';
-  final uid = SharedPreferencesUtil().uid;
+  const messageId = '1000';
   final accumulatedText = StringBuffer();
 
   try {
