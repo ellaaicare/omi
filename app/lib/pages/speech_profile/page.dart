@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/settings/language_selection_dialog.dart';
 import 'package:omi/pages/settings/people.dart';
@@ -16,7 +17,6 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/speech_profile_provider.dart';
 import 'package:omi/services/services.dart';
-import 'package:omi/utils/analytics/intercom.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/temp.dart';
@@ -214,13 +214,15 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
             }
           },
           child: Scaffold(
-            backgroundColor: Theme.of(context).colorScheme.primary,
+            backgroundColor: EllaColors.bgPrimary,
             appBar: AppBar(
-              backgroundColor: Theme.of(context).colorScheme.primary,
+              backgroundColor: EllaColors.bgPrimary,
               automaticallyImplyLeading: true,
+              foregroundColor: EllaColors.textPrimary,
+              iconTheme: const IconThemeData(color: EllaColors.textPrimary),
               title: const Text(
                 '',
-                style: TextStyle(color: Colors.white, fontSize: 20),
+                style: TextStyle(color: EllaColors.textPrimary, fontSize: 20),
               ),
               actions: [
                 !widget.onbording
@@ -248,7 +250,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                         },
                         child: Text(
                           context.l10n.skip,
-                          style: const TextStyle(color: Colors.white, decoration: TextDecoration.underline),
+                          style: const TextStyle(color: EllaColors.primary, decoration: TextDecoration.underline),
                         ),
                       ),
               ],
@@ -293,7 +295,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                 context.l10n.speechProfileIntro,
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(
-                                  color: Colors.white,
+                                  color: EllaColors.textPrimary,
                                   fontSize: 20,
                                   height: 1.4,
                                   fontWeight: FontWeight.w400,
@@ -333,7 +335,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                               provider.text,
                                               textAlign: TextAlign.center,
                                               style: const TextStyle(
-                                                color: Colors.white,
+                                                color: EllaColors.textPrimary,
                                                 fontSize: 20,
                                                 fontWeight: FontWeight.w400,
                                                 height: 1.5,
@@ -361,13 +363,13 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                   padding: const EdgeInsets.only(bottom: 16),
                                   child: Text(
                                     context.l10n.noDeviceConnectedUseMic,
-                                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
                                     textAlign: TextAlign.center,
                                   ),
                                 ),
                               provider.isInitialising
                                   ? const CircularProgressIndicator(
-                                      color: Colors.white,
+                                      color: EllaColors.primary,
                                     )
                                   : MaterialButton(
                                       onPressed: () async {
@@ -417,14 +419,14 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                         provider.updateStartedRecording(true);
                                         _questionAnimationController.forward();
                                       },
-                                      color: Colors.white,
+                                      color: EllaColors.primary,
                                       padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                                       child: Text(
                                         SharedPreferencesUtil().hasSpeakerProfile
                                             ? context.l10n.doItAgain
                                             : context.l10n.getStarted,
-                                        style: const TextStyle(color: Colors.black),
+                                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                                       ),
                                     ),
                               const SizedBox(height: 24),
@@ -435,7 +437,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                       },
                                       child: Text(
                                         context.l10n.listenToSpeechProfile,
-                                        style: const TextStyle(color: Colors.white, fontSize: 16),
+                                        style: const TextStyle(color: EllaColors.primary, fontSize: 16),
                                       ))
                                   : const SizedBox(),
                               TextButton(
@@ -444,7 +446,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                   },
                                   child: Text(
                                     context.l10n.recognizingOthers,
-                                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                                    style: const TextStyle(color: EllaColors.primary, fontSize: 16),
                                   )),
                             ],
                           )
@@ -470,13 +472,13 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                   },
                                   child: Text(
                                     context.l10n.allDone,
-                                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                                    style: const TextStyle(color: EllaColors.primary, fontSize: 16),
                                   ),
                                 ),
                               )
                             : provider.uploadingProfile
                                 ? const CircularProgressIndicator(
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                    valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                                   )
                                 : Column(
                                     mainAxisSize: MainAxisSize.min,
@@ -486,7 +488,8 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                         opacity: _questionFadeAnimation,
                                         child: Text(
                                           provider.currentQuestion,
-                                          style: const TextStyle(color: Colors.white, fontSize: 22, height: 1.3),
+                                          style:
+                                              const TextStyle(color: EllaColors.textPrimary, fontSize: 22, height: 1.3),
                                           textAlign: TextAlign.center,
                                         ),
                                       ),
@@ -498,7 +501,8 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                       const SizedBox(height: 8),
                                       Text(
                                         context.l10n.keepGoingGreat,
-                                        style: TextStyle(color: Colors.grey.shade300, fontSize: 14, height: 1.3),
+                                        style:
+                                            const TextStyle(color: EllaColors.textSecondary, fontSize: 14, height: 1.3),
                                         textAlign: TextAlign.center,
                                       ),
                                       const SizedBox(height: 8),
@@ -507,7 +511,7 @@ class _SpeechProfilePageState extends State<SpeechProfilePage> with TickerProvid
                                         child: Text(
                                           context.l10n.skipThisQuestion,
                                           style: const TextStyle(
-                                            color: Colors.white70,
+                                            color: EllaColors.textSecondary,
                                             fontSize: 14,
                                           ),
                                         ),

@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/settings/usage_page.dart';
@@ -777,13 +778,18 @@ class _TranscriptionSettingsPageState extends State<TranscriptionSettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        title: Text(context.l10n.transcription, style: const TextStyle(fontWeight: FontWeight.w600)),
-        backgroundColor: const Color(0xFF0D0D0D),
+        title: Text(
+          context.l10n.transcription,
+          style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600),
+        ),
+        backgroundColor: EllaColors.bgPrimary,
+        foregroundColor: EllaColors.textPrimary,
+        iconTheme: const IconThemeData(color: EllaColors.textPrimary),
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, size: 20),
+          icon: const Icon(Icons.arrow_back_ios, color: EllaColors.textPrimary, size: 20),
           onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [
@@ -2524,13 +2530,18 @@ class _JsonEditorPageState extends State<_JsonEditorPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        title: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.w600)),
-        backgroundColor: const Color(0xFF0D0D0D),
+        title: Text(
+          widget.title,
+          style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600),
+        ),
+        backgroundColor: EllaColors.bgPrimary,
+        foregroundColor: EllaColors.textPrimary,
+        iconTheme: const IconThemeData(color: EllaColors.textPrimary),
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios, size: 20),
+          icon: const Icon(Icons.arrow_back_ios, color: EllaColors.textPrimary, size: 20),
           onPressed: () => Navigator.of(context).pop(),
         ),
         actions: [

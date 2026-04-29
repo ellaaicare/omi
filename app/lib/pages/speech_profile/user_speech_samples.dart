@@ -4,6 +4,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/speech_profile.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/user_speech_samples_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/widgets/extensions/functions.dart';
@@ -44,7 +45,9 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
         return Scaffold(
           appBar: AppBar(
             title: Text(context.l10n.speechSamples),
-            backgroundColor: Theme.of(context).colorScheme.primary,
+            backgroundColor: EllaColors.bgPrimary,
+            foregroundColor: EllaColors.textPrimary,
+            iconTheme: const IconThemeData(color: EllaColors.textPrimary),
             // actions: [
             //   IconButton(
             //       onPressed: () {
@@ -66,11 +69,11 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
             //       ))
             // ],
           ),
-          backgroundColor: Theme.of(context).colorScheme.primary,
+          backgroundColor: EllaColors.bgPrimary,
           body: provider.loading
               ? const Center(
                   child: CircularProgressIndicator(
-                  color: Colors.white,
+                  color: EllaColors.primary,
                 ))
               : ListView.builder(
                   itemCount: provider.samplesUrl.length,
@@ -103,18 +106,30 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
                               provider.currentPlayingIndex == index && provider.isPlaying
                                   ? Icons.pause
                                   : Icons.play_arrow,
+                              color: EllaColors.primary,
                             ),
                             onPressed: () => provider.playPause(index),
                           ),
-                          title: Text(index == 0 ? context.l10n.speechProfile : context.l10n.additionalSampleIndex(index.toString())),
+                          title: Text(
+                            index == 0
+                                ? context.l10n.speechProfile
+                                : context.l10n.additionalSampleIndex(index.toString()),
+                            style: const TextStyle(color: EllaColors.textPrimary),
+                          ),
                           // _getFileNameFromUrl(samplesUrl[index])
                           subtitle: FutureBuilder<Duration?>(
                             future: AudioPlayer().setUrl(provider.samplesUrl[index]),
                             builder: (context, snapshot) {
                               if (snapshot.hasData) {
-                                return Text(context.l10n.durationSeconds(snapshot.data!.inSeconds.toString()));
+                                return Text(
+                                  context.l10n.durationSeconds(snapshot.data!.inSeconds.toString()),
+                                  style: const TextStyle(color: EllaColors.textSecondary),
+                                );
                               } else {
-                                return Text(context.l10n.loadingDuration);
+                                return Text(
+                                  context.l10n.loadingDuration,
+                                  style: const TextStyle(color: EllaColors.textSecondary),
+                                );
                               }
                             },
                           ),
@@ -133,7 +148,7 @@ class _UserSpeechSamplesState extends State<UserSpeechSamplesView> {
                                     )));
                                     setState(() {});
                                   },
-                                  icon: const Icon(Icons.delete, size: 20),
+                                  icon: const Icon(Icons.delete, color: EllaColors.error, size: 20),
                                 ),
                         ),
                         index == 0 ? const SizedBox(height: 8) : const SizedBox(),

@@ -14,6 +14,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
@@ -51,8 +52,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: children,
@@ -72,7 +74,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
               Text(
                 title,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
                 ),
@@ -84,8 +86,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
             const SizedBox(height: 6),
             Text(
               subtitle,
-              style: TextStyle(
-                color: Colors.grey.shade400,
+              style: const TextStyle(
+                color: EllaColors.textSecondary,
                 fontSize: 14,
               ),
             ),
@@ -103,13 +105,14 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.grey.shade800,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Text(
         label,
         style: const TextStyle(
-          color: Colors.grey,
+          color: EllaColors.textSecondary,
           fontSize: 11,
           fontWeight: FontWeight.w500,
         ),
@@ -130,11 +133,11 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           width: 40,
           height: 40,
           decoration: BoxDecoration(
-            color: const Color(0xFF2A2A2E),
+            color: EllaColors.bgTertiary,
             borderRadius: BorderRadius.circular(10),
           ),
           child: Center(
-            child: FaIcon(icon, color: Colors.grey.shade400, size: 16),
+            child: FaIcon(icon, color: EllaColors.primary, size: 16),
           ),
         ),
         const SizedBox(width: 14),
@@ -145,7 +148,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
               Text(
                 title,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 16,
                   fontWeight: FontWeight.w500,
                 ),
@@ -153,8 +156,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
               const SizedBox(height: 2),
               Text(
                 description,
-                style: TextStyle(
-                  color: Colors.grey.shade500,
+                style: const TextStyle(
+                  color: EllaColors.textSecondary,
                   fontSize: 12,
                 ),
               ),
@@ -165,6 +168,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
           value: value,
           onChanged: onChanged,
           activeColor: const Color(0xFF22C55E),
+          activeTrackColor: EllaColors.primarySubtle,
         ),
       ],
     );
@@ -187,11 +191,11 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: const Color(0xFF2A2A2E),
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Center(
-                child: FaIcon(icon, color: Colors.grey.shade400, size: 16),
+                child: FaIcon(icon, color: EllaColors.primary, size: 16),
               ),
             ),
             const SizedBox(width: 14),
@@ -202,7 +206,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   Text(
                     title,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),
@@ -210,8 +214,8 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   const SizedBox(height: 2),
                   Text(
                     description,
-                    style: TextStyle(
-                      color: Colors.grey.shade500,
+                    style: const TextStyle(
+                      color: EllaColors.textSecondary,
                       fontSize: 12,
                     ),
                   ),
@@ -222,6 +226,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
               value: isEnabled,
               onChanged: onToggle,
               activeColor: const Color(0xFF22C55E),
+              activeTrackColor: EllaColors.primarySubtle,
             ),
           ],
         ),
@@ -245,24 +250,25 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
   }) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF2C2C2E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: TextField(
         controller: controller,
         keyboardType: keyboardType,
-        style: const TextStyle(color: Colors.white, fontSize: 15),
+        style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
         decoration: InputDecoration(
           labelText: label,
           hintText: hint,
-          labelStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-          hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+          labelStyle: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
+          hintStyle: const TextStyle(color: EllaColors.textDisabled, fontSize: 14),
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: Colors.white24, width: 1),
+            borderSide: const BorderSide(color: EllaColors.primary, width: 1),
           ),
         ),
       ),
@@ -444,17 +450,18 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
       child: Consumer<DeveloperModeProvider>(
         builder: (context, provider, child) {
           return Scaffold(
-            backgroundColor: const Color(0xFF0D0D0D),
+            backgroundColor: EllaColors.bgPrimary,
             appBar: AppBar(
-              backgroundColor: const Color(0xFF0D0D0D),
+              backgroundColor: EllaColors.bgPrimary,
+              foregroundColor: EllaColors.textPrimary,
               elevation: 0,
               leading: IconButton(
-                icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+                icon: const FaIcon(FontAwesomeIcons.chevronLeft, color: EllaColors.textPrimary, size: 18),
                 onPressed: () => Navigator.of(context).pop(),
               ),
               title: Text(
                 context.l10n.developerSettings,
-                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+                style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 18),
               ),
               centerTitle: true,
               actions: [
@@ -463,7 +470,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   child: Text(
                     provider.savingSettingsLoading ? context.l10n.saving : context.l10n.save,
                     style: TextStyle(
-                      color: provider.savingSettingsLoading ? Colors.grey : Colors.white,
+                      color: provider.savingSettingsLoading ? EllaColors.textDisabled : EllaColors.primary,
                       fontWeight: FontWeight.w500,
                       fontSize: 16,
                     ),
@@ -775,48 +782,20 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1C1C1E),
+                      color: EllaColors.bgSecondary,
                       borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: EllaColors.bgTertiary),
                     ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF2A2A2E),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Center(
-                            child: FaIcon(
-                              FontAwesomeIcons.volumeHigh,
-                              color: Colors.grey.shade400,
-                              size: 16,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'TTS Provider',
-                                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Sent as X-TTS-Provider header',
-                                style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
-                              ),
-                            ],
-                          ),
-                        ),
-                        DropdownButton<String>(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final compact = constraints.maxWidth < 360;
+                        final providerDropdown = DropdownButton<String>(
                           value: V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider),
-                          dropdownColor: const Color(0xFF2A2A2E),
+                          dropdownColor: Colors.white,
                           underline: const SizedBox.shrink(),
-                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                          isExpanded: true,
+                          style: const TextStyle(color: EllaColors.textPrimary, fontSize: 14),
+                          iconEnabledColor: EllaColors.textSecondary,
                           items: [
                             const DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
                             const DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
@@ -838,8 +817,60 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                               });
                             }
                           },
-                        ),
-                      ],
+                        );
+                        return Row(
+                          crossAxisAlignment: compact ? CrossAxisAlignment.start : CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                color: EllaColors.bgTertiary,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Center(
+                                child: FaIcon(
+                                  FontAwesomeIcons.volumeHigh,
+                                  color: EllaColors.primary,
+                                  size: 16,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'TTS Provider',
+                                    style: TextStyle(
+                                      color: EllaColors.textPrimary,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  const Text(
+                                    'Sent as X-TTS-Provider header',
+                                    style: TextStyle(color: EllaColors.textSecondary, fontSize: 12),
+                                  ),
+                                  if (compact) ...[
+                                    const SizedBox(height: 10),
+                                    providerDropdown,
+                                  ],
+                                ],
+                              ),
+                            ),
+                            if (!compact) ...[
+                              const SizedBox(width: 12),
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: 210),
+                                child: providerDropdown,
+                              ),
+                            ],
+                          ],
+                        );
+                      },
                     ),
                   ),
                   const SizedBox(height: 32),

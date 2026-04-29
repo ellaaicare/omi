@@ -137,18 +137,23 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             ),
           ),
           if (chipValue != null) ...[
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: chipColor ?? const Color(0xFF2A2A2E),
-                borderRadius: BorderRadius.circular(100),
-              ),
-              child: Text(
-                chipValue,
-                style: TextStyle(
-                  color: chipTextColor ?? EllaColors.textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
+            Flexible(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: chipColor ?? Colors.white,
+                  borderRadius: BorderRadius.circular(100),
+                  border: Border.all(color: EllaColors.bgTertiary),
+                ),
+                child: Text(
+                  chipValue,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: chipTextColor ?? EllaColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
             ),
@@ -157,7 +162,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
           if (showChevron)
             const Icon(
               Icons.chevron_right,
-              color: EllaColors.bgTertiary,
+              color: EllaColors.textTertiary,
               size: 20,
             ),
         ],
@@ -254,7 +259,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
             onTap: provider.connectedDevice != null
                 ? () {
                     // Route to OmiGlass OTA page for openglass devices
-                    final deviceName = provider.connectedDevice?.name?.toLowerCase() ?? '';
+                    final deviceName = provider.connectedDevice!.name.toLowerCase();
                     final isOpenGlass = provider.connectedDevice?.type == DeviceType.openglass ||
                         deviceName.contains('openglass') ||
                         deviceName.contains('omiglass') ||
@@ -350,7 +355,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                   ),
                   const Icon(
                     Icons.chevron_right,
-                    color: EllaColors.bgTertiary,
+                    color: EllaColors.textTertiary,
                     size: 20,
                   ),
                 ],

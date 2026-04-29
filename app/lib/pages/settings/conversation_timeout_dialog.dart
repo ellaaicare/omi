@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -24,12 +25,13 @@ class ConversationTimeoutDialog {
         return StatefulBuilder(
           builder: (context, setState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF1A1A1A),
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.transparent,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               title: Text(
                 context.l10n.conversationTimeout,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
                 ),
@@ -43,7 +45,7 @@ class ConversationTimeoutDialog {
                     Text(
                       context.l10n.conversationTimeoutDesc,
                       style: const TextStyle(
-                        color: Color(0xFF8E8E93),
+                        color: EllaColors.textSecondary,
                         fontSize: 14,
                       ),
                     ),
@@ -66,10 +68,10 @@ class ConversationTimeoutDialog {
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: isSelected ? Colors.white : const Color(0xFF3C3C43),
+                                  color: isSelected ? EllaColors.primary : EllaColors.bgTertiary,
                                   width: isSelected ? 2 : 1,
                                 ),
-                                color: isSelected ? const Color(0xFF2C2C2E) : Colors.transparent,
+                                color: isSelected ? EllaColors.primarySubtle : Colors.transparent,
                               ),
                               child: Row(
                                 children: [
@@ -80,7 +82,7 @@ class ConversationTimeoutDialog {
                                         Text(
                                           option['label'] as String,
                                           style: TextStyle(
-                                            color: isSelected ? Colors.white : const Color(0xFFE5E5E7),
+                                            color: EllaColors.textPrimary,
                                             fontSize: 16,
                                             fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
                                           ),
@@ -88,8 +90,8 @@ class ConversationTimeoutDialog {
                                         const SizedBox(height: 4),
                                         Text(
                                           option['description'] as String,
-                                          style: TextStyle(
-                                            color: isSelected ? const Color(0xFFAEAEB2) : const Color(0xFF8E8E93),
+                                          style: const TextStyle(
+                                            color: EllaColors.textSecondary,
                                             fontSize: 12,
                                           ),
                                         ),
@@ -99,7 +101,7 @@ class ConversationTimeoutDialog {
                                   if (isSelected)
                                     const Icon(
                                       Icons.check_circle,
-                                      color: Colors.white,
+                                      color: EllaColors.primary,
                                       size: 20,
                                     ),
                                 ],
@@ -108,7 +110,7 @@ class ConversationTimeoutDialog {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
                   ],
                 ),
               ),
@@ -119,7 +121,7 @@ class ConversationTimeoutDialog {
                   },
                   child: Text(
                     context.l10n.cancel,
-                    style: const TextStyle(color: Color(0xFF8E8E93)),
+                    style: const TextStyle(color: EllaColors.textSecondary),
                   ),
                 ),
                 TextButton(
@@ -139,7 +141,7 @@ class ConversationTimeoutDialog {
                   },
                   child: Text(
                     context.l10n.save,
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                    style: const TextStyle(color: EllaColors.primary, fontWeight: FontWeight.w600),
                   ),
                 ),
               ],
