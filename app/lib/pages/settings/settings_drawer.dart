@@ -2,8 +2,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/persona/persona_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/pages/settings/developer.dart';
@@ -119,8 +119,9 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
       child: Container(
         margin: const EdgeInsets.only(bottom: 1),
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
@@ -138,7 +139,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                     Text(
                       title,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 17,
                         fontWeight: FontWeight.w400,
                       ),
@@ -190,7 +191,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
               ),
               const Icon(
                 Icons.chevron_right,
-                color: Color(0xFF3C3C43),
+                color: EllaColors.textTertiary,
                 size: 20,
               ),
             ],
@@ -203,8 +204,9 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: children,
@@ -225,7 +227,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
         Text(
           displayText,
           style: const TextStyle(
-            color: Color(0xFF8E8E93),
+            color: EllaColors.textSecondary,
             fontSize: 13,
             fontWeight: FontWeight.w400,
           ),
@@ -238,7 +240,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
             child: const Icon(
               Icons.copy,
               size: 12,
-              color: Color(0xFF8E8E93),
+              color: EllaColors.textSecondary,
             ),
           ),
         ),
@@ -627,7 +629,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     return Container(
       height: MediaQuery.of(context).size.height * 0.9,
       decoration: const BoxDecoration(
-        color: Color(0xFF000000),
+        color: EllaColors.bgPrimary,
         borderRadius: BorderRadius.only(
           topLeft: Radius.circular(16),
           topRight: Radius.circular(16),
@@ -641,7 +643,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
             height: 4,
             width: 36,
             decoration: BoxDecoration(
-              color: const Color(0xFF3C3C43),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -655,7 +657,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                   child: Text(
                     context.l10n.settings,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                     ),
@@ -669,7 +671,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
                     child: Text(
                       context.l10n.done,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.primary,
                         fontSize: 17,
                         fontWeight: FontWeight.w400,
                       ),

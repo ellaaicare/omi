@@ -499,8 +499,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1C1C1E),
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: EllaColors.bgTertiary),
                       ),
                       child: Row(
                         children: [
@@ -508,13 +509,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Center(
                               child: FaIcon(
                                 FontAwesomeIcons.solidCircleUser,
-                                color: Colors.grey.shade400,
+                                color: EllaColors.primary,
                                 size: 16,
                               ),
                             ),
@@ -529,7 +530,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                     Text(
                                       context.l10n.persona,
                                       style: const TextStyle(
-                                        color: Colors.white,
+                                        color: EllaColors.textPrimary,
                                         fontSize: 16,
                                         fontWeight: FontWeight.w500,
                                       ),
@@ -557,7 +558,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.configureAiPersona,
                                   style: TextStyle(
-                                    color: Colors.grey.shade500,
+                                    color: EllaColors.textSecondary,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -566,7 +567,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                           FaIcon(
                             FontAwesomeIcons.chevronRight,
-                            color: Colors.grey.shade600,
+                            color: EllaColors.textTertiary,
                             size: 14,
                           ),
                         ],
@@ -590,8 +591,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1C1C1E),
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: EllaColors.bgTertiary),
                       ),
                       child: Row(
                         children: [
@@ -599,13 +601,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Center(
                               child: FaIcon(
                                 FontAwesomeIcons.microphone,
-                                color: Colors.grey.shade400,
+                                color: EllaColors.primary,
                                 size: 16,
                               ),
                             ),
@@ -618,7 +620,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.transcription,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: EllaColors.textPrimary,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -627,7 +629,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.configureSttProvider,
                                   style: TextStyle(
-                                    color: Colors.grey.shade500,
+                                    color: EllaColors.textSecondary,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -638,7 +640,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           const SizedBox(width: 8),
                           FaIcon(
                             FontAwesomeIcons.chevronRight,
-                            color: Colors.grey.shade600,
+                            color: EllaColors.textTertiary,
                             size: 14,
                           ),
                         ],
@@ -655,8 +657,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1C1C1E),
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: EllaColors.bgTertiary),
                       ),
                       child: Row(
                         children: [
@@ -664,13 +667,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Center(
                               child: FaIcon(
                                 FontAwesomeIcons.clock,
-                                color: Colors.grey.shade400,
+                                color: EllaColors.primary,
                                 size: 16,
                               ),
                             ),
@@ -683,7 +686,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.conversationTimeout,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: EllaColors.textPrimary,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -692,7 +695,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.setWhenConversationsAutoEnd,
                                   style: TextStyle(
-                                    color: Colors.grey.shade500,
+                                    color: EllaColors.textSecondary,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -701,7 +704,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                           FaIcon(
                             FontAwesomeIcons.chevronRight,
-                            color: Colors.grey.shade600,
+                            color: EllaColors.textTertiary,
                             size: 14,
                           ),
                         ],
@@ -722,8 +725,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1C1C1E),
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: EllaColors.bgTertiary),
                       ),
                       child: Row(
                         children: [
@@ -731,13 +735,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Center(
                               child: FaIcon(
                                 FontAwesomeIcons.fileImport,
-                                color: Colors.grey.shade400,
+                                color: EllaColors.primary,
                                 size: 16,
                               ),
                             ),
@@ -750,7 +754,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.importData,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: EllaColors.textPrimary,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -759,7 +763,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.importDataFromOtherSources,
                                   style: TextStyle(
-                                    color: Colors.grey.shade500,
+                                    color: EllaColors.textSecondary,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -768,7 +772,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                           FaIcon(
                             FontAwesomeIcons.chevronRight,
-                            color: Colors.grey.shade600,
+                            color: EllaColors.textTertiary,
                             size: 14,
                           ),
                         ],
@@ -880,8 +884,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1C1C1E),
+                      color: Colors.white,
                       borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: EllaColors.bgTertiary),
                     ),
                     child: Column(
                       children: [
@@ -892,13 +897,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                               width: 40,
                               height: 40,
                               decoration: BoxDecoration(
-                                color: const Color(0xFF2A2A2E),
+                                color: EllaColors.bgTertiary,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Center(
                                 child: FaIcon(
                                   FontAwesomeIcons.bug,
-                                  color: Colors.grey.shade400,
+                                  color: EllaColors.primary,
                                   size: 16,
                                 ),
                               ),
@@ -911,7 +916,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                   Text(
                                     context.l10n.debugLogs,
                                     style: const TextStyle(
-                                      color: Colors.white,
+                                      color: EllaColors.textPrimary,
                                       fontSize: 16,
                                       fontWeight: FontWeight.w500,
                                     ),
@@ -922,7 +927,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                         ? context.l10n.autoDeletesAfterThreeDays
                                         : context.l10n.helpsDiagnoseIssues,
                                     style: TextStyle(
-                                      color: Colors.grey.shade500,
+                                      color: EllaColors.textSecondary,
                                       fontSize: 13,
                                     ),
                                   ),
@@ -965,7 +970,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                     if (!mounted) return;
                                     final selected = await showModalBottomSheet<File>(
                                       context: context,
-                                      backgroundColor: const Color(0xFF1C1C1E),
+                                      backgroundColor: Colors.white,
                                       shape: const RoundedRectangleBorder(
                                         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
                                       ),
@@ -979,7 +984,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                                 height: 4,
                                                 width: 36,
                                                 decoration: BoxDecoration(
-                                                  color: const Color(0xFF3C3C43),
+                                                  color: EllaColors.bgTertiary,
                                                   borderRadius: BorderRadius.circular(2),
                                                 ),
                                               ),
@@ -988,7 +993,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                                 child: Text(
                                                   context.l10n.selectLogFile,
                                                   style: const TextStyle(
-                                                    color: Colors.white,
+                                                    color: EllaColors.textPrimary,
                                                     fontSize: 18,
                                                     fontWeight: FontWeight.w600,
                                                   ),
@@ -999,14 +1004,15 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                                   shrinkWrap: true,
                                                   itemCount: files.length,
                                                   separatorBuilder: (_, __) =>
-                                                      const Divider(height: 1, color: Color(0xFF3C3C43)),
+                                                      const Divider(height: 1, color: EllaColors.bgTertiary),
                                                   itemBuilder: (ctx, i) {
                                                     final f = files[i];
                                                     final name = f.uri.pathSegments.last;
                                                     return ListTile(
-                                                      title: Text(name, style: const TextStyle(color: Colors.white)),
+                                                      title: Text(name,
+                                                          style: const TextStyle(color: EllaColors.textPrimary)),
                                                       trailing: const FaIcon(FontAwesomeIcons.chevronRight,
-                                                          color: Color(0xFF3C3C43), size: 14),
+                                                          color: EllaColors.textTertiary, size: 14),
                                                       onTap: () => Navigator.of(ctx).pop(f),
                                                     );
                                                   },
@@ -1029,18 +1035,18 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(vertical: 12),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF2A2A2E),
+                                      color: EllaColors.primarySubtle,
                                       borderRadius: BorderRadius.circular(10),
                                     ),
                                     child: Row(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        FaIcon(FontAwesomeIcons.fileArrowUp, color: Colors.grey.shade300, size: 16),
+                                        FaIcon(FontAwesomeIcons.fileArrowUp, color: EllaColors.primary, size: 16),
                                         const SizedBox(width: 8),
                                         Text(
                                           context.l10n.shareLogs,
                                           style: TextStyle(
-                                            color: Colors.grey.shade300,
+                                            color: EllaColors.primary,
                                             fontSize: 14,
                                             fontWeight: FontWeight.w500,
                                           ),
@@ -1114,8 +1120,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1C1C1E),
+                        color: Colors.white,
                         borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: EllaColors.bgTertiary),
                       ),
                       child: Row(
                         children: [
@@ -1123,13 +1130,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                             width: 40,
                             height: 40,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Center(
                               child: FaIcon(
                                 FontAwesomeIcons.fileExport,
-                                color: Colors.grey.shade400,
+                                color: EllaColors.primary,
                                 size: 16,
                               ),
                             ),
@@ -1142,7 +1149,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.exportAllData,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: EllaColors.textPrimary,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -1151,7 +1158,7 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                                 Text(
                                   context.l10n.exportConversationsToJson,
                                   style: TextStyle(
-                                    color: Colors.grey.shade500,
+                                    color: EllaColors.textSecondary,
                                     fontSize: 13,
                                   ),
                                 ),
@@ -1164,13 +1171,13 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                               height: 20,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: Colors.white,
+                                color: EllaColors.primary,
                               ),
                             )
                           else
                             FaIcon(
                               FontAwesomeIcons.chevronRight,
-                              color: Colors.grey.shade400,
+                              color: EllaColors.textTertiary,
                               size: 16,
                             ),
                         ],

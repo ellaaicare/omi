@@ -264,14 +264,14 @@ class _DataProtectionSectionState extends State<DataProtectionSection> {
         padding: const EdgeInsets.all(16),
         margin: const EdgeInsets.only(top: 12),
         decoration: BoxDecoration(
-          color: const Color(0xFF1A1A1A),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.lock_outline, color: Colors.grey.shade400, size: 28),
+            const Icon(Icons.lock_outline, color: EllaColors.primary, size: 28),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -283,7 +283,7 @@ class _DataProtectionSectionState extends State<DataProtectionSection> {
                         context.l10n.endToEndEncryption,
                         style: const TextStyle(
                           fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 16,
                         ),
                       ),
@@ -291,14 +291,14 @@ class _DataProtectionSectionState extends State<DataProtectionSection> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                         decoration: BoxDecoration(
-                          color: Colors.grey.shade700,
+                          color: EllaColors.bgTertiary,
                           borderRadius: BorderRadius.circular(16),
                         ),
                         child: Text(
                           context.l10n.comingSoon,
                           style: const TextStyle(
                             fontSize: 10,
-                            color: Colors.white,
+                            color: EllaColors.textSecondary,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
@@ -308,12 +308,12 @@ class _DataProtectionSectionState extends State<DataProtectionSection> {
                   const SizedBox(height: 8),
                   Text(
                     context.l10n.e2eeCardDescription,
-                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14, height: 1.4),
+                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14, height: 1.4),
                   ),
                 ],
               ),
             ),
-            Icon(Icons.info_outline, color: Colors.grey.shade600, size: 20),
+            const Icon(Icons.info_outline, color: EllaColors.textTertiary, size: 20),
           ],
         ),
       ),
@@ -326,12 +326,12 @@ class _DataProtectionSectionState extends State<DataProtectionSection> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: Colors.grey, size: 16),
+          Icon(icon, color: EllaColors.textTertiary, size: 16),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
               text,
-              style: const TextStyle(color: Colors.grey, fontSize: 14, height: 1.4),
+              style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14, height: 1.4),
             ),
           ),
         ],

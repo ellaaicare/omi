@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -38,8 +39,9 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -51,13 +53,13 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2E),
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Center(
                   child: FaIcon(
                     FontAwesomeIcons.book,
-                    color: Colors.grey.shade400,
+                    color: EllaColors.primary,
                     size: 16,
                   ),
                 ),
@@ -72,7 +74,7 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                         Text(
                           context.l10n.addWords,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             fontSize: 16,
                             fontWeight: FontWeight.w500,
                           ),
@@ -81,13 +83,13 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.grey.shade800,
+                            color: EllaColors.bgTertiary,
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
                             '${userProvider.transcriptionVocabulary.length}',
                             style: const TextStyle(
-                              color: Colors.grey,
+                              color: EllaColors.textSecondary,
                               fontSize: 11,
                               fontWeight: FontWeight.w500,
                             ),
@@ -99,7 +101,7 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                     Text(
                       context.l10n.addWordsDesc,
                       style: TextStyle(
-                        color: Colors.grey.shade500,
+                        color: EllaColors.textSecondary,
                         fontSize: 13,
                       ),
                     ),
@@ -116,22 +118,23 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
               Expanded(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: const Color(0xFF2C2C2E),
+                    color: EllaColors.bgPrimary,
+                    border: Border.all(color: EllaColors.bgTertiary),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: TextField(
                     controller: _vocabularyController,
                     enabled: !(userProvider.isUpdatingVocabulary && !_isDeletingBatch),
-                    style: const TextStyle(color: Colors.white, fontSize: 15),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
                     decoration: InputDecoration(
                       hintText: context.l10n.vocabularyHint,
-                      hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+                      hintStyle: const TextStyle(color: EllaColors.textTertiary, fontSize: 14),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                       border: InputBorder.none,
                       enabledBorder: InputBorder.none,
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: Colors.white24, width: 1),
+                        borderSide: const BorderSide(color: EllaColors.primary, width: 1),
                       ),
                     ),
                     onSubmitted: userProvider.isUpdatingVocabulary && !_isDeletingBatch
@@ -147,8 +150,8 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: userProvider.isUpdatingVocabulary && !_isDeletingBatch
-                        ? const Color(0xFF1A1A1A)
-                        : const Color(0xFF2A2A2E),
+                        ? EllaColors.bgTertiary
+                        : EllaColors.primary,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: userProvider.isUpdatingVocabulary && !_isDeletingBatch
@@ -169,7 +172,7 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
           // Words chips section
           if (userProvider.transcriptionVocabulary.isNotEmpty) ...[
             const SizedBox(height: 20),
-            Divider(height: 1, color: Colors.grey.shade800),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
             const SizedBox(height: 16),
             Wrap(
               spacing: 8,
@@ -180,7 +183,8 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                 return Container(
                   padding: const EdgeInsets.only(left: 14, right: 6, top: 6, bottom: 6),
                   decoration: BoxDecoration(
-                    color: isPendingDelete ? const Color(0xFF1A1A1A) : const Color(0xFF2A2A2E),
+                    color: isPendingDelete ? EllaColors.bgTertiary : EllaColors.primarySubtle,
+                    border: Border.all(color: EllaColors.bgTertiary),
                     borderRadius: BorderRadius.circular(100),
                   ),
                   child: Row(
@@ -189,7 +193,7 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                       Text(
                         word,
                         style: TextStyle(
-                          color: isPendingDelete ? Colors.grey.shade600 : Colors.white,
+                          color: isPendingDelete ? EllaColors.textTertiary : EllaColors.textPrimary,
                           fontSize: 14,
                           fontWeight: FontWeight.w500,
                         ),
@@ -210,12 +214,13 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
                           child: Container(
                             padding: const EdgeInsets.all(4),
                             decoration: BoxDecoration(
-                              color: Colors.grey.shade700.withOpacity(0.5),
+                              color: Colors.white,
+                              border: Border.all(color: EllaColors.bgTertiary),
                               shape: BoxShape.circle,
                             ),
                             child: Icon(
                               Icons.close,
-                              color: isDisabled ? Colors.grey.shade700 : Colors.grey.shade300,
+                              color: isDisabled ? EllaColors.textDisabled : EllaColors.textSecondary,
                               size: 12,
                             ),
                           ),
@@ -294,18 +299,19 @@ class _CustomVocabularyPageState extends State<CustomVocabularyPage> {
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
       child: Scaffold(
-        backgroundColor: const Color(0xFF0D0D0D),
+        backgroundColor: EllaColors.bgPrimary,
         appBar: AppBar(
-          backgroundColor: const Color(0xFF0D0D0D),
+          backgroundColor: EllaColors.bgPrimary,
+          foregroundColor: EllaColors.textPrimary,
           elevation: 0,
           leading: IconButton(
-            icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+            icon: const FaIcon(FontAwesomeIcons.chevronLeft, color: EllaColors.textPrimary, size: 18),
             onPressed: () => Navigator.of(context).pop(),
           ),
           title: Text(
             context.l10n.customVocabularyTitle,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontSize: 18,
               fontWeight: FontWeight.w600,
             ),

@@ -31,7 +31,7 @@ import 'package:omi/ella/ella_theme.dart';
 Widget _buildFaIcon(IconData icon, {double size = 18, Color color = const Color(0xFF8E8E93)}) {
   return Padding(
     padding: const EdgeInsets.only(left: 2, top: 1),
-    child: FaIcon(icon, size: size, color: color),
+    child: FaIcon(icon, size: size, color: color == const Color(0xFF8E8E93) ? EllaColors.primary : color),
   );
 }
 
@@ -104,8 +104,9 @@ class WalListItem extends StatelessWidget {
           },
           child: Container(
             decoration: BoxDecoration(
-              color: const Color(0xFF1C1C1E),
+              color: Colors.white,
               borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: EllaColors.bgTertiary),
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(16),
@@ -141,7 +142,7 @@ class WalListItem extends StatelessWidget {
                             width: 36,
                             height: 36,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF2A2A2E),
+                              color: EllaColors.bgTertiary,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Padding(
@@ -162,7 +163,7 @@ class WalListItem extends StatelessWidget {
                                   dateTimeFormat(
                                       'MMM d, h:mm a', DateTime.fromMillisecondsSinceEpoch(wal.timerStart * 1000)),
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: EllaColors.textPrimary,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w500,
                                   ),
@@ -173,7 +174,7 @@ class WalListItem extends StatelessWidget {
                                     Text(
                                       secondsToHumanReadable(wal.seconds, context),
                                       style: TextStyle(
-                                        color: Colors.grey.shade500,
+                                        color: EllaColors.textSecondary,
                                         fontSize: 13,
                                       ),
                                     ),
@@ -280,7 +281,7 @@ class WalListItem extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(2),
                                 child: LinearProgressIndicator(
                                   value: calculateProgress(wal.syncStartedAt, wal.syncEtaSeconds ?? 0),
-                                  backgroundColor: const Color(0xFF3C3C43),
+                                  backgroundColor: EllaColors.bgTertiary,
                                   color: wal.syncMethod == SyncMethod.wifi ? Colors.blue : Colors.orange,
                                   minHeight: 3,
                                 ),
@@ -291,7 +292,7 @@ class WalListItem extends StatelessWidget {
                               Text(
                                 '${wal.syncSpeedKBps!.toStringAsFixed(1)} KB/s',
                                 style: TextStyle(
-                                  color: Colors.grey.shade500,
+                                  color: EllaColors.textSecondary,
                                   fontSize: 11,
                                 ),
                               ),
@@ -303,7 +304,7 @@ class WalListItem extends StatelessWidget {
                           Text(
                             context.l10n.etaLabel(_formatEta(wal.syncEtaSeconds!)),
                             style: TextStyle(
-                              color: Colors.grey.shade600,
+                              color: EllaColors.textTertiary,
                               fontSize: 11,
                             ),
                           ),
@@ -343,7 +344,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
       child: Text(
         title,
         style: const TextStyle(
-          color: Colors.white,
+          color: EllaColors.textPrimary,
           fontSize: 20,
           fontWeight: FontWeight.w600,
         ),
@@ -374,7 +375,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               child: Text(
                 title,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 16,
                   fontWeight: FontWeight.w400,
                 ),
@@ -383,7 +384,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
             if (trailing != null) trailing,
             if (showChevron) ...[
               const SizedBox(width: 8),
-              const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
+              const Icon(Icons.chevron_right, color: EllaColors.textTertiary, size: 20),
             ],
           ],
         ),
@@ -398,8 +399,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -411,13 +413,13 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 trailing: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: isFastTransfer ? Colors.blue.withOpacity(0.2) : const Color(0xFF2A2A2E),
+                    color: isFastTransfer ? Colors.blue.withOpacity(0.15) : EllaColors.primarySubtle,
                     borderRadius: BorderRadius.circular(100),
                   ),
                   child: Text(
                     isFastTransfer ? context.l10n.fast : context.l10n.ble,
                     style: TextStyle(
-                      color: isFastTransfer ? Colors.blue : Colors.white,
+                      color: isFastTransfer ? Colors.blue : EllaColors.textPrimary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                     ),
@@ -433,7 +435,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 },
               );
             }),
-            const Divider(height: 1, color: Color(0xFF3C3C43)),
+            const Divider(height: 1, color: EllaColors.bgTertiary),
           ],
           Builder(builder: (context) {
             return _buildSettingsItem(
@@ -442,13 +444,13 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               trailing: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: isPhoneStorageOn ? Colors.green.withOpacity(0.2) : const Color(0xFF2A2A2E),
+                  color: isPhoneStorageOn ? Colors.green.withOpacity(0.15) : EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(100),
                 ),
                 child: Text(
                   isPhoneStorageOn ? context.l10n.on : context.l10n.off,
                   style: TextStyle(
-                    color: isPhoneStorageOn ? Colors.green : Colors.white,
+                    color: isPhoneStorageOn ? Colors.green : EllaColors.textPrimary,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -464,7 +466,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
               },
             );
           }),
-          const Divider(height: 1, color: Color(0xFF3C3C43)),
+          const Divider(height: 1, color: EllaColors.bgTertiary),
           Consumer<UserProvider>(
             builder: (context, userProvider, child) {
               final isCloudOn = userProvider.privateCloudSyncEnabled;
@@ -474,13 +476,13 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 trailing: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: isCloudOn ? Colors.green.withOpacity(0.2) : const Color(0xFF2A2A2E),
+                    color: isCloudOn ? Colors.green.withOpacity(0.15) : EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(100),
                   ),
                   child: Text(
                     isCloudOn ? context.l10n.on : context.l10n.off,
                     style: TextStyle(
-                      color: isCloudOn ? Colors.green : Colors.white,
+                      color: isCloudOn ? Colors.green : EllaColors.textPrimary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                     ),
@@ -546,9 +548,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.white.withOpacity(0.12) : const Color(0xFF1C1C1E),
+          color: isSelected ? EllaColors.primarySubtle : Colors.white,
           borderRadius: BorderRadius.circular(100),
-          border: isSelected ? Border.all(color: Colors.white.withOpacity(0.3), width: 1) : null,
+          border: Border.all(color: isSelected ? EllaColors.primary : EllaColors.bgTertiary, width: 1),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -556,7 +558,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
             Text(
               label,
               style: TextStyle(
-                color: isSelected ? Colors.white : Colors.grey.shade400,
+                color: isSelected ? EllaColors.primaryDark : EllaColors.textSecondary,
                 fontSize: 14,
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
               ),
@@ -565,13 +567,13 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
-                color: isSelected ? Colors.white.withOpacity(0.2) : const Color(0xFF2A2A2E),
+                color: isSelected ? Colors.white : EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
                 '$count',
                 style: TextStyle(
-                  color: isSelected ? Colors.white : Colors.grey.shade500,
+                  color: isSelected ? EllaColors.primaryDark : EllaColors.textSecondary,
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
                 ),
@@ -715,23 +717,24 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C1E),
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Row(
           children: [
             _buildFaIcon(FontAwesomeIcons.sdCard, size: 20, color: EllaColors.primaryLight),
             const SizedBox(width: 12),
-            Text(context.l10n.sdCardProcessing, style: const TextStyle(color: Colors.white, fontSize: 18)),
+            Text(context.l10n.sdCardProcessing, style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18)),
           ],
         ),
         content: Text(
           context.l10n.sdCardProcessingMessage(sdCardCount),
-          style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+          style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
         ),
         actions: [
           TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: Text(context.l10n.cancel, style: TextStyle(color: Colors.grey.shade500))),
+              child: Text(context.l10n.cancel, style: const TextStyle(color: EllaColors.textSecondary))),
           TextButton(
             onPressed: () {
               Navigator.of(context).pop();
@@ -782,8 +785,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
 
       return Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -807,12 +811,13 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                       children: [
                         Text(
                           isWifiError ? context.l10n.wifiSyncFailed : context.l10n.processingFailed,
-                          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                          style:
+                              const TextStyle(color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500),
                         ),
                         const SizedBox(height: 2),
                         Text(
                           _formatErrorMessage(context, errorMessage),
-                          style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                          style: const TextStyle(color: EllaColors.textSecondary, fontSize: 13),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -830,13 +835,14 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2A2A2E),
+                          color: EllaColors.primarySubtle,
                           borderRadius: BorderRadius.circular(100),
                         ),
                         child: Center(
                           child: Text(
                             context.l10n.retry,
-                            style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                            style:
+                                const TextStyle(color: EllaColors.primary, fontSize: 14, fontWeight: FontWeight.w500),
                           ),
                         ),
                       ),
@@ -863,8 +869,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
 
       return Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: Padding(
           padding: const EdgeInsets.all(16),
@@ -898,7 +905,8 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                                     ? context.l10n.downloadingFromSdCard
                                     : context.l10n.processingProgress(
                                         syncProvider.processedWalsCount, syncProvider.initialMissingWalsCount),
-                                style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                                style: const TextStyle(
+                                    color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -908,7 +916,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                           const SizedBox(height: 4),
                           Text(
                             '${speedKBps.toStringAsFixed(1)} KB/s',
-                            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                            style: const TextStyle(color: EllaColors.textSecondary, fontSize: 13),
                           ),
                         ],
                       ],
@@ -916,7 +924,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                   ),
                   Text(
                     '${(progress * 100).toInt()}%',
-                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w500),
+                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14, fontWeight: FontWeight.w500),
                   ),
                   if (isSdCardSyncing) ...[
                     const SizedBox(width: 12),
@@ -939,7 +947,7 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 borderRadius: BorderRadius.circular(3),
                 child: LinearProgressIndicator(
                   value: progress,
-                  backgroundColor: const Color(0xFF3C3C43),
+                  backgroundColor: EllaColors.bgTertiary,
                   color: isWifiSync ? Colors.blue : EllaColors.primaryLight,
                   minHeight: 4,
                 ),
@@ -954,8 +962,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
     if (syncProvider.syncCompleted && syncProvider.syncedConversationsPointers.isNotEmpty) {
       return Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: GestureDetector(
           onTap: () => routeToPage(context, const SyncedConversationsPage()),
@@ -968,10 +977,10 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                 Expanded(
                   child: Text(
                     context.l10n.conversationsCreated(syncProvider.syncedConversationsPointers.length),
-                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500),
                   ),
                 ),
-                const Icon(Icons.chevron_right, color: Color(0xFF3C3C43), size: 20),
+                const Icon(Icons.chevron_right, color: EllaColors.textTertiary, size: 20),
               ],
             ),
           ),
@@ -988,8 +997,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
 
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: GestureDetector(
         onTap: () {
@@ -1018,7 +1028,8 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(context.l10n.processAudio,
-                        style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)),
+                        style:
+                            const TextStyle(color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500)),
                     const SizedBox(height: 3),
                     Text(
                       secondsToHumanReadable(totalSecondsToProcess, context),
@@ -1048,8 +1059,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
       margin: const EdgeInsets.all(20),
       padding: const EdgeInsets.all(32),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -1057,17 +1069,17 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
             width: 64,
             height: 64,
             decoration: BoxDecoration(
-              color: const Color(0xFF2A2A2E),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(16),
             ),
             child: Center(child: _buildFaIcon(FontAwesomeIcons.microphone, size: 24)),
           ),
           const SizedBox(height: 20),
           Text(context.l10n.noRecordings,
-              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
           Text(context.l10n.audioFromOmiWillAppearHere,
-              style: TextStyle(color: Colors.grey.shade500, fontSize: 14), textAlign: TextAlign.center),
+              style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14), textAlign: TextAlign.center),
         ],
       ),
     );
@@ -1083,19 +1095,20 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
       },
       child: Consumer<SyncProvider>(builder: (context, syncProvider, child) {
         return Scaffold(
-          backgroundColor: const Color(0xFF0D0D0D),
+          backgroundColor: EllaColors.bgPrimary,
           appBar: AppBar(
-            backgroundColor: const Color(0xFF0D0D0D),
+            backgroundColor: EllaColors.bgPrimary,
+            foregroundColor: EllaColors.textPrimary,
             elevation: 0,
             leading: IconButton(
               icon: const Padding(
                 padding: EdgeInsets.only(left: 2, top: 1),
-                child: FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+                child: FaIcon(FontAwesomeIcons.chevronLeft, color: EllaColors.textPrimary, size: 18),
               ),
               onPressed: () => Navigator.of(context).pop(),
             ),
             title: Text(context.l10n.offlineSync,
-                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+                style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.w600)),
             centerTitle: true,
             actions: [
               PullDownButton(
@@ -1117,11 +1130,11 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                     height: 36,
                     margin: const EdgeInsets.only(right: 8),
                     decoration: BoxDecoration(
-                      color: Colors.grey.withOpacity(0.3),
+                      color: EllaColors.bgTertiary,
                       shape: BoxShape.circle,
                     ),
                     child: Center(
-                      child: _buildFaIcon(FontAwesomeIcons.ellipsisVertical, size: 16, color: Colors.white),
+                      child: _buildFaIcon(FontAwesomeIcons.ellipsisVertical, size: 16, color: EllaColors.textPrimary),
                     ),
                   ),
                 ),
@@ -1179,8 +1192,9 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                             margin: const EdgeInsets.all(20),
                             padding: const EdgeInsets.all(32),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF1C1C1E),
+                              color: Colors.white,
                               borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: EllaColors.bgTertiary),
                             ),
                             child: Column(
                               children: [
@@ -1188,10 +1202,10 @@ class _SyncPageState extends State<SyncPage> with TickerProviderStateMixin {
                                 const SizedBox(height: 16),
                                 Text(context.l10n.noRecordings,
                                     style: const TextStyle(
-                                        color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)),
+                                        color: EllaColors.textPrimary, fontSize: 16, fontWeight: FontWeight.w500)),
                                 const SizedBox(height: 4),
                                 Text(context.l10n.tryDifferentFilter,
-                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 14)),
+                                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14)),
                               ],
                             ),
                           ),

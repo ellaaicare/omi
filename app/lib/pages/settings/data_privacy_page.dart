@@ -32,8 +32,9 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -44,7 +45,7 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
           const SizedBox(height: 16),
           Text(
             context.l10n.yourPrivacyYourControl,
-            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: EllaColors.textPrimary),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
@@ -53,7 +54,7 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
             child: RichText(
               textAlign: TextAlign.center,
               text: TextSpan(
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade400, height: 1.5),
+                style: const TextStyle(fontSize: 16, color: EllaColors.textSecondary, height: 1.5),
                 children: [
                   TextSpan(
                     text: '${context.l10n.privacyIntro} ',
@@ -123,17 +124,18 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
         final isMigrating = provider.isMigrating;
 
         return Scaffold(
-          backgroundColor: Theme.of(context).colorScheme.primary,
+          backgroundColor: EllaColors.bgPrimary,
           appBar: AppBar(
-            backgroundColor: Theme.of(context).colorScheme.primary,
+            backgroundColor: EllaColors.bgPrimary,
+            foregroundColor: EllaColors.textPrimary,
             automaticallyImplyLeading: true,
             title: Text(
               context.l10n.dataPrivacy,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w600),
             ),
             centerTitle: true,
             leading: IconButton(
-              icon: const Icon(Icons.arrow_back_ios_new),
+              icon: const Icon(Icons.arrow_back_ios_new, color: EllaColors.textPrimary),
               onPressed: () => Navigator.pop(context),
             ),
             elevation: 0,
@@ -147,17 +149,17 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                   const SizedBox(height: 32),
                   Text(
                     context.l10n.dataProtectionLevel,
-                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     context.l10n.dataProtectionDesc,
-                    style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                    style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
                   ),
                   const SizedBox(height: 16),
                   const DataProtectionSection(),
                   const SizedBox(height: 24),
-                  const Divider(color: Colors.grey),
+                  const Divider(color: EllaColors.bgTertiary),
                   const SizedBox(height: 24),
                   Consumer<AppProvider>(
                     builder: (context, appProvider, child) {
@@ -169,12 +171,13 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                         children: [
                           Text(
                             context.l10n.appAccess,
-                            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                           const SizedBox(height: 8),
                           Text(
                             context.l10n.appAccessDesc,
-                            style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                            style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
                           ),
                           const SizedBox(height: 16),
                           if (appsWithDataAccess.isEmpty)
@@ -182,18 +185,19 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                               width: double.infinity,
                               padding: const EdgeInsets.symmetric(vertical: 32.0, horizontal: 16.0),
                               decoration: BoxDecoration(
-                                color: const Color(0xFF1A1A1A),
+                                color: Colors.white,
                                 borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: EllaColors.bgTertiary),
                               ),
                               child: Center(
                                 child: Column(
                                   children: [
-                                    Icon(Icons.apps_outlined, color: Colors.grey.shade600, size: 32),
+                                    const Icon(Icons.apps_outlined, color: EllaColors.textTertiary, size: 32),
                                     const SizedBox(height: 16),
                                     Text(
                                       context.l10n.noAppsExternalAccess,
                                       textAlign: TextAlign.center,
-                                      style: TextStyle(color: Colors.grey.shade400),
+                                      style: const TextStyle(color: EllaColors.textSecondary),
                                     ),
                                   ],
                                 ),
@@ -203,7 +207,7 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                             Column(
                               children: appsWithDataAccess.map((app) {
                                 return Card(
-                                  color: const Color(0xFF1A1A1A),
+                                  color: Colors.white,
                                   margin: const EdgeInsets.only(bottom: 10),
                                   shape: RoundedRectangleBorder(
                                     borderRadius: BorderRadius.circular(12),
@@ -216,12 +220,13 @@ class _DataPrivacyPageState extends State<DataPrivacyPage> {
                                     leading: CircleAvatar(
                                       backgroundImage: NetworkImage(app.getImageUrl()),
                                     ),
-                                    title: Text(app.getName()),
+                                    title: Text(app.getName(), style: const TextStyle(color: EllaColors.textPrimary)),
                                     subtitle: Text(
                                       _getAccessDescription(context, app),
-                                      style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                                      style: const TextStyle(color: EllaColors.textSecondary, fontSize: 12),
                                     ),
-                                    trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                                    trailing:
+                                        const Icon(Icons.arrow_forward_ios, color: EllaColors.textTertiary, size: 16),
                                     onTap: () {
                                       routeToPage(context, AppDetailPage(app: app, preventAutoOpenHomePage: true));
                                     },

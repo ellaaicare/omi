@@ -297,8 +297,8 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               icon: FontAwesomeIcons.sdCard,
               title: context.l10n.sdCardSync,
               chipValue: pendingSeconds > 0 ? secondsToCompactDuration(pendingSeconds, context) : null,
-              chipColor: pendingSeconds > 0 ? const Color(0xFF3D3520) : null,
-              chipTextColor: pendingSeconds > 0 ? const Color(0xFFFFD060) : null,
+              chipColor: pendingSeconds > 0 ? EllaColors.primarySubtle : null,
+              chipTextColor: pendingSeconds > 0 ? EllaColors.textPrimary : null,
               onTap: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(

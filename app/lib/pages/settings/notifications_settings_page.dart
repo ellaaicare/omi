@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -146,7 +147,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
 
     await showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -166,13 +167,13 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                         onPressed: () => Navigator.pop(context),
                         child: Text(
                           context.l10n.cancel,
-                          style: TextStyle(color: Colors.grey.shade400, fontSize: 16),
+                          style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16),
                         ),
                       ),
                       Text(
                         context.l10n.selectTime,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 17,
                           fontWeight: FontWeight.w600,
                         ),
@@ -184,7 +185,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                         },
                         child: Text(
                           context.l10n.done,
-                          style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                          style: const TextStyle(color: EllaColors.primary, fontSize: 16, fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
@@ -193,7 +194,8 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                   Expanded(
                     child: CupertinoTheme(
                       data: const CupertinoThemeData(
-                        brightness: Brightness.dark,
+                        brightness: Brightness.light,
+                        primaryColor: EllaColors.primary,
                       ),
                       child: CupertinoPicker(
                         scrollController: FixedExtentScrollController(initialItem: tempHour),
@@ -208,7 +210,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                             child: Text(
                               '$hour12:00 $period',
                               style: const TextStyle(
-                                color: Colors.white,
+                                color: EllaColors.textPrimary,
                                 fontSize: 20,
                               ),
                             ),
@@ -236,13 +238,13 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.dark(
-              primary: Color(0xFF6366F1),
+            colorScheme: const ColorScheme.light(
+              primary: EllaColors.primary,
               onPrimary: Colors.white,
-              surface: Color(0xFF1C1C1E),
-              onSurface: Colors.white,
+              surface: Colors.white,
+              onSurface: EllaColors.textPrimary,
             ),
-            dialogBackgroundColor: const Color(0xFF1C1C1E),
+            dialogBackgroundColor: Colors.white,
           ),
           child: child!,
         );
@@ -295,15 +297,16 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Theme.of(context).colorScheme.primary,
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
         title: Text(context.l10n.notifications),
-        backgroundColor: Theme.of(context).colorScheme.primary,
+        backgroundColor: EllaColors.bgPrimary,
+        foregroundColor: EllaColors.textPrimary,
         elevation: 0,
         actions: [
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
-            color: const Color(0xFF1C1C1E),
+            icon: const Icon(Icons.more_vert, color: EllaColors.textPrimary),
+            color: Colors.white,
             onSelected: (value) {
               if (value == 'generate') {
                 _showGenerateSummaryPicker();
@@ -314,9 +317,9 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                 value: 'generate',
                 child: Row(
                   children: [
-                    const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+                    const Icon(Icons.auto_awesome, color: EllaColors.primary, size: 20),
                     const SizedBox(width: 12),
-                    Text(context.l10n.generateSummary, style: const TextStyle(color: Colors.white)),
+                    Text(context.l10n.generateSummary, style: const TextStyle(color: EllaColors.textPrimary)),
                   ],
                 ),
               ),
@@ -325,7 +328,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Colors.white))
+          ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
           : SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
@@ -339,7 +342,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                     child: Text(
                       context.l10n.notificationFrequencyDescription,
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textSecondary,
                         fontSize: 14,
                         height: 1.5,
                       ),
@@ -357,7 +360,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                     child: Text(
                       context.l10n.dailySummaryDescription,
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textSecondary,
                         fontSize: 14,
                         height: 1.5,
                       ),
@@ -375,7 +378,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                     child: Text(
                       context.l10n.dailyReflectionDescription,
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textSecondary,
                         fontSize: 14,
                         height: 1.5,
                       ),
@@ -392,7 +395,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
     return Text(
       title,
       style: const TextStyle(
-        color: Colors.white,
+        color: EllaColors.textPrimary,
         fontSize: 20,
         fontWeight: FontWeight.w600,
       ),
@@ -403,8 +406,9 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -418,7 +422,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                   Text(
                     _getFrequencyLabel(context, _notificationFrequency),
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                     ),
@@ -427,7 +431,7 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                   Text(
                     _getFrequencyDescription(context, _notificationFrequency),
                     style: TextStyle(
-                      color: Colors.grey.shade400,
+                      color: EllaColors.textSecondary,
                       fontSize: 14,
                     ),
                   ),
@@ -437,14 +441,14 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                 width: 48,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: _notificationFrequency == 0 ? Colors.grey.shade800 : const Color(0xFF6366F1).withOpacity(0.2),
+                  color: _notificationFrequency == 0 ? EllaColors.bgTertiary : EllaColors.primarySubtle,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Center(
                   child: Text(
                     '$_notificationFrequency',
                     style: TextStyle(
-                      color: _notificationFrequency == 0 ? Colors.grey.shade500 : const Color(0xFF6366F1),
+                      color: _notificationFrequency == 0 ? EllaColors.textTertiary : EllaColors.primary,
                       fontSize: 20,
                       fontWeight: FontWeight.w700,
                     ),
@@ -459,10 +463,10 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
           // Slider
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
-              activeTrackColor: const Color(0xFF6366F1),
-              inactiveTrackColor: Colors.grey.shade800,
-              thumbColor: Colors.white,
-              overlayColor: const Color(0xFF6366F1).withOpacity(0.2),
+              activeTrackColor: EllaColors.primary,
+              inactiveTrackColor: EllaColors.bgTertiary,
+              thumbColor: EllaColors.primary,
+              overlayColor: EllaColors.primarySubtle,
               trackHeight: 6,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 10),
             ),
@@ -484,14 +488,14 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                 Text(
                   context.l10n.sliderOff,
                   style: TextStyle(
-                    color: Colors.grey.shade500,
+                    color: EllaColors.textTertiary,
                     fontSize: 12,
                   ),
                 ),
                 Text(
                   context.l10n.sliderMax,
                   style: TextStyle(
-                    color: Colors.grey.shade500,
+                    color: EllaColors.textTertiary,
                     fontSize: 12,
                   ),
                 ),
@@ -507,8 +511,9 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -519,13 +524,14 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
             trailing: Switch(
               value: _dailySummaryEnabled,
               onChanged: _updateDailySummaryEnabled,
-              activeColor: const Color(0xFF6366F1),
+              activeThumbColor: EllaColors.primary,
+              activeTrackColor: EllaColors.primarySubtle,
             ),
           ),
 
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Divider(color: Colors.grey.shade800, height: 1),
+            child: Divider(color: EllaColors.bgTertiary, height: 1),
           ),
 
           // Time selector row
@@ -544,14 +550,14 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
                     Text(
                       _formatHourDisplay(_dailySummaryHour),
                       style: TextStyle(
-                        color: Colors.grey.shade400,
+                        color: EllaColors.textSecondary,
                         fontSize: 16,
                       ),
                     ),
                     const SizedBox(width: 6),
                     Icon(
                       Icons.chevron_right,
-                      color: Colors.grey.shade600,
+                      color: EllaColors.textTertiary,
                       size: 20,
                     ),
                   ],
@@ -568,8 +574,9 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: _buildSettingRow(
         icon: FontAwesomeIcons.moon,
@@ -577,7 +584,8 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
         trailing: Switch(
           value: _dailyReflectionEnabled,
           onChanged: _updateDailyReflectionEnabled,
-          activeColor: const Color(0xFF6366F1),
+          activeThumbColor: EllaColors.primary,
+          activeTrackColor: EllaColors.primarySubtle,
         ),
       ),
     );
@@ -594,17 +602,17 @@ class _NotificationsSettingsPageState extends State<NotificationsSettingsPage> {
           width: 40,
           height: 40,
           decoration: BoxDecoration(
-            color: const Color(0xFF2A2A2E),
+            color: EllaColors.bgTertiary,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Center(child: FaIcon(icon, color: Colors.grey.shade400, size: 16)),
+          child: Center(child: FaIcon(icon, color: EllaColors.primary, size: 16)),
         ),
         const SizedBox(width: 14),
         Expanded(
           child: Text(
             title,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontSize: 16,
               fontWeight: FontWeight.w500,
             ),

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'package:omi/ella/ella_theme.dart';
+
 class ToggleSectionWidget extends StatefulWidget {
   final bool isSectionEnabled;
   final String sectionTitle;
@@ -25,9 +27,9 @@ class _ToggleSectionWidgetState extends State<ToggleSectionWidget> {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF2C2C2E), width: 1),
+        border: Border.all(color: EllaColors.bgTertiary, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -42,7 +44,7 @@ class _ToggleSectionWidgetState extends State<ToggleSectionWidget> {
                     Text(
                       widget.sectionTitle,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
                       ),
@@ -51,7 +53,7 @@ class _ToggleSectionWidgetState extends State<ToggleSectionWidget> {
                     Text(
                       widget.sectionDescription,
                       style: const TextStyle(
-                        color: Color(0xFF8E8E93),
+                        color: EllaColors.textSecondary,
                         fontSize: 13,
                       ),
                     ),
@@ -61,7 +63,8 @@ class _ToggleSectionWidgetState extends State<ToggleSectionWidget> {
               Switch(
                 value: widget.isSectionEnabled,
                 onChanged: widget.onSectionEnabledChanged,
-                activeColor: const Color(0xFF8B5CF6),
+                activeThumbColor: EllaColors.primary,
+                activeTrackColor: EllaColors.primarySubtle,
               ),
             ],
           ),

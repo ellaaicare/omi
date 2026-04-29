@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/payments/payments_page.dart';
 import 'package:omi/pages/settings/change_name_widget.dart';
 import 'package:omi/pages/settings/language_settings_page.dart';
@@ -13,7 +14,6 @@ import 'package:omi/pages/speech_profile/page.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
-
 
 import 'package:omi/pages/settings/conversation_display_settings.dart';
 
@@ -35,8 +35,9 @@ class _ProfilePageState extends State<ProfilePage> {
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: EllaColors.bgSecondary,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: children,
@@ -58,8 +59,9 @@ class _ProfilePageState extends State<ProfilePage> {
       onTap: onTap,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1C1C1E),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: EllaColors.bgTertiary),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
@@ -80,7 +82,7 @@ class _ProfilePageState extends State<ProfilePage> {
                         Text(
                           title,
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: EllaColors.textPrimary,
                             fontSize: 17,
                             fontWeight: FontWeight.w400,
                           ),
@@ -111,7 +113,7 @@ class _ProfilePageState extends State<ProfilePage> {
                       Text(
                         subtitle,
                         style: const TextStyle(
-                          color: Color(0xFF8E8E93),
+                          color: EllaColors.textSecondary,
                           fontSize: 12,
                           fontWeight: FontWeight.w400,
                         ),
@@ -124,13 +126,13 @@ class _ProfilePageState extends State<ProfilePage> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF2A2A2E),
+                    color: EllaColors.primarySubtle,
                     borderRadius: BorderRadius.circular(100),
                   ),
                   child: Text(
                     chipValue,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
                     ),
@@ -141,7 +143,7 @@ class _ProfilePageState extends State<ProfilePage> {
               if (showChevron)
                 const Icon(
                   Icons.chevron_right,
-                  color: Color(0xFF3C3C43),
+                  color: EllaColors.textTertiary,
                   size: 20,
                 ),
             ],
@@ -154,20 +156,20 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF000000),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
         title: Text(
           context.l10n.profile,
           style: const TextStyle(
-            color: Colors.white,
+            color: EllaColors.textPrimary,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
         ),
         centerTitle: true,
-        backgroundColor: const Color(0xFF000000),
+        backgroundColor: EllaColors.bgPrimary,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
+        iconTheme: const IconThemeData(color: EllaColors.textPrimary),
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 20),

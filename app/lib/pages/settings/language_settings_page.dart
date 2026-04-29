@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/locale_provider.dart';
@@ -39,8 +40,9 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -51,13 +53,13 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: const Color(0xFF2A2A2E),
+                color: EllaColors.bgTertiary,
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Center(
                 child: FaIcon(
                   FontAwesomeIcons.textHeight,
-                  color: Colors.grey.shade400,
+                  color: EllaColors.primary,
                   size: 16,
                 ),
               ),
@@ -70,7 +72,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                   Text(
                     context.l10n.appLanguage,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: EllaColors.textPrimary,
                       fontSize: 16,
                       fontWeight: FontWeight.w500,
                     ),
@@ -81,7 +83,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                         ? LocaleProvider.getDisplayName(localeProvider.locale!)
                         : context.l10n.systemDefault,
                     style: TextStyle(
-                      color: Colors.grey.shade500,
+                      color: EllaColors.textSecondary,
                       fontSize: 13,
                     ),
                   ),
@@ -90,7 +92,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
             ),
             FaIcon(
               FontAwesomeIcons.chevronRight,
-              color: Colors.grey.shade600,
+              color: EllaColors.textTertiary,
               size: 14,
             ),
           ],
@@ -119,8 +121,9 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: [
@@ -134,13 +137,13 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF2A2A2E),
+                    color: EllaColors.bgTertiary,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Center(
                     child: FaIcon(
                       FontAwesomeIcons.microphone,
-                      color: Colors.grey.shade400,
+                      color: EllaColors.primary,
                       size: 16,
                     ),
                   ),
@@ -153,7 +156,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                       Text(
                         context.l10n.primaryLanguage,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: EllaColors.textPrimary,
                           fontSize: 16,
                           fontWeight: FontWeight.w500,
                         ),
@@ -162,7 +165,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                       Text(
                         languageName,
                         style: TextStyle(
-                          color: Colors.grey.shade500,
+                          color: EllaColors.textSecondary,
                           fontSize: 13,
                         ),
                       ),
@@ -175,13 +178,13 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                     height: 20,
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                     ),
                   )
                 else
                   FaIcon(
                     FontAwesomeIcons.chevronRight,
-                    color: Colors.grey.shade600,
+                    color: EllaColors.textTertiary,
                     size: 14,
                   ),
               ],
@@ -190,7 +193,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
 
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 16),
-            child: Divider(height: 1, color: Colors.grey.shade800),
+            child: Divider(height: 1, color: EllaColors.bgTertiary),
           ),
 
           // Multi-language Detection Row
@@ -200,13 +203,13 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2E),
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Center(
                   child: FaIcon(
                     FontAwesomeIcons.language,
-                    color: Colors.grey.shade400,
+                    color: EllaColors.primary,
                     size: 16,
                   ),
                 ),
@@ -219,7 +222,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                     Text(
                       context.l10n.automaticTranslation,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 16,
                         fontWeight: FontWeight.w500,
                       ),
@@ -227,8 +230,8 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                     const SizedBox(height: 2),
                     Text(
                       context.l10n.detectLanguages,
-                      style: TextStyle(
-                        color: Colors.grey.shade500,
+                      style: const TextStyle(
+                        color: EllaColors.textSecondary,
                         fontSize: 13,
                       ),
                     ),
@@ -242,7 +245,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                   height: 24,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                   ),
                 )
               else
@@ -254,7 +257,8 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                       context.read<CaptureProvider>().onTranscriptionSettingsChanged();
                     }
                   },
-                  activeColor: const Color(0xFF22C55E),
+                  activeThumbColor: EllaColors.primary,
+                  activeTrackColor: EllaColors.primarySubtle,
                 ),
             ],
           ),
@@ -268,8 +272,8 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: Text(
         context.l10n.languageSettingsHelperText,
-        style: TextStyle(
-          color: Colors.grey.shade600,
+        style: const TextStyle(
+          color: EllaColors.textTertiary,
           fontSize: 12,
           height: 1.4,
         ),
@@ -283,7 +287,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -297,14 +301,14 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                 width: 36,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF3C3C43),
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
               Text(
                 context.l10n.appLanguage,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: EllaColors.textPrimary,
                   fontSize: 17,
                   fontWeight: FontWeight.w600,
                 ),
@@ -322,11 +326,11 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                       title: Text(
                         LocaleProvider.getDisplayName(locale),
                         style: TextStyle(
-                          color: isSelected ? Colors.white : const Color(0xFF8E8E93),
+                          color: isSelected ? EllaColors.primaryDark : EllaColors.textSecondary,
                           fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
                         ),
                       ),
-                      trailing: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                      trailing: isSelected ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                       onTap: () {
                         localeProvider.setLocale(locale);
                         Navigator.pop(context);
@@ -349,7 +353,7 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1C1C1E),
+      backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -370,14 +374,14 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                       width: 36,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF3C3C43),
+                        color: EllaColors.bgTertiary,
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
                     Text(
                       context.l10n.selectLanguage,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 17,
                         fontWeight: FontWeight.w600,
                       ),
@@ -394,11 +398,11 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
                             title: Text(
                               entry.key,
                               style: TextStyle(
-                                color: isSelected ? Colors.white : const Color(0xFF8E8E93),
+                                color: isSelected ? EllaColors.primaryDark : EllaColors.textSecondary,
                                 fontWeight: isSelected ? FontWeight.w500 : FontWeight.w400,
                               ),
                             ),
-                            trailing: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
+                            trailing: isSelected ? const Icon(Icons.check, color: EllaColors.primary, size: 20) : null,
                             onTap: _isUpdatingLanguage
                                 ? null
                                 : () async {
@@ -442,18 +446,19 @@ class _LanguageSettingsPageState extends State<LanguageSettingsPage> {
     MixpanelManager().pageOpened('Language Settings');
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0D0D),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0D0D0D),
+        backgroundColor: EllaColors.bgPrimary,
+        foregroundColor: EllaColors.textPrimary,
         elevation: 0,
         leading: IconButton(
-          icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+          icon: const FaIcon(FontAwesomeIcons.chevronLeft, color: EllaColors.textPrimary, size: 18),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: Text(
           context.l10n.languageTitle,
           style: const TextStyle(
-            color: Colors.white,
+            color: EllaColors.textPrimary,
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),

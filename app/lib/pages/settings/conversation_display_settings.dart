@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -24,8 +25,9 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
   Widget _buildSectionContainer({required List<Widget> children}) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: EllaColors.bgTertiary),
       ),
       child: Column(
         children: children,
@@ -42,7 +44,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
           Text(
             title,
             style: const TextStyle(
-              color: Colors.white,
+              color: EllaColors.textPrimary,
               fontSize: 20,
               fontWeight: FontWeight.w600,
             ),
@@ -52,7 +54,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
             Text(
               subtitle,
               style: TextStyle(
-                color: Colors.grey.shade400,
+                color: EllaColors.textSecondary,
                 fontSize: 14,
               ),
             ),
@@ -77,11 +79,11 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: const Color(0xFF2A2A2E),
+              color: EllaColors.bgTertiary,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Center(
-              child: FaIcon(icon, color: Colors.grey.shade400, size: 16),
+              child: FaIcon(icon, color: EllaColors.primary, size: 16),
             ),
           ),
           const SizedBox(width: 14),
@@ -92,7 +94,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                 Text(
                   title,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w500,
                   ),
@@ -101,7 +103,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                 Text(
                   description,
                   style: TextStyle(
-                    color: Colors.grey.shade500,
+                    color: EllaColors.textSecondary,
                     fontSize: 12,
                   ),
                 ),
@@ -111,7 +113,8 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
           Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: const Color(0xFF22C55E),
+            activeThumbColor: EllaColors.primary,
+            activeTrackColor: EllaColors.primarySubtle,
           ),
         ],
       ),
@@ -143,13 +146,13 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2E),
+                  color: EllaColors.bgTertiary,
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Center(
                   child: FaIcon(
                     FontAwesomeIcons.clock,
-                    color: Colors.grey.shade400,
+                    color: EllaColors.primary,
                     size: 16,
                   ),
                 ),
@@ -162,7 +165,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                     Text(
                       context.l10n.durationThreshold,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: EllaColors.textPrimary,
                         fontSize: 16,
                         fontWeight: FontWeight.w500,
                       ),
@@ -171,7 +174,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                     Text(
                       context.l10n.durationThresholdDesc,
                       style: TextStyle(
-                        color: Colors.grey.shade500,
+                        color: EllaColors.textSecondary,
                         fontSize: 12,
                       ),
                     ),
@@ -181,7 +184,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF2A2A2E),
+                  color: EllaColors.primarySubtle,
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -189,7 +192,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                   style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Colors.white,
+                    color: EllaColors.textPrimary,
                   ),
                 ),
               ),
@@ -212,7 +215,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                     ),
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     decoration: BoxDecoration(
-                      color: isSelected ? const Color(0xFF22C55E).withValues(alpha: 0.2) : const Color(0xFF2A2A2E),
+                      color: isSelected ? EllaColors.primarySubtle : EllaColors.bgTertiary,
                       borderRadius: BorderRadius.circular(8),
                       border: isSelected ? Border.all(color: const Color(0xFF22C55E), width: 1) : null,
                     ),
@@ -222,7 +225,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                        color: isSelected ? Colors.white : Colors.grey.shade400,
+                        color: isSelected ? EllaColors.primaryDark : EllaColors.textSecondary,
                       ),
                     ),
                   ),
@@ -238,17 +241,18 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF000000),
+      backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF000000),
+        backgroundColor: EllaColors.bgPrimary,
+        foregroundColor: EllaColors.textPrimary,
         elevation: 0,
         leading: IconButton(
-          icon: const FaIcon(FontAwesomeIcons.chevronLeft, size: 18),
+          icon: const FaIcon(FontAwesomeIcons.chevronLeft, color: EllaColors.textPrimary, size: 18),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: Text(
           context.l10n.conversationDisplay,
-          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+          style: const TextStyle(color: EllaColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 18),
         ),
         centerTitle: true,
       ),
@@ -275,7 +279,7 @@ class _ConversationDisplaySettingsState extends State<ConversationDisplaySetting
                         MixpanelManager().showShortConversationsToggled(provider.showShortConversations);
                       },
                     ),
-                    const Divider(height: 1, color: Color(0xFF3C3C43)),
+                    const Divider(height: 1, color: EllaColors.bgTertiary),
                     _buildToggleItem(
                       icon: FontAwesomeIcons.trash,
                       title: context.l10n.showDiscardedConversations,

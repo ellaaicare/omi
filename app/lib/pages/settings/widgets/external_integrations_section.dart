@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:provider/provider.dart';
 
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -21,12 +22,12 @@ class ExternalIntegrationsSection extends StatelessWidget {
           children: [
             Text(
               context.l10n.externalAppAccess,
-              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+              style: const TextStyle(color: EllaColors.textPrimary, fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
             Text(
               context.l10n.externalAppAccessDescription,
-              style: const TextStyle(color: Colors.grey, fontSize: 14),
+              style: const TextStyle(color: EllaColors.textSecondary, fontSize: 14),
             ),
             const SizedBox(height: 16),
             if (enabledExternalApps.isEmpty)
@@ -34,21 +35,23 @@ class ExternalIntegrationsSection extends StatelessWidget {
                 width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 24.0),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1A1A1A),
+                  color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: EllaColors.bgTertiary),
                 ),
                 child: Center(
                   child: Text(
                     context.l10n.noExternalAppsHaveAccess,
-                    style: const TextStyle(color: Colors.grey),
+                    style: const TextStyle(color: EllaColors.textSecondary),
                   ),
                 ),
               )
             else
               Container(
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1A1A1A),
+                  color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: EllaColors.bgTertiary),
                 ),
                 child: ListView.separated(
                   shrinkWrap: true,
@@ -60,8 +63,8 @@ class ExternalIntegrationsSection extends StatelessWidget {
                       leading: CircleAvatar(
                         backgroundImage: NetworkImage(app.getImageUrl()),
                       ),
-                      title: Text(app.getName()),
-                      trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                      title: Text(app.getName(), style: const TextStyle(color: EllaColors.textPrimary)),
+                      trailing: const Icon(Icons.arrow_forward_ios, color: EllaColors.textTertiary, size: 16),
                       onTap: () {
                         routeToPage(context, AppDetailPage(app: app));
                       },
@@ -69,7 +72,7 @@ class ExternalIntegrationsSection extends StatelessWidget {
                   },
                   separatorBuilder: (context, index) => const Divider(
                     height: 1,
-                    color: Colors.grey,
+                    color: EllaColors.bgTertiary,
                   ),
                 ),
               ),
