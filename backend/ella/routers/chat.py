@@ -44,6 +44,10 @@ XAI_CHAT_MODEL = os.getenv("ELLA_GROK_CHAT_MODEL", "grok-3-mini")
 
 OPENCLAW_URL = os.getenv("OPENCLAW_URL", "http://100.67.113.120:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "openclaw").strip().lower()
+HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642").rstrip("/")
+HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -347,6 +351,94 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         yield f"data: Error: {str(e)}\n\n"
 
 
+async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = None):
+    """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
+    import time as _time
+    _start = _time.time()
+
+    if not HERMES_GATEWAY_TOKEN:
+        print(f"[FLOW:CHAT-HERMES] ERROR token_missing=true uid={uid}", flush=True)
+        yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
+        return
+
+    session_key = f"ella:omi:{uid.lower()}:ios-chat"
+    text = []
+    print(f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key}", flush=True)
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                f"{HERMES_GATEWAY_URL}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {HERMES_GATEWAY_TOKEN}",
+                    "Content-Type": "application/json",
+                    "X-Hermes-Session-Id": session_key,
+                },
+                json={
+                    "model": f"openclaw:{HERMES_AGENT_ID}",
+                    "messages": [{"role": "user", "content": user_message}],
+                    "stream": True,
+                },
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    _elapsed = int((_time.time() - _start) * 1000)
+                    print(
+                        f"[FLOW:CHAT-HERMES] ERROR status={response.status_code} latency={_elapsed}ms body={body[:120]!r}",
+                        flush=True,
+                    )
+                    yield f"data: Error: Hermes API returned {response.status_code}\n\n"
+                    return
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content") or ""
+                    if content:
+                        text.append(content)
+                        yield f"data: {content.replace(chr(10), '__CRLF__')}\n\n"
+
+        full_text = "".join(text).strip()
+        if full_text:
+            msg = {
+                "id": str(uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "text": full_text,
+                "sender": "ai",
+                "type": "text",
+                "plugin_id": None,
+                "from_integration": False,
+                "memories": [],
+                "files": [],
+                "ask_for_nps": False,
+            }
+            yield f"done: {base64.b64encode(json.dumps(msg).encode()).decode()}\n\n"
+
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] OK uid={uid} chars={len(full_text)} latency={_elapsed}ms", flush=True)
+
+    except httpx.TimeoutException:
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] TIMEOUT uid={uid} latency={_elapsed}ms", flush=True)
+        yield "data: Error: Hermes request timed out\n\n"
+    except Exception as e:
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] ERROR uid={uid} error={e} latency={_elapsed}ms", flush=True)
+        yield f"data: Error: {str(e)}\n\n"
+
+
 @router.post("/chat/stream")
 async def ella_chat_stream(
     request: EllaChatRequest,
@@ -394,6 +486,22 @@ async def ella_chat_stream(
         k: v for k, v in raw_request.headers.items()
         if k.lower().startswith("x-ella-")
     }
+
+    if CHAT_PLATFORM == "hermes":
+        trace.resolved_agent = HERMES_AGENT_ID
+        trace.resolve_source = "hermes_platform"
+        trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
+        record_trace(trace)
+        return StreamingResponse(
+            _stream_hermes_chat(request.message, request.uid, {
+                "type": x_ella_client_type or "",
+                "version": x_ella_client_version or "",
+                "ip": raw_request.client.host if raw_request.client else "",
+                "route": x_ella_route or "",
+                "headers": trace.client_headers,
+            }),
+            media_type="text/event-stream",
+        )
 
     if debug_level == 1:
         trace.resolved_agent = "N/A (ACK)"

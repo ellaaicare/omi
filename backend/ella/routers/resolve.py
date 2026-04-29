@@ -35,6 +35,12 @@ PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISIO
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 PUBLIC_GATEWAY_URL = os.getenv("OPENCLAW_PUBLIC_URL", "https://gateway.ella-ai-care.com")
+CHAT_PLATFORM = os.getenv("ELLA_CHAT_PLATFORM", "openclaw").strip().lower()
+HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
+HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_PUBLIC_URL", "https://api.ella-ai-care.com/hermes")
+HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
+HERMES_PROVISION_URL = os.getenv("HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
+HERMES_WORKSPACE = os.getenv("HERMES_WORKSPACE", "/Users/ellaai/.hermes/profiles/plato-eval/workspace")
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -94,6 +100,23 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "workspace": agents.get("workspace"),
             "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
         }
+        if CHAT_PLATFORM == "hermes":
+            # iOS Pattern C still sends model=openclaw:{agentId}; Hermes accepts that
+            # OpenAI-compatible model label, so expose "hermes" as the routed agent.
+            routing.update(
+                {
+                    "agentId": HERMES_AGENT_ID,
+                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:ios-chat",
+                    "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
+                    "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
+                    "token": HERMES_GATEWAY_TOKEN,
+                    "provisionToken": PROVISION_API_KEY,
+                    "provisionUrl": HERMES_PROVISION_URL,
+                    "workspace": HERMES_WORKSPACE,
+                    "historyUrl": "/v1/ella/chat/history",
+                    "platform": "hermes",
+                }
+            )
 
     return {
         "user": {
@@ -195,6 +218,22 @@ async def resolve_endpoint(
             "workspace": agents.get("workspace"),
             "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
         }
+        if CHAT_PLATFORM == "hermes":
+            routing.update(
+                {
+                    "agentId": HERMES_AGENT_ID,
+                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:ios-chat",
+                    "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
+                    "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
+                    "token": HERMES_GATEWAY_TOKEN,
+                    "provisionToken": PROVISION_API_KEY,
+                    "provisionUrl": HERMES_PROVISION_URL,
+                    "clusterStatus": row["cluster_status"],
+                    "workspace": HERMES_WORKSPACE,
+                    "historyUrl": "/v1/ella/chat/history",
+                    "platform": "hermes",
+                }
+            )
 
     return {
         "user": {
