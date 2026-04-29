@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:record/record.dart';
 import 'package:web_socket_channel/io.dart';
@@ -262,6 +263,7 @@ class V2VClient {
   static bool _isAssistantTranscriptEvent(String type) {
     final normalized = type.toLowerCase();
     return normalized == 'transcript' ||
+        normalized == 'transcript_delta' ||
         normalized == 'assistant_transcript' ||
         normalized == 'output_transcript' ||
         normalized == 'response_text' ||
@@ -271,6 +273,11 @@ class V2VClient {
         normalized == 'response.text.done' ||
         normalized.contains('output_audio_transcription') ||
         (normalized.contains('assistant') && normalized.contains('transcript'));
+  }
+
+  @visibleForTesting
+  static bool treatsAsAssistantTranscriptEvent(String type) {
+    return _isAssistantTranscriptEvent(type);
   }
 
   static bool _isAudioDoneEvent(String type) {

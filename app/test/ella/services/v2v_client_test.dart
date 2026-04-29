@@ -27,5 +27,12 @@ void main() {
       expect(V2VClient.normalizeProvider('gemini-live'), 'gemini-native-live');
       expect(V2VClient.normalizeProvider('openclaw-direct'), 'openclaw-direct');
     });
+
+    test('maps proxy transcript_delta events as assistant transcripts', () {
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript'), isTrue);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('transcript_delta'), isTrue);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('response.audio_transcript.delta'), isTrue);
+      expect(V2VClient.treatsAsAssistantTranscriptEvent('user_transcript'), isFalse);
+    });
   });
 }
