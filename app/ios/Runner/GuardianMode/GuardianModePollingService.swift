@@ -210,20 +210,13 @@ class GuardianModePollingService {
                     ?? metadata["traceId"] as? String
                 let eventId = result.id ?? traceId ?? "unknown"
 
-                if result.priority == "debug" {
-                    // Route to debug buffer — never plays audio
-                    DebugEventBuffer.shared.add(
-                        id: result.id,
-                        triggerType: result.triggerType ?? "unknown",
-                        message: result.message ?? "",
-                        metadata: metadata
-                    )
-                } else if let urlString = result.url, !urlString.isEmpty,
+                if let urlString = result.url, !urlString.isEmpty,
                           let audioURL = URL(string: urlString) {
                     NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
                     var pollMetadata = metadata
                     pollMetadata["url"] = urlString
                     pollMetadata["trace_id"] = traceId ?? ""
+                    pollMetadata["priority"] = result.priority ?? ""
                     DebugEventBuffer.shared.add(
                         id: eventId,
                         triggerType: "guardian_audio_inject_request",
@@ -237,6 +230,17 @@ class GuardianModePollingService {
                         traceId: traceId,
                         triggerType: result.triggerType,
                         metadata: metadata
+                    )
+                } else if result.priority == "debug" {
+                    // Metadata-only debug items never play audio; debug items with a URL are injected above.
+                    var debugMetadata = metadata
+                    debugMetadata["priority"] = result.priority ?? ""
+                    debugMetadata["debug_skip_reason"] = "no_audio_url"
+                    DebugEventBuffer.shared.add(
+                        id: result.id,
+                        triggerType: result.triggerType ?? "unknown",
+                        message: result.message ?? "",
+                        metadata: debugMetadata
                     )
                 } else if let message = result.message, !message.isEmpty {
                     // Text-only (consolidated) — use on-device TTS
