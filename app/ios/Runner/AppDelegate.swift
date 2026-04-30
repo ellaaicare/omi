@@ -42,11 +42,9 @@ extension FlutterError: Error {}
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
 
-    // Configure audio session for background recording
+    // Configure audio session for background recording and Guardian playback.
     do {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-        try audioSession.setActive(true, options: [])
+        try AppDelegate.configureGuardianAudioSession(reason: "app_launch")
         print("AppDelegate: Audio session configured for background recording")
 
         // Observe audio session interruptions
@@ -54,14 +52,14 @@ extension FlutterError: Error {}
             self,
             selector: #selector(handleAudioSessionInterruption),
             name: AVAudioSession.interruptionNotification,
-            object: audioSession
+            object: AVAudioSession.sharedInstance()
         )
 
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAudioSessionRouteChange),
             name: AVAudioSession.routeChangeNotification,
-            object: audioSession
+            object: AVAudioSession.sharedInstance()
         )
 
         // Reactivate audio session when app becomes active
@@ -203,6 +201,82 @@ extension FlutterError: Error {}
 
   // MARK: - Audio Session Handlers
 
+  static func configureGuardianAudioSession(reason: String) throws {
+      let audioSession = AVAudioSession.sharedInstance()
+      let options: AVAudioSession.CategoryOptions = [
+          .allowBluetooth,
+          .allowBluetoothA2DP,
+          .allowAirPlay,
+          .mixWithOthers
+      ]
+
+      try audioSession.setCategory(.playAndRecord, mode: .default, options: options)
+      try audioSession.setActive(true, options: [])
+      try applyGuardianOutputRoutePolicy(audioSession: audioSession, reason: reason)
+      logGuardianAudioRoute(audioSession: audioSession, reason: reason)
+  }
+
+  static func refreshGuardianOutputRoute(reason: String) {
+      let audioSession = AVAudioSession.sharedInstance()
+      do {
+          try applyGuardianOutputRoutePolicy(audioSession: audioSession, reason: reason)
+          logGuardianAudioRoute(audioSession: audioSession, reason: reason)
+      } catch {
+          print("AppDelegate: Failed to refresh Guardian audio route (\(reason)): \(error.localizedDescription)")
+      }
+  }
+
+  private static func applyGuardianOutputRoutePolicy(audioSession: AVAudioSession, reason: String) throws {
+      if hasExternalOutput(audioSession.currentRoute.outputs) {
+          try audioSession.overrideOutputAudioPort(.none)
+          print("AppDelegate: Guardian audio route keeps external output (\(reason))")
+          return
+      }
+
+      // Clear stale speaker overrides first so a newly connected Bluetooth route can become active.
+      try audioSession.overrideOutputAudioPort(.none)
+
+      if hasExternalOutput(audioSession.currentRoute.outputs) {
+          print("AppDelegate: Guardian audio route switched to external output (\(reason))")
+          return
+      }
+
+      if shouldForceSpeakerFallback(outputs: audioSession.currentRoute.outputs) {
+          try audioSession.overrideOutputAudioPort(.speaker)
+          print("AppDelegate: Guardian audio route using speaker fallback (\(reason))")
+      }
+  }
+
+  private static func hasExternalOutput(_ outputs: [AVAudioSessionPortDescription]) -> Bool {
+      return outputs.contains { output in
+          switch output.portType {
+          case .airPlay, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .carAudio, .headphones, .usbAudio:
+              return true
+          default:
+              return false
+          }
+      }
+  }
+
+  private static func shouldForceSpeakerFallback(outputs: [AVAudioSessionPortDescription]) -> Bool {
+      guard !hasExternalOutput(outputs) else { return false }
+      return outputs.isEmpty || outputs.contains { $0.portType == .builtInReceiver }
+  }
+
+  private static func logGuardianAudioRoute(audioSession: AVAudioSession, reason: String) {
+      let outputs = audioSession.currentRoute.outputs
+          .map { "\($0.portType.rawValue):\($0.portName)" }
+          .joined(separator: ", ")
+      let inputs = audioSession.currentRoute.inputs
+          .map { "\($0.portType.rawValue):\($0.portName)" }
+          .joined(separator: ", ")
+      let availableInputs = audioSession.availableInputs?
+          .map { "\($0.portType.rawValue):\($0.portName)" }
+          .joined(separator: ", ") ?? "none"
+
+      print("AppDelegate: Guardian audio route [\(reason)] category=\(audioSession.category.rawValue) options=\(audioSession.categoryOptions.rawValue) outputs=[\(outputs)] inputs=[\(inputs)] availableInputs=[\(availableInputs)]")
+  }
+
   @objc private func handleAudioSessionInterruption(notification: Notification) {
       guard let userInfo = notification.userInfo,
             let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -215,9 +289,8 @@ extension FlutterError: Error {}
           print("AppDelegate: Audio session interrupted")
       case .ended:
           print("AppDelegate: Audio session interruption ended")
-          // Reactivate audio session
           do {
-              try AVAudioSession.sharedInstance().setActive(true)
+              try AppDelegate.configureGuardianAudioSession(reason: "interruption_ended")
               print("AppDelegate: Audio session reactivated after interruption")
           } catch {
               print("AppDelegate: Failed to reactivate audio session: \(error)")
@@ -235,19 +308,7 @@ extension FlutterError: Error {}
       }
 
       print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
-
-      // When headphones or Bluetooth are removed, iOS defaults .playAndRecord back to the
-      // earpiece. Override to the loudspeaker so guardian audio stays audible.
-      if reason == .oldDeviceUnavailable {
-          DispatchQueue.main.async {
-              do {
-                  try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-                  print("AppDelegate: Forced output to loudspeaker after device removal")
-              } catch {
-                  print("AppDelegate: Failed to override output port: \(error)")
-              }
-          }
-      }
+      AppDelegate.refreshGuardianOutputRoute(reason: "route_change_\(reason.rawValue)")
 
       // Report route changes only while an exact Guardian playback span is active.
       GuardianModeManager.shared.reportActivePlaybackRouteChange()
@@ -258,7 +319,7 @@ extension FlutterError: Error {}
       do {
           let audioSession = AVAudioSession.sharedInstance()
           if !audioSession.isOtherAudioPlaying {
-              try audioSession.setActive(true)
+              try AppDelegate.configureGuardianAudioSession(reason: "app_became_active")
               print("AppDelegate: Audio session reactivated on app becoming active")
           }
       } catch {

@@ -62,9 +62,9 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Activate audio session (configured in AppDelegate, activated here before playback)
+            // Re-apply route policy before playback so stale speaker overrides do not persist.
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setActive(true)
+            try AppDelegate.configureGuardianAudioSession(reason: "guardian_start")
 
             // Detailed audio session diagnostics
             NSLog("🔊 SESSION_STATE_DETAILED:")
@@ -334,7 +334,7 @@ class GuardianModeManager: NSObject {
 
     // MARK: - Audio Injection with Pre-download + Retry
 
-    /// Inject remote audio with pre-download and retry logic
+    /// Inject remote audio with pre-download and retry logic.
     func injectRemoteAudio(
         audioURL: URL,
         eventId: String,
@@ -362,115 +362,150 @@ class GuardianModeManager: NSObject {
             )
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) trace=\(resolvedTraceId) ts=\(Date().timeIntervalSince1970)")
+            AppDelegate.refreshGuardianOutputRoute(reason: "guardian_remote_audio")
 
-            // Inject remote audio directly (no download - progressive streaming)
-            Task {
-                await self.injectRemoteAudioDirect(
-                    remoteURL: audioURL,
-                    context: playbackContext,
-                    seq: seq,
-                    filename: filename,
-                    attempt: 1
-                )
-            }
+            self.downloadAndInjectAudio(
+                remoteURL: audioURL,
+                context: playbackContext,
+                seq: seq,
+                filename: filename,
+                attempt: 1
+            )
         }
     }
 
-    /// Inject remote audio directly into the player queue (progressive streaming)
-    /// KEY: Inserts FIRST (triggers loading), THEN waits for .readyToPlay
-    private func injectRemoteAudioDirect(
+    private func downloadAndInjectAudio(
         remoteURL: URL,
         context: PlaybackContext,
         seq: Int,
         filename: String,
         attempt: Int
-    ) async {
-        // Must be called on self.queue
-        guard let player = self.audioPlayer, self.isActive else {
+    ) {
+        guard self.isActive else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
-            reportGuardianPlaybackFailure(
-                context: context,
-                error: "not_active"
-            )
-            await MainActor.run { self.failedInjections += 1 }
+            reportGuardianPlaybackFailure(context: context, error: "not_active")
+            self.failedInjections += 1
             return
         }
 
-        let audioItem = AVPlayerItem(url: remoteURL)
+        let downloadStart = Date()
+        let request = URLRequest(url: remoteURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 10.0)
+        let task = URLSession.shared.downloadTask(with: request) { [weak self] tempURL, response, error in
+            guard let self = self else { return }
 
-        // Insert into queue FIRST - this triggers AVPlayer to start loading!
-        player.insert(audioItem, after: nil)
-
-        // Wait for item to become ready (production logging - minimal)
-        let startTime = Date()
-        let timeout: TimeInterval = 10.0
-        var iteration = 0
-
-        while audioItem.status == .unknown {
-            iteration += 1
-
-            // Check for error
-            if let error = audioItem.error {
-                NSLog("❌ ITEM_ERROR #\(seq) (\(filename)) - \(error.localizedDescription)")
-                reportGuardianPlaybackFailure(
-                    context: context,
-                    error: error.localizedDescription
-                )
-                await MainActor.run { self.failedInjections += 1 }
+            if let error = error {
+                self.queue.async {
+                    NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) attempt=\(attempt) error=\(error.localizedDescription)")
+                    if attempt < 3 {
+                        self.retryDownloadAndInject(
+                            remoteURL: remoteURL,
+                            context: context,
+                            seq: seq,
+                            filename: filename,
+                            attempt: attempt + 1
+                        )
+                    } else {
+                        self.reportGuardianPlaybackFailure(context: context, error: "download_failed:\(error.localizedDescription)")
+                        self.failedInjections += 1
+                    }
+                }
                 return
             }
 
-            // Check timeout
-            if Date().timeIntervalSince(startTime) > timeout {
-                NSLog("❌ TIMEOUT #\(seq) (\(filename)) after 10s - status: \(audioItem.status.rawValue)")
-                reportGuardianPlaybackFailure(
-                    context: context,
-                    error: "ready_timeout"
-                )
-                await MainActor.run { self.failedInjections += 1 }
+            guard let tempURL = tempURL else {
+                self.queue.async {
+                    NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=no_temp_file")
+                    self.reportGuardianPlaybackFailure(context: context, error: "download_failed:no_temp_file")
+                    self.failedInjections += 1
+                }
                 return
             }
 
-            // Only log if taking unusually long (> 5 seconds)
-            if iteration == 100 {
-                NSLog("⚠️ Slow load #\(seq) (\(filename)) - still waiting after 5s")
+            let httpStatus = (response as? HTTPURLResponse)?.statusCode ?? 200
+            guard (200..<300).contains(httpStatus) else {
+                self.queue.async {
+                    NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) http_status=\(httpStatus)")
+                    self.reportGuardianPlaybackFailure(context: context, error: "download_failed:http_\(httpStatus)")
+                    self.failedInjections += 1
+                }
+                return
             }
 
-            // Wait 50ms before checking again
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? NSNumber)?.intValue ?? 0
+            guard fileSize > 0 else {
+                self.queue.async {
+                    NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=empty_file")
+                    self.reportGuardianPlaybackFailure(context: context, error: "download_failed:empty_file")
+                    self.failedInjections += 1
+                }
+                return
+            }
 
-        // Check if buffering succeeded
-        if audioItem.status == .failed {
-            let errorMsg = audioItem.error?.localizedDescription ?? "unknown"
-            NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(errorMsg)")
-            reportGuardianPlaybackFailure(
-                context: context,
-                error: errorMsg
-            )
-            await MainActor.run { self.failedInjections += 1 }
+            do {
+                let localURL = self.cacheDir.appendingPathComponent(self.cacheFilename(for: context.queueItemId, remoteURL: remoteURL))
+                if FileManager.default.fileExists(atPath: localURL.path) {
+                    try FileManager.default.removeItem(at: localURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: localURL)
+
+                self.queue.async {
+                    let latencyMs = Int(Date().timeIntervalSince(downloadStart) * 1000)
+                    NSLog("DOWNLOAD_COMPLETE #\(seq) (\(filename)) bytes=\(fileSize) latency_ms=\(latencyMs)")
+                    self.injectLocalAudio(
+                        localURL: localURL,
+                        context: context,
+                        seq: seq,
+                        filename: filename,
+                        downloadLatencyMs: latencyMs
+                    )
+                }
+            } catch {
+                self.queue.async {
+                    NSLog("DOWNLOAD_FAILED #\(seq) (\(filename)) reason=cache_move_error error=\(error.localizedDescription)")
+                    self.reportGuardianPlaybackFailure(context: context, error: "download_failed:cache_move_error:\(error.localizedDescription)")
+                    self.failedInjections += 1
+                }
+            }
+        }
+        task.resume()
+    }
+
+    private func retryDownloadAndInject(
+        remoteURL: URL,
+        context: PlaybackContext,
+        seq: Int,
+        filename: String,
+        attempt: Int
+    ) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Double(attempt) * 0.5) { [weak self] in
+            self?.queue.async {
+                self?.downloadAndInjectAudio(
+                    remoteURL: remoteURL,
+                    context: context,
+                    seq: seq,
+                    filename: filename,
+                    attempt: attempt
+                )
+            }
+        }
+    }
+
+    private func injectLocalAudio(
+        localURL: URL,
+        context: PlaybackContext,
+        seq: Int,
+        filename: String,
+        downloadLatencyMs: Int
+    ) {
+        guard let player = self.audioPlayer, self.isActive else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active_after_download")
+            reportGuardianPlaybackFailure(context: context, error: "not_active_after_download")
+            failedInjections += 1
             return
         }
 
-        guard audioItem.status == .readyToPlay else {
-            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=unexpected_status_\(audioItem.status.rawValue)")
-            reportGuardianPlaybackFailure(
-                context: context,
-                error: "unexpected_status_\(audioItem.status.rawValue)"
-            )
-            await MainActor.run { self.failedInjections += 1 }
-            return
-        }
-
-        let readyTime = Date().timeIntervalSince(startTime)
-
-        // Only log unusual load times (production logging - minimal)
-        if readyTime > 5.0 {
-            NSLog("⚠️ Slow load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
-        } else if readyTime < 0.5 {
-            NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
-        }
-        // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
+        let audioItem = AVPlayerItem(url: localURL)
+        let itemQueuedAt = Date()
 
         player.publisher(for: \.currentItem)
             .sink { [weak self, weak audioItem] currentItem in
@@ -478,7 +513,8 @@ class GuardianModeManager: NSObject {
                 self.reportGuardianPlaybackStartedIfNeeded(
                     item: audioItem,
                     context: context,
-                    readyLatencyMs: Int(readyTime * 1000)
+                    readyLatencyMs: Int(Date().timeIntervalSince(itemQueuedAt) * 1000),
+                    downloadLatencyMs: downloadLatencyMs
                 )
             }
             .store(in: &cancellables)
@@ -506,8 +542,49 @@ class GuardianModeManager: NSObject {
             }
             .store(in: &cancellables)
 
+        audioItem.publisher(for: \.status)
+            .sink { [weak self, weak audioItem] status in
+                guard let self = self, let audioItem = audioItem else { return }
+                if status == .readyToPlay {
+                    NSLog("ITEM_READY #\(seq) (\(filename)) queued_latency_ms=\(Int(Date().timeIntervalSince(itemQueuedAt) * 1000))")
+                    if player.currentItem === audioItem {
+                        self.reportGuardianPlaybackStartedIfNeeded(
+                            item: audioItem,
+                            context: context,
+                            readyLatencyMs: Int(Date().timeIntervalSince(itemQueuedAt) * 1000),
+                            downloadLatencyMs: downloadLatencyMs
+                        )
+                    }
+                } else if status == .failed {
+                    let error = audioItem.error?.localizedDescription ?? "item_failed"
+                    NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(error)")
+                    self.reportGuardianPlaybackFailure(context: context, error: error, item: audioItem)
+                    self.queue.async { self.failedInjections += 1 }
+                }
+            }
+            .store(in: &cancellables)
+
+        let afterItem = player.currentItem
+        if player.canInsert(audioItem, after: afterItem) {
+            player.insert(audioItem, after: afterItem)
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=after_current depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+        } else if player.canInsert(audioItem, after: nil) {
+            player.insert(audioItem, after: nil)
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+        } else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
+            reportGuardianPlaybackFailure(context: context, error: "cannot_insert", item: audioItem)
+            failedInjections += 1
+            return
+        }
+
         if player.currentItem === audioItem {
-            reportGuardianPlaybackStartedIfNeeded(item: audioItem, context: context, readyLatencyMs: Int(readyTime * 1000))
+            reportGuardianPlaybackStartedIfNeeded(
+                item: audioItem,
+                context: context,
+                readyLatencyMs: Int(Date().timeIntervalSince(itemQueuedAt) * 1000),
+                downloadLatencyMs: downloadLatencyMs
+            )
         }
 
         // Ensure player is actually playing
@@ -519,12 +596,17 @@ class GuardianModeManager: NSObject {
     private func reportGuardianPlaybackStartedIfNeeded(
         item: AVPlayerItem,
         context: PlaybackContext,
-        readyLatencyMs: Int
+        readyLatencyMs: Int,
+        downloadLatencyMs: Int
     ) {
         queue.async { [weak self] in
             guard let self = self else { return }
             let itemId = ObjectIdentifier(item)
             guard !self.playbackStartedItems.contains(itemId) else { return }
+            guard item.status == .readyToPlay else {
+                NSLog("PLAYBACK_START_DEFERRED item=\(context.queueItemId) status=\(item.status.rawValue)")
+                return
+            }
 
             self.playbackStartedItems.insert(itemId)
             self.playbackStartedAt[itemId] = Date()
@@ -532,6 +614,7 @@ class GuardianModeManager: NSObject {
 
             var eventMetadata = context.metadata
             eventMetadata["ready_latency_ms"] = readyLatencyMs
+            eventMetadata["download_latency_ms"] = downloadLatencyMs
             self.reportPlaybackEvent(
                 eventType: "started",
                 queueItemId: context.queueItemId,
@@ -593,6 +676,15 @@ class GuardianModeManager: NSObject {
                 }
             }
         }
+    }
+
+    private func cacheFilename(for queueItemId: String, remoteURL: URL) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let safeId = String(queueItemId.map { character in
+            character.unicodeScalars.allSatisfy { allowed.contains($0) } ? character : "_"
+        })
+        let ext = remoteURL.pathExtension.isEmpty ? "mp3" : remoteURL.pathExtension
+        return "\(safeId).\(ext)"
     }
 
     // MARK: - Cache Cleanup

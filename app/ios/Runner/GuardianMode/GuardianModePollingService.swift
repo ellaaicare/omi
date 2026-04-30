@@ -173,6 +173,7 @@ class GuardianModePollingService: NSObject, AVSpeechSynthesizerDelegate {
             startedAt: Date()
         )
 
+        AppDelegate.refreshGuardianOutputRoute(reason: "guardian_tts")
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
