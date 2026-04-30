@@ -51,9 +51,9 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Activate audio session (configured in AppDelegate, activated here before playback)
+            // Re-apply route policy before playback so stale speaker overrides do not persist.
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setActive(true)
+            try AppDelegate.configureGuardianAudioSession(reason: "guardian_start")
 
             // Detailed audio session diagnostics
             NSLog("🔊 SESSION_STATE_DETAILED:")
@@ -313,6 +313,7 @@ class GuardianModeManager: NSObject {
             playbackMetadata["playback_source"] = playbackMetadata["playback_source"] ?? "remote_audio_url"
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
+            AppDelegate.refreshGuardianOutputRoute(reason: "guardian_remote_audio")
 
             // Inject remote audio directly (no download - progressive streaming)
             Task {

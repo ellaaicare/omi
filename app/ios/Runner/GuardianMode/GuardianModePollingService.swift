@@ -146,6 +146,7 @@ class GuardianModePollingService {
     // MARK: - On-Device TTS
 
     private func speakText(_ text: String) {
+        AppDelegate.refreshGuardianOutputRoute(reason: "guardian_tts")
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
