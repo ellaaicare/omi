@@ -137,10 +137,37 @@ class GuardianModePollingService {
 
         let hasMessage = !(pollResponse.message?.isEmpty ?? true)
         if pollResponse.url != nil || pollResponse.priority == "debug" || hasMessage {
+            recordNextAudioPayload(pollResponse, data: data, httpStatus: httpResponse.statusCode)
             return pollResponse
         }
 
         return nil
+    }
+
+    private func recordNextAudioPayload(_ response: PollResponse, data: Data, httpStatus: Int) {
+        let rawBody = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+        let eventId = response.id ?? response.traceId ?? "unknown"
+        let hasURL = !(response.url?.isEmpty ?? true)
+        let hasMessage = !(response.message?.isEmpty ?? true)
+        let message = "next-audio id=\(eventId) has_url=\(hasURL) has_message=\(hasMessage)"
+        NSLog("NEXT_AUDIO_PAYLOAD id=\(eventId) has_url=\(hasURL) url=\(response.url ?? "none") priority=\(response.priority ?? "none") body=\(rawBody)")
+        DebugEventBuffer.shared.add(
+            id: eventId,
+            triggerType: "guardian_next_audio_payload",
+            message: message,
+            metadata: [
+                "http_status": httpStatus,
+                "id": response.id ?? "",
+                "trace_id": response.traceId ?? "",
+                "trigger_type": response.triggerType ?? "",
+                "priority": response.priority ?? "",
+                "has_url": hasURL,
+                "url": response.url ?? "",
+                "has_message": hasMessage,
+                "message_length": response.message?.count ?? 0,
+                "raw_payload": rawBody
+            ]
+        )
     }
 
     // MARK: - On-Device TTS
@@ -194,6 +221,15 @@ class GuardianModePollingService {
                 } else if let urlString = result.url, !urlString.isEmpty,
                           let audioURL = URL(string: urlString) {
                     NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+                    var pollMetadata = metadata
+                    pollMetadata["url"] = urlString
+                    pollMetadata["trace_id"] = traceId ?? ""
+                    DebugEventBuffer.shared.add(
+                        id: eventId,
+                        triggerType: "guardian_audio_inject_request",
+                        message: "inject request id=\(eventId)",
+                        metadata: pollMetadata
+                    )
                     // Inject via GuardianModeManager (handles pre-download + retry)
                     GuardianModeManager.shared.injectRemoteAudio(
                         audioURL: audioURL,

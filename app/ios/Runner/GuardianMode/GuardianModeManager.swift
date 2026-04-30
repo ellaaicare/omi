@@ -370,9 +370,37 @@ class GuardianModeManager: NSObject {
         if player.canInsert(audioItem, after: afterItem) {
             player.insert(audioItem, after: afterItem)
             NSLog("INJECT_OK #\(seq) (\(filename)) position=after_current depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+            recordPlaybackDebugEvent(
+                "inject_ok",
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                extra: [
+                    "position": "after_current",
+                    "depth": player.items().count,
+                    "player_rate": player.rate,
+                    "url": remoteURL.absoluteString,
+                    "is_current_item": player.currentItem === audioItem
+                ]
+            )
         } else if player.canInsert(audioItem, after: nil) {
             player.insert(audioItem, after: nil)
             NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+            recordPlaybackDebugEvent(
+                "inject_ok",
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                extra: [
+                    "position": "end",
+                    "depth": player.items().count,
+                    "player_rate": player.rate,
+                    "url": remoteURL.absoluteString,
+                    "is_current_item": player.currentItem === audioItem
+                ]
+            )
         } else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
             reportGuardianPlaybackFailure(
@@ -393,7 +421,8 @@ class GuardianModeManager: NSObject {
                     guard !self.playbackStartedItems.contains(itemId) else { return }
                     self.playbackStartedItems.insert(itemId)
                     var eventMetadata = metadata ?? [:]
-                    eventMetadata["queued_latency_ms"] = Int(Date().timeIntervalSince(itemQueuedAt) * 1000)
+                    let queuedLatencyMs = Int(Date().timeIntervalSince(itemQueuedAt) * 1000)
+                    eventMetadata["queued_latency_ms"] = queuedLatencyMs
                     self.reportPlaybackEvent(
                         eventType: "started",
                         queueItemId: eventId,
@@ -403,6 +432,19 @@ class GuardianModeManager: NSObject {
                         metadata: eventMetadata
                     )
                     NSLog("PLAYBACK_START #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+                    self.recordPlaybackDebugEvent(
+                        "playback_start",
+                        queueItemId: eventId,
+                        traceId: traceId,
+                        triggerType: triggerType,
+                        metadata: metadata,
+                        extra: [
+                            "queued_latency_ms": queuedLatencyMs,
+                            "player_rate": player.rate,
+                            "item_status": audioItem.status.rawValue,
+                            "is_current_item": true
+                        ]
+                    )
                 }
             }
             .store(in: &cancellables)
@@ -418,6 +460,14 @@ class GuardianModeManager: NSObject {
             // Check for error
             if let error = audioItem.error {
                 NSLog("❌ ITEM_ERROR #\(seq) (\(filename)) - \(error.localizedDescription)")
+                recordPlaybackDebugEvent(
+                    "item_error",
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    extra: ["error": error.localizedDescription, "item_status": audioItem.status.rawValue]
+                )
                 reportGuardianPlaybackFailure(
                     queueItemId: eventId,
                     traceId: traceId,
@@ -432,6 +482,18 @@ class GuardianModeManager: NSObject {
             // Check timeout
             if Date().timeIntervalSince(startTime) > timeout {
                 NSLog("❌ TIMEOUT #\(seq) (\(filename)) after 10s - status: \(audioItem.status.rawValue)")
+                recordPlaybackDebugEvent(
+                    "ready_timeout",
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    extra: [
+                        "item_status": audioItem.status.rawValue,
+                        "player_rate": player.rate,
+                        "is_current_item": player.currentItem === audioItem
+                    ]
+                )
                 reportGuardianPlaybackFailure(
                     queueItemId: eventId,
                     traceId: traceId,
@@ -456,6 +518,14 @@ class GuardianModeManager: NSObject {
         if audioItem.status == .failed {
             let errorMsg = audioItem.error?.localizedDescription ?? "unknown"
             NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(errorMsg)")
+            recordPlaybackDebugEvent(
+                "item_failed",
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                extra: ["error": errorMsg, "item_status": audioItem.status.rawValue]
+            )
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
@@ -469,6 +539,14 @@ class GuardianModeManager: NSObject {
 
         guard audioItem.status == .readyToPlay else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=unexpected_status_\(audioItem.status.rawValue)")
+            recordPlaybackDebugEvent(
+                "unexpected_status",
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                extra: ["item_status": audioItem.status.rawValue]
+            )
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
@@ -488,6 +566,19 @@ class GuardianModeManager: NSObject {
         } else if readyTime < 0.5 {
             NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         }
+        recordPlaybackDebugEvent(
+            "item_ready",
+            queueItemId: eventId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: metadata,
+            extra: [
+                "ready_latency_ms": Int(readyTime * 1000),
+                "item_status": audioItem.status.rawValue,
+                "player_rate": player.rate,
+                "is_current_item": player.currentItem === audioItem
+            ]
+        )
         // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
         // Observe when playback completes
         NotificationCenter.default
@@ -496,6 +587,17 @@ class GuardianModeManager: NSObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 NSLog("PLAYBACK_COMPLETE #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+                self.recordPlaybackDebugEvent(
+                    "playback_complete",
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    extra: [
+                        "duration_ms": Int(Date().timeIntervalSince(startTime) * 1000),
+                        "item_status": audioItem.status.rawValue
+                    ]
+                )
                 self.reportPlaybackEvent(
                     eventType: "completed",
                     queueItemId: eventId,
@@ -519,6 +621,14 @@ class GuardianModeManager: NSObject {
                 let error = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
                     .localizedDescription ?? "failed_to_play_to_end"
                 NSLog("PLAYBACK_FAILED #\(seq) (\(filename)) error=\(error)")
+                self.recordPlaybackDebugEvent(
+                    "playback_failed_to_end",
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    extra: ["error": error, "item_status": audioItem.status.rawValue]
+                )
                 self.reportGuardianPlaybackFailure(
                     queueItemId: eventId,
                     traceId: traceId,
@@ -545,6 +655,14 @@ class GuardianModeManager: NSObject {
     ) {
         var eventMetadata = metadata ?? [:]
         eventMetadata["error"] = error
+        recordPlaybackDebugEvent(
+            "playback_failed",
+            queueItemId: queueItemId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: eventMetadata,
+            extra: ["error": error]
+        )
         reportPlaybackEvent(
             eventType: "failed",
             queueItemId: queueItemId,
@@ -552,6 +670,33 @@ class GuardianModeManager: NSObject {
             triggerType: triggerType,
             durationMs: 0,
             metadata: eventMetadata
+        )
+    }
+
+    private func recordPlaybackDebugEvent(
+        _ event: String,
+        queueItemId: String,
+        traceId: String?,
+        triggerType: String?,
+        metadata: [String: Any]?,
+        extra: [String: Any] = [:]
+    ) {
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute.outputs.first
+        var debugMetadata = metadata ?? [:]
+        debugMetadata["queue_item_id"] = queueItemId
+        debugMetadata["trace_id"] = traceId ?? ""
+        debugMetadata["trigger_type"] = triggerType ?? ""
+        debugMetadata["event"] = event
+        debugMetadata["port_type"] = route?.portType.rawValue ?? "none"
+        debugMetadata["port_name"] = route?.portName ?? "none"
+        extra.forEach { debugMetadata[$0.key] = $0.value }
+
+        DebugEventBuffer.shared.add(
+            id: queueItemId,
+            triggerType: "guardian_playback_\(event)",
+            message: "guardian \(event) id=\(queueItemId)",
+            metadata: debugMetadata
         )
     }
 
