@@ -346,13 +346,39 @@ class GuardianModeManager: NSObject {
         attempt: Int
     ) async {
         // Must be called on self.queue
+        recordPlaybackDebugEvent(
+            "inject_start",
+            queueItemId: eventId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: metadata,
+            extra: [
+                "attempt": attempt,
+                "seq": seq,
+                "filename": filename,
+                "url": remoteURL.absoluteString,
+                "is_active": self.isActive,
+                "has_player": self.audioPlayer != nil,
+                "queue_depth": self.audioPlayer?.items().count ?? 0,
+                "player_rate": self.audioPlayer?.rate ?? -1,
+                "current_item_present": self.audioPlayer?.currentItem != nil
+            ]
+        )
+
         guard let player = self.audioPlayer, self.isActive else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
+            var failureMetadata = metadata ?? [:]
+            failureMetadata["url"] = remoteURL.absoluteString
+            failureMetadata["is_active"] = self.isActive
+            failureMetadata["has_player"] = self.audioPlayer != nil
+            failureMetadata["queue_depth"] = self.audioPlayer?.items().count ?? 0
+            failureMetadata["player_rate"] = self.audioPlayer?.rate ?? -1
+            failureMetadata["current_item_present"] = self.audioPlayer?.currentItem != nil
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
-                metadata: metadata,
+                metadata: failureMetadata,
                 error: "not_active"
             )
             await MainActor.run { self.failedInjections += 1 }
@@ -384,6 +410,16 @@ class GuardianModeManager: NSObject {
                     "is_current_item": player.currentItem === audioItem
                 ]
             )
+            scheduleCurrentItemProbes(
+                player: player,
+                audioItem: audioItem,
+                itemId: itemId,
+                itemQueuedAt: itemQueuedAt,
+                eventId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata
+            )
         } else if player.canInsert(audioItem, after: nil) {
             player.insert(audioItem, after: nil)
             NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
@@ -401,13 +437,28 @@ class GuardianModeManager: NSObject {
                     "is_current_item": player.currentItem === audioItem
                 ]
             )
+            scheduleCurrentItemProbes(
+                player: player,
+                audioItem: audioItem,
+                itemId: itemId,
+                itemQueuedAt: itemQueuedAt,
+                eventId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata
+            )
         } else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
+            var failureMetadata = metadata ?? [:]
+            failureMetadata["url"] = remoteURL.absoluteString
+            failureMetadata["queue_depth"] = player.items().count
+            failureMetadata["player_rate"] = player.rate
+            failureMetadata["current_item_present"] = player.currentItem != nil
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
-                metadata: metadata,
+                metadata: failureMetadata,
                 error: "cannot_insert"
             )
             await MainActor.run { self.failedInjections += 1 }
@@ -643,6 +694,44 @@ class GuardianModeManager: NSObject {
         // Ensure player is actually playing
         if player.rate == 0 {
             player.play()
+        }
+    }
+
+    private func scheduleCurrentItemProbes(
+        player: AVQueuePlayer,
+        audioItem: AVPlayerItem,
+        itemId: ObjectIdentifier,
+        itemQueuedAt: Date,
+        eventId: String,
+        traceId: String?,
+        triggerType: String?,
+        metadata: [String: Any]?
+    ) {
+        for delayMs in [1000, 3000, 8000] {
+            Task { [weak self, weak player, weak audioItem] in
+                try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                guard let self = self, let player = player, let audioItem = audioItem else { return }
+
+                self.queue.async {
+                    self.recordPlaybackDebugEvent(
+                        "current_item_probe",
+                        queueItemId: eventId,
+                        traceId: traceId,
+                        triggerType: triggerType,
+                        metadata: metadata,
+                        extra: [
+                            "probe_delay_ms": delayMs,
+                            "elapsed_ms": Int(Date().timeIntervalSince(itemQueuedAt) * 1000),
+                            "has_started": self.playbackStartedItems.contains(itemId),
+                            "is_current_item": player.currentItem === audioItem,
+                            "item_status": audioItem.status.rawValue,
+                            "player_rate": player.rate,
+                            "queue_depth": player.items().count,
+                            "current_item_present": player.currentItem != nil
+                        ]
+                    )
+                }
+            }
         }
     }
 

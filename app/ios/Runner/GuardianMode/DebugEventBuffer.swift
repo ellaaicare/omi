@@ -30,7 +30,17 @@ class DebugEventBuffer {
         if events.count > maxItems { events = Array(events.prefix(maxItems)) }
         lock.unlock()
         NotificationCenter.default.post(name: DebugEventBuffer.didUpdateNotification, object: nil)
-        NSLog("DebugEvent: [\(triggerType)] \(message)")
+        NSLog("DebugEvent: [\(triggerType)] \(message) metadata=\(Self.metadataDescription(metadata))")
+    }
+
+    private static func metadataDescription(_ metadata: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(metadata),
+              let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return "\(metadata)"
+        }
+
+        return json
     }
 
     /// Serialize for Flutter MethodChannel
