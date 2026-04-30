@@ -29,6 +29,7 @@ class GuardianModeManager: NSObject {
     private var successfulInjections: Int = 0
     private var failedInjections: Int = 0
     private var injectionSequence: Int = 0  // Sequential counter for easy log tracking
+    private var playbackStartedItems = Set<ObjectIdentifier>()
 
     // Download cache directory
     private lazy var cacheDir: URL = {
@@ -84,6 +85,7 @@ class GuardianModeManager: NSObject {
             self.successfulInjections = 0
             self.failedInjections = 0
             self.injectionSequence = 0
+            self.playbackStartedItems.removeAll()
 
             setupItemEndObserver()
             startHealthMonitor()
@@ -111,6 +113,7 @@ class GuardianModeManager: NSObject {
             audioPlayer?.removeAllItems()
             audioPlayer = nil
             cancellables.removeAll()
+            playbackStartedItems.removeAll()
             isActive = false
 
             let rate = totalInjections > 0
@@ -358,8 +361,51 @@ class GuardianModeManager: NSObject {
 
         let audioItem = AVPlayerItem(url: remoteURL)
 
-        // Insert into queue FIRST - this triggers AVPlayer to start loading!
-        player.insert(audioItem, after: nil)
+        let itemQueuedAt = Date()
+        let itemId = ObjectIdentifier(audioItem)
+
+        // Insert to play next, not at the end of the silence buffer. This restores
+        // the original audible-alert behavior while still triggering remote loading.
+        let afterItem = player.currentItem
+        if player.canInsert(audioItem, after: afterItem) {
+            player.insert(audioItem, after: afterItem)
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=after_current depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+        } else if player.canInsert(audioItem, after: nil) {
+            player.insert(audioItem, after: nil)
+            NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+        } else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "cannot_insert"
+            )
+            await MainActor.run { self.failedInjections += 1 }
+            return
+        }
+
+        player.publisher(for: \.currentItem)
+            .sink { [weak self, weak audioItem] currentItem in
+                guard let self = self, let audioItem = audioItem, currentItem === audioItem else { return }
+                self.queue.async {
+                    guard !self.playbackStartedItems.contains(itemId) else { return }
+                    self.playbackStartedItems.insert(itemId)
+                    var eventMetadata = metadata ?? [:]
+                    eventMetadata["queued_latency_ms"] = Int(Date().timeIntervalSince(itemQueuedAt) * 1000)
+                    self.reportPlaybackEvent(
+                        eventType: "started",
+                        queueItemId: eventId,
+                        traceId: traceId,
+                        triggerType: triggerType,
+                        durationMs: 0,
+                        metadata: eventMetadata
+                    )
+                    NSLog("PLAYBACK_START #\(seq) (\(filename)) ts=\(Date().timeIntervalSince1970)")
+                }
+            }
+            .store(in: &cancellables)
 
         // Wait for item to become ready (production logging - minimal)
         let startTime = Date()
@@ -443,15 +489,6 @@ class GuardianModeManager: NSObject {
             NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         }
         // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
-        reportPlaybackEvent(
-            eventType: "started",
-            queueItemId: eventId,
-            traceId: traceId,
-            triggerType: triggerType,
-            durationMs: Int(readyTime * 1000),
-            metadata: metadata
-        )
-
         // Observe when playback completes
         NotificationCenter.default
             .publisher(for: .AVPlayerItemDidPlayToEndTime, object: audioItem)
@@ -467,7 +504,29 @@ class GuardianModeManager: NSObject {
                     durationMs: Int(Date().timeIntervalSince(startTime) * 1000),
                     metadata: metadata
                 )
-                self.queue.async { self.successfulInjections += 1 }
+                self.queue.async {
+                    self.playbackStartedItems.remove(itemId)
+                    self.successfulInjections += 1
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default
+            .publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: audioItem)
+            .first()
+            .sink { [weak self] notification in
+                guard let self = self else { return }
+                let error = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?
+                    .localizedDescription ?? "failed_to_play_to_end"
+                NSLog("PLAYBACK_FAILED #\(seq) (\(filename)) error=\(error)")
+                self.reportGuardianPlaybackFailure(
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: metadata,
+                    error: error
+                )
+                self.queue.async { self.playbackStartedItems.remove(itemId) }
             }
             .store(in: &cancellables)
 
