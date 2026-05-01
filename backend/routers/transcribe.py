@@ -1444,9 +1444,13 @@ async def _stream_handler(
         except Exception as e:
             print(f"Speaker ID: match error for speaker {speaker_id}: {e}", uid, session_id)
 
+    pending_scanner_wake_prefix_segments: List[dict] = []
+    pending_scanner_wake_prefix_since: Optional[float] = None
+
     async def stream_transcript_process():
         nonlocal websocket_active, realtime_segment_buffers, realtime_photo_buffers, websocket
         nonlocal current_conversation_id, translation_enabled, speaker_to_person_map, suggested_segments, words_transcribed_since_last_record, last_transcript_time
+        nonlocal pending_scanner_wake_prefix_segments, pending_scanner_wake_prefix_since
 
         while websocket_active or len(realtime_segment_buffers) > 0 or len(realtime_photo_buffers) > 0:
             await asyncio.sleep(0.6)
@@ -1539,11 +1543,41 @@ async def _stream_handler(
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
                 try:
                     from utils.ella import send_to_scanner
-                    send_to_scanner(
-                        uid=uid,
-                        conversation_id=str(current_conversation_id),
-                        segments=[s.dict() for s in transcript_segments],
+                    from utils.ella.scanner import prepare_scanner_segments_for_dispatch, scanner_payload_preview
+
+                    scanner_input_segments = [s.dict() for s in transcript_segments]
+                    (
+                        scanner_dispatch_segments,
+                        pending_scanner_wake_prefix_segments,
+                        pending_scanner_wake_prefix_since,
+                        scanner_dispatch_meta,
+                    ) = prepare_scanner_segments_for_dispatch(
+                        scanner_input_segments,
+                        pending_wake_prefix_segments=pending_scanner_wake_prefix_segments,
+                        pending_wake_prefix_since=pending_scanner_wake_prefix_since,
+                        now=time.time(),
                     )
+
+                    if scanner_dispatch_segments:
+                        print(
+                            f"[TRANSCRIPT-RECV] Scanner dispatch action={scanner_dispatch_meta['action']} "
+                            f"prepended={scanner_dispatch_meta['prepended_count']} "
+                            f"payload={scanner_payload_preview(scanner_dispatch_segments)}",
+                            uid,
+                            session_id,
+                        )
+                        send_to_scanner(
+                            uid=uid,
+                            conversation_id=str(current_conversation_id),
+                            segments=scanner_dispatch_segments,
+                        )
+                    else:
+                        print(
+                            f"[TRANSCRIPT-RECV] Scanner dispatch skipped action={scanner_dispatch_meta['action']} "
+                            f"payload={scanner_payload_preview(scanner_input_segments)}",
+                            uid,
+                            session_id,
+                        )
                 except ImportError:
                     pass
 
