@@ -59,6 +59,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
+HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
@@ -1397,6 +1399,58 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
         return results
 
 
+async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
+    """Fast Hermes voice-memory lookup for realtime providers.
+
+    This is the preferred low-latency path for live V2V tools. It reads the
+    compact Hermes pack and returns quickly; heavier Firestore/workspace/Honcho
+    searches remain fallback sources in the merged /v1/voice/search response.
+    """
+    if not HERMES_VOICE_MEMORY_URL or not HERMES_VOICE_MEMORY_TOKEN:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=1.8) as client:
+            resp = await client.post(
+                HERMES_VOICE_MEMORY_URL,
+                headers={"Authorization": f"Bearer {HERMES_VOICE_MEMORY_TOKEN}"},
+                json={
+                    "uid": uid,
+                    "query": query,
+                    "scope": "recent",
+                    "detail": "brief",
+                    "top_k": min(max(limit, 1), 5),
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(f"[FLOW:VOICE-MEMORY] lookup returned {resp.status_code}: {resp.text[:200]}")
+            return []
+        data = resp.json()
+        answer = (data.get("answer") or "").strip()
+        if not answer or data.get("confidence") in {"low", "unknown"}:
+            return []
+        sources = data.get("sources") or []
+        top = sources[0] if sources else {}
+        confidence = data.get("confidence") or "medium"
+        score = 120 if confidence == "high" else 70
+        return [{
+            "source": "voice_memory",
+            "title": top.get("title") or "Hermes Voice Memory",
+            "content": answer[:900],
+            "timestamp": top.get("timestamp") or "",
+            "score": score,
+            "metadata": {
+                "path": data.get("path"),
+                "confidence": confidence,
+                "latency_ms": data.get("latency_ms"),
+                "source_ref": top.get("source_ref"),
+                "channel": top.get("channel"),
+            },
+        }]
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-MEMORY] lookup error: {e}")
+        return []
+
+
 async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars: int = 9000) -> str:
     """Fetch the latest cross-channel turns for realtime voice startup context.
 
@@ -2032,6 +2086,10 @@ async def unified_search(request: Request):
     tasks = []
     task_source_names = []
 
+    if agent_role in {"voice", "user"} and (not requested_sources or "voice_memory" in requested_sources):
+        tasks.append(_search_voice_memory_pack(uid, query, limit))
+        task_source_names.append("voice_memory")
+
     if allowed.get("timeline"):
         tasks.append(_search_canonical_timeline(uid, query, limit))
         task_source_names.append("timeline")
@@ -2060,7 +2118,7 @@ async def unified_search(request: Request):
         task_source_names.append("scanner")
 
     # Determine which sources were denied
-    all_source_names = {"timeline", "workspace", "omi", "memories", "voice", "scanner"}
+    all_source_names = {"voice_memory", "timeline", "workspace", "omi", "memories", "voice", "scanner"}
     if requested_sources:
         requested_set = set(requested_sources)
     else:
