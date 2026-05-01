@@ -2055,6 +2055,27 @@ async def unified_search(request: Request):
 
     _start = time.time()
 
+    # Realtime voice needs a bounded fast path. If the compact Hermes memory
+    # pack has a high-confidence answer, return it immediately and avoid
+    # waiting on slower Firestore/workspace/Honcho fallback searches.
+    if agent_role == "voice" and not requested_sources:
+        fast_results = await _search_voice_memory_pack(uid, query, limit)
+        if fast_results and fast_results[0].get("score", 0) >= 120:
+            _elapsed = int((time.time() - _start) * 1000)
+            logger.info(
+                f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
+                f"sources=['voice_memory'] results={len(fast_results)} denied=[] "
+                f"latency={_elapsed}ms fast_path=true"
+            )
+            return {
+                "results": fast_results,
+                "sources_searched": ["voice_memory"],
+                "sources_denied": [],
+                "total_results": len(fast_results),
+                "query": query,
+                "fast_path": True,
+            }
+
     # Resolve agent_id from postgres if not provided
     if not agent_id:
         try:
