@@ -30,7 +30,7 @@ import secrets
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 import httpx
@@ -166,6 +166,20 @@ class ConversationSummaryUpdate(BaseModel):
     correction_id: Optional[str] = None
     based_on_version_id: Optional[str] = None
     set_active: bool = True
+    ella_tags: List[str] = Field(default_factory=list)
+    ella_signal: Optional[Dict[str, Any]] = None
+
+
+def _normalize_ella_tags(tags: List[str]) -> List[str]:
+    """Normalize bounded conversation tags for app filtering and recall ranking."""
+    normalized: list[str] = []
+    for tag in tags or []:
+        clean = str(tag).strip().lower().replace(" ", "_")
+        if not clean or len(clean) > 64:
+            continue
+        if clean not in normalized:
+            normalized.append(clean)
+    return normalized[:12]
 
 
 def _update_correction_audit(
@@ -338,6 +352,11 @@ async def update_conversation_summary(
     internal_assessment = await _fetch_internal_assessment(uid, conversation_id)
     if internal_assessment:
         update_data["internal_assessment"] = internal_assessment
+    ella_tags = _normalize_ella_tags(update.ella_tags)
+    if ella_tags:
+        update_data["ella_tags"] = ella_tags
+    if update.ella_signal is not None:
+        update_data["ella_signal"] = update.ella_signal
     if update.correction_id:
         existing_state = conversation.get("correction_state") or {}
         update_data["correction_state"] = {
