@@ -45,8 +45,19 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     audits = []
     events = []
     submitted = {}
+    conversation_updates = []
 
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "bootstrap_summary_versioning_update",
+        lambda conversation: {"summary_versions": [{"id": "legacy-v1"}], "active_summary_version_id": "legacy-v1"},
+    )
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
     monkeypatch.setattr(
         corrections,
         "_persist_correction_audit",
@@ -101,6 +112,10 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     assert "The podcast said memory can be tricky." in submitted["transcript"]
     assert submitted["request"].summary_context.app_summary == "The app summary was too clinical."
     assert events[-1]["stage"] == "queued"
+    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+    assert conversation_updates[0]["active_summary_version_id"] == "legacy-v1"
+    assert conversation_updates[-1]["correction_state"]["status"] == "queued"
+    assert conversation_updates[-1]["correction_state"]["active_summary_version_id"] == "legacy-v1"
 
 
 def test_submit_correction_uses_authenticated_uid_for_ownership(monkeypatch):
@@ -146,8 +161,15 @@ def test_submit_correction_rejects_locked_conversation(monkeypatch):
 def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monkeypatch):
     audits = []
     events = []
+    conversation_updates = []
 
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
+    monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda conversation: {})
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
     monkeypatch.setattr(
         corrections,
         "_persist_correction_audit",
@@ -178,6 +200,9 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
     assert audits[-1]["queue_error"] == "n8n offline"
     assert events[-1]["stage"] == "queue_failed"
     assert events[-1]["status"] == "error"
+    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+    assert conversation_updates[-1]["correction_state"]["status"] == "queue_failed"
+    assert conversation_updates[-1]["correction_state"]["pending"] is False
 
 
 def test_router_uses_custom_ella_namespace_only():

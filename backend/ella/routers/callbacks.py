@@ -23,6 +23,7 @@ NOTE: Caregiver CRUD endpoints moved to n8n (ella-ai-care repo). iOS calls n8n w
 import hashlib
 import hmac
 import io
+import json
 import logging
 import os
 import secrets
@@ -31,6 +32,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import asyncpg
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -51,6 +53,7 @@ from utils.other.storage import storage_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ella", tags=["ella"])
+_resolve_pool: Optional[asyncpg.Pool] = None
 
 # GCS bucket for Ella TTS audio files (defaults to project's Firebase Storage bucket)
 ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorage.app")
@@ -58,6 +61,8 @@ ELLA_AUDIO_BUCKET = os.getenv("ELLA_AUDIO_BUCKET", "omi-dev-ca005.firebasestorag
 # OpenAI TTS configuration
 OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "tts-1")
 OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
+PROVISION_API_KEY = os.getenv("ELLA_PROVISION_API_KEY", os.getenv("ELLA_PROVISION_API_TOKEN", ""))
+PROVISION_API_URL = os.getenv("ELLA_PROVISION_URL", "http://100.76.138.56:8200")
 
 
 # ============================================================================
@@ -166,35 +171,6 @@ class ConversationSummaryUpdate(BaseModel):
     ella_signal: Optional[Dict[str, Any]] = None
 
 
-
-def _normalize_ella_tags(tags: List[str]) -> List[str]:
-    """Normalize bounded conversation tags for app filtering and recall ranking."""
-    normalized: list[str] = []
-    for tag in tags or []:
-        clean = str(tag).strip().lower().replace(" ", "_")
-        if not clean or len(clean) > 64:
-            continue
-        if clean not in normalized:
-            normalized.append(clean)
-    return normalized[:12]
-
-def _update_correction_audit(
-    uid: str,
-    conversation_id: str,
-    correction_id: str,
-    payload: dict,
-) -> None:
-    (
-        db.collection("users")
-        .document(uid)
-        .collection("conversations")
-        .document(conversation_id)
-        .collection("corrections")
-        .document(correction_id)
-        .set(payload, merge=True)
-    )
-
-
 def _active_summary_version(conversation: dict) -> Optional[dict]:
     active_id = conversation.get("active_summary_version_id")
     versions = conversation.get("summary_versions") or []
@@ -229,6 +205,109 @@ def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
     return "active_summary_not_enriched"
 
 
+def _normalize_ella_tags(tags: List[str]) -> List[str]:
+    """Normalize bounded conversation tags for app filtering and recall ranking."""
+    normalized: list[str] = []
+    for tag in tags or []:
+        clean = str(tag).strip().lower().replace(" ", "_")
+        if not clean or len(clean) > 64:
+            continue
+        if clean not in normalized:
+            normalized.append(clean)
+    return normalized[:12]
+
+
+def _update_correction_audit(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    payload: dict,
+) -> None:
+    (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("corrections")
+        .document(correction_id)
+        .set(payload, merge=True)
+    )
+
+
+async def _get_resolve_pool() -> asyncpg.Pool:
+    global _resolve_pool
+    if _resolve_pool is None:
+        _resolve_pool = await asyncpg.create_pool(
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
+            database="ella_ai",
+            min_size=1,
+            max_size=4,
+        )
+    return _resolve_pool
+
+
+async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
+    pool = await _get_resolve_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT ac.agents
+        FROM users u
+        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+        WHERE u.omi_uid = $1
+        """,
+        uid,
+    )
+    if not row or not row["agents"]:
+        return None
+
+    agents = row["agents"]
+    if isinstance(agents, str):
+        try:
+            agents = json.loads(agents)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(agents, dict):
+        return None
+    return agents.get("userAgentId")
+
+
+async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional[dict]:
+    """Best-effort fetch of Observer sidecar internal_assessment.
+
+    This keeps the app-facing conversation payload aligned with the OpenClaw sidecar
+    without making the summary PATCH path depend on Mac Mini reachability.
+    """
+    try:
+        agent_id = await _resolve_agent_id_for_uid(uid)
+        if not agent_id:
+            return None
+
+        headers = {}
+        if PROVISION_API_KEY:
+            headers["Authorization"] = f"Bearer {PROVISION_API_KEY}"
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{PROVISION_API_URL}/workspace/{agent_id}/metadata/conversations/{conversation_id}",
+                headers=headers,
+            )
+
+        if resp.status_code >= 400:
+            return None
+
+        data = resp.json()
+        assessment = data.get("internal_assessment")
+        return assessment if isinstance(assessment, dict) else None
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch internal_assessment from Provision API",
+            extra={"uid": uid, "conversation_id": conversation_id},
+        )
+        logger.warning(str(e))
+        return None
 @router.patch("/conversation/{conversation_id}/summary")
 async def update_conversation_summary(
     conversation_id: str,
@@ -315,6 +394,9 @@ async def update_conversation_summary(
         "updated_at": state_updated_at,
         "error": None,
     }
+    internal_assessment = await _fetch_internal_assessment(uid, conversation_id)
+    if internal_assessment:
+        update_data["internal_assessment"] = internal_assessment
     ella_tags = _normalize_ella_tags(update.ella_tags)
     if ella_tags:
         update_data["ella_tags"] = ella_tags

@@ -127,6 +127,10 @@ def _persist_correction_audit(
     _audit_ref(uid, conversation_id, correction_id).set(payload, merge=True)
 
 
+def _update_conversation_correction_state(uid: str, conversation_id: str, update_data: dict[str, Any]) -> None:
+    conversations_db.update_conversation(uid, conversation_id, update_data)
+
+
 def _append_correction_event(
     uid: str,
     conversation_id: str,
@@ -212,6 +216,29 @@ async def _submit_conversation_correction(
     structured = _structured_summary(conversation)
     transcript = _format_transcript(conversation)
     segment_count = len(conversation.get("transcript_segments") or [])
+    bootstrap_update = {}
+    bootstrap_builder = getattr(conversations_db, "bootstrap_summary_versioning_update", None)
+    if callable(bootstrap_builder):
+        bootstrap_update = bootstrap_builder(conversation)
+
+    submitted_state = {
+        "correction_id": correction_id,
+        "status": "submitted",
+        "pending": True,
+        "source": request.source,
+        "submitted_at": submitted_at,
+        "updated_at": submitted_at,
+        "active_summary_version_id": bootstrap_update.get("active_summary_version_id")
+        or conversation.get("active_summary_version_id"),
+    }
+    _update_conversation_correction_state(
+        uid,
+        conversation_id,
+        {
+            **bootstrap_update,
+            "correction_state": submitted_state,
+        },
+    )
 
     audit_payload = {
         "correction_id": correction_id,
@@ -247,13 +274,14 @@ async def _submit_conversation_correction(
             "Failed to submit conversation correction to n8n",
             extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
         )
+        failed_at = _now_iso()
         _persist_correction_audit(
             uid,
             conversation_id,
             correction_id,
             {
                 "status": "queue_failed",
-                "updated_at": _now_iso(),
+                "updated_at": failed_at,
                 "queue_error": str(exc),
             },
         )
@@ -261,7 +289,23 @@ async def _submit_conversation_correction(
             uid,
             conversation_id,
             correction_id,
-            {"stage": "queue_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id, "error": str(exc)},
+            {"stage": "queue_failed", "status": "error", "at": failed_at, "trace_id": trace_id, "error": str(exc)},
+        )
+        _update_conversation_correction_state(
+            uid,
+            conversation_id,
+            {
+                "correction_state": {
+                    "correction_id": correction_id,
+                    "status": "queue_failed",
+                    "pending": False,
+                    "source": request.source,
+                    "submitted_at": submitted_at,
+                    "updated_at": failed_at,
+                    "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+                    "error": str(exc),
+                }
+            },
         )
         return ConversationCorrectionResponse(
             correction_id=correction_id,
@@ -272,6 +316,15 @@ async def _submit_conversation_correction(
         )
 
     queued_at = _now_iso()
+    queued_state = {
+        "correction_id": correction_id,
+        "status": "queued",
+        "pending": True,
+        "source": request.source,
+        "submitted_at": submitted_at,
+        "updated_at": queued_at,
+        "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+    }
     _persist_correction_audit(
         uid,
         conversation_id,
@@ -284,6 +337,7 @@ async def _submit_conversation_correction(
         correction_id,
         {"stage": "queued", "status": "ok", "at": queued_at, "trace_id": trace_id, "queue_result": queue_result},
     )
+    _update_conversation_correction_state(uid, conversation_id, {"correction_state": queued_state})
 
     return ConversationCorrectionResponse(
         correction_id=correction_id,

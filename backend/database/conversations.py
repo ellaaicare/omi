@@ -143,6 +143,109 @@ def build_summary_version_update(
 
 
 
+def _category_value(value: Any) -> str:
+    if value is None:
+        return 'other'
+    raw = getattr(value, 'value', value)
+    return str(raw or 'other')
+
+
+def _has_summary_content(structured: Optional[Dict[str, Any]]) -> bool:
+    structured = structured or {}
+    return any(
+        str(structured.get(field) or '').strip()
+        for field in ('title', 'overview', 'emoji', 'category')
+    )
+
+
+def _build_summary_version_payload(
+    *,
+    structured: Dict[str, Any],
+    created_at: datetime,
+    source: str,
+    kind: str,
+    is_active: bool,
+    correction_id: Optional[str] = None,
+    based_on_version_id: Optional[str] = None,
+    version_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        'id': version_id or str(uuid.uuid4()),
+        'created_at': _ensure_timezone_aware(created_at),
+        'source': source,
+        'kind': kind,
+        'title': structured.get('title') or '',
+        'overview': structured.get('overview') or '',
+        'emoji': structured.get('emoji') or '🧠',
+        'category': _category_value(structured.get('category')),
+        'correction_id': correction_id,
+        'based_on_version_id': based_on_version_id,
+        'is_active': is_active,
+    }
+
+
+def bootstrap_summary_versioning_update(conversation_data: Dict[str, Any]) -> Dict[str, Any]:
+    if not conversation_data or conversation_data.get('summary_versions'):
+        return {}
+
+    structured = conversation_data.get('structured') or {}
+    if not _has_summary_content(structured):
+        return {}
+
+    created_at = conversation_data.get('created_at') or datetime.now(timezone.utc)
+    version = _build_summary_version_payload(
+        structured=structured,
+        created_at=_ensure_timezone_aware(created_at),
+        source='legacy',
+        kind='legacy_current',
+        is_active=True,
+    )
+    return {
+        'summary_versions': [version],
+        'active_summary_version_id': version['id'],
+    }
+
+
+def build_summary_version_update(
+    conversation_data: Dict[str, Any],
+    *,
+    next_structured: Dict[str, Any],
+    source: str = 'observer',
+    kind: str = 'observer_enriched',
+    correction_id: Optional[str] = None,
+    based_on_version_id: Optional[str] = None,
+    activate: bool = True,
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    bootstrap_update = bootstrap_summary_versioning_update(conversation_data)
+    versions = copy.deepcopy(conversation_data.get('summary_versions') or bootstrap_update.get('summary_versions') or [])
+    active_summary_version_id = (
+        conversation_data.get('active_summary_version_id') or bootstrap_update.get('active_summary_version_id')
+    )
+
+    if activate:
+        for version in versions:
+            version['is_active'] = False
+
+    base_version_id = based_on_version_id or active_summary_version_id
+    new_version = _build_summary_version_payload(
+        structured=next_structured,
+        created_at=now,
+        source=source,
+        kind=kind,
+        correction_id=correction_id,
+        based_on_version_id=base_version_id,
+        is_active=activate,
+    )
+    versions.append(new_version)
+
+    return {
+        'summary_versions': versions,
+        'active_summary_version_id': new_version['id'] if activate else active_summary_version_id,
+        'new_summary_version_id': new_version['id'],
+    }
+
+
 # *********************************
 # ******* ENCRYPTION HELPERS ******
 # *********************************

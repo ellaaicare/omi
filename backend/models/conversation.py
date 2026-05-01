@@ -204,6 +204,53 @@ class Structured(BaseModel):
         return result.strip()
 
 
+class SummaryVersion(BaseModel):
+    id: str = Field(description="Unique identifier for this summary version")
+    created_at: datetime = Field(description="When this summary version was created")
+    source: str = Field(default="observer", description="Producer of this summary version")
+    kind: str = Field(default="observer_enriched", description="Semantic type of this summary version")
+    title: str = Field(default="", description="Summary title for this version")
+    overview: str = Field(default="", description="Summary overview for this version")
+    emoji: str = Field(default="🧠", description="Summary emoji for this version")
+    category: CategoryEnum = Field(default=CategoryEnum.other, description="Summary category for this version")
+    correction_id: Optional[str] = Field(default=None, description="Correction event that produced this version")
+    based_on_version_id: Optional[str] = Field(default=None, description="Parent summary version identifier")
+    is_active: bool = Field(default=False, description="Whether this version is currently active")
+
+
+class CorrectionState(BaseModel):
+    correction_id: Optional[str] = Field(default=None, description="Latest correction event identifier")
+    status: Optional[str] = Field(default=None, description="Correction lifecycle status")
+    pending: bool = Field(default=False, description="Whether a correction is still pending")
+    source: Optional[str] = Field(default=None, description="Where the correction came from")
+    submitted_at: Optional[datetime] = Field(default=None, description="When the correction was first submitted")
+    updated_at: Optional[datetime] = Field(default=None, description="When the correction state last changed")
+    active_summary_version_id: Optional[str] = Field(
+        default=None, description="Currently active summary version while this state applies"
+    )
+    error: Optional[str] = Field(default=None, description="Last correction processing error if any")
+
+
+class InternalAssessment(BaseModel):
+    media_likelihood: Optional[float] = Field(default=None, description="Likelihood the audio was primarily media")
+    speaker_confidence: Optional[str] = Field(default=None, description="Confidence in speaker attribution")
+    risk_level: Optional[str] = Field(default=None, description="Internal risk classification")
+    caregiver_relevance: Optional[str] = Field(default=None, description="How relevant this is to caregiver workflows")
+    escalation_recommendation: Optional[str] = Field(default=None, description="Recommended escalation action")
+    reason_codes: List[str] = Field(default_factory=list, description="Machine-readable internal assessment reasons")
+    notes: Optional[str] = Field(default=None, description="Short internal notes for debug/operator use")
+
+
+class EllaSignal(BaseModel):
+    salience: Optional[str] = Field(default=None, description="low, medium, or high signal for recall/ranking")
+    memory_promotion: Optional[str] = Field(default=None, description="none, candidate, or promoted")
+    noise_level: Optional[str] = Field(default=None, description="none, low, medium, or high noise")
+    contains_media: bool = False
+    contains_user_speech: bool = False
+    guardian_relevant: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Reserved signal metadata")
+
+
 class Geolocation(BaseModel):
     google_place_id: Optional[str] = None
     latitude: float
@@ -289,16 +336,6 @@ class ConversationPostProcessing(BaseModel):
 
 
 
-class EllaSignal(BaseModel):
-    salience: Optional[str] = Field(default=None, description="low, medium, or high signal for recall/ranking")
-    memory_promotion: Optional[str] = Field(default=None, description="none, candidate, or promoted")
-    noise_level: Optional[str] = Field(default=None, description="none, low, medium, or high noise")
-    contains_media: bool = False
-    contains_user_speech: bool = False
-    guardian_relevant: bool = False
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Reserved signal metadata")
-
-
 class Conversation(BaseModel):
     id: str
     created_at: datetime
@@ -309,6 +346,10 @@ class Conversation(BaseModel):
     language: Optional[str] = None  # applies only to Friend # TODO: once released migrate db to default 'en'
 
     structured: Structured
+    summary_versions: List[SummaryVersion] = []
+    active_summary_version_id: Optional[str] = None
+    correction_state: Optional[CorrectionState] = None
+    internal_assessment: Optional[InternalAssessment] = None
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[EllaSignal] = None
     transcript_segments: List[TranscriptSegment] = []
