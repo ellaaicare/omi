@@ -166,8 +166,43 @@ class ConversationSummaryUpdate(BaseModel):
     correction_id: Optional[str] = None
     based_on_version_id: Optional[str] = None
     set_active: bool = True
+    trace_id: Optional[str] = None
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
+
+
+def _active_summary_version(conversation: dict) -> Optional[dict]:
+    active_id = conversation.get("active_summary_version_id")
+    versions = conversation.get("summary_versions") or []
+    if active_id:
+        for version in versions:
+            if version.get("id") == active_id:
+                return version
+    for version in versions:
+        if version.get("is_active"):
+            return version
+    return None
+
+
+def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
+    enrichment_state = conversation.get("enrichment_state") or {}
+    status = enrichment_state.get("status")
+    if status == "writeback_applied":
+        return None
+    if status == "failed":
+        return "enrichment_failed"
+    if enrichment_state.get("pending"):
+        return "enrichment_pending"
+
+    active_version = _active_summary_version(conversation)
+    if not active_version:
+        return "missing_active_summary_version"
+
+    source = str(active_version.get("source") or "")
+    kind = str(active_version.get("kind") or "")
+    if source == "observer" and kind in {"observer_enriched", "corrected_enriched"}:
+        return None
+    return "active_summary_not_enriched"
 
 
 def _normalize_ella_tags(tags: List[str]) -> List[str]:
@@ -347,8 +382,18 @@ async def update_conversation_summary(
         based_on_version_id=update.based_on_version_id,
         activate=update.set_active,
     )
+    state_updated_at = datetime.now(timezone.utc)
     update_data["summary_versions"] = version_update["summary_versions"]
     update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
+    update_data["enrichment_state"] = {
+        "status": "writeback_applied",
+        "pending": False,
+        "source": update.summary_source,
+        "kind": update.summary_kind,
+        "trace_id": update.trace_id,
+        "updated_at": state_updated_at,
+        "error": None,
+    }
     internal_assessment = await _fetch_internal_assessment(uid, conversation_id)
     if internal_assessment:
         update_data["internal_assessment"] = internal_assessment
@@ -365,7 +410,7 @@ async def update_conversation_summary(
             "pending": False,
             "source": existing_state.get("source"),
             "submitted_at": existing_state.get("submitted_at"),
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": state_updated_at,
             "active_summary_version_id": version_update["active_summary_version_id"],
         }
 
@@ -403,6 +448,66 @@ async def update_conversation_summary(
         "updated_fields": list(update_data.keys()),
         "active_summary_version_id": version_update["active_summary_version_id"],
         "sanitizer_warnings": sanitized_update.warnings,
+    }
+
+
+@router.get("/conversations/enrichment/reconcile-candidates")
+async def list_enrichment_reconcile_candidates(
+    uid: Optional[str] = None,
+    lookback_minutes: int = 180,
+    limit: int = 25,
+):
+    """
+    Internal helper for n8n reconciliation.
+    Returns recent completed conversations whose active summary is not yet
+    marked as observer-enriched in OMI.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    if lookback_minutes <= 0:
+        raise HTTPException(status_code=400, detail="lookback_minutes must be positive")
+    if limit <= 0 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+    start_date = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    get_recent = getattr(conversations_db, "get_conversations_without_photos", conversations_db.get_conversations)
+    conversations = get_recent(
+        uid,
+        limit=limit,
+        offset=0,
+        include_discarded=False,
+        statuses=["completed"],
+        start_date=start_date,
+    )
+
+    candidates = []
+    for conversation in conversations:
+        reason = _enrichment_candidate_reason(conversation)
+        if not reason:
+            continue
+
+        active_version = _active_summary_version(conversation) or {}
+        structured = conversation.get("structured") or {}
+        candidates.append(
+            {
+                "conversation_id": conversation.get("id"),
+                "created_at": conversation.get("created_at"),
+                "title": structured.get("title") or conversation.get("title") or "",
+                "reason": reason,
+                "active_summary_version_id": conversation.get("active_summary_version_id"),
+                "active_summary_source": active_version.get("source"),
+                "active_summary_kind": active_version.get("kind"),
+                "enrichment_state": conversation.get("enrichment_state"),
+            }
+        )
+
+    return {
+        "uid": uid,
+        "lookback_minutes": lookback_minutes,
+        "limit": limit,
+        "total_scanned": len(conversations),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
     }
 
 
