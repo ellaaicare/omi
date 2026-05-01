@@ -29,7 +29,7 @@ import secrets
 import string
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from database._client import db
 from models.conversation import CategoryEnum
 
 
@@ -155,6 +156,77 @@ class ConversationSummaryUpdate(BaseModel):
     overview: Optional[str] = None
     emoji: Optional[str] = None
     category: Optional[str] = None
+    summary_source: str = "observer"
+    summary_kind: str = "observer_enriched"
+    correction_id: Optional[str] = None
+    based_on_version_id: Optional[str] = None
+    set_active: bool = True
+    trace_id: Optional[str] = None
+    ella_tags: List[str] = Field(default_factory=list)
+    ella_signal: Optional[Dict[str, Any]] = None
+
+
+
+def _normalize_ella_tags(tags: List[str]) -> List[str]:
+    """Normalize bounded conversation tags for app filtering and recall ranking."""
+    normalized: list[str] = []
+    for tag in tags or []:
+        clean = str(tag).strip().lower().replace(" ", "_")
+        if not clean or len(clean) > 64:
+            continue
+        if clean not in normalized:
+            normalized.append(clean)
+    return normalized[:12]
+
+def _update_correction_audit(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    payload: dict,
+) -> None:
+    (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("corrections")
+        .document(correction_id)
+        .set(payload, merge=True)
+    )
+
+
+def _active_summary_version(conversation: dict) -> Optional[dict]:
+    active_id = conversation.get("active_summary_version_id")
+    versions = conversation.get("summary_versions") or []
+    if active_id:
+        for version in versions:
+            if version.get("id") == active_id:
+                return version
+    for version in versions:
+        if version.get("is_active"):
+            return version
+    return None
+
+
+def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
+    enrichment_state = conversation.get("enrichment_state") or {}
+    status = enrichment_state.get("status")
+    if status == "writeback_applied":
+        return None
+    if status == "failed":
+        return "enrichment_failed"
+    if enrichment_state.get("pending"):
+        return "enrichment_pending"
+
+    active_version = _active_summary_version(conversation)
+    if not active_version:
+        return "missing_active_summary_version"
+
+    source = str(active_version.get("source") or "")
+    kind = str(active_version.get("kind") or "")
+    if source == "observer" and kind in {"observer_enriched", "corrected_enriched"}:
+        return None
+    return "active_summary_not_enriched"
 
 
 @router.patch("/conversation/{conversation_id}/summary")
@@ -170,6 +242,10 @@ async def update_conversation_summary(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     try:
         sanitized_update = sanitize_summary_update(
@@ -208,17 +284,148 @@ async def update_conversation_summary(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    structured = dict((conversation.get("structured") or {}))
+    if sanitized_update.title is not None:
+        structured["title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        structured["overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        structured["emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
+        structured["category"] = sanitized_update.category
+
+    version_update = conversations_db.build_summary_version_update(
+        conversation,
+        next_structured=structured,
+        source=update.summary_source,
+        kind=update.summary_kind,
+        correction_id=update.correction_id,
+        based_on_version_id=update.based_on_version_id,
+        activate=update.set_active,
+    )
+    state_updated_at = datetime.now(timezone.utc)
+    update_data["summary_versions"] = version_update["summary_versions"]
+    update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
+    update_data["enrichment_state"] = {
+        "status": "writeback_applied",
+        "pending": False,
+        "source": update.summary_source,
+        "kind": update.summary_kind,
+        "trace_id": update.trace_id,
+        "updated_at": state_updated_at,
+        "error": None,
+    }
+    ella_tags = _normalize_ella_tags(update.ella_tags)
+    if ella_tags:
+        update_data["ella_tags"] = ella_tags
+    if update.ella_signal is not None:
+        update_data["ella_signal"] = update.ella_signal
+    if update.correction_id:
+        existing_state = conversation.get("correction_state") or {}
+        update_data["correction_state"] = {
+            "correction_id": update.correction_id,
+            "status": "applied",
+            "pending": False,
+            "source": existing_state.get("source"),
+            "submitted_at": existing_state.get("submitted_at"),
+            "updated_at": state_updated_at,
+            "active_summary_version_id": version_update["active_summary_version_id"],
+        }
+
     try:
         conversations_db.update_conversation(uid, conversation_id, update_data)
     except Exception as e:
         logging.error(f"Failed to update conversation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+    if update.correction_id:
+        try:
+            _update_correction_audit(
+                uid,
+                conversation_id,
+                update.correction_id,
+                {
+                    "status": "applied",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_summary_version_id": version_update["active_summary_version_id"],
+                    "summary_version_kind": update.summary_kind,
+                    "summary_version_source": update.summary_source,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update correction audit after summary apply",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": update.correction_id},
+            )
+            logger.warning(str(e))
+
     return {
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "active_summary_version_id": version_update["active_summary_version_id"],
         "sanitizer_warnings": sanitized_update.warnings,
+    }
+
+
+@router.get("/conversations/enrichment/reconcile-candidates")
+async def list_enrichment_reconcile_candidates(
+    uid: Optional[str] = None,
+    lookback_minutes: int = 180,
+    limit: int = 25,
+):
+    """
+    Internal helper for n8n reconciliation.
+    Returns recent completed conversations whose active summary is not yet
+    marked as observer-enriched in OMI.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+    if lookback_minutes <= 0:
+        raise HTTPException(status_code=400, detail="lookback_minutes must be positive")
+    if limit <= 0 or limit > 200:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 200")
+
+    start_date = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
+    get_recent = getattr(conversations_db, "get_conversations_without_photos", conversations_db.get_conversations)
+    conversations = get_recent(
+        uid,
+        limit=limit,
+        offset=0,
+        include_discarded=False,
+        statuses=["completed"],
+        start_date=start_date,
+    )
+
+    candidates = []
+    for conversation in conversations:
+        reason = _enrichment_candidate_reason(conversation)
+        if not reason:
+            continue
+
+        active_version = _active_summary_version(conversation) or {}
+        structured = conversation.get("structured") or {}
+        candidates.append(
+            {
+                "conversation_id": conversation.get("id"),
+                "created_at": conversation.get("created_at"),
+                "title": structured.get("title") or conversation.get("title") or "",
+                "reason": reason,
+                "active_summary_version_id": conversation.get("active_summary_version_id"),
+                "active_summary_source": active_version.get("source"),
+                "active_summary_kind": active_version.get("kind"),
+                "enrichment_state": conversation.get("enrichment_state"),
+            }
+        )
+
+    return {
+        "uid": uid,
+        "lookback_minutes": lookback_minutes,
+        "limit": limit,
+        "total_scanned": len(conversations),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
     }
 
 

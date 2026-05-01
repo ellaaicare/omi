@@ -20,7 +20,8 @@ import json
 import os
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 import asyncpg
@@ -29,6 +30,8 @@ import websockets
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
+
+from database.conversations import _decrypt_conversation_data
 
 # JWT handling
 try:
@@ -53,6 +56,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
@@ -99,11 +103,25 @@ V2V_PROVIDERS = {
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
     "gemini-live": {
-        "name": "Gemini Live (V2V)",
-        "description": "Voice-to-voice via Gemini Live API, multimodal",
+        "name": "Gemini Live compatibility (V2V)",
+        "description": "Compatibility label for older app builds; use gemini-native-live for provider-native voice",
         "default_mode": "gemini-live",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
-        "key_check": lambda: bool(GEMINI_API_KEY),
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "gemini-native-live": {
+        "name": "Gemini Native Live (V2V)",
+        "description": "Provider-native Gemini Live speech-to-speech through Ella voice proxy",
+        "default_mode": "gemini-native-live-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
+    },
+    "openai-native-realtime": {
+        "name": "OpenAI Native Realtime (V2V)",
+        "description": "Provider-native OpenAI Realtime speech-to-speech through Ella voice proxy",
+        "default_mode": "openai-native-realtime-v1",
+        "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
 }
 
@@ -300,10 +318,28 @@ async def get_voice_providers():
         },
         {
             "id": "gemini-live",
-            "name": "Gemini Live (V2V)",
+            "name": "Gemini Live compatibility (V2V)",
             "type": "v2v",
-            "description": "Voice-to-voice via Gemini Live API, multimodal",
+            "description": "Compatibility label for older app builds",
             "available": V2V_PROVIDERS["gemini-live"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+        },
+        {
+            "id": "gemini-native-live",
+            "name": "Gemini Native Live (V2V)",
+            "type": "v2v",
+            "description": "Provider-native Gemini Live speech-to-speech",
+            "available": V2V_PROVIDERS["gemini-native-live"]["key_check"](),
+            "requires_session": True,
+            "session_endpoint": "/v1/voice/session",
+        },
+        {
+            "id": "openai-native-realtime",
+            "name": "OpenAI Native Realtime (V2V)",
+            "type": "v2v",
+            "description": "Provider-native OpenAI Realtime speech-to-speech",
+            "available": V2V_PROVIDERS["openai-native-realtime"]["key_check"](),
             "requires_session": True,
             "session_endpoint": "/v1/voice/session",
         },
@@ -653,7 +689,12 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
         return ""
 
 
-async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name: str = "user") -> str:
+async def _fetch_memory_context(
+    gateway_url: str,
+    gateway_token: str,
+    user_name: str = "user",
+    timeout_seconds: float = 2.0,
+) -> str:
     """Fetch recent memory/agent context via OpenClaw memory_search.
     Returns formatted string of relevant memory snippets."""
     if not gateway_token:
@@ -665,13 +706,10 @@ async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name:
     }
     
     results_all = []
-    queries = [
-        f"{user_name} recent activity today schedule important",
-        f"recent conversations events updates news",
-    ]
+    queries = [f"{user_name} recent activity today schedule important"]
     
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             for query in queries:
                 try:
                     resp = await client.post(
@@ -735,6 +773,7 @@ async def get_voice_context(request: Request):
     Request body:
         uid (str, required): OMI user ID (Firebase UID / omi_uid)
         context_budget (int, optional): Max chars for context sections (default: 8000)
+        memory_timeout_seconds (float, optional): Best-effort OpenClaw memory timeout (default: 2.0)
 
     Returns structured context: user info, soul, user profile, conditions,
     medications, recent voice summaries, dynamic rules, and voice rules.
@@ -745,6 +784,7 @@ async def get_voice_context(request: Request):
         raise HTTPException(status_code=400, detail="uid is required")
 
     budget = body.get("context_budget", 8000)
+    memory_timeout_seconds = float(body.get("memory_timeout_seconds", 2.0))
     _start = time.time()
 
     # 1. DB lookup — user + agent cluster
@@ -822,15 +862,30 @@ async def get_voice_context(request: Request):
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Dynamic rules error: {e}")
 
-    # 4. Fetch recent OMI conversation summaries (Firestore) + agent memory context
+    # 4. Fetch recent OMI summaries, canonical cross-channel timeline, and
+    # best-effort agent memory. The canonical timeline is the most important
+    # realtime voice context because it includes iMessage, app chat, voice, and
+    # OMI-derived events in chronological order.
     recent_conversations = ""
+    recent_timeline = ""
     memory_context = ""
     try:
         import asyncio as _aio
-        # Run both fetches concurrently
-        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=5))
-        mem_task = _aio.create_task(_fetch_memory_context(gateway_url, gateway_token, row["name"] or "user"))
-        recent_conversations, memory_context = await _aio.gather(conv_task, mem_task)
+        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=8))
+        timeline_task = _aio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
+        mem_task = _aio.create_task(
+            _fetch_memory_context(
+                gateway_url,
+                gateway_token,
+                row["name"] or "user",
+                timeout_seconds=memory_timeout_seconds,
+            )
+        )
+        recent_conversations, recent_timeline, memory_context = await _aio.gather(
+            conv_task,
+            timeline_task,
+            mem_task,
+        )
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
 
@@ -880,7 +935,7 @@ async def get_voice_context(request: Request):
     print(
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
         f"files={len(files)} rules={len(dynamic_rules)} "
-        f"convos={len(recent_conversations)} mem={len(memory_context)} "
+        f"convos={len(recent_conversations)} timeline={len(recent_timeline)} mem={len(memory_context)} "
         f"latency={_elapsed}ms",
         flush=True,
     )
@@ -896,6 +951,7 @@ async def get_voice_context(request: Request):
         "conditions": conditions_list,
         "medications": medications_list,
         "recent_voice_summaries": voice_summaries,
+        "recent_timeline": recent_timeline,
         "recent_conversations": recent_conversations,
         "memory_context": memory_context,
         "shared_reports": shared_reports,
@@ -938,6 +994,8 @@ async def search_omi_conversations(request: Request):
         import re as re_mod
         
         # Parse date hints from query for date-range filtering
+        now_local = _pacific_now()
+        now_local = _pacific_now()
         now = datetime.utcnow()
         date_filter_start = None
         date_filter_end = None
@@ -1004,6 +1062,9 @@ async def search_omi_conversations(request: Request):
         
         if not date_parsed:
             keyword_terms = query_lower.split()
+
+        keyword_terms = _expand_query_terms(_significant_query_terms(" ".join(keyword_terms)))
+        keyword_terms = _normalized_query_terms(" ".join(keyword_terms))
         
         logger.info(f"[FLOW:VOICE-SEARCH] date_filter={date_filter_start}->{date_filter_end}, keywords={keyword_terms}")
         
@@ -1044,7 +1105,7 @@ async def search_omi_conversations(request: Request):
             
             if keyword_terms:
                 # Score: how many keyword terms match
-                score = sum(1 for term in keyword_terms if term in searchable)
+                score = _keyword_score(searchable, keyword_terms)
                 if score > 0:
                     matches.append((score, c))
             else:
@@ -1092,14 +1153,16 @@ async def search_omi_conversations(request: Request):
 # Privacy policy: maps agent_role -> source -> access level
 # True = full access, False = no access, "own" = own data only, "full" = full
 SEARCH_POLICY = {
-    "user":      {"workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
-    "caregiver": {"workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
-    "scanner":   {"workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
-    "voice":     {"workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
+    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
+    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
+    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
+    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
 }
 
 # Which source keys map to which request-level source names
 _SOURCE_TO_POLICY_KEYS = {
+    "timeline":  ["timeline"],
+    "channel":   ["timeline"],
     "workspace": ["workspace"],
     "omi":       ["omi_full", "omi_meta"],
     "memories":  ["memories"],
@@ -1149,9 +1212,239 @@ def _validate_agent_uid(agent_id: str, uid: str) -> bool:
 
 
 def _keyword_score(text: str, terms: list) -> int:
-    """Simple keyword match score: count of query terms found in text."""
+    """Simple keyword match score: count exact query terms found in text."""
+    import re as _re
+
     text_lower = text.lower()
-    return sum(1 for t in terms if t in text_lower)
+    score = 0
+    for t in terms:
+        term = (t or "").lower().strip()
+        if not term:
+            continue
+        if _re.search(rf"(?<![a-z0-9]){_re.escape(term)}(?![a-z0-9])", text_lower):
+            score += 1
+    return score
+
+
+def _conversation_transcript_text(conversation: dict, uid: str, max_chars: int = 12000) -> str:
+    """Return readable transcript text from a Firestore conversation document."""
+    try:
+        data = _decrypt_conversation_data(conversation, uid)
+    except Exception as e:
+        logger.debug(f"[FLOW:UNIFIED-SEARCH] Transcript decrypt/decompress failed: {e}")
+        data = conversation
+
+    segments = data.get("transcript_segments") or []
+    if not isinstance(segments, list):
+        return ""
+
+    parts = []
+    for seg in segments:
+        if isinstance(seg, dict):
+            text = seg.get("text") or seg.get("transcript") or seg.get("content") or ""
+            speaker = seg.get("speaker") or seg.get("speaker_id") or seg.get("person_id") or ""
+        else:
+            text = getattr(seg, "text", "") or getattr(seg, "transcript", "") or ""
+            speaker = getattr(seg, "speaker", "") or getattr(seg, "speaker_id", "") or ""
+        text = " ".join(str(text).split())
+        if not text:
+            continue
+        if speaker:
+            parts.append(f"{speaker}: {text}")
+        else:
+            parts.append(text)
+        if sum(len(p) for p in parts) > max_chars:
+            break
+    return "\n".join(parts)[:max_chars]
+
+
+def _snippet_around_terms(text: str, terms: list, max_chars: int = 900) -> str:
+    if not text:
+        return ""
+    lower = text.lower()
+    for term in terms:
+        idx = lower.find(term.lower())
+        if idx >= 0:
+            start = max(0, idx - max_chars // 3)
+            end = min(len(text), idx + len(term) + (max_chars * 2 // 3))
+            return text[start:end].strip()
+    return text[:max_chars].strip()
+
+
+def _normalized_query_terms(query: str) -> list[str]:
+    stop = {
+        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
+        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
+        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
+        "memory", "memories", "after", "before", "else", "went", "go", "this",
+        "omi", "conversation", "conversations", "transcript", "transcripts",
+        "summary", "summaries", "morning", "today", "yesterday", "raw",
+    }
+    terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
+    filtered = [t for t in terms if len(t) > 2 and t not in stop]
+    return filtered or [t for t in terms if len(t) > 2]
+
+
+def _significant_query_terms(query: str) -> list[str]:
+    """Return only evidence-bearing terms; unlike _normalized_query_terms,
+    this may return an empty list for broad temporal questions."""
+    stop = {
+        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
+        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
+        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
+        "memory", "memories", "after", "before", "else", "went", "go", "this",
+        "omi", "conversation", "conversations", "transcript", "transcripts",
+        "summary", "summaries", "morning", "today", "yesterday", "raw",
+    }
+    terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
+    return [t for t in terms if len(t) > 2 and t not in stop]
+
+
+def _expand_query_terms(terms: list[str]) -> list[str]:
+    expanded = list(terms)
+    aliases = {
+        "meisheng": ["mei", "sheng", "may", "shing"],
+        "meishengs": ["mei", "sheng", "may", "shing"],
+    }
+    for term in terms:
+        expanded.extend(aliases.get(term, []))
+    return list(dict.fromkeys(expanded))
+
+
+def _pacific_now() -> datetime:
+    return datetime.now(ZoneInfo("America/Los_Angeles"))
+
+
+def _local_window_to_utc(start_local: datetime, end_local: datetime) -> tuple[datetime, datetime]:
+    return (
+        start_local.astimezone(timezone.utc).replace(tzinfo=None),
+        end_local.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
+async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
+    """Search the canonical cross-channel event ledger.
+
+    This is the durable source for voice/app/iMessage/chat turns and should be
+    preferred for recent chronological facts that may not have been promoted to
+    OMI summaries or workspace memory yet.
+    """
+    results = []
+    try:
+        pool = await _get_pool()
+        query_terms = _expand_query_terms(_significant_query_terms(query))
+        if not query_terms:
+            return results
+        rows = await pool.fetch(
+            """
+            SELECT channel, provider, role, text, started_at, session_id, metadata
+            FROM canonical_events
+            WHERE lower(uid) = lower($1)
+              AND text IS NOT NULL
+              AND trim(text) != ''
+            ORDER BY started_at DESC, id DESC
+            LIMIT 300
+            """,
+            uid,
+        )
+        matches = []
+        include_assistant = any(
+            phrase in query.lower()
+            for phrase in ("what did you say", "what did ella say", "your response", "assistant said", "you told me")
+        )
+        for row in rows:
+            text = row["text"] or ""
+            channel = row["channel"] or ""
+            role = row["role"] or ""
+            provider = row["provider"] or ""
+            # Assistant turns are useful for chat continuity, but they are not
+            # source evidence for memory lookup. Letting previous assistant
+            # answers outrank user/OMI facts creates self-reinforcing hallucinations.
+            if role == "assistant" and not include_assistant:
+                continue
+            searchable = f"{channel} {provider} {role} {text}"
+            score = _keyword_score(searchable, query_terms)
+            if score <= 0:
+                continue
+            if role == "user" and text.strip().endswith("?"):
+                # User questions are useful conversational history, but they are
+                # usually not evidence for factual recall. Avoid ranking prior
+                # questions like "what did I do this morning?" as answers.
+                score = max(0, score - 2)
+                if score <= 0:
+                    continue
+            # Recency should break ties for live voice questions.
+            ts = row["started_at"]
+            ts_text = ts.strftime("%Y-%m-%d %I:%M %p") if ts else ""
+            role_boost = 15 if role == "user" else 3
+            matches.append((score, ts or datetime.min, {
+                "source": "timeline",
+                "title": f"{channel} {role}".strip(),
+                "content": text[:700],
+                "timestamp": ts_text,
+                "score": score + role_boost,
+                "metadata": {
+                    "channel": channel,
+                    "provider": provider,
+                    "role": role,
+                    "session_id": row["session_id"] or "",
+                },
+            }))
+        matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [m[2] for m in matches[:limit]]
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Canonical timeline search error: {e}")
+        return results
+
+
+async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars: int = 9000) -> str:
+    """Fetch the latest cross-channel turns for realtime voice startup context.
+
+    This is not keyword search. Realtime voice providers need a hot chronological
+    context window at session start because some native audio modes cannot safely
+    call backend tools mid-turn.
+    """
+    try:
+        pool = await _get_pool()
+        rows = await pool.fetch(
+            """
+            SELECT channel, provider, role, text, started_at
+            FROM canonical_events
+            WHERE lower(uid) = lower($1)
+              AND text IS NOT NULL
+              AND trim(text) != ''
+            ORDER BY started_at DESC, id DESC
+            LIMIT $2
+            """,
+            uid,
+            limit,
+        )
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Canonical timeline fetch failed: {e}")
+        return ""
+
+    entries = []
+    for row in reversed(rows):
+        ts = row["started_at"]
+        ts_text = ts.strftime("%Y-%m-%d %I:%M %p") if ts else ""
+        channel = row["channel"] or "unknown"
+        role = row["role"] or "unknown"
+        provider = row["provider"] or ""
+        text = " ".join((row["text"] or "").split())
+        if not text:
+            continue
+        if len(text) > 700:
+            text = text[:700].rstrip() + "..."
+        label = f"{ts_text} [{channel}/{role}"
+        if provider:
+            label += f"/{provider}"
+        label += "]"
+        entries.append(f"- {label}: {text}")
+
+    timeline = "\n".join(entries)
+    if len(timeline) > max_chars:
+        timeline = timeline[-max_chars:]
+    return timeline
 
 
 async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> list:
@@ -1161,7 +1454,9 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
     if not agent_id or not PROVISION_API_TOKEN:
         return results
 
-    query_terms = query.lower().split()
+    query_terms = _expand_query_terms(_significant_query_terms(query))
+    if not query_terms:
+        return results
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -1250,6 +1545,7 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
 
         db = _fs.Client()
         query_lower = query.lower().strip()
+        now_local = _pacific_now()
         now = datetime.utcnow()
 
         # --- Date parsing (reused from search_omi_conversations) ---
@@ -1258,15 +1554,43 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
         keyword_terms = []
         date_parsed = False
 
-        if "yesterday" in query_lower:
-            d = now - timedelta(days=1)
-            date_filter_start = d.replace(hour=0, minute=0, second=0)
-            date_filter_end = d.replace(hour=23, minute=59, second=59)
+        if "this morning" in query_lower:
+            date_filter_start, date_filter_end = _local_window_to_utc(
+                now_local.replace(hour=5, minute=0, second=0, microsecond=0),
+                min(now_local, now_local.replace(hour=12, minute=0, second=0, microsecond=0)),
+            )
+            date_parsed = True
+            remaining = query_lower.replace("this morning", "")
+            keyword_terms = [t for t in remaining.split() if t]
+        elif "this afternoon" in query_lower:
+            date_filter_start, date_filter_end = _local_window_to_utc(
+                now_local.replace(hour=12, minute=0, second=0, microsecond=0),
+                min(now_local, now_local.replace(hour=17, minute=0, second=0, microsecond=0)),
+            )
+            date_parsed = True
+            remaining = query_lower.replace("this afternoon", "")
+            keyword_terms = [t for t in remaining.split() if t]
+        elif "this evening" in query_lower:
+            date_filter_start, date_filter_end = _local_window_to_utc(
+                now_local.replace(hour=17, minute=0, second=0, microsecond=0),
+                now_local,
+            )
+            date_parsed = True
+            remaining = query_lower.replace("this evening", "")
+            keyword_terms = [t for t in remaining.split() if t]
+        elif "yesterday" in query_lower:
+            d = now_local - timedelta(days=1)
+            date_filter_start, date_filter_end = _local_window_to_utc(
+                d.replace(hour=0, minute=0, second=0, microsecond=0),
+                d.replace(hour=23, minute=59, second=59, microsecond=999999),
+            )
             date_parsed = True
             keyword_terms = [t for t in query_lower.split() if t != "yesterday"]
         elif "today" in query_lower:
-            date_filter_start = now.replace(hour=0, minute=0, second=0)
-            date_filter_end = now
+            date_filter_start, date_filter_end = _local_window_to_utc(
+                now_local.replace(hour=0, minute=0, second=0, microsecond=0),
+                now_local,
+            )
             date_parsed = True
             keyword_terms = [t for t in query_lower.split() if t != "today"]
         elif "last week" in query_lower:
@@ -1337,25 +1661,37 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             title = (structured.get("title", "") or "").lower()
             overview = (structured.get("overview", "") or "").lower()
             category = (structured.get("category", "") or "").lower()
+            transcript_text = _conversation_transcript_text(c, uid) if full_access else ""
+            transcript_lower = transcript_text.lower()
 
             created = c.get("created_at")
             date_str = ""
             if created and hasattr(created, "strftime"):
                 date_str = created.strftime("%B %d %Y %b %A").lower()
 
-            searchable = f"{title} {overview} {category} {date_str}"
+            searchable = f"{title} {overview} {category} {date_str} {transcript_lower}"
 
+            has_content = bool(title or overview or transcript_lower)
             if keyword_terms:
                 score = sum(1 for term in keyword_terms if term in searchable)
-                if score > 0:
-                    matches.append((score, c))
+                # If the user gave a date-style query with only generic terms
+                # like "morning OMI conversations", return dated conversations
+                # rather than requiring the word "morning" to appear in a summary.
+                if score > 0 or date_parsed:
+                    source_score = score or 1
+                    if not has_content:
+                        source_score -= 3
+                    matches.append((source_score, created or datetime.min, c, transcript_text))
             else:
-                matches.append((1, c))
+                source_score = 1
+                if not has_content:
+                    source_score -= 3
+                matches.append((source_score, created or datetime.min, c, transcript_text))
 
-        matches.sort(key=lambda x: x[0], reverse=True)
+        matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
         matches = matches[:limit]
 
-        for score, c in matches:
+        for score, _created_sort, c, transcript_text in matches:
             structured = c.get("structured", {})
             created = c.get("created_at")
             ts = ""
@@ -1369,16 +1705,24 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             if not full_access:
                 # Caregiver: truncate overview to first 100 chars, no raw content
                 overview_text = overview_text[:100] + ("..." if len(overview_text) > 100 else "")
+            elif transcript_text:
+                snippet = _snippet_around_terms(transcript_text, keyword_terms, max_chars=1000)
+                if snippet:
+                    overview_text = (
+                        (overview_text + "\n\nTranscript detail: " if overview_text else "Transcript detail: ")
+                        + snippet
+                    )[:1400]
 
             results.append({
                 "source": "omi",
                 "title": structured.get("title", "Untitled"),
                 "content": overview_text,
                 "timestamp": ts,
-                "score": score,
+                "score": score + 18,
                 "metadata": {
                     "emoji": structured.get("emoji", ""),
                     "category": structured.get("category", ""),
+                    "has_transcript_detail": bool(transcript_text and full_access),
                 },
             })
 
@@ -1397,7 +1741,9 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
         from google.cloud import firestore as _fs
 
         db = _fs.Client()
-        query_terms = query.lower().split()
+        query_terms = _expand_query_terms(_significant_query_terms(query))
+        if not query_terms:
+            return results
 
         # Fetch recent memories sorted by scoring (same pattern as database/memories.py)
         memories_ref = (
@@ -1462,7 +1808,9 @@ async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) ->
     if not agent_id or not PROVISION_API_TOKEN:
         return results
 
-    query_terms = query.lower().split()
+    query_terms = _expand_query_terms(_significant_query_terms(query))
+    if not query_terms:
+        return results
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -1684,6 +2032,10 @@ async def unified_search(request: Request):
     tasks = []
     task_source_names = []
 
+    if allowed.get("timeline"):
+        tasks.append(_search_canonical_timeline(uid, query, limit))
+        task_source_names.append("timeline")
+
     if allowed.get("workspace"):
         tasks.append(_search_workspace(uid, agent_id, query, limit))
         task_source_names.append("workspace")
@@ -1708,7 +2060,7 @@ async def unified_search(request: Request):
         task_source_names.append("scanner")
 
     # Determine which sources were denied
-    all_source_names = {"workspace", "omi", "memories", "voice", "scanner"}
+    all_source_names = {"timeline", "workspace", "omi", "memories", "voice", "scanner"}
     if requested_sources:
         requested_set = set(requested_sources)
     else:

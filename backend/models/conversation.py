@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -287,6 +287,18 @@ class ConversationPostProcessing(BaseModel):
     fail_reason: Optional[str] = None
 
 
+
+
+class EllaSignal(BaseModel):
+    salience: Optional[str] = Field(default=None, description="low, medium, or high signal for recall/ranking")
+    memory_promotion: Optional[str] = Field(default=None, description="none, candidate, or promoted")
+    noise_level: Optional[str] = Field(default=None, description="none, low, medium, or high noise")
+    contains_media: bool = False
+    contains_user_speech: bool = False
+    guardian_relevant: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Reserved signal metadata")
+
+
 class Conversation(BaseModel):
     id: str
     created_at: datetime
@@ -297,6 +309,8 @@ class Conversation(BaseModel):
     language: Optional[str] = None  # applies only to Friend # TODO: once released migrate db to default 'en'
 
     structured: Structured
+    ella_tags: List[str] = Field(default_factory=list)
+    ella_signal: Optional[EllaSignal] = None
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None

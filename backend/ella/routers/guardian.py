@@ -20,7 +20,7 @@ import time
 import uuid
 from email.mime.text import MIMEText
 import smtplib
-from typing import Optional
+from typing import Any, Optional
 
 import asyncpg
 import httpx
@@ -31,7 +31,10 @@ from ella.routers.resolve import resolve_user_routing
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
+    MODE_EMERGENCY_ONLY,
+    MODE_OFF,
     UserPolicyContext,
+    _normalize_mode,
     evaluate_escalation_policy,
 )
 
@@ -354,6 +357,40 @@ class PlaybackEventRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+class PlaybackDebugEventRequest(BaseModel):
+    """JSON body for /playback-debug endpoint.
+
+    This is a wider debug/event sink for iOS Guardian playback diagnostics.
+    It is intended for TestFlight/debug builds where we want the full local
+    playback trace server-side without requiring manual copy/paste.
+    """
+
+    uid: str
+    event_name: str
+    trace_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
+    stage: Optional[str] = None
+    status: str = "success"
+    port_type: str = ""
+    port_name: str = ""
+    device_uid: str = ""
+    latency_ms: Optional[int] = None
+    metadata: Optional[dict] = None
+
+
+class DebugTriggerRequest(BaseModel):
+    """Debug-only direct queue injection helper for iOS/device validation."""
+
+    uid: str
+    url: Optional[str] = None
+    queue_item_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    priority: str = "debug"
+    message: str = "Guardian debug trigger"
+    trigger_type: str = "manual_direct_test"
+    metadata: Optional[dict] = None
+
+
 class DeliverRequest(BaseModel):
     """JSON body for /deliver."""
 
@@ -423,6 +460,113 @@ def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
             if value:
                 return str(value)
     return fallback
+
+
+def _coerce_metadata_dict(metadata: Optional[dict]) -> dict[str, Any]:
+    """Return queue metadata as a plain dict."""
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _queue_priority_rank(priority: Optional[str]) -> int:
+    return {
+        "urgent": 0,
+        "normal": 1,
+        "scheduled": 2,
+        "debug": 3,
+    }.get(str(priority or "").lower(), 4)
+
+
+def _queue_trace_id(row: dict[str, Any]) -> str:
+    return _trace_id_from_metadata(_coerce_metadata_dict(row.get("metadata")), str(row.get("id") or ""))
+
+
+def _is_wake_word_row(row: dict[str, Any]) -> bool:
+    metadata = _coerce_metadata_dict(row.get("metadata"))
+    trigger = str(row.get("trigger_type") or metadata.get("trigger_type") or metadata.get("category") or "").lower()
+    return trigger == "wake_word"
+
+
+def _select_same_trace_supersede_rows(pending_rows: list[dict[str, Any]]) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+    """Pick one primary same-trace row to keep and return superseded siblings."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in pending_rows:
+        trace_id = _queue_trace_id(row)
+        if not trace_id:
+            continue
+        groups.setdefault(trace_id, []).append(row)
+
+    candidate_groups = [rows for rows in groups.values() if len(rows) >= 2]
+    if not candidate_groups:
+        return None, []
+
+    def _group_sort_key(rows: list[dict[str, Any]]) -> tuple[int, float]:
+        best_rank = min(_queue_priority_rank(row.get("priority")) for row in rows)
+        newest_ts = max(getattr(row.get("created_at"), "timestamp", lambda: 0.0)() for row in rows)
+        return best_rank, -newest_ts
+
+    group = sorted(candidate_groups, key=_group_sort_key)[0]
+    ordered = sorted(
+        group,
+        key=lambda row: (
+            _queue_priority_rank(row.get("priority")),
+            1 if _is_wake_word_row(row) else 0,
+            -getattr(row.get("created_at"), "timestamp", lambda: 0.0)(),
+        ),
+    )
+    primary = ordered[0]
+    superseded = [row for row in group if row.get("id") != primary.get("id")]
+    return primary, superseded
+
+
+def _enqueue_allows_guardian_audio(mode: str, req: "EnqueueRequest") -> tuple[bool, Optional[str]]:
+    """Secondary queue-boundary gate for guardian audio."""
+    normalized_mode = _normalize_mode(mode)
+    if normalized_mode == MODE_OFF:
+        return False, "guardian_mode_off"
+    if normalized_mode != MODE_EMERGENCY_ONLY:
+        return True, None
+
+    metadata = _coerce_metadata_dict(req.metadata)
+    trigger = str(
+        req.trigger
+        or metadata.get("trigger_type")
+        or metadata.get("event_type")
+        or metadata.get("category")
+        or ""
+    ).lower()
+    severity = str(metadata.get("severity") or metadata.get("urgency") or req.priority or "").lower()
+    message = str(req.message or metadata.get("message") or "").lower()
+    emergency_keywords = (
+        "fall",
+        "fell",
+        "help me",
+        "cant breathe",
+        "can't breathe",
+        "call 911",
+        "emergency",
+        "stroke",
+        "chest pain",
+        "not breathing",
+        "intruder",
+        "fire",
+        "gas leak",
+    )
+
+    if trigger == "wake_word":
+        return True, None
+    if trigger == "safety" and (severity in {"critical", "urgent", "high"} or req.priority == "urgent"):
+        return True, None
+    if any(keyword in message for keyword in emergency_keywords):
+        return True, None
+    return False, "guardian_mode_emergency_only"
 
 
 async def _log_pipeline_event(
@@ -629,11 +773,8 @@ async def next_audio(uid: str):
     )
     pending_count = depth_row["pending"] if depth_row else 0
 
-    # --- Consolidation path ---
-    if pending_count >= CONSOLIDATION_THRESHOLD:
-        print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={pending_count} triggering consolidation", flush=True)
-
-        # Fetch all pending non-debug items
+    pending_rows: list[dict[str, Any]] = []
+    if pending_count >= 2:
         pending_rows = await pool.fetch(
             """
             SELECT id, url, priority, message, trigger_type, metadata, created_at
@@ -646,9 +787,50 @@ async def next_audio(uid: str):
             uid,
         )
 
-        # Urgent items bypass consolidation — fall through to normal pop
-        urgent = [r for r in pending_rows if r["priority"] == "urgent"]
-        if not urgent:
+        primary_row, superseded_rows = _select_same_trace_supersede_rows([dict(r) for r in pending_rows])
+        if primary_row and superseded_rows:
+            superseded_ids = [str(row["id"]) for row in superseded_rows]
+            await pool.execute(
+                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
+                superseded_ids,
+            )
+            _elapsed = int((time.time() - _start) * 1000)
+            print(
+                f"[FLOW:GUARDIAN-SUPERSEDE] uid={uid} trace={_queue_trace_id(primary_row)} "
+                f"kept={primary_row['id']} dropped={len(superseded_ids)} latency={_elapsed}ms",
+                flush=True,
+            )
+            await _log_pipeline_event(
+                trace_id=_queue_trace_id(primary_row),
+                uid=uid,
+                stage="queue_superseded",
+                status="success",
+                latency_ms=_elapsed,
+                metadata={
+                    "queue_item_id": str(primary_row["id"]),
+                    "priority": str(primary_row.get("priority") or ""),
+                    "superseded_queue_item_ids": superseded_ids,
+                },
+            )
+            pending_rows = [row for row in pending_rows if str(row["id"]) not in set(superseded_ids)]
+
+    # --- Consolidation path ---
+    if pending_count >= CONSOLIDATION_THRESHOLD:
+        if not pending_rows:
+            pending_rows = await pool.fetch(
+                """
+                SELECT id, url, priority, message, trigger_type, metadata, created_at
+                FROM guardian_queue
+                WHERE uid = $1 AND consumed_at IS NULL AND priority != 'debug'
+                ORDER BY
+                    CASE priority WHEN 'urgent' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                    created_at ASC
+                """,
+                uid,
+            )
+
+        if len(pending_rows) >= CONSOLIDATION_THRESHOLD:
+            print(f"[FLOW:CONSOLIDATOR] uid={uid} pending={len(pending_rows)} triggering consolidation", flush=True)
             # Fetch recently consumed items for echo detection
             consumed_rows = await pool.fetch(
                 """
@@ -825,13 +1007,16 @@ async def enqueue(
     )
     guardian_mode = mode_row["guardian_mode"] if mode_row else None
 
-    # --- guardian_mode gate: reject inserts when guardian is OFF (NULL) ---
+    normalized_mode = _normalize_mode(guardian_mode)
+
+    # --- guardian_mode gate: reject inserts when guardian is OFF / suppressed ---
     if req.priority != "debug":
-        if guardian_mode is None:
-            # NULL = guardian is off (iOS sends override:null → DB stores NULL via CHECK constraint)
+        allowed, reject_reason = _enqueue_allows_guardian_audio(guardian_mode, req)
+        if not allowed:
             _elapsed = int((time.time() - _start) * 1000)
             print(
-                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED guardian_mode=NULL latency={_elapsed}ms",
+                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED guardian_mode={normalized_mode or 'unknown'} "
+                f"reason={reject_reason} latency={_elapsed}ms",
                 flush=True,
             )
             await _log_pipeline_event(
@@ -844,13 +1029,14 @@ async def enqueue(
                     "queue_item_id": item_id,
                     "priority": req.priority,
                     "trigger_type": req.trigger,
-                    "reason": "guardian_mode is OFF (NULL)",
+                    "reason": reject_reason,
+                    "guardian_mode": normalized_mode,
                 },
             )
             return {
                 "ok": False,
                 "rejected": True,
-                "reason": "guardian_mode is OFF (NULL)",
+                "reason": reject_reason,
                 "suggestion": "Route critical alerts to iMessage instead",
             }
 
@@ -1025,6 +1211,89 @@ async def view_queue(uid: str):
     print(f"[FLOW:GUARDIAN-QUEUE] uid={uid} pending={len(items)}", flush=True)
 
     return {"uid": uid, "count": len(items), "items": items}
+
+
+@router.get("/debug-events")
+async def view_debug_events(
+    uid: str,
+    trace_id: Optional[str] = None,
+    queue_item_id: Optional[str] = None,
+    limit: int = 50,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Return recent Guardian pipeline/debug events for a user."""
+    _verify_key(x_guardian_key, key)
+    pool = await _get_pool()
+    safe_limit = max(1, min(limit, 200))
+
+    rows = await pool.fetch(
+        """
+        SELECT created_at, trace_id, stage, status, latency_ms, metadata
+        FROM guardian_pipeline_events
+        WHERE uid = $1
+          AND ($2::text IS NULL OR trace_id = $2)
+          AND ($3::text IS NULL OR metadata->>'queue_item_id' = $3)
+        ORDER BY created_at DESC
+        LIMIT $4
+        """,
+        uid,
+        trace_id,
+        queue_item_id,
+        safe_limit,
+    )
+
+    items = [
+        {
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "trace_id": row["trace_id"],
+            "stage": row["stage"],
+            "status": row["status"],
+            "latency_ms": row["latency_ms"],
+            "metadata": _coerce_metadata_dict(row["metadata"]),
+        }
+        for row in rows
+    ]
+
+    return {
+        "uid": uid,
+        "trace_id": trace_id,
+        "queue_item_id": queue_item_id,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.post("/debug-trigger")
+async def debug_trigger(
+    req: DebugTriggerRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Insert a direct debug Guardian queue item for device validation."""
+    _verify_key(x_guardian_key, key)
+
+    item_id = req.queue_item_id or f"guardian_{uuid.uuid4().hex[:12]}"
+    trace_id = req.trace_id or item_id
+    url = req.url or GUARDIAN_ACTIVE_AUDIO_URL
+    metadata = dict(req.metadata or {})
+    metadata.setdefault("trace_id", trace_id)
+    metadata.setdefault("queue_item_id", item_id)
+    metadata.setdefault("source", "guardian_debug_trigger")
+
+    return await enqueue(
+        EnqueueRequest(
+            uid=req.uid,
+            id=item_id,
+            url=url,
+            priority=req.priority,
+            message=req.message,
+            trigger=req.trigger_type,
+            metadata=metadata,
+        ),
+        x_guardian_key=x_guardian_key,
+        key=key,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1520,6 +1789,47 @@ async def record_playback_event(req: PlaybackEventRequest):
         flush=True,
     )
     return {"ok": True, "trace_id": trace_id, "echo_risk": echo_risk}
+
+
+@router.post("/playback-debug")
+async def record_playback_debug_event(req: PlaybackDebugEventRequest):
+    """Broader iOS Guardian debug-event sink.
+
+    Unlike /playback-event, this accepts non-route lifecycle markers such as
+    payload receipt, inject requests, queue state transitions, and early-return
+    failures that happen before AVFoundation playback starts.
+    """
+
+    metadata = dict(req.metadata or {})
+    event_name = (req.event_name or "unknown").strip().lower().replace(" ", "_")
+    stage = req.stage or f"ios_debug_{event_name}"
+    trace_id = req.trace_id or req.queue_item_id
+    echo_risk = _ECHO_RISK.get(req.port_type, "unknown") if req.port_type else "unknown"
+
+    if trace_id:
+        await _log_pipeline_event(
+            trace_id=trace_id,
+            uid=req.uid,
+            stage=stage,
+            status=req.status,
+            latency_ms=req.latency_ms,
+            metadata={
+                "event_name": event_name,
+                "queue_item_id": req.queue_item_id,
+                "port_type": req.port_type,
+                "port_name": req.port_name,
+                "device_uid": req.device_uid,
+                "echo_risk": echo_risk,
+                **metadata,
+            },
+        )
+
+    print(
+        f"[FLOW:PLAYBACK-DEBUG] uid={req.uid} trace={trace_id} item={req.queue_item_id} "
+        f"event={event_name} status={req.status} port={req.port_type or 'n/a'}",
+        flush=True,
+    )
+    return {"ok": True, "trace_id": trace_id, "stage": stage, "event_name": event_name}
 
 
 def get_playback_event(uid: str) -> dict | None:

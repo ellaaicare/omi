@@ -302,6 +302,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella corrections not available: {e}", flush=True)
 
+    # Canonical event ledger (lossless cross-channel memory events)
+    try:
+        from ella.routers.canonical_events import create_canonical_events_router
+
+        app.include_router(create_canonical_events_router(), tags=["Ella Canonical Events"])
+        print("  🌐 /v1/ella/events + /v1/ella/timeline - Canonical memory event ledger", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella canonical events not available: {e}", flush=True)
+
     # Escalation policy resolver (classifier output -> deterministic delivery plan)
     try:
         from ella.routers.escalations import router as escalations_router
