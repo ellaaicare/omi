@@ -1446,11 +1446,13 @@ async def _stream_handler(
 
     pending_scanner_wake_prefix_segments: List[dict] = []
     pending_scanner_wake_prefix_since: Optional[float] = None
+    recent_scanner_context_segments: List[dict] = []
 
     async def stream_transcript_process():
         nonlocal websocket_active, realtime_segment_buffers, realtime_photo_buffers, websocket
         nonlocal current_conversation_id, translation_enabled, speaker_to_person_map, suggested_segments, words_transcribed_since_last_record, last_transcript_time
         nonlocal pending_scanner_wake_prefix_segments, pending_scanner_wake_prefix_since
+        nonlocal recent_scanner_context_segments
 
         while websocket_active or len(realtime_segment_buffers) > 0 or len(realtime_photo_buffers) > 0:
             await asyncio.sleep(0.6)
@@ -1543,7 +1545,11 @@ async def _stream_handler(
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
                 try:
                     from utils.ella import send_to_scanner
-                    from utils.ella.scanner import prepare_scanner_segments_for_dispatch, scanner_payload_preview
+                    from utils.ella.scanner import (
+                        build_scanner_context_window,
+                        prepare_scanner_segments_for_dispatch,
+                        scanner_payload_preview,
+                    )
 
                     scanner_input_segments = [s.dict() for s in transcript_segments]
                     (
@@ -1559,10 +1565,18 @@ async def _stream_handler(
                     )
 
                     if scanner_dispatch_segments:
+                        scanner_context = build_scanner_context_window(
+                            scanner_dispatch_segments,
+                            recent_segments=recent_scanner_context_segments,
+                            now=time.time(),
+                        )
+                        recent_scanner_context_segments = scanner_context["updated_recent_cache"]
                         print(
                             f"[TRANSCRIPT-RECV] Scanner dispatch action={scanner_dispatch_meta['action']} "
                             f"prepended={scanner_dispatch_meta['prepended_count']} "
-                            f"payload={scanner_payload_preview(scanner_dispatch_segments)}",
+                            f"payload={scanner_payload_preview(scanner_dispatch_segments)} "
+                            f"recent={scanner_payload_preview(scanner_context['recent_segments'])} "
+                            f"wake_prefix_recent={scanner_context['wake_prefix_recent']}",
                             uid,
                             session_id,
                         )
@@ -1570,6 +1584,9 @@ async def _stream_handler(
                             uid=uid,
                             conversation_id=str(current_conversation_id),
                             segments=scanner_dispatch_segments,
+                            recent_segments=scanner_context["recent_segments"],
+                            scanner_window_text=scanner_context["scanner_window_text"],
+                            wake_prefix_recent=scanner_context["wake_prefix_recent"],
                         )
                     else:
                         print(

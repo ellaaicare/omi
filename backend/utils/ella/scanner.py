@@ -18,6 +18,7 @@ GUARDIAN_TRACE_LOG_URL = os.getenv(
 )
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = 2.0
+SCANNER_CONTEXT_WINDOW_S = 2.0
 WAKE_WORD_ALIASES = (
     "hey ella",
     "ella",
@@ -58,12 +59,13 @@ def is_short_wake_prefix_only(segments: List[dict]) -> bool:
     combined = _combined_segment_text(segments)
     if not combined:
         return False
-    normalized = _normalize_text(combined)
+    candidate = combined.strip()
+    if re.fullmatch(r".*[.?!]+", candidate):
+        candidate = re.sub(r"[.?!]+\s*$", "", candidate).strip()
+    normalized = _normalize_text(candidate)
     if not contains_wake_phrase(normalized):
         return False
     # Only hold very short prefix-like utterances such as "Hey Ella".
-    if any(punct in combined for punct in ".?!"):
-        return False
     return len(normalized.split()) <= WAKE_WORD_PREFIX_MAX_WORDS
 
 
@@ -127,6 +129,49 @@ def scanner_payload_preview(segments: List[dict], *, limit: int = 4) -> List[dic
     return preview
 
 
+def build_scanner_context_window(
+    current_segments: List[dict],
+    recent_segments: Optional[List[dict]] = None,
+    *,
+    now: Optional[float] = None,
+    window_s: float = SCANNER_CONTEXT_WINDOW_S,
+):
+    """
+    Build a short recent context window for the scanner payload.
+
+    recent_segments items are expected to be dicts like:
+      {"observed_at": <float>, "segment": <segment-dict>}
+    """
+    now = now if now is not None else time.time()
+    cleaned_recent = []
+    recent_context_segments: List[dict] = []
+    for item in recent_segments or []:
+        observed_at = item.get("observed_at")
+        segment = item.get("segment")
+        if observed_at is None or not segment:
+            continue
+        if now - float(observed_at) <= window_s:
+            cleaned_recent.append({"observed_at": float(observed_at), "segment": segment})
+            recent_context_segments.append(segment)
+
+    scanner_window_segments = recent_context_segments + list(current_segments or [])
+    scanner_window_text = _combined_segment_text(scanner_window_segments)
+    wake_prefix_recent = contains_wake_phrase(_combined_segment_text(recent_context_segments))
+    updated_recent_cache = cleaned_recent + [
+        {"observed_at": now, "segment": segment}
+        for segment in current_segments or []
+        if segment.get("text")
+    ]
+
+    return {
+        "recent_segments": recent_context_segments,
+        "scanner_window_segments": scanner_window_segments,
+        "scanner_window_text": scanner_window_text,
+        "wake_prefix_recent": wake_prefix_recent,
+        "updated_recent_cache": updated_recent_cache,
+    }
+
+
 def _log_trace_event(
     trace_id: str,
     uid: str,
@@ -158,7 +203,10 @@ def send_to_scanner(
     conversation_id: str,
     segments: List[dict],
     device_type: str = "omi",
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
+    recent_segments: Optional[List[dict]] = None,
+    scanner_window_text: Optional[str] = None,
+    wake_prefix_recent: Optional[bool] = None,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -213,6 +261,20 @@ def send_to_scanner(
             "contract": "ella-ai#600",
         },
     }
+    if recent_segments is not None:
+        payload["recent_segments"] = [
+            {
+                "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
+                "text": s.get("text", ""),
+                "stt_source": s.get("source"),
+            }
+            for s in recent_segments
+            if s.get("text")
+        ]
+    if scanner_window_text is not None:
+        payload["scanner_window_text"] = scanner_window_text
+    if wake_prefix_recent is not None:
+        payload["wake_prefix_recent"] = wake_prefix_recent
 
     try:
         start = time.time()
@@ -234,11 +296,15 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "scanner_status_code": resp.status_code,
                 "segments_preview": scanner_payload_preview(scanner_segments),
+                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
         print(
             f"📡 Scanner: trace={trace_id} {len(scanner_segments)} segments → {resp.status_code} "
-            f"payload={scanner_payload_preview(scanner_segments)}",
+            f"payload={scanner_payload_preview(scanner_segments)} "
+            f"recent={scanner_payload_preview(payload.get('recent_segments', []))} "
+            f"wake_prefix_recent={payload.get('wake_prefix_recent')}",
             flush=True,
         )
         return resp.status_code
@@ -255,6 +321,8 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "timeout_s": timeout,
                 "segments_preview": scanner_payload_preview(scanner_segments),
+                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
         print(f"📡 Scanner timeout trace={trace_id} ({timeout}s)", flush=True)
@@ -272,6 +340,8 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "error": str(e)[:200],
                 "segments_preview": scanner_payload_preview(scanner_segments),
+                "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
+                "wake_prefix_recent": payload.get("wake_prefix_recent"),
             },
         )
         print(f"📡 Scanner error trace={trace_id}: {e}", flush=True)

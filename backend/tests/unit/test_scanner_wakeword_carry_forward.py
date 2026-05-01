@@ -1,4 +1,5 @@
 from utils.ella.scanner import (
+    build_scanner_context_window,
     contains_wake_phrase,
     is_short_wake_prefix_only,
     prepare_scanner_segments_for_dispatch,
@@ -68,3 +69,39 @@ def test_direct_wake_phrase_in_current_batch_dispatches_normally():
 def test_ela_variant_is_treated_as_short_wake_prefix():
     assert contains_wake_phrase("Ela")
     assert is_short_wake_prefix_only([_segment("Ela", "SPEAKER_00")])
+
+
+def test_punctuated_wake_prefix_is_still_held():
+    dispatch, pending, pending_since, meta = prepare_scanner_segments_for_dispatch(
+        [_segment("Hey Ella.", "SPEAKER_00")],
+        now=100.0,
+    )
+
+    assert dispatch == []
+    assert [segment["text"] for segment in pending] == ["Hey Ella."]
+    assert pending_since == 100.0
+    assert meta["action"] == "hold_wake_prefix"
+
+
+def test_scanner_context_window_merges_recent_segments_and_sets_wake_flag():
+    context = build_scanner_context_window(
+        [_segment("What time is my appointment today?", "SPEAKER_02")],
+        recent_segments=[
+            {"observed_at": 99.0, "segment": _segment("Hey Ella.", "SPEAKER_00")},
+            {"observed_at": 96.5, "segment": _segment("Old segment", "SPEAKER_01")},
+        ],
+        now=100.0,
+        window_s=2.0,
+    )
+
+    assert [segment["text"] for segment in context["recent_segments"]] == ["Hey Ella."]
+    assert [segment["text"] for segment in context["scanner_window_segments"]] == [
+        "Hey Ella.",
+        "What time is my appointment today?",
+    ]
+    assert context["scanner_window_text"] == "Hey Ella. What time is my appointment today?"
+    assert context["wake_prefix_recent"] is True
+    assert [item["segment"]["text"] for item in context["updated_recent_cache"]] == [
+        "Hey Ella.",
+        "What time is my appointment today?",
+    ]
