@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/ella_demo_scenarios_page.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/services/v2v_client.dart';
 
 class GuardianModePage extends StatefulWidget {
   /// When true, show the Demo intelligence mode option.
@@ -30,6 +32,10 @@ class _GuardianModePageState extends State<GuardianModePage> {
   bool _loading = true;
   bool _saving = false;
 
+  GuardianVoiceConfig _currentVoiceConfig = const GuardianVoiceConfig();
+  GuardianVoicePolicy _selectedVoicePolicy = GuardianVoicePolicy.matchActiveProvider;
+  String _selectedVoiceProvider = 'openai';
+
   @override
   void initState() {
     super.initState();
@@ -41,9 +47,11 @@ class _GuardianModePageState extends State<GuardianModePage> {
     final results = await Future.wait([
       guardian_api.getGuardianPresets(),
       guardian_api.getGuardianMode(),
+      guardian_api.getGuardianVoiceConfig(),
     ]);
     final presets = results[0] as List<GuardianPreset>;
     final modeInfo = results[1] as GuardianModeInfo?;
+    final voiceConfig = results[2] as GuardianVoiceConfig? ?? const GuardianVoiceConfig();
 
     if (mounted) {
       setState(() {
@@ -69,6 +77,9 @@ class _GuardianModePageState extends State<GuardianModePage> {
         _currentState = state;
         _selectedOverride = state.override;
         _selectedFeatures = Set<String>.from(state.features);
+        _currentVoiceConfig = voiceConfig;
+        _selectedVoicePolicy = voiceConfig.policy;
+        _selectedVoiceProvider = voiceConfig.provider ?? _defaultPinnedVoiceProvider;
         _loading = false;
       });
     }
@@ -81,7 +92,33 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
   bool get _hasChanges {
     final pending = _pendingState;
-    return pending.override != _currentState.override || !_sameFeatures(pending.features, _currentState.features);
+    return pending.override != _currentState.override ||
+        !_sameFeatures(pending.features, _currentState.features) ||
+        !_pendingVoiceConfig.samePersistedValue(_currentVoiceConfig);
+  }
+
+  GuardianVoiceConfig get _pendingVoiceConfig => GuardianVoiceConfig(
+        policy: _selectedVoicePolicy,
+        provider: _selectedVoicePolicy == GuardianVoicePolicy.pinnedProvider ? _selectedVoiceProvider : null,
+      );
+
+  String get _defaultPinnedVoiceProvider => _guardianProviderForActiveVoiceProvider ?? 'openai';
+
+  String? get _guardianProviderForActiveVoiceProvider {
+    switch (V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider)) {
+      case 'grok-voice':
+        return 'xai-tts';
+      case 'gemini-native-live':
+      case 'openai-native-realtime':
+      case 'openclaw-direct':
+        return 'openai';
+      case 'elevenlabs':
+        return 'elevenlabs';
+      case 'kokoro':
+        return 'kokoro';
+      default:
+        return null;
+    }
   }
 
   bool _sameFeatures(List<String> a, List<String> b) {
@@ -102,15 +139,29 @@ class _GuardianModePageState extends State<GuardianModePage> {
     }
 
     setState(() => _saving = true);
-    final success = await guardian_api.setGuardianModeTwoTier(_pendingState);
+    final modeChanged = _pendingState.override != _currentState.override ||
+        !_sameFeatures(_pendingState.features, _currentState.features);
+    final voiceChanged = !_pendingVoiceConfig.samePersistedValue(_currentVoiceConfig);
+
+    bool modeSuccess = true;
+    GuardianVoiceConfig? savedVoiceConfig = _currentVoiceConfig;
+    if (modeChanged) {
+      modeSuccess = await guardian_api.setGuardianModeTwoTier(_pendingState);
+    }
+    if (voiceChanged) {
+      savedVoiceConfig = await guardian_api.setGuardianVoiceConfig(_pendingVoiceConfig);
+    }
     if (!mounted) return;
     setState(() => _saving = false);
 
-    if (success) {
-      setState(() => _currentState = _pendingState);
+    if (modeSuccess && (!voiceChanged || savedVoiceConfig != null)) {
+      setState(() {
+        if (modeChanged) _currentState = _pendingState;
+        if (savedVoiceConfig != null) _currentVoiceConfig = savedVoiceConfig;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Guardian mode updated'),
+          content: Text('Guardian settings updated'),
           backgroundColor: EllaColors.success,
           behavior: SnackBarBehavior.floating,
           duration: Duration(seconds: 3),
@@ -211,6 +262,27 @@ class _GuardianModePageState extends State<GuardianModePage> {
       default:
         return key;
     }
+  }
+
+  static const Map<String, String> _guardianVoiceProviders = {
+    'xai-tts': 'xAI TTS / Grok family',
+    'openai': 'OpenAI',
+    'elevenlabs': 'ElevenLabs',
+    'kokoro': 'Kokoro',
+  };
+
+  static String _formatProviderLabel(String? provider) {
+    if (provider == null || provider.isEmpty) return 'Unknown';
+    return _guardianVoiceProviders[provider] ??
+        switch (provider) {
+          'grok-voice' => 'Grok Native Realtime',
+          'openai-native-realtime' => 'OpenAI Native Realtime',
+          'gemini-native-live' => 'Gemini Native Live',
+          'openclaw-direct' => 'OpenClaw Direct',
+          'fish-audio-s2' => 'Fish Audio S2',
+          'inworld' => 'Inworld',
+          _ => provider,
+        };
   }
 
   // ── Intelligence mode rows (exclusive radio) ──────────────────────────────
@@ -318,28 +390,28 @@ class _GuardianModePageState extends State<GuardianModePage> {
                           borderRadius: BorderRadius.circular(
                             EllaSizes.radiusMedium,
                           ),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
                               horizontal: 4,
                               vertical: 10,
                             ),
                             child: Row(
                               children: [
-                                const Icon(
+                                Icon(
                                   Icons.list_alt,
                                   color: EllaColors.primary,
                                   size: 20,
                                 ),
-                                const SizedBox(width: 10),
-                                const Text(
+                                SizedBox(width: 10),
+                                Text(
                                   'View Demo Scenarios',
                                   style: TextStyle(
                                     fontSize: 16,
                                     color: EllaColors.primary,
                                   ),
                                 ),
-                                const Spacer(),
-                                const Icon(
+                                Spacer(),
+                                Icon(
                                   Icons.chevron_right,
                                   color: EllaColors.textTertiary,
                                   size: 20,
@@ -348,6 +420,41 @@ class _GuardianModePageState extends State<GuardianModePage> {
                             ),
                           ),
                         ),
+
+                      const SizedBox(height: 20),
+
+                      const _SectionHeader(label: 'GUARDIAN VOICE'),
+                      const Padding(
+                        padding: EdgeInsets.only(left: 4, bottom: 10),
+                        child: Text(
+                          'Controls which backend voice family generates Guardian alerts. App chat and V2V voice selection stay separate.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: EllaColors.textTertiary,
+                          ),
+                        ),
+                      ),
+                      _GuardianVoicePolicyCard(
+                        policy: _selectedVoicePolicy,
+                        provider: _selectedVoiceProvider,
+                        activeProviderLabel:
+                            _formatProviderLabel(V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider)),
+                        resolvedProvider: _currentVoiceConfig.resolvedProvider,
+                        fallbackProvider: _currentVoiceConfig.fallbackProvider,
+                        lastVoiceProvider: _currentVoiceConfig.lastVoiceProvider,
+                        onPolicyChanged: (policy) {
+                          setState(() {
+                            _selectedVoicePolicy = policy;
+                            if (policy == GuardianVoicePolicy.pinnedProvider &&
+                                !_guardianVoiceProviders.containsKey(_selectedVoiceProvider)) {
+                              _selectedVoiceProvider = _defaultPinnedVoiceProvider;
+                            }
+                          });
+                        },
+                        onProviderChanged: (provider) {
+                          setState(() => _selectedVoiceProvider = provider);
+                        },
+                      ),
 
                       const SizedBox(height: 20),
 
@@ -409,6 +516,179 @@ class _GuardianModePageState extends State<GuardianModePage> {
                 ),
               ],
             ),
+    );
+  }
+}
+
+class _GuardianVoicePolicyCard extends StatelessWidget {
+  final GuardianVoicePolicy policy;
+  final String provider;
+  final String activeProviderLabel;
+  final String? resolvedProvider;
+  final String? fallbackProvider;
+  final String? lastVoiceProvider;
+  final ValueChanged<GuardianVoicePolicy> onPolicyChanged;
+  final ValueChanged<String> onProviderChanged;
+
+  const _GuardianVoicePolicyCard({
+    required this.policy,
+    required this.provider,
+    required this.activeProviderLabel,
+    required this.resolvedProvider,
+    required this.fallbackProvider,
+    required this.lastVoiceProvider,
+    required this.onPolicyChanged,
+    required this.onProviderChanged,
+  });
+
+  static const Map<String, String> _providerLabels = {
+    'xai-tts': 'xAI TTS / Grok family',
+    'openai': 'OpenAI',
+    'elevenlabs': 'ElevenLabs',
+    'kokoro': 'Kokoro',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: EllaColors.bgSecondary,
+        borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
+        border: Border.all(color: EllaColors.bgTertiary),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _PolicyOption(
+            title: GuardianVoicePolicy.matchActiveProvider.displayName,
+            subtitle:
+                'Use the active voice provider where Guardian can support it. Current app voice: $activeProviderLabel.',
+            selected: policy == GuardianVoicePolicy.matchActiveProvider,
+            onTap: () => onPolicyChanged(GuardianVoicePolicy.matchActiveProvider),
+          ),
+          const SizedBox(height: 8),
+          _PolicyOption(
+            title: GuardianVoicePolicy.pinnedProvider.displayName,
+            subtitle: 'Always ask the backend to generate Guardian alerts with a specific provider.',
+            selected: policy == GuardianVoicePolicy.pinnedProvider,
+            onTap: () => onPolicyChanged(GuardianVoicePolicy.pinnedProvider),
+          ),
+          if (policy == GuardianVoicePolicy.pinnedProvider) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: EllaColors.bgPrimary,
+                borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                border: Border.all(color: EllaColors.bgTertiary),
+              ),
+              child: DropdownButton<String>(
+                value: _providerLabels.containsKey(provider) ? provider : 'openai',
+                isExpanded: true,
+                underline: const SizedBox.shrink(),
+                dropdownColor: Colors.white,
+                style: const TextStyle(color: EllaColors.textPrimary, fontSize: 15),
+                iconEnabledColor: EllaColors.textSecondary,
+                items: _providerLabels.entries
+                    .map((entry) => DropdownMenuItem(value: entry.key, child: Text(entry.value)))
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) onProviderChanged(value);
+                },
+              ),
+            ),
+          ],
+          if (resolvedProvider != null || fallbackProvider != null || lastVoiceProvider != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              [
+                if (resolvedProvider != null) 'Resolved: ${_formatProviderLabel(resolvedProvider!)}',
+                if (fallbackProvider != null) 'Fallback: ${_formatProviderLabel(fallbackProvider!)}',
+                if (lastVoiceProvider != null) 'Last active: ${_formatProviderLabel(lastVoiceProvider!)}',
+              ].join('  |  '),
+              style: const TextStyle(
+                fontSize: 12,
+                color: EllaColors.textTertiary,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static String _formatProviderLabel(String provider) {
+    return _providerLabels[provider] ?? provider;
+  }
+}
+
+class _PolicyOption extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PolicyOption({
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? EllaColors.primarySubtle : EllaColors.bgPrimary,
+          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+          border: Border.all(color: selected ? EllaColors.primary : EllaColors.bgTertiary),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 20,
+              height: 20,
+              margin: const EdgeInsets.only(top: 1),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: selected ? EllaColors.primary : Colors.transparent,
+                border: Border.all(color: selected ? EllaColors.primary : EllaColors.bgTertiary, width: 2),
+              ),
+              child: selected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: EllaColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: EllaColors.textSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

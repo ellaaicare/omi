@@ -63,9 +63,7 @@ enum GuardianModeKey {
   /// Returns true if this key is an "Intelligence Mode" override (exclusive,
   /// replaces care system entirely).
   bool get isOverride =>
-      this == GuardianModeKey.cyborg ||
-      this == GuardianModeKey.chatbot ||
-      this == GuardianModeKey.demo;
+      this == GuardianModeKey.cyborg || this == GuardianModeKey.chatbot || this == GuardianModeKey.demo;
 
   /// Returns true if this key is a composable "Care Feature" checkbox.
   bool get isCareFeature =>
@@ -131,14 +129,11 @@ class GuardianModeState {
       final rawFeatures = json['features'];
       return GuardianModeState(
         override: json['override'] as String?,
-        features: rawFeatures is List
-            ? List<String>.from(rawFeatures)
-            : const [],
+        features: rawFeatures is List ? List<String>.from(rawFeatures) : const [],
       );
     }
     // Legacy schema: {mode: 'ACTIVE_SUPPORT'}
-    final modeStr =
-        json['mode'] as String? ?? json['currentMode'] as String? ?? '';
+    final modeStr = json['mode'] as String? ?? json['currentMode'] as String? ?? '';
     final key = GuardianModeKey.fromString(modeStr);
     if (key.isOverride) {
       return GuardianModeState(override: key.toApiString());
@@ -246,5 +241,130 @@ class GuardianModeInfo {
       case GuardianModeKey.memorySupport:
         return const Color(0xFF10B981);
     }
+  }
+}
+
+enum GuardianVoicePolicy {
+  matchActiveProvider,
+  pinnedProvider,
+  fallbackOnly;
+
+  static GuardianVoicePolicy fromString(String? value) {
+    switch ((value ?? '').toLowerCase()) {
+      case 'pinned_provider':
+        return GuardianVoicePolicy.pinnedProvider;
+      case 'fallback_only':
+        return GuardianVoicePolicy.fallbackOnly;
+      case 'match_active_provider':
+      default:
+        return GuardianVoicePolicy.matchActiveProvider;
+    }
+  }
+
+  String toApiString() {
+    switch (this) {
+      case GuardianVoicePolicy.matchActiveProvider:
+        return 'match_active_provider';
+      case GuardianVoicePolicy.pinnedProvider:
+        return 'pinned_provider';
+      case GuardianVoicePolicy.fallbackOnly:
+        return 'fallback_only';
+    }
+  }
+
+  String get displayName {
+    switch (this) {
+      case GuardianVoicePolicy.matchActiveProvider:
+        return 'Match active voice provider';
+      case GuardianVoicePolicy.pinnedProvider:
+        return 'Pinned provider';
+      case GuardianVoicePolicy.fallbackOnly:
+        return 'Fallback only';
+    }
+  }
+}
+
+class GuardianVoiceConfig {
+  final GuardianVoicePolicy policy;
+  final String? provider;
+  final String? lastVoiceProvider;
+  final String? resolvedProvider;
+  final String? fallbackProvider;
+  final String? traceId;
+  final String? queueItemId;
+
+  const GuardianVoiceConfig({
+    this.policy = GuardianVoicePolicy.matchActiveProvider,
+    this.provider,
+    this.lastVoiceProvider,
+    this.resolvedProvider,
+    this.fallbackProvider,
+    this.traceId,
+    this.queueItemId,
+  });
+
+  factory GuardianVoiceConfig.fromJson(Map<String, dynamic> json) {
+    final data = json['data'] is Map<String, dynamic>
+        ? json['data'] as Map<String, dynamic>
+        : json['voice_config'] is Map<String, dynamic>
+            ? json['voice_config'] as Map<String, dynamic>
+            : json['config'] is Map<String, dynamic>
+                ? json['config'] as Map<String, dynamic>
+                : json;
+
+    return GuardianVoiceConfig(
+      policy: GuardianVoicePolicy.fromString(
+        data['guardian_voice_policy'] as String? ?? data['policy'] as String?,
+      ),
+      provider: _readString(data, 'guardian_voice_provider', 'provider'),
+      lastVoiceProvider: _readString(data, 'last_voice_provider', 'lastVoiceProvider'),
+      resolvedProvider: _readString(data, 'resolved_provider', 'resolvedProvider'),
+      fallbackProvider: _readString(data, 'fallback_provider', 'fallbackProvider'),
+      traceId: _readString(data, 'trace_id', 'traceId'),
+      queueItemId: _readString(data, 'queue_item_id', 'queueItemId'),
+    );
+  }
+
+  Map<String, dynamic> toJson({required String uid}) {
+    return {
+      'uid': uid,
+      'guardian_voice_policy': policy.toApiString(),
+      'guardian_voice_provider': policy == GuardianVoicePolicy.pinnedProvider ? provider : null,
+    };
+  }
+
+  GuardianVoiceConfig copyWith({
+    GuardianVoicePolicy? policy,
+    String? provider,
+    String? lastVoiceProvider,
+    String? resolvedProvider,
+    String? fallbackProvider,
+    String? traceId,
+    String? queueItemId,
+  }) {
+    return GuardianVoiceConfig(
+      policy: policy ?? this.policy,
+      provider: provider ?? this.provider,
+      lastVoiceProvider: lastVoiceProvider ?? this.lastVoiceProvider,
+      resolvedProvider: resolvedProvider ?? this.resolvedProvider,
+      fallbackProvider: fallbackProvider ?? this.fallbackProvider,
+      traceId: traceId ?? this.traceId,
+      queueItemId: queueItemId ?? this.queueItemId,
+    );
+  }
+
+  bool samePersistedValue(GuardianVoiceConfig other) {
+    return policy == other.policy && _normalizedProvider(provider) == _normalizedProvider(other.provider);
+  }
+
+  static String? _readString(Map<String, dynamic> json, String snakeKey, String camelKey) {
+    final value = json[snakeKey] ?? json[camelKey];
+    if (value is String && value.trim().isNotEmpty) return value;
+    return null;
+  }
+
+  static String? _normalizedProvider(String? value) {
+    final normalized = value?.trim();
+    return normalized == null || normalized.isEmpty ? null : normalized;
   }
 }

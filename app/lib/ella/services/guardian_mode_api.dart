@@ -2,8 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
+import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
 const String _dashboardBase = 'https://ella-ai-care.com';
@@ -101,6 +103,60 @@ Future<bool> setGuardianMode(GuardianModeKey mode) async {
   }
 }
 
+/// GET /v1/ella/guardian/voice-config?uid=...
+Future<GuardianVoiceConfig?> getGuardianVoiceConfig() async {
+  final uid = _userId;
+  final apiBaseUrl = Env.apiBaseUrl;
+  if (uid.isEmpty || apiBaseUrl == null) return null;
+
+  try {
+    final response = await makeApiCall(
+      url: '${apiBaseUrl}v1/ella/guardian/voice-config?uid=${Uri.encodeQueryComponent(uid)}',
+      headers: {'Content-Type': 'application/json'},
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+    );
+
+    if (response?.statusCode == 200) {
+      final data = jsonDecode(response!.body) as Map<String, dynamic>;
+      return GuardianVoiceConfig.fromJson(data);
+    }
+    Logger.debug('getGuardianVoiceConfig: ${response?.statusCode} ${response?.body}');
+    return const GuardianVoiceConfig();
+  } catch (e) {
+    Logger.debug('getGuardianVoiceConfig error: $e');
+    return const GuardianVoiceConfig();
+  }
+}
+
+/// PUT /v1/ella/guardian/voice-config
+Future<GuardianVoiceConfig?> setGuardianVoiceConfig(GuardianVoiceConfig config) async {
+  final uid = _userId;
+  final apiBaseUrl = Env.apiBaseUrl;
+  if (uid.isEmpty || apiBaseUrl == null) return null;
+
+  try {
+    final response = await makeApiCall(
+      url: '${apiBaseUrl}v1/ella/guardian/voice-config',
+      headers: {'Content-Type': 'application/json'},
+      method: 'PUT',
+      body: jsonEncode(config.toJson(uid: uid)),
+      timeout: const Duration(seconds: 10),
+    );
+
+    if (response?.statusCode == 200) {
+      final data = jsonDecode(response!.body) as Map<String, dynamic>;
+      return GuardianVoiceConfig.fromJson(data);
+    }
+    Logger.debug('setGuardianVoiceConfig: ${response?.statusCode} ${response?.body}');
+    return null;
+  } catch (e) {
+    Logger.debug('setGuardianVoiceConfig error: $e');
+    return null;
+  }
+}
+
 /// GET /api/guardian/presets  (no auth required, cached in memory)
 Future<List<GuardianPreset>> getGuardianPresets() async {
   if (_cachedPresets != null) return _cachedPresets!;
@@ -126,13 +182,13 @@ Future<List<GuardianPreset>> getGuardianPresets() async {
 }
 
 /// Hard-coded fallback so the UI works even if the presets endpoint is down.
-List<GuardianPreset> _fallbackPresets() => [
+List<GuardianPreset> _fallbackPresets() => const [
       GuardianPreset(
         presetKey: 'EMERGENCY_ONLY',
         name: 'Emergency Alerts',
         description: 'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
         detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
-        color: const Color(0xFFF59E0B),
+        color: Color(0xFFF59E0B),
       ),
       GuardianPreset(
         presetKey: 'ACTIVE_SUPPORT',
@@ -143,7 +199,7 @@ List<GuardianPreset> _fallbackPresets() => [
           'Wake words (always active)',
           'Recall assistance',
         ],
-        color: const Color(0xFF14B8A6),
+        color: Color(0xFF14B8A6),
       ),
       GuardianPreset(
         presetKey: 'MAXIMUM_AWARENESS',
@@ -155,7 +211,7 @@ List<GuardianPreset> _fallbackPresets() => [
           'Lower alert thresholds',
           'Helpful during outings or recovery',
         ],
-        color: const Color(0xFF6366F1),
+        color: Color(0xFF6366F1),
       ),
       GuardianPreset(
         presetKey: 'MEMORY_SUPPORT',
@@ -166,7 +222,7 @@ List<GuardianPreset> _fallbackPresets() => [
           'Daily routine reminders',
           'Cognitive pattern monitoring',
         ],
-        color: const Color(0xFF10B981),
+        color: Color(0xFF10B981),
       ),
       GuardianPreset(
         presetKey: 'CYBORG',
@@ -178,7 +234,7 @@ List<GuardianPreset> _fallbackPresets() => [
           'Useful companion asides',
           'Experimental brain-enhancer mode',
         ],
-        color: const Color(0xFFEC4899),
+        color: Color(0xFFEC4899),
       ),
       GuardianPreset(
         presetKey: 'CHATBOT',
@@ -189,13 +245,13 @@ List<GuardianPreset> _fallbackPresets() => [
           'Suppresses media/background audio',
           'Best for direct voice chat',
         ],
-        color: const Color(0xFFF97316),
+        color: Color(0xFFF97316),
       ),
       GuardianPreset(
         presetKey: 'DEMO',
         name: 'Demo',
         description: 'Demonstration mode with scripted responses for showcasing Ella.',
         detailsBullets: ['Scripted demo responses', 'Showcase mode'],
-        color: const Color(0xFF3B82F6),
+        color: Color(0xFF3B82F6),
       ),
     ];
