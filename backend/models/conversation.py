@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -239,6 +239,18 @@ class InternalAssessment(BaseModel):
     escalation_recommendation: Optional[str] = Field(default=None, description="Recommended escalation action")
     reason_codes: List[str] = Field(default_factory=list, description="Machine-readable internal assessment reasons")
     notes: Optional[str] = Field(default=None, description="Short internal notes for debug/operator use")
+
+
+class EllaSignal(BaseModel):
+    salience: Optional[str] = Field(default=None, description="low, medium, or high signal for recall/ranking")
+    memory_promotion: Optional[str] = Field(default=None, description="none, candidate, or promoted")
+    noise_level: Optional[str] = Field(default=None, description="none, low, medium, or high noise")
+    contains_media: bool = False
+    contains_user_speech: bool = False
+    guardian_relevant: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Reserved signal metadata")
+
+
 class Geolocation(BaseModel):
     google_place_id: Optional[str] = None
     latitude: float
@@ -336,6 +348,8 @@ class Conversation(BaseModel):
     active_summary_version_id: Optional[str] = None
     correction_state: Optional[CorrectionState] = None
     internal_assessment: Optional[InternalAssessment] = None
+    ella_tags: List[str] = Field(default_factory=list)
+    ella_signal: Optional[EllaSignal] = None
     transcript_segments: List[TranscriptSegment] = []
     transcript_segments_compressed: Optional[bool] = False
     geolocation: Optional[Geolocation] = None

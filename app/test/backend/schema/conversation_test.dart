@@ -23,13 +23,27 @@ void main() {
           'score': 0.93,
           'reasons': ['low_confidence_title'],
         },
+        'ella_tags': ['omi', 'family', 'guardian_relevant'],
+        'ella_signal': {
+          'salience': 'high',
+          'memory_promotion': 'candidate',
+          'guardian_relevant': true,
+        },
       });
 
       expect(conversation.hasInternalAssessment, isTrue);
       expect(conversation.internalAssessmentDebugText, contains('"score": 0.93'));
+      expect(conversation.ellaTags, ['omi', 'family', 'guardian_relevant']);
+      expect(conversation.ellaSignal?['salience'], 'high');
       expect(conversation.toJson()['internal_assessment'], {
         'score': 0.93,
         'reasons': ['low_confidence_title'],
+      });
+      expect(conversation.toJson()['ella_tags'], ['omi', 'family', 'guardian_relevant']);
+      expect(conversation.toJson()['ella_signal'], {
+        'salience': 'high',
+        'memory_promotion': 'candidate',
+        'guardian_relevant': true,
       });
     });
   });

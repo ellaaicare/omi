@@ -190,6 +190,8 @@ class ServerConversation {
 
   final ConversationExternalData? externalIntegration;
   final Object? internalAssessment;
+  final List<String> ellaTags;
+  final Map<String, dynamic>? ellaSignal;
 
   ConversationStatus status;
   bool discarded;
@@ -219,6 +221,8 @@ class ServerConversation {
     this.language,
     this.externalIntegration,
     this.internalAssessment,
+    this.ellaTags = const [],
+    this.ellaSignal,
     this.status = ConversationStatus.completed,
     this.isLocked = false,
     this.starred = false,
@@ -251,6 +255,8 @@ class ServerConversation {
       externalIntegration:
           json['external_data'] != null ? ConversationExternalData.fromJson(json['external_data']) : null,
       internalAssessment: json['internal_assessment'],
+      ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
+      ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
       status: json['status'] != null
           ? ConversationStatus.values.asNameMap()[json['status']] ?? ConversationStatus.completed
           : ConversationStatus.completed,
@@ -278,6 +284,8 @@ class ServerConversation {
       'language': language,
       'external_data': externalIntegration?.toJson(),
       'internal_assessment': internalAssessment,
+      'ella_tags': ellaTags,
+      'ella_signal': ellaSignal,
       'status': status.toString().split('.').last,
       'is_locked': isLocked,
       'starred': starred,
