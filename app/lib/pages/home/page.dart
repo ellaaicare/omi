@@ -1,10 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:flutter/services.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
@@ -47,7 +44,6 @@ import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
-import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -58,6 +54,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/widgets/ella_emergency_button.dart';
 import 'package:omi/ella/widgets/guardian_mode_button.dart';
 import 'widgets/battery_info_widget.dart';
+import 'widgets/phone_mic_capture_button.dart';
 
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
@@ -645,7 +642,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                                     const SizedBox(height: EllaSizes.buttonStackSpacing),
                                   ],
                                   // Always reserve space for nav bar
-                                  SizedBox(height: EllaSizes.navBarHeight),
+                                  const SizedBox(height: EllaSizes.navBarHeight),
                                 ],
                               ),
                             );
@@ -684,49 +681,65 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     return AppBar(
       automaticallyImplyLeading: false,
       backgroundColor: Theme.of(context).colorScheme.primary,
-      leading: const Padding(
-        padding: EdgeInsets.only(left: 8),
-        child: Center(child: BatteryInfoWidget()),
-      ),
-      leadingWidth: 140,
-      title: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
+      titleSpacing: 8,
+      title: SizedBox(
+        height: 48,
+        width: double.infinity,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Positioned(
+              left: 0,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  BatteryInfoWidget(),
+                  SizedBox(width: 8),
+                  PhoneMicCaptureButton(),
+                ],
               ),
             ),
-            child: const Center(
-              child: Text(
-                'e',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w300,
-                  color: Colors.white,
-                  fontFamily: 'Manrope',
-                  height: 1.1,
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: const BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
+                    ),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'e',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w300,
+                        color: Colors.white,
+                        fontFamily: 'Manrope',
+                        height: 1.1,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                const Text(
+                  'ella',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w600,
+                    fontFamily: 'Manrope',
+                    letterSpacing: 1,
+                  ),
+                ),
+              ],
             ),
-          ),
-          const SizedBox(width: 8),
-          const Text(
-            'ella',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w600,
-              fontFamily: 'Manrope',
-              letterSpacing: 1,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
       centerTitle: true,
       elevation: 0,

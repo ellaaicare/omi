@@ -1,15 +1,18 @@
 import 'dart:async';
 
+// ignore: depend_on_referenced_packages
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/people_provider.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/utils/enums.dart';
 
 /// Mock PeopleProvider that tracks setPeople calls
 class MockPeopleProvider extends PeopleProvider {
@@ -88,6 +91,38 @@ void main() {
     expect(provider.suggestionsBySegmentId.containsKey('a'), false);
     expect(provider.taggingSegmentIds.contains('a'), false);
     expect(provider.hasTranscripts, true);
+  });
+
+  group('phone mic capture fallback state', () {
+    test('allows phone mic when no device capture is active', () {
+      final provider = CaptureProvider();
+
+      expect(provider.isPhoneMicRecording, false);
+      expect(provider.isDeviceRecording, false);
+      expect(provider.canUsePhoneMicCapture, true);
+
+      provider.recordingState = RecordingState.record;
+
+      expect(provider.isPhoneMicRecording, true);
+      expect(provider.canUsePhoneMicCapture, true);
+    });
+
+    test('disables phone mic while device capture owns recording', () {
+      final provider = CaptureProvider();
+      provider.updateRecordingDevice(
+        BtDevice(
+          name: 'Omi',
+          id: 'device-1',
+          type: DeviceType.omi,
+          rssi: -45,
+        ),
+      );
+      provider.recordingState = RecordingState.deviceRecord;
+
+      expect(provider.isDeviceRecording, true);
+      expect(provider.isPhoneMicRecording, false);
+      expect(provider.canUsePhoneMicCapture, false);
+    });
   });
 
   group('metricsNotifyEnabled', () {
@@ -346,7 +381,7 @@ void main() {
   });
 
   group('People cache refresh', () {
-    TranscriptSegment _segmentWithPerson(String id, String? personId) {
+    TranscriptSegment segmentWithPerson(String id, String? personId) {
       return TranscriptSegment(
         id: id,
         text: 'text',
@@ -365,10 +400,10 @@ void main() {
       provider.peopleProvider = mockPeopleProvider;
 
       // Pre-populate segments to skip platform-specific initialization code
-      provider.segments = [_segmentWithPerson('seed', null)];
+      provider.segments = [segmentWithPerson('seed', null)];
 
       // Segment with personId that's not in cache (cachedPeople is empty)
-      final segments = [_segmentWithPerson('seg1', 'unknown-person-id')];
+      final segments = [segmentWithPerson('seg1', 'unknown-person-id')];
 
       provider.onSegmentReceived(segments);
 
@@ -382,9 +417,9 @@ void main() {
       provider.peopleProvider = mockPeopleProvider;
 
       // Pre-populate segments to skip platform-specific initialization code
-      provider.segments = [_segmentWithPerson('seed', null)];
+      provider.segments = [segmentWithPerson('seed', null)];
 
-      final segments = [_segmentWithPerson('seg2', null)];
+      final segments = [segmentWithPerson('seg2', null)];
 
       provider.onSegmentReceived(segments);
 
@@ -403,17 +438,17 @@ void main() {
       provider.peopleProvider = mockPeopleProvider;
 
       // Pre-populate segments to skip platform-specific initialization code
-      provider.segments = [_segmentWithPerson('seed', null)];
+      provider.segments = [segmentWithPerson('seed', null)];
 
       // First segment with unknown personId
-      final segments1 = [_segmentWithPerson('seg-a', 'unknown-1')];
+      final segments1 = [segmentWithPerson('seg-a', 'unknown-1')];
       provider.onSegmentReceived(segments1);
 
       // Should trigger first call
       expect(mockPeopleProvider.setPeopleCallCount, 1);
 
       // Second segment with different unknown personId while first is still in-flight
-      final segments2 = [_segmentWithPerson('seg-b', 'unknown-2')];
+      final segments2 = [segmentWithPerson('seg-b', 'unknown-2')];
       provider.onSegmentReceived(segments2);
 
       // Should NOT trigger another call (first is still in-flight)
@@ -424,7 +459,7 @@ void main() {
       await Future.delayed(Duration.zero); // Let the future complete
 
       // Third segment - now a new call should be allowed
-      final segments3 = [_segmentWithPerson('seg-c', 'unknown-3')];
+      final segments3 = [segmentWithPerson('seg-c', 'unknown-3')];
       provider.onSegmentReceived(segments3);
 
       // Should trigger a new call
