@@ -1134,16 +1134,18 @@ def _validate_agent_uid(agent_id: str, uid: str) -> bool:
         return True  # No agent_id means direct API call (trusted)
     if not uid:
         return False
+    agent_id_norm = agent_id.lower()
+    uid_norm = uid.lower()
     # Agent IDs should contain the uid as a suffix component
     # Patterns: ella-{uid}, ella-user-{uid}, ella-cg-{uid}, ella-scanner-{uid}
-    parts = agent_id.split("-")
+    parts = agent_id_norm.split("-")
     if len(parts) < 2:
         return False
     # The uid should appear as the last segment(s) of the agent_id
-    if agent_id.endswith(uid):
+    if agent_id_norm.endswith(uid_norm):
         return True
     # Also accept if uid appears anywhere in the agent_id (for flexibility)
-    if uid in agent_id:
+    if uid_norm in agent_id_norm:
         return True
     return False
 
