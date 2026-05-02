@@ -9925,6 +9925,15 @@
   "ellaCareTeamFullDialog": "Your care team is full (5 people). Remove someone to add a new member.",
   "ellaCaregiverStatusActive": "Active — receives alerts",
   "ellaCaregiverStatusInvited": "Invited — waiting to join",
+  "ellaCaregiverStatusExpired": "Invite expired",
+  "ellaInviteExpiredDate": "Invite expired {date}",
+  "@ellaInviteExpiredDate": {
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
   "ellaFamilyCaregivers": "Family & Caregivers",
   "ellaFamilyCaregiversSubtitle": "{count, plural, =1{1 person} other{{count} people}}",
   "@ellaFamilyCaregiversSubtitle": {
@@ -10025,8 +10034,26 @@
   "ellaSave": "Save",
   "ellaCancel": "Cancel",
   "ellaCareTeamSection": "CARE TEAM",
+  "ellaCaptureSection": "CAPTURE",
   "ellaDeviceSection": "DEVICE",
   "ellaAboutSection": "ABOUT",
+  "ellaMaxConversationLengthTitle": "Maximum Conversation Length",
+  "ellaMaxConversationLengthConfig": "Split long captures on the backend",
+  "ellaMaxConversationLengthDescription": "Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.",
+  "ellaMaxConversationLengthBackendDefault": "Backend default",
+  "ellaMaxConversationLengthBackendDefaultDesc": "Use Ella's current default: 30 minutes.",
+  "ellaMaxConversationLengthDisabled": "Disabled",
+  "ellaMaxConversationLengthDisabledDesc": "Do not split conversations just because a recording is long.",
+  "ellaMaxConversationLengthMinutesDesc": "Split after {minutes} minutes of continuous recording.",
+  "@ellaMaxConversationLengthMinutesDesc": {
+    "placeholders": {
+      "minutes": {
+        "type": "int"
+      }
+    }
+  },
+  "ellaMaxConversationLengthSaved": "Conversation length setting saved.",
+  "ellaMaxConversationLengthSaveFailed": "Couldn't save conversation length setting.",
   "ellaJoinedDate": "Joined {date}",
   "@ellaJoinedDate": {
     "placeholders": {
@@ -10092,5 +10119,22 @@
   "ellaProfileName": "Name",
   "ellaProfileNotSet": "Not set",
   "ellaProfileSave": "Save",
-  "ellaProfileSaved": "Profile saved"
+  "ellaProfileSaved": "Profile saved",
+  "ellaAlertChannels": "Alert Channels",
+  "ellaAlertChannelsSubtitle": "How Ella handles alerts and notifications",
+  "ellaAlertChannelsUnavailable": "Unable to load alert policy",
+  "ellaAlertChannelsPullRetry": "Pull down to retry",
+  "ellaAlertChannelsRetry": "Retry",
+  "ellaAlertChannelsYourChannels": "YOUR CHANNELS",
+  "ellaAlertChannelsNoChannels": "No channels configured",
+  "ellaAlertChannelsEmergencyContact": "EMERGENCY CONTACT",
+  "ellaAlertChannelsNotConfigured": "No emergency contact selected",
+  "ellaAlertChannelsSetUpContact": "Set up an emergency contact",
+  "ellaAlertChannelsCaregiverNotifications": "CAREGIVER NOTIFICATIONS",
+  "ellaAlertChannelsAlertRules": "ALERT RULES",
+  "ellaAlertChannelsPrivacyNotes": "PRIVACY NOTES",
+  "ellaAlertChannelsEnabled": "Enabled",
+  "ellaAlertChannelsDisabled": "Disabled",
+  "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
+  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active."
 }

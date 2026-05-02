@@ -75,14 +75,13 @@ class _GuardianModePageState extends State<GuardianModePage> {
   }
 
   GuardianModeState get _pendingState => GuardianModeState(
-    override: _selectedOverride,
-    features: _selectedOverride != null ? [] : _selectedFeatures.toList(),
-  );
+        override: _selectedOverride,
+        features: _selectedOverride != null ? [] : _selectedFeatures.toList(),
+      );
 
   bool get _hasChanges {
     final pending = _pendingState;
-    return pending.override != _currentState.override ||
-        !_sameFeatures(pending.features, _currentState.features);
+    return pending.override != _currentState.override || !_sameFeatures(pending.features, _currentState.features);
   }
 
   bool _sameFeatures(List<String> a, List<String> b) {
@@ -188,9 +187,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
         name: _fallbackLabel(key),
         description: '',
         detailsBullets: const [],
-        color: GuardianModeKey.fromString(key).isOverride
-            ? const Color(0xFFEC4899)
-            : const Color(0xFF14B8A6),
+        color: GuardianModeKey.fromString(key).isOverride ? const Color(0xFFEC4899) : const Color(0xFF14B8A6),
       ),
     );
   }
@@ -283,7 +280,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
-                          'Replaces the care system entirely.',
+                          'Controls how Ella detects and processes conversations. Does not change who receives alerts.',
                           style: TextStyle(
                             fontSize: 13,
                             color: EllaColors.textTertiary,
@@ -359,7 +356,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
                       const Padding(
                         padding: EdgeInsets.only(left: 4, bottom: 10),
                         child: Text(
-                          'Combine multiple features simultaneously.',
+                          'Choose which care features are active. Critical alerts to your emergency contact remain active even when Guardian is off.',
                           style: TextStyle(
                             fontSize: 13,
                             color: EllaColors.textTertiary,
@@ -392,9 +389,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
                       // ── Turn Guardian Off ──────────────────────────────────
                       _TurnOffButton(
-                        isOff:
-                            _selectedOverride == null &&
-                            _selectedFeatures.isEmpty,
+                        isOff: _selectedOverride == null && _selectedFeatures.isEmpty,
                         onTap: () {
                           setState(() {
                             _selectedOverride = null;
@@ -465,9 +460,7 @@ class _OverrideRow extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected
-                ? preset.color.withValues(alpha: 0.08)
-                : EllaColors.bgSecondary,
+            color: isSelected ? preset.color.withValues(alpha: 0.08) : EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
             border: Border.all(
               color: isSelected ? preset.color : Colors.transparent,
@@ -488,9 +481,7 @@ class _OverrideRow extends StatelessWidget {
                     width: 2,
                   ),
                 ),
-                child: isSelected
-                    ? const Icon(Icons.check, size: 12, color: Colors.white)
-                    : null,
+                child: isSelected ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -502,9 +493,7 @@ class _OverrideRow extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: isSelected
-                            ? preset.color
-                            : EllaColors.textPrimary,
+                        color: isSelected ? preset.color : EllaColors.textPrimary,
                       ),
                     ),
                     if (preset.description.isNotEmpty)
@@ -558,9 +547,7 @@ class _FeatureRow extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isChecked && !dimmed
-                ? preset.color.withValues(alpha: 0.08)
-                : EllaColors.bgSecondary,
+            color: isChecked && !dimmed ? preset.color.withValues(alpha: 0.08) : EllaColors.bgSecondary,
             borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
             border: Border.all(
               color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
@@ -576,19 +563,13 @@ class _FeatureRow extends StatelessWidget {
                 height: 20,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(5),
-                  color: isChecked && !dimmed
-                      ? effectiveColor
-                      : Colors.transparent,
+                  color: isChecked && !dimmed ? effectiveColor : Colors.transparent,
                   border: Border.all(
-                    color: isChecked && !dimmed
-                        ? effectiveColor
-                        : EllaColors.bgTertiary,
+                    color: isChecked && !dimmed ? effectiveColor : EllaColors.bgTertiary,
                     width: 2,
                   ),
                 ),
-                child: isChecked && !dimmed
-                    ? const Icon(Icons.check, size: 12, color: Colors.white)
-                    : null,
+                child: isChecked && !dimmed ? const Icon(Icons.check, size: 12, color: Colors.white) : null,
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -600,9 +581,7 @@ class _FeatureRow extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
-                        color: isChecked && !dimmed
-                            ? effectiveColor
-                            : textColor,
+                        color: isChecked && !dimmed ? effectiveColor : textColor,
                       ),
                     ),
                     if (preset.description.isNotEmpty)
@@ -612,9 +591,7 @@ class _FeatureRow extends StatelessWidget {
                           preset.description,
                           style: TextStyle(
                             fontSize: 13,
-                            color: dimmed
-                                ? EllaColors.textTertiary.withValues(alpha: 0.5)
-                                : EllaColors.textTertiary,
+                            color: dimmed ? EllaColors.textTertiary.withValues(alpha: 0.5) : EllaColors.textTertiary,
                           ),
                         ),
                       ),
@@ -653,13 +630,26 @@ class _TurnOffButton extends StatelessWidget {
           ),
           padding: const EdgeInsets.symmetric(vertical: 14),
         ),
-        child: Text(
-          isOff ? 'Guardian Off' : 'Turn Guardian Off',
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w500,
-            color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF),
-          ),
+        child: Column(
+          children: [
+            Text(
+              isOff ? 'Guardian Off' : 'Turn Guardian Off',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'Disables audio and non-critical check-ins. Emergency alerts stay active.',
+              style: TextStyle(
+                fontSize: 12,
+                color: isOff ? EllaColors.bgTertiary : const Color(0xFF9CA3AF).withValues(alpha: 0.7),
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ),
       ),
     );

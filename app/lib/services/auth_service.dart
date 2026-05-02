@@ -18,7 +18,6 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
-import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 /// Detects if the app is running in an iOS simulator
@@ -28,7 +27,7 @@ bool isSimulator() {
 
   // Check for simulator environment variables
   return Platform.environment['SIMULATOR_DEVICE_NAME'] != null ||
-         Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
+      Platform.environment['SIMULATOR_MODEL_IDENTIFIER'] != null;
 }
 
 class AuthService {
@@ -472,6 +471,9 @@ class AuthService {
     }
   }
 
+  /// Public wrapper for _restoreOnboardingState — used by MobileApp self-healing.
+  Future<void> restoreOnboardingState() => _restoreOnboardingState();
+
   Future<void> _restoreOnboardingState() async {
     try {
       final state = await getUserOnboardingState();
@@ -700,7 +702,10 @@ class AuthService {
     final newUserId = FirebaseAuth.instance.currentUser?.uid;
     await getIdToken();
 
-    SharedPreferencesUtil().onboardingCompleted = false;
+    // Restore onboarding state from server instead of resetting to false.
+    // Setting onboardingCompleted=false here was causing existing users to
+    // see the new-user flow after re-authentication (issue #633).
+    await restoreOnboardingState();
     SharedPreferencesUtil().uid = newUserId ?? '';
     SharedPreferencesUtil().email = FirebaseAuth.instance.currentUser?.email ?? '';
     SharedPreferencesUtil().givenName = FirebaseAuth.instance.currentUser?.displayName?.split(' ')[0] ?? '';

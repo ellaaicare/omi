@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 import database.conversations as conversations_db
 import database.memories as memories_db
 import database.users as users_db
+from database._client import db
 from models.conversation import CategoryEnum
 
 
@@ -155,6 +156,28 @@ class ConversationSummaryUpdate(BaseModel):
     overview: Optional[str] = None
     emoji: Optional[str] = None
     category: Optional[str] = None
+    summary_source: str = "observer"
+    summary_kind: str = "observer_enriched"
+    correction_id: Optional[str] = None
+    based_on_version_id: Optional[str] = None
+    set_active: bool = True
+
+
+def _update_correction_audit(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    payload: dict,
+) -> None:
+    (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("corrections")
+        .document(correction_id)
+        .set(payload, merge=True)
+    )
 
 
 @router.patch("/conversation/{conversation_id}/summary")
@@ -170,6 +193,10 @@ async def update_conversation_summary(
     """
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     try:
         sanitized_update = sanitize_summary_update(
@@ -208,17 +235,145 @@ async def update_conversation_summary(
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    structured = dict((conversation.get("structured") or {}))
+    if sanitized_update.title is not None:
+        structured["title"] = sanitized_update.title
+    if sanitized_update.overview is not None:
+        structured["overview"] = sanitized_update.overview
+    if sanitized_update.emoji is not None:
+        structured["emoji"] = sanitized_update.emoji
+    if sanitized_update.category is not None:
+        structured["category"] = sanitized_update.category
+
+    version_update = conversations_db.build_summary_version_update(
+        conversation,
+        next_structured=structured,
+        source=update.summary_source,
+        kind=update.summary_kind,
+        correction_id=update.correction_id,
+        based_on_version_id=update.based_on_version_id,
+        activate=update.set_active,
+    )
+    update_data["summary_versions"] = version_update["summary_versions"]
+    update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
+    if update.correction_id:
+        existing_state = conversation.get("correction_state") or {}
+        update_data["correction_state"] = {
+            "correction_id": update.correction_id,
+            "status": "applied",
+            "pending": False,
+            "source": existing_state.get("source"),
+            "submitted_at": existing_state.get("submitted_at"),
+            "updated_at": datetime.now(timezone.utc),
+            "active_summary_version_id": version_update["active_summary_version_id"],
+        }
+
     try:
         conversations_db.update_conversation(uid, conversation_id, update_data)
     except Exception as e:
         logging.error(f"Failed to update conversation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+    if update.correction_id:
+        try:
+            _update_correction_audit(
+                uid,
+                conversation_id,
+                update.correction_id,
+                {
+                    "status": "applied",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_at": datetime.now(timezone.utc).isoformat(),
+                    "applied_summary_version_id": version_update["active_summary_version_id"],
+                    "summary_version_kind": update.summary_kind,
+                    "summary_version_source": update.summary_source,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to update correction audit after summary apply",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": update.correction_id},
+            )
+            logger.warning(str(e))
+
     return {
         "status": "ok",
         "conversation_id": conversation_id,
         "updated_fields": list(update_data.keys()),
+        "active_summary_version_id": version_update["active_summary_version_id"],
         "sanitizer_warnings": sanitized_update.warnings,
+    }
+
+
+# ============================================================================
+# Conversation Data Fetch (for reprocessing pipeline)
+# ============================================================================
+
+
+def _conversation_field(conversation, key: str, default=None):
+    if isinstance(conversation, dict):
+        return conversation.get(key, default)
+    return getattr(conversation, key, default)
+
+
+def _structured_field(structured, key: str):
+    if isinstance(structured, dict):
+        return structured.get(key)
+    return getattr(structured, key, None)
+
+
+@router.get("/conversation/{conversation_id}/data")
+async def get_conversation_data(
+    conversation_id: str,
+    uid: Optional[str] = None,
+):
+    """
+    Fetch conversation data used by the reprocessing pipeline when re-firing the
+    conversation-ready webhook. Internal endpoint; requires uid as query param.
+    """
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid query parameter required")
+
+    try:
+        conversation = conversations_db.get_conversation(uid, conversation_id)
+    except Exception as e:
+        logging.error(f"Failed to fetch conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    segments = _conversation_field(conversation, "transcript_segments", []) or []
+    transcript_parts = []
+    for segment in segments:
+        if isinstance(segment, dict):
+            speaker = "User" if segment.get("is_user") else (segment.get("speaker") or "Other")
+            text = segment.get("text", "")
+        else:
+            speaker = "User" if getattr(segment, "is_user", False) else (getattr(segment, "speaker", None) or "Other")
+            text = getattr(segment, "text", "")
+        transcript_parts.append(f"{speaker}: {text}")
+
+    structured_src = _conversation_field(conversation, "structured", {}) or {}
+    structured = {}
+    if structured_src:
+        structured = {
+            "title": _structured_field(structured_src, "title"),
+            "overview": _structured_field(structured_src, "overview"),
+            "emoji": _structured_field(structured_src, "emoji"),
+            "category": _structured_field(structured_src, "category"),
+        }
+        if structured.get("category") and hasattr(structured["category"], "value"):
+            structured["category"] = structured["category"].value
+
+    return {
+        "conversation_id": conversation_id,
+        "uid": uid,
+        "transcript": "\n\n".join(transcript_parts),
+        "segment_count": len(segments),
+        "structured": structured,
+        "started_at": str(_conversation_field(conversation, "started_at", "")),
+        "finished_at": str(_conversation_field(conversation, "finished_at", "")),
     }
 
 

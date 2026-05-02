@@ -53,6 +53,11 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+OPENAI_TTS_MODEL = os.getenv("ELLA_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("ELLA_TTS_VOICE", "nova")
+XAI_TTS_VOICE = os.getenv("XAI_TTS_VOICE", "ara")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
@@ -105,6 +110,11 @@ V2V_PROVIDERS = {
         "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
         "key_check": lambda: bool(GEMINI_API_KEY),
     },
+}
+
+# Backward/alternate provider labels accepted from clients.
+V2V_PROVIDER_ALIASES = {
+    "gemini-native-live": "gemini-live",
 }
 
 
@@ -203,6 +213,142 @@ async def _inworld_tts(text: str, api_key: str, voice_id: str = "Serena") -> byt
     return b"".join(audio_chunks)
 
 
+async def _persist_user_identity_key(uid: str, key: str, value: str) -> None:
+    """Best-effort persistence of the user's last-selected voice provider."""
+    if not uid or not value:
+        return
+
+    try:
+        pool = await _get_pool()
+        await pool.execute(
+            """
+            UPDATE users
+            SET identities = COALESCE(identities, '{}'::jsonb) || $1::jsonb
+            WHERE LOWER(omi_uid) = LOWER($2)
+            """,
+            json.dumps({key: value}),
+            uid,
+        )
+    except Exception as exc:
+        logger.warning(f"[FLOW:VOICE] failed to persist {key} for uid={uid}: {exc}")
+
+
+async def synthesize_speech_bytes(text: str, provider: str, voice_id: Optional[str] = None) -> tuple[bytes, str]:
+    """Synthesize speech for a supported provider and return audio bytes + media type."""
+    text = (text or "").strip()[:500]
+    provider = (provider or "elevenlabs").lower()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    if provider in ("fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{ELLA_TTS_URL}/v1/audio/speech",
+                    json={"input": text, "voice": "nova", "response_format": "mp3"},
+                    timeout=30.0,
+                )
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
+            return response.content, "audio/mpeg"
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail=f"{provider} TTS timed out") from exc
+
+    if provider == "inworld":
+        if not INWORLD_API_KEY:
+            raise HTTPException(status_code=500, detail="INWORLD_API_KEY not configured")
+        try:
+            audio = await _inworld_tts(text, INWORLD_API_KEY)
+            return audio, "audio/mpeg"
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Inworld TTS error: {exc}") from exc
+
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {OPENAI_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": OPENAI_TTS_MODEL,
+                        "input": text,
+                        "voice": voice_id or OPENAI_TTS_VOICE,
+                        "response_format": "mp3",
+                    },
+                    timeout=30.0,
+                )
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"OpenAI TTS error: {response.status_code}")
+            return response.content, "audio/mpeg"
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail="OpenAI TTS timed out") from exc
+
+    if provider == "xai-tts":
+        if not XAI_API_KEY:
+            raise HTTPException(status_code=500, detail="XAI_API_KEY not configured")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.x.ai/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {XAI_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "text": text,
+                        "voice_id": voice_id or XAI_TTS_VOICE,
+                        "language": "en",
+                        "output_format": {"codec": "mp3", "sample_rate": 24000, "bit_rate": 128000},
+                    },
+                    timeout=30.0,
+                )
+            if response.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"xAI TTS error: {response.status_code}")
+            return response.content, "audio/mpeg"
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail="xAI TTS timed out") from exc
+
+    if provider != "elevenlabs":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, "
+                "fish-audio-s2, kokoro, inworld, openai, xai-tts, grok-voice, gemini-live"
+            ),
+        )
+
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id or 'pFZP5JQG7iQjIQuC4Bku'}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/mpeg",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                },
+                timeout=30.0,
+            )
+        if response.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
+        return response.content, "audio/mpeg"
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="ElevenLabs TTS timed out") from exc
+
+
 def create_session_token(
     uid: str,
     firebase_uid: str,
@@ -290,6 +436,20 @@ async def get_voice_providers():
             "available": bool(INWORLD_API_KEY),
         },
         {
+            "id": "openai",
+            "name": "OpenAI TTS",
+            "type": "tts",
+            "description": "OpenAI GPT-4o mini TTS",
+            "available": bool(OPENAI_API_KEY),
+        },
+        {
+            "id": "xai-tts",
+            "name": "xAI TTS",
+            "type": "tts",
+            "description": "xAI text-to-speech, good match for Grok voice sessions",
+            "available": bool(XAI_API_KEY),
+        },
+        {
             "id": "grok-voice",
             "name": "Grok Voice (V2V)",
             "type": "v2v",
@@ -346,6 +506,7 @@ async def create_voice_session(
     # Merge body and query params (body takes priority)
     uid = (body.uid if body else None) or uid
     provider = (body.provider if body else None) or provider or "grok-voice"
+    provider = V2V_PROVIDER_ALIASES.get(provider, provider)
     voice_mode = (body.voice_mode if body else None) or voice_mode
 
     if not uid:
@@ -404,6 +565,7 @@ async def create_voice_session(
             f"endpoint={endpoint} expiry={SESSION_EXPIRY_HOURS}h latency={_elapsed}ms",
             flush=True,
         )
+        await _persist_user_identity_key(uid, "last_voice_provider", provider)
 
         return VoiceSessionResponse(
             session_token=token,
@@ -478,99 +640,21 @@ async def synthesize_speech(
             },
         )
 
-    # --- Local ella-tts proxy (Fish Audio or Kokoro) ---
-    if provider in ("fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"):
-        print(f"[FLOW:VOICE-TTS] provider={provider} text_len={text_len} url={ELLA_TTS_URL}", flush=True)
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{ELLA_TTS_URL}/v1/audio/speech",
-                    json={"input": text, "voice": "nova", "response_format": "mp3"},
-                    timeout=30.0,
-                )
-            _elapsed = int((time.time() - _start) * 1000)
-            if response.status_code != 200:
-                print(f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms", flush=True)
-                raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
-            audio_size = len(response.content)
-            print(f"[FLOW:VOICE-TTS] OK provider={provider} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
-            return Response(content=response.content, media_type="audio/mpeg")
-        except httpx.TimeoutException:
-            _elapsed = int((time.time() - _start) * 1000)
-            print(f"[FLOW:VOICE-TTS] TIMEOUT provider={provider} latency={_elapsed}ms", flush=True)
-            raise HTTPException(status_code=504, detail=f"{provider} TTS timed out")
-        except HTTPException:
-            raise
-        except Exception as e:
-            _elapsed = int((time.time() - _start) * 1000)
-            print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    # --- Inworld TTS (WebSocket, ~120-200ms) ---
-    if provider == "inworld":
-        if not INWORLD_API_KEY:
-            print(f"[FLOW:VOICE-TTS] ERROR provider=inworld key_missing=true", flush=True)
-            raise HTTPException(status_code=500, detail="INWORLD_API_KEY not configured")
-        print(f"[FLOW:VOICE-TTS] provider=inworld model=tts-1.5-mini text_len={text_len}", flush=True)
-        try:
-            audio = await _inworld_tts(text, INWORLD_API_KEY)
-            _elapsed = int((time.time() - _start) * 1000)
-            print(f"[FLOW:VOICE-TTS] OK provider=inworld audio_bytes={len(audio)} latency={_elapsed}ms", flush=True)
-            return Response(content=audio, media_type="audio/mpeg")
-        except Exception as e:
-            _elapsed = int((time.time() - _start) * 1000)
-            print(f"[FLOW:VOICE-TTS] ERROR provider=inworld error={e} latency={_elapsed}ms", flush=True)
-            raise HTTPException(status_code=502, detail=f"Inworld TTS error: {e}")
-
-    # --- Reject unknown providers (no silent fallbacks) ---
-    if provider != "elevenlabs":
-        print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live")
-
-    # --- ElevenLabs ---
-    if not ELEVENLABS_API_KEY:
-        print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs key_missing=true text_len={text_len}", flush=True)
-        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY not configured")
-
-    print(f"[FLOW:VOICE-TTS] provider=elevenlabs voice={request.voice_id} text_len={text_len}", flush=True)
-
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{request.voice_id}",
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                    "Accept": "audio/mpeg",
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                },
-                timeout=30.0,
-            )
-
+        requested_voice = request.voice_id if provider == "elevenlabs" else None
+        audio, media_type = await synthesize_speech_bytes(text, provider, requested_voice)
         _elapsed = int((time.time() - _start) * 1000)
-
-        if response.status_code != 200:
-            print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}", flush=True)
-            raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
-
-        audio_size = len(response.content)
-        print(f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
-
-        return Response(content=response.content, media_type="audio/mpeg")
-
-    except httpx.TimeoutException:
-        _elapsed = int((time.time() - _start) * 1000)
-        print(f"[FLOW:VOICE-TTS] TIMEOUT provider=elevenlabs latency={_elapsed}ms", flush=True)
-        raise HTTPException(status_code=504, detail="ElevenLabs TTS timed out")
+        print(
+            f"[FLOW:VOICE-TTS] OK provider={provider} voice={request.voice_id} "
+            f"audio_bytes={len(audio)} latency={_elapsed}ms",
+            flush=True,
+        )
+        return Response(content=audio, media_type=media_type)
     except HTTPException:
         raise
     except Exception as e:
         _elapsed = int((time.time() - _start) * 1000)
-        print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs error={e} latency={_elapsed}ms", flush=True)
+        print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -651,6 +735,65 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Conversation fetch failed: {e}")
         return ""
+
+
+async def _fetch_recent_timeline(uid: str, limit: int = 12) -> str:
+    """Fetch recent cross-channel canonical events for startup voice context.
+
+    This is the main bridge between post-call canonical ledger writeback and
+    the next realtime voice session. It should include recent iOS voice/chat
+    turns and other canonical events in one chronological stream.
+    """
+    if not uid:
+        return ""
+
+    timeline_url = f"{ELLA_API_BASE}/v1/ella/timeline"
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                timeline_url,
+                params={"uid": uid, "limit": limit},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        logger.warning(f"[FLOW:VOICE-CONTEXT] Timeline fetch failed: {e}")
+        return ""
+
+    events = data.get("events", []) if isinstance(data, dict) else []
+    if not events:
+        return ""
+
+    lines = []
+    for event in events:
+        channel = (event.get("channel") or "").strip()
+        role = (event.get("role") or "").strip().lower()
+        text = " ".join((event.get("text") or "").split())
+        if not text:
+            continue
+
+        ts = event.get("started_at") or event.get("ended_at") or ""
+        ts_short = ""
+        if ts:
+            try:
+                ts_short = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%b %d %I:%M %p")
+            except Exception:
+                ts_short = str(ts)[:16]
+
+        channel_label = channel or "event"
+        role_label = "User" if role == "user" else "Ella" if role == "assistant" else role.title() or "Event"
+        line = f"- [{channel_label}] {role_label}: {text[:280]}"
+        if ts_short:
+            line += f" ({ts_short})"
+        lines.append(line)
+
+    if not lines:
+        return ""
+
+    timeline = "\n".join(lines)
+    if len(timeline) > 2200:
+        timeline = timeline[-2200:]
+    return timeline
 
 
 async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name: str = "user") -> str:
@@ -822,15 +965,22 @@ async def get_voice_context(request: Request):
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Dynamic rules error: {e}")
 
-    # 4. Fetch recent OMI conversation summaries (Firestore) + agent memory context
+    # 4. Fetch recent OMI conversation summaries, canonical recent timeline,
+    #    and agent memory context in parallel
     recent_conversations = ""
+    recent_timeline = ""
     memory_context = ""
     try:
         import asyncio as _aio
-        # Run both fetches concurrently
+        # Run all fetches concurrently
         conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=5))
+        timeline_task = _aio.create_task(_fetch_recent_timeline(uid, limit=12))
         mem_task = _aio.create_task(_fetch_memory_context(gateway_url, gateway_token, row["name"] or "user"))
-        recent_conversations, memory_context = await _aio.gather(conv_task, mem_task)
+        recent_conversations, recent_timeline, memory_context = await _aio.gather(
+            conv_task,
+            timeline_task,
+            mem_task,
+        )
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
 
@@ -880,7 +1030,7 @@ async def get_voice_context(request: Request):
     print(
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
         f"files={len(files)} rules={len(dynamic_rules)} "
-        f"convos={len(recent_conversations)} mem={len(memory_context)} "
+        f"convos={len(recent_conversations)} timeline={len(recent_timeline)} mem={len(memory_context)} "
         f"latency={_elapsed}ms",
         flush=True,
     )
@@ -897,6 +1047,7 @@ async def get_voice_context(request: Request):
         "medications": medications_list,
         "recent_voice_summaries": voice_summaries,
         "recent_conversations": recent_conversations,
+        "recent_timeline": recent_timeline,
         "memory_context": memory_context,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
@@ -1134,16 +1285,18 @@ def _validate_agent_uid(agent_id: str, uid: str) -> bool:
         return True  # No agent_id means direct API call (trusted)
     if not uid:
         return False
+    agent_id_norm = agent_id.lower()
+    uid_norm = uid.lower()
     # Agent IDs should contain the uid as a suffix component
     # Patterns: ella-{uid}, ella-user-{uid}, ella-cg-{uid}, ella-scanner-{uid}
-    parts = agent_id.split("-")
+    parts = agent_id_norm.split("-")
     if len(parts) < 2:
         return False
     # The uid should appear as the last segment(s) of the agent_id
-    if agent_id.endswith(uid):
+    if agent_id_norm.endswith(uid_norm):
         return True
     # Also accept if uid appears anywhere in the agent_id (for flexibility)
-    if uid in agent_id:
+    if uid_norm in agent_id_norm:
         return True
     return False
 
@@ -1328,7 +1481,18 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                 .order_by("created_at", direction=_fs.Query.DESCENDING)
                 .limit(100)
             )
-        convos = [doc.to_dict() for doc in convos_ref.stream()]
+        from database.conversations import _prepare_conversation_for_read
+
+        convos = []
+        for doc in convos_ref.stream():
+            raw = doc.to_dict()
+            if not raw:
+                continue
+            try:
+                raw = _prepare_conversation_for_read(raw, uid) or raw
+            except Exception:
+                pass
+            convos.append(raw)
 
         # --- Client-side keyword matching ---
         matches = []
@@ -1366,19 +1530,47 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                     ts = str(created)[:16]
 
             overview_text = structured.get("overview", "") or ""
+            transcript_text = ""
+            if full_access:
+                seg_texts = []
+                for seg in c.get("transcript_segments", []) or []:
+                    text = (seg.get("text", "") if isinstance(seg, dict) else "") or ""
+                    text = text.strip()
+                    if text:
+                        seg_texts.append(text)
+                transcript_text = " ".join(seg_texts)
+
+            content_text = overview_text
             if not full_access:
                 # Caregiver: truncate overview to first 100 chars, no raw content
-                overview_text = overview_text[:100] + ("..." if len(overview_text) > 100 else "")
+                content_text = overview_text[:100] + ("..." if len(overview_text) > 100 else "")
+            elif transcript_text:
+                query_terms = [t for t in keyword_terms if len(t) > 2]
+                transcript_lower = transcript_text.lower()
+                snippet = ""
+                for term in query_terms:
+                    pos = transcript_lower.find(term)
+                    if pos != -1:
+                        start = max(0, pos - 160)
+                        end = min(len(transcript_text), pos + 340)
+                        snippet = transcript_text[start:end].strip()
+                        break
+                if not snippet:
+                    snippet = transcript_text[:500].strip()
+                content_text = snippet
+            elif overview_text:
+                content_text = overview_text
 
             results.append({
                 "source": "omi",
                 "title": structured.get("title", "Untitled"),
-                "content": overview_text,
+                "content": content_text,
                 "timestamp": ts,
                 "score": score,
                 "metadata": {
                     "emoji": structured.get("emoji", ""),
                     "category": structured.get("category", ""),
+                    "overview": overview_text,
                 },
             })
 

@@ -14,7 +14,7 @@ sys.modules.setdefault("database.users", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.notifications", MagicMock())
 sys.modules.setdefault("utils.other.storage", MagicMock())
-sys.modules.setdefault("ella.config", MagicMock())
+sys.modules.pop("ella.config", None)
 sys.modules.setdefault("database.ella_contacts", MagicMock())
 
 _backend_path = Path(__file__).resolve().parents[2]
@@ -200,3 +200,73 @@ def test_get_conversation_data_404s_when_missing(monkeypatch):
 
     assert excinfo.value.status_code == 404
     assert "Conversation not found" in excinfo.value.detail
+
+
+def test_update_conversation_summary_records_version_and_marks_correction_applied(monkeypatch):
+    captured = {}
+    audit_updates = []
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "structured": {
+                "title": "Original title",
+                "overview": "[Ella] Original overview with enough detail to preserve.",
+                "emoji": "🧠",
+                "category": callbacks.CategoryEnum.health,
+            },
+            "correction_state": {
+                "correction_id": "corr-123",
+                "source": "ios",
+                "submitted_at": "2026-04-22T17:00:00+00:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "build_summary_version_update",
+        lambda conversation, **kwargs: {
+            "summary_versions": [
+                {"id": "legacy-v1", "title": "Original title"},
+                {"id": "corr-v2", "title": kwargs["next_structured"]["title"]},
+            ],
+            "active_summary_version_id": "corr-v2",
+            "new_summary_version_id": "corr-v2",
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "_update_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audit_updates.append(payload),
+    )
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Corrected title",
+                overview="[Ella] Corrected overview with enough detail to safely replace the summary.",
+                correction_id="corr-123",
+                summary_kind="corrected_enriched",
+                summary_source="observer",
+            ),
+            uid="user-123",
+        )
+    )
+
+    assert captured["update_data"]["summary_versions"][1]["id"] == "corr-v2"
+    assert captured["update_data"]["active_summary_version_id"] == "corr-v2"
+    assert captured["update_data"]["correction_state"]["status"] == "applied"
+    assert captured["update_data"]["correction_state"]["pending"] is False
+    assert captured["update_data"]["correction_state"]["correction_id"] == "corr-123"
+    assert captured["update_data"]["correction_state"]["source"] == "ios"
+    assert captured["update_data"]["correction_state"]["submitted_at"] == "2026-04-22T17:00:00+00:00"
+    assert audit_updates[0]["status"] == "applied"
+    assert audit_updates[0]["applied_summary_version_id"] == "corr-v2"
+    assert result["active_summary_version_id"] == "corr-v2"

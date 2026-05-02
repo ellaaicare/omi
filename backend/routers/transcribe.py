@@ -436,12 +436,15 @@ async def _stream_handler(
         audio_ring_buffer = AudioRingBuffer(RING_BUFFER_DURATION, sample_rate)
 
     # Conversation timeout (to process the conversation after x seconds of silence)
-    # Max: 4h, min 2m
+    # Binary audio sessions keep the legacy 2m minimum. Custom STT sessions can
+    # finalize faster because the app has already provided transcript segments.
     conversation_creation_timeout = conversation_timeout
     if conversation_creation_timeout == -1:
         conversation_creation_timeout = 4 * 60 * 60
-    if conversation_creation_timeout < 120:
-        conversation_creation_timeout = 120
+    min_conversation_timeout = 10 if use_custom_stt else 120
+    if conversation_creation_timeout < min_conversation_timeout:
+        conversation_creation_timeout = min_conversation_timeout
+    inactivity_timeout_seconds = max(inactivity_timeout_seconds, conversation_creation_timeout + 30)
 
     # Stream transcript
     # Callback for when pusher finishes processing a conversation
@@ -1858,6 +1861,9 @@ async def _stream_handler(
                                 suggested_segments = json_data.get('segments', [])
                                 stt_provider = json_data.get('stt_provider')
                                 if suggested_segments:
+                                    if first_audio_byte_timestamp is None:
+                                        first_audio_byte_timestamp = last_activity_time
+                                        last_usage_record_timestamp = first_audio_byte_timestamp
                                     # Attach stt_provider to each segment
                                     if stt_provider:
                                         for seg in suggested_segments:
@@ -2119,7 +2125,12 @@ async def listen_handler(
 
     # Ella sidecar: auto-provision check
     try:
-        from ella.routers.auto_provision import get_agent_cluster, auto_provision_user
+        from ella.routers.auto_provision import (
+            auto_provision_user,
+            ensure_firestore_user_document,
+            get_agent_cluster,
+        )
+        await ensure_firestore_user_document(uid)
         cluster = await get_agent_cluster(uid)
         if not cluster:
             logger = logging.getLogger(__name__)

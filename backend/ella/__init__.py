@@ -293,6 +293,24 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella debug metadata not available: {e}", flush=True)
 
+    # App-facing conversation correction endpoint (iOS Correct Summary)
+    try:
+        from ella.routers.corrections import router as corrections_router
+
+        app.include_router(corrections_router, tags=["Conversation Corrections"])
+        print("  🌐 /v1/ella/conversations/*/corrections - Summary correction loop", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella corrections not available: {e}", flush=True)
+
+    # Escalation policy resolver (classifier output -> deterministic delivery plan)
+    try:
+        from ella.routers.escalations import router as escalations_router
+
+        app.include_router(escalations_router, tags=["Ella Escalations"])
+        print("  🌐 /v1/ella/escalations/* - Escalation policy", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella escalation policy not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
@@ -302,7 +320,6 @@ def _register_routers(app) -> None:
             print("  🌐 /v1/voice/* - Voice session endpoints", flush=True)
         except ImportError as e:
             print(f"  ⚠️ Voice endpoints not available: {e}", flush=True)
-
 
     # Guardian Mode (audio queue for iOS)
     if ELLA_GUARDIAN_ENABLED:

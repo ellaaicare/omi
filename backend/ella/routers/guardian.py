@@ -2,7 +2,8 @@
 Guardian Mode Router - Audio delivery queue for iOS Guardian Mode.
 
 Endpoints:
-- GET  /v1/ella/guardian/next-audio?uid={uid}  - iOS polls, pops from queue
+- POST /v1/ella/guardian/deliver              - evaluate policy and dispatch delivery plan
+- GET  /v1/ella/guardian/next-audio?uid={uid} - iOS polls, pops from queue
 - POST /v1/ella/guardian/enqueue               - n8n enqueues after TTS
 - POST /v1/ella/guardian/upload                - n8n uploads MP3 binary
 - GET  /v1/ella/guardian/queue?uid={uid}       - debug/dashboard view
@@ -11,19 +12,28 @@ Queue: ella-postgres guardian_queue table.
 Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 """
 
+import base64
+import binascii
 import json
 import os
-import re
 import time
 import uuid
+from email.mime.text import MIMEText
+import smtplib
 from typing import Optional
 
 import asyncpg
 import httpx
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
+from ella.services.escalation_policy import (
+    CaregiverPolicyContext,
+    EscalationEvent,
+    UserPolicyContext,
+    evaluate_escalation_policy,
+)
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
@@ -34,11 +44,14 @@ router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 AUDIO_BASE_DIR = "/var/www/ella-ai-care.com/audio"
 AUDIO_PUBLIC_URL = "https://ella-ai-care.com/audio"
 GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
+SMTP_FROM = os.getenv("ELLA_SMTP_FROM", "guardian@ella-ai-care.com")
+N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
+    "N8N_GUARDIAN_DELIVER_WEBHOOK",
+    "https://n8n.ella-ai-care.com/webhook/guardian-deliver",
+)
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
-QUEUE_DEDUPE_WINDOW_SECONDS = int(os.getenv("GUARDIAN_QUEUE_DEDUPE_WINDOW_SECONDS", "90"))
-WAKE_WORD_ACK_TEXT = os.getenv("GUARDIAN_WAKE_WORD_ACK_TEXT", "I heard you. Give me a moment.")
 
 # Provision API for chat history lookups
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
@@ -101,6 +114,227 @@ def _verify_key(
         raise HTTPException(status_code=403, detail="Invalid guardian key")
 
 
+def _verify_optional_trace_key(x_guardian_key: Optional[str] = None, key: Optional[str] = None) -> None:
+    """Allow legacy scanner trace posts without a key, but reject bad keys when present."""
+    provided = x_guardian_key or key
+    if provided and provided != GUARDIAN_WEBHOOK_KEY:
+        raise HTTPException(status_code=403, detail="Invalid guardian key")
+
+
+def _dict_value(data: object, *keys: str) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _identity_phone(identities: object, canonical_phone: Optional[str]) -> Optional[str]:
+    if isinstance(identities, dict) and identities.get("phone"):
+        return identities.get("phone")
+    return canonical_phone
+
+
+def _delivery_key(step: dict) -> tuple[str, str]:
+    return str(step.get("channel") or "unknown"), str(step.get("target") or "unknown")
+
+
+def _delivery_status_blocks_dispatch(status: Optional[str]) -> bool:
+    return str(status or "").lower() in {"pending", "sending", "sent", "success", "delivered"}
+
+
+def _caregiver_payload(caregiver: CaregiverPolicyContext) -> dict:
+    return {
+        "id": caregiver.caregiver_id,
+        "caregiver_id": caregiver.caregiver_id,
+        "name": caregiver.name,
+        "email": caregiver.email,
+        "phone": caregiver.phone,
+        "is_emergency_contact": caregiver.is_emergency_contact,
+        "relationship": caregiver.relationship,
+    }
+
+
+def _recipient_for_step(
+    step: dict,
+    user: UserPolicyContext,
+    caregivers: list[CaregiverPolicyContext],
+) -> dict:
+    if step.get("target") == "caregiver":
+        caregiver = next((item for item in caregivers if item.caregiver_id == step.get("caregiver_id")), None)
+        if caregiver is None:
+            caregiver = next(
+                (item for item in caregivers if item.is_emergency_contact), caregivers[0] if caregivers else None
+            )
+        if caregiver:
+            return {
+                "recipient_id": caregiver.caregiver_id,
+                "recipient_name": caregiver.name,
+                "recipient_phone": caregiver.phone,
+                "recipient_email": caregiver.email,
+            }
+        return {"recipient_id": None, "recipient_name": None, "recipient_phone": None, "recipient_email": None}
+
+    return {
+        "recipient_id": user.user_id,
+        "recipient_name": None,
+        "recipient_phone": user.user_phone,
+        "recipient_email": user.user_email,
+    }
+
+
+async def _load_delivery_context(uid: str) -> tuple[UserPolicyContext, list[CaregiverPolicyContext]]:
+    pool = await _get_pool()
+    user_row = await pool.fetchrow(
+        """
+        SELECT id, omi_uid, guardian_mode, email, phone_number, identities
+        FROM users
+        WHERE LOWER(omi_uid) = LOWER($1)
+        """,
+        uid,
+    )
+    if not user_row:
+        raise HTTPException(status_code=404, detail={"error": "user_not_found", "uid": uid})
+
+    identities = user_row["identities"] or {}
+    if isinstance(identities, str):
+        identities = json.loads(identities)
+
+    user = UserPolicyContext(
+        uid=user_row["omi_uid"],
+        user_id=str(user_row["id"]),
+        guardian_mode=user_row["guardian_mode"],
+        user_email=user_row["email"],
+        user_phone=_identity_phone(identities, user_row["phone_number"]),
+        guardian_audio_enabled=identities.get("guardian_audio_enabled") if isinstance(identities, dict) else None,
+        channel_preferences=_dict_value(
+            identities,
+            "escalation_channel_preferences",
+            "channel_preferences",
+            "notification_channel_preferences",
+        ),
+        caregiver_alert_preferences=_dict_value(identities, "caregiver_alert_preferences", "caregiver_alerts"),
+        recap_preferences=_dict_value(identities, "recap_preferences", "daily_recap_preferences"),
+        provider_health=_dict_value(identities, "provider_health", "channel_provider_health"),
+        quiet_hours_active=bool(identities.get("quiet_hours_active", False)) if isinstance(identities, dict) else False,
+    )
+
+    caregiver_rows = await pool.fetch(
+        """
+        SELECT id, status::text AS status, is_emergency_contact, name, relationship, email, phone, permissions
+        FROM caregivers
+        WHERE user_id = $1
+        ORDER BY is_emergency_contact DESC, created_at ASC
+        """,
+        user_row["id"],
+    )
+    caregivers: list[CaregiverPolicyContext] = []
+    for row in caregiver_rows:
+        permissions = row["permissions"] or {}
+        if isinstance(permissions, str):
+            permissions = json.loads(permissions)
+        caregivers.append(
+            CaregiverPolicyContext(
+                caregiver_id=str(row["id"]),
+                status=row["status"],
+                is_emergency_contact=bool(row["is_emergency_contact"]),
+                name=row["name"],
+                relationship=row["relationship"],
+                email=row["email"],
+                phone=row["phone"],
+                permissions=permissions if isinstance(permissions, dict) else {},
+            )
+        )
+    return user, caregivers
+
+
+async def _reserve_delivery_steps(
+    trace_id: str,
+    uid: str,
+    steps: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    if not steps:
+        return [], []
+
+    pool = await _get_pool()
+    channels = [channel for channel, _target in [_delivery_key(step) for step in steps]]
+    targets = [target for _channel, target in [_delivery_key(step) for step in steps]]
+    existing_rows = await pool.fetch(
+        """
+        SELECT channel, target, status
+        FROM guardian_delivery_log
+        WHERE trace_id = $1
+          AND channel = ANY($2::text[])
+          AND target = ANY($3::text[])
+        """,
+        trace_id,
+        channels,
+        targets,
+    )
+    existing_status = {(str(row["channel"]), str(row["target"])): row["status"] for row in existing_rows}
+
+    pending_steps: list[dict] = []
+    skipped_steps: list[dict] = []
+    for step in steps:
+        channel, target = _delivery_key(step)
+        status = existing_status.get((channel, target))
+        if _delivery_status_blocks_dispatch(status):
+            skipped_steps.append({**step, "skip_reason": f"already_{status}"})
+            continue
+
+        await pool.execute(
+            """
+            INSERT INTO guardian_delivery_log (
+                trace_id, uid, channel, target, caregiver_id, recipient_phone,
+                recipient_email, status, provider_response
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8::jsonb)
+            ON CONFLICT (trace_id, channel, target) DO UPDATE SET
+                uid = EXCLUDED.uid,
+                caregiver_id = EXCLUDED.caregiver_id,
+                recipient_phone = EXCLUDED.recipient_phone,
+                recipient_email = EXCLUDED.recipient_email,
+                status = 'pending',
+                error_message = NULL,
+                provider_response = EXCLUDED.provider_response,
+                updated_at = NOW()
+            WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
+            """,
+            trace_id,
+            uid,
+            channel,
+            target,
+            step.get("caregiver_id"),
+            step.get("recipient_phone"),
+            step.get("recipient_email"),
+            json.dumps({"reserved_by": "omi_backend", "step": step}),
+        )
+        pending_steps.append(step)
+
+    return pending_steps, skipped_steps
+
+
+async def _mark_reserved_steps_dispatch_failed(trace_id: str, steps: list[dict], error_message: str) -> None:
+    if not steps:
+        return
+    pool = await _get_pool()
+    for step in steps:
+        channel, target = _delivery_key(step)
+        await pool.execute(
+            """
+            UPDATE guardian_delivery_log
+            SET status = 'dispatch_failed', error_message = $1, updated_at = NOW()
+            WHERE trace_id = $2 AND channel = $3 AND target = $4 AND status = 'pending'
+            """,
+            error_message[:500],
+            trace_id,
+            channel,
+            target,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -120,6 +354,46 @@ class PlaybackEventRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+class DeliverRequest(BaseModel):
+    """JSON body for /deliver."""
+
+    uid: str
+    trace_id: Optional[str] = None
+    source: str = "unknown"
+    event_type: str = "unknown"
+    severity: str = "low"
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    ambiguity: float = Field(default=0.0, ge=0.0, le=1.0)
+    summary: str = ""
+    evidence: dict = Field(default_factory=dict)
+    requested_channels: list[str] = Field(default_factory=list)
+
+
+class EmailSendRequest(BaseModel):
+    """JSON body for /email/send."""
+
+    to: str
+    subject: str
+    body: str
+    trace_id: Optional[str] = None
+    uid: Optional[str] = None
+    channel: str = "email"
+    target: str = "unknown"
+    priority: str = "normal"
+
+
+class TraceLogRequest(BaseModel):
+    """JSON body for /trace/log."""
+
+    trace_id: str
+    uid: Optional[str] = None
+    stage: str
+    status: str = "success"
+    latency_ms: Optional[int] = None
+    error_detail: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
+
+
 class EnqueueRequest(BaseModel):
     """JSON body for enqueue endpoint."""
 
@@ -133,6 +407,14 @@ class EnqueueRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+class UploadJsonRequest(BaseModel):
+    """JSON body for trusted n8n audio uploads."""
+
+    uid: str
+    audio_base64: str
+    filename: Optional[str] = None
+
+
 def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
     """Resolve the shared guardian pipeline trace id from queue metadata."""
     if isinstance(metadata, dict):
@@ -141,31 +423,6 @@ def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
             if value:
                 return str(value)
     return fallback
-
-
-def _coerce_metadata_dict(metadata: Optional[dict]) -> dict:
-    """Return queue metadata as a plain dict."""
-    if isinstance(metadata, dict):
-        return metadata
-    if isinstance(metadata, str):
-        try:
-            parsed = json.loads(metadata)
-        except (TypeError, ValueError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _normalize_guardian_message(message: Optional[str]) -> str:
-    """Normalize queue text for duplicate detection."""
-    if not message:
-        return ""
-    normalized = str(message).strip().lower()
-    if normalized.startswith("i heard you. i am checking that now:"):
-        normalized = normalized.split(":", 1)[1].strip()
-    normalized = re.sub(r"\s+", " ", normalized)
-    normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
-    return normalized.strip()
 
 
 async def _log_pipeline_event(
@@ -560,14 +817,6 @@ async def enqueue(
 
     item_id = req.id or f"guardian_{uuid.uuid4().hex[:12]}"
     trace_id = _trace_id_from_metadata(req.metadata, item_id)
-    trigger_type = (req.trigger or "").strip()
-    priority = (req.priority or "normal").strip()
-    message = req.message
-
-    # Wake-word acknowledgements should be deterministic and never quote
-    # transcript fragments back to the user.
-    if trigger_type == "wake_word":
-        message = WAKE_WORD_ACK_TEXT
 
     pool = await _get_pool()
     mode_row = await pool.fetchrow(
@@ -609,109 +858,7 @@ async def enqueue(
     metadata = dict(req.metadata or {})
     metadata.setdefault("trace_id", trace_id)
     metadata.setdefault("queue_item_id", item_id)
-    metadata.setdefault("dedupe_window_seconds", QUEUE_DEDUPE_WINDOW_SECONDS)
     metadata_str = json.dumps(metadata)
-
-    recent_rows = await pool.fetch(
-        """
-        SELECT id, priority, message, trigger_type, metadata, consumed_at, created_at
-        FROM guardian_queue
-        WHERE uid = $1
-          AND created_at > NOW() - make_interval(secs => $2)
-        ORDER BY created_at DESC
-        LIMIT 25
-        """,
-        uid,
-        QUEUE_DEDUPE_WINDOW_SECONDS,
-    )
-
-    normalized_message = _normalize_guardian_message(message)
-    same_trace_rows = []
-    pending_same_trace_rows = []
-    for row in recent_rows:
-        row_meta = _coerce_metadata_dict(row["metadata"])
-        row_trace_id = _trace_id_from_metadata(row_meta, row["id"])
-        if row_trace_id != trace_id:
-            continue
-        same_trace_rows.append(row)
-        if row["consumed_at"] is None:
-            pending_same_trace_rows.append(row)
-
-    duplicate_row = next(
-        (
-            row
-            for row in same_trace_rows
-            if row["trigger_type"] == trigger_type and _normalize_guardian_message(row["message"]) == normalized_message
-        ),
-        None,
-    )
-    if duplicate_row is not None:
-        _elapsed = int((time.time() - _start) * 1000)
-        await _log_pipeline_event(
-            trace_id=trace_id,
-            uid=uid,
-            stage="queue_rejected",
-            status="skipped",
-            latency_ms=_elapsed,
-            metadata={
-                "queue_item_id": item_id,
-                "priority": priority,
-                "trigger_type": trigger_type,
-                "reason": "duplicate_message_same_trace",
-                "existing_queue_item_id": duplicate_row["id"],
-            },
-        )
-        return {
-            "ok": True,
-            "skipped": True,
-            "reason": "duplicate_message_same_trace",
-            "existing_id": duplicate_row["id"],
-            "trace_id": trace_id,
-        }
-
-    if trigger_type == "wake_word":
-        actionable_pending_row = next(
-            (
-                row
-                for row in pending_same_trace_rows
-                if row["trigger_type"] in ("policy_dispatch", "scanner-escalation", "consolidated")
-            ),
-            None,
-        )
-        if actionable_pending_row is not None:
-            _elapsed = int((time.time() - _start) * 1000)
-            await _log_pipeline_event(
-                trace_id=trace_id,
-                uid=uid,
-                stage="queue_rejected",
-                status="skipped",
-                latency_ms=_elapsed,
-                metadata={
-                    "queue_item_id": item_id,
-                    "priority": priority,
-                    "trigger_type": trigger_type,
-                    "reason": "wake_word_suppressed_same_trace_has_actionable_audio",
-                    "existing_queue_item_id": actionable_pending_row["id"],
-                    "existing_trigger_type": actionable_pending_row["trigger_type"],
-                },
-            )
-            return {
-                "ok": True,
-                "skipped": True,
-                "reason": "wake_word_suppressed_same_trace_has_actionable_audio",
-                "existing_id": actionable_pending_row["id"],
-                "trace_id": trace_id,
-            }
-
-    if priority == "urgent" and trigger_type in ("policy_dispatch", "scanner-escalation", "consolidated"):
-        superseded_ids = [row["id"] for row in pending_same_trace_rows if row["trigger_type"] == "wake_word"]
-        if superseded_ids:
-            await pool.execute(
-                "UPDATE guardian_queue SET consumed_at = NOW() WHERE id = ANY($1::text[])",
-                superseded_ids,
-            )
-            metadata["superseded_wake_word_ids"] = superseded_ids
-            metadata_str = json.dumps(metadata)
 
     await pool.execute(
         """
@@ -722,9 +869,9 @@ async def enqueue(
         item_id,
         uid,
         req.url,
-        priority,
-        message,
-        trigger_type,
+        req.priority,
+        req.message,
+        req.trigger,
         metadata_str,
     )
 
@@ -743,14 +890,14 @@ async def enqueue(
         latency_ms=_elapsed,
         metadata={
             "queue_item_id": item_id,
-            "priority": priority,
-            "trigger_type": trigger_type,
+            "priority": req.priority,
+            "trigger_type": req.trigger,
             "queued": count,
         },
     )
     print(
-        f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={priority} "
-        f"trigger={trigger_type} trace={trace_id} queued={count} latency={_elapsed}ms",
+        f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} id={item_id} priority={req.priority} "
+        f"trigger={req.trigger} trace={trace_id} queued={count} latency={_elapsed}ms",
         flush=True,
     )
 
@@ -761,6 +908,26 @@ async def enqueue(
 # POST /v1/ella/guardian/upload
 # n8n uploads TTS audio binary (multipart form).
 # ---------------------------------------------------------------------------
+
+
+def _store_audio_content(uid: str, content: bytes, filename: Optional[str] = None) -> dict:
+    user_dir = os.path.join(AUDIO_BASE_DIR, uid)
+    os.makedirs(user_dir, exist_ok=True)
+
+    ts = int(time.time())
+    fname = filename or f"{ts}-{uuid.uuid4().hex[:12]}.mp3"
+    filepath = os.path.join(user_dir, fname)
+
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
+    return {
+        "url": public_url,
+        "path": filepath,
+        "size_bytes": len(content),
+        "filename": fname,
+    }
 
 
 @router.post("/upload")
@@ -775,33 +942,44 @@ async def upload_audio(
     _start = time.time()
     _verify_key(x_guardian_key, key)
 
-    # Create user directory
-    user_dir = os.path.join(AUDIO_BASE_DIR, uid)
-    os.makedirs(user_dir, exist_ok=True)
-
-    # Generate filename
-    ts = int(time.time())
-    fname = filename or f"{ts}-{uuid.uuid4().hex[:12]}.mp3"
-    filepath = os.path.join(user_dir, fname)
-
-    # Write file
     content = await file.read()
-    with open(filepath, "wb") as f:
-        f.write(content)
-
-    public_url = f"{AUDIO_PUBLIC_URL}/{uid}/{fname}"
+    result = _store_audio_content(uid, content, filename)
 
     _elapsed = int((time.time() - _start) * 1000)
     print(
-        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={fname} size={len(content)}B latency={_elapsed}ms url={public_url}",
+        f"[FLOW:GUARDIAN-UPLOAD] uid={uid} file={result['filename']} size={result['size_bytes']}B "
+        f"latency={_elapsed}ms url={result['url']}",
         flush=True,
     )
 
-    return {
-        "url": public_url,
-        "path": filepath,
-        "size_bytes": len(content),
-    }
+    return {k: v for k, v in result.items() if k != "filename"}
+
+
+@router.post("/upload-json")
+async def upload_audio_json(
+    req: UploadJsonRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Upload a base64-encoded audio file and return its public URL."""
+    _start = time.time()
+    _verify_key(x_guardian_key, key)
+
+    try:
+        content = base64.b64decode(req.audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio") from exc
+
+    result = _store_audio_content(req.uid, content, req.filename)
+
+    _elapsed = int((time.time() - _start) * 1000)
+    print(
+        f"[FLOW:GUARDIAN-UPLOAD-JSON] uid={req.uid} file={result['filename']} size={result['size_bytes']}B "
+        f"latency={_elapsed}ms url={result['url']}",
+        flush=True,
+    )
+
+    return {k: v for k, v in result.items() if k != "filename"}
 
 
 # ---------------------------------------------------------------------------
@@ -992,41 +1170,304 @@ async def get_pipeline_trace(conversation_id: str):
 
 
 # ---------------------------------------------------------------------------
+# POST /v1/ella/guardian/deliver
+# Evaluate escalation policy and dispatch pending delivery steps to n8n.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/deliver")
+async def deliver(
+    req: DeliverRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Evaluate escalation policy, reserve idempotency rows, then dispatch to n8n."""
+    started_at = time.time()
+    _verify_key(x_guardian_key, key)
+
+    uid = req.uid.strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid is required")
+
+    trace_id = req.trace_id or uid
+    user, caregivers = await _load_delivery_context(uid)
+    event = EscalationEvent(
+        uid=uid,
+        trace_id=trace_id,
+        source=req.source,
+        event_type=req.event_type,
+        severity=req.severity,
+        confidence=req.confidence,
+        ambiguity=req.ambiguity,
+        summary=req.summary,
+        requested_channels=tuple(req.requested_channels),
+        evidence=req.evidence,
+    )
+    decision = evaluate_escalation_policy(event, user, caregivers)
+    decision_dict = decision.to_dict()
+
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="escalation_decided",
+        status="success",
+        metadata={"decision": decision.decision, "steps": len(decision.delivery_plan)},
+    )
+
+    enriched_steps: list[dict] = []
+    for step in decision_dict.get("delivery_plan", []):
+        recipient = _recipient_for_step(step, user, caregivers)
+        enriched_steps.append({**step, **recipient})
+
+    pending_steps, skipped_steps = await _reserve_delivery_steps(trace_id, uid, enriched_steps)
+    if not pending_steps:
+        elapsed_ms = int((time.time() - started_at) * 1000)
+        print(
+            f"[FLOW:GUARDIAN-DELIVER] SKIP uid={uid} trace={trace_id} "
+            f"reason=no_pending_steps skipped={len(skipped_steps)} latency={elapsed_ms}ms",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "dispatched": False,
+            "reason": "no_pending_delivery_steps",
+            "decision": decision.decision,
+            "trace_id": trace_id,
+            "delivery_plan": enriched_steps,
+            "skipped_delivery_plan": skipped_steps,
+            "latency_ms": elapsed_ms,
+        }
+
+    dispatch_payload = {
+        **decision_dict,
+        "uid": uid,
+        "trace_id": trace_id,
+        "source": req.source,
+        "event_type": req.event_type,
+        "severity": req.severity,
+        "summary": req.summary,
+        "evidence": dict(req.evidence),
+        "user_phone": user.user_phone,
+        "user_email": user.user_email,
+        "guardian_mode": str(user.guardian_mode or "off"),
+        "caregivers": [_caregiver_payload(caregiver) for caregiver in caregivers],
+        "delivery_plan": pending_steps,
+        "selected_channels": pending_steps,
+        "skipped_delivery_plan": skipped_steps,
+    }
+
+    dispatch_ok = False
+    dispatch_error = ""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                N8N_GUARDIAN_DELIVER_WEBHOOK,
+                json=dispatch_payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Guardian-Key": GUARDIAN_WEBHOOK_KEY,
+                },
+            )
+            dispatch_ok = response.status_code < 300
+            if not dispatch_ok:
+                dispatch_error = f"n8n returned {response.status_code}: {response.text[:200]}"
+    except Exception as exc:
+        dispatch_error = f"n8n dispatch error: {exc}"
+
+    elapsed_ms = int((time.time() - started_at) * 1000)
+    if not dispatch_ok:
+        await _mark_reserved_steps_dispatch_failed(trace_id, pending_steps, dispatch_error)
+
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="delivery_dispatched" if dispatch_ok else "delivery_dispatch_failed",
+        status="success" if dispatch_ok else "error",
+        latency_ms=elapsed_ms,
+        metadata={
+            "channels": [step["channel"] for step in pending_steps],
+            "skipped": len(skipped_steps),
+            "n8n_status": "ok" if dispatch_ok else "failed",
+            "n8n_error": dispatch_error,
+        },
+    )
+
+    print(
+        f"[FLOW:GUARDIAN-DELIVER] uid={uid} trace={trace_id} decision={decision.decision} "
+        f"pending={len(pending_steps)} skipped={len(skipped_steps)} "
+        f"dispatch={'ok' if dispatch_ok else 'FAILED'} latency={elapsed_ms}ms",
+        flush=True,
+    )
+    return {
+        "ok": dispatch_ok,
+        "dispatched": dispatch_ok,
+        "reason": "" if dispatch_ok else dispatch_error,
+        "decision": decision.decision,
+        "trace_id": trace_id,
+        "delivery_plan": pending_steps,
+        "skipped_delivery_plan": skipped_steps,
+        "latency_ms": elapsed_ms,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/ella/guardian/email/send
+# Optional SMTP fallback used by delivery workflows.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/email/send")
+async def email_send(
+    req: EmailSendRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
+    """Send a guardian alert email via configured SMTP relay."""
+    _verify_key(x_guardian_key, key)
+    if not req.to:
+        raise HTTPException(status_code=400, detail="email recipient is required")
+
+    trace_id = req.trace_id or "unknown"
+    uid = req.uid or "unknown"
+    pool = await _get_pool()
+    existing = await pool.fetchval(
+        """
+        SELECT status
+        FROM guardian_delivery_log
+        WHERE trace_id = $1 AND channel = 'email' AND target = $2
+        """,
+        trace_id,
+        req.target,
+    )
+    if _delivery_status_blocks_dispatch(existing):
+        return {"ok": True, "sent": False, "reason": f"already_{existing}", "trace_id": trace_id}
+
+    await pool.execute(
+        """
+        INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, recipient_email, status, provider_response)
+        VALUES ($1, $2, 'email', $3, $4, 'sending', $5::jsonb)
+        ON CONFLICT (trace_id, channel, target) DO UPDATE SET
+            uid = EXCLUDED.uid,
+            recipient_email = EXCLUDED.recipient_email,
+            status = 'sending',
+            error_message = NULL,
+            provider_response = EXCLUDED.provider_response,
+            updated_at = NOW()
+        WHERE guardian_delivery_log.status NOT IN ('pending', 'sending', 'sent', 'success', 'delivered')
+        """,
+        trace_id,
+        uid,
+        req.target,
+        req.to,
+        json.dumps({"to": req.to, "subject": req.subject}),
+    )
+
+    message = MIMEText(req.body)
+    message["Subject"] = req.subject
+    message["To"] = req.to
+    message["From"] = SMTP_FROM
+    smtp_host = os.environ.get("ELLA_SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("ELLA_SMTP_PORT", "587"))
+    smtp_user = os.environ.get("ELLA_SMTP_USER", "")
+    smtp_pass = os.environ.get("ELLA_SMTP_PASS", "")
+
+    sent = False
+    error = ""
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            if smtp_user and smtp_pass:
+                server.starttls()
+                server.login(smtp_user, smtp_pass)
+            server.send_message(message)
+        sent = True
+    except smtplib.SMTPRecipientsRefused as exc:
+        error = f"recipient_refused: {str(exc)[:150]}"
+    except smtplib.SMTPException as exc:
+        error = f"smtp_error: {str(exc)[:150]}"
+    except Exception as exc:
+        error = f"send_error: {str(exc)[:150]}"
+
+    await pool.execute(
+        """
+        UPDATE guardian_delivery_log
+        SET status = $1, error_message = $2, updated_at = NOW()
+        WHERE trace_id = $3 AND channel = 'email' AND target = $4
+        """,
+        "sent" if sent else "error",
+        error,
+        trace_id,
+        req.target,
+    )
+    await _log_pipeline_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="delivery_email_sent" if sent else "delivery_email_failed",
+        status="success" if sent else "error",
+        metadata={"to": req.to, "subject": req.subject[:80], "error": error if not sent else None},
+    )
+
+    if sent:
+        return {"ok": True, "sent": True, "trace_id": trace_id, "to": req.to}
+    return {"ok": False, "sent": False, "trace_id": trace_id, "error": error}
+
+
+# ---------------------------------------------------------------------------
 # POST /v1/ella/guardian/trace/log
 # Log a pipeline event (called by n8n workflows).
 # ---------------------------------------------------------------------------
 
 
 @router.post("/trace/log")
-async def log_pipeline_event(request: Request):
+async def log_pipeline_event(
+    req: TraceLogRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+):
     """Log a pipeline event (called by n8n workflows)."""
-    request_body = await request.json()
-
-    trace_id = request_body.get("trace_id")
-    uid = request_body.get("uid", "")
-    stage = request_body.get("stage")
-    status = request_body.get("status", "success")
-    latency_ms = request_body.get("latency_ms")
-    metadata = request_body.get("metadata", {})
-
-    if not trace_id or not stage:
-        raise HTTPException(status_code=400, detail="trace_id and stage required")
+    _verify_optional_trace_key(x_guardian_key, key)
+    metadata = dict(req.metadata or {})
+    if req.error_detail:
+        metadata["error_detail"] = req.error_detail
 
     await _log_pipeline_event(
-        trace_id=trace_id,
-        uid=uid,
-        stage=stage,
-        status=status,
-        latency_ms=latency_ms,
+        trace_id=req.trace_id,
+        uid=req.uid or "",
+        stage=req.stage,
+        status=req.status,
+        latency_ms=req.latency_ms,
         metadata=metadata,
     )
 
+    channel = metadata.get("channel")
+    if channel:
+        pool = await _get_pool()
+        await pool.execute(
+            """
+            INSERT INTO guardian_delivery_log (trace_id, uid, channel, target, caregiver_id, status, error_message)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (trace_id, channel, target) DO UPDATE SET
+                uid = EXCLUDED.uid,
+                caregiver_id = EXCLUDED.caregiver_id,
+                status = EXCLUDED.status,
+                error_message = EXCLUDED.error_message,
+                updated_at = NOW()
+            """,
+            req.trace_id,
+            req.uid or "",
+            channel,
+            metadata.get("target", "unknown"),
+            metadata.get("caregiver_id"),
+            req.status,
+            req.error_detail,
+        )
+
     print(
-        f"[FLOW:GUARDIAN-TRACE-LOG] trace={trace_id} uid={uid} stage={stage} status={status} latency={latency_ms}ms",
+        f"[FLOW:GUARDIAN-TRACE-LOG] trace={req.trace_id} uid={req.uid or ''} "
+        f"stage={req.stage} status={req.status} latency={req.latency_ms}ms",
         flush=True,
     )
 
-    return {"logged": True, "trace_id": trace_id, "stage": stage}
+    return {"ok": True, "logged": True, "trace_id": req.trace_id, "stage": req.stage, "status": req.status}
 
 
 # ---------------------------------------------------------------------------

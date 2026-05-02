@@ -20,13 +20,40 @@ class EllaCaregiverDetailPage extends StatefulWidget {
 }
 
 class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
+  late Caregiver _caregiver;
   late bool _dailySummary;
+  late bool _isEmergencyContact;
   bool _resending = false;
+  bool _loadingEmergency = true;
 
   @override
   void initState() {
     super.initState();
-    _dailySummary = widget.caregiver.receiveDailySummary;
+    _caregiver = widget.caregiver;
+    _dailySummary = _caregiver.receiveDailySummary;
+    _isEmergencyContact = false;
+    _refreshFromBackend();
+  }
+
+  Future<void> _refreshFromBackend() async {
+    try {
+      final caregivers = await caregiver_api.getCaregivers();
+      final emergencyId = await caregiver_api.getEmergencyContactId();
+      final updated = caregivers.firstWhere(
+        (c) => c.id == _caregiver.id,
+        orElse: () => _caregiver,
+      );
+      if (mounted) {
+        setState(() {
+          _dailySummary = updated.receiveDailySummary;
+          _caregiver = updated;
+          _isEmergencyContact = emergencyId == updated.id;
+          _loadingEmergency = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingEmergency = false);
+    }
   }
 
   String _formatDate(DateTime? date) {
@@ -37,24 +64,40 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   Future<void> _toggleDailySummary(bool value) async {
     setState(() => _dailySummary = value);
     try {
-      await caregiver_api.updateCaregiverPermissions(widget.caregiver.id, dailySummary: value);
+      await caregiver_api.updateCaregiverPermissions(_caregiver.id, dailySummary: value);
     } catch (_) {
       if (mounted) setState(() => _dailySummary = !value);
     }
   }
 
+  Future<void> _toggleEmergencyContact(bool value) async {
+    final previousValue = _isEmergencyContact;
+    setState(() => _isEmergencyContact = value);
+    try {
+      if (value) {
+        await caregiver_api.setEmergencyContact(_caregiver.id);
+      } else {
+        // Clear emergency contact by setting to empty — backend clears the field
+        await caregiver_api.clearEmergencyContact();
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isEmergencyContact = previousValue);
+    }
+  }
+
   Future<void> _resendInvite() async {
-    if (_resending || widget.caregiver.phone == null) return;
+    if (_resending) return;
     setState(() => _resending = true);
     try {
       await caregiver_api.resendInvite(
         uid: SharedPreferencesUtil().uid,
-        caregiverId: widget.caregiver.id,
+        caregiverId: _caregiver.id,
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaResendSuccess(widget.caregiver.name))),
+          SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))),
         );
+        await _refreshFromBackend();
       }
     } catch (_) {
       if (mounted) {
@@ -73,11 +116,11 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
         backgroundColor: EllaColors.bgSecondary,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
         title: Text(
-          context.l10n.ellaRemoveConfirmTitle(widget.caregiver.name),
+          context.l10n.ellaRemoveConfirmTitle(_caregiver.name),
           style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
         ),
         content: Text(
-          context.l10n.ellaRemoveConfirmDescription(widget.caregiver.name),
+          context.l10n.ellaRemoveConfirmDescription(_caregiver.name),
           style: const TextStyle(fontSize: 18, color: EllaColors.textSecondary, height: 1.5),
         ),
         actions: [
@@ -97,10 +140,10 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     if (confirmed != true || !mounted) return;
 
     try {
-      await caregiver_api.removeCaregiver(widget.caregiver.id);
+      await caregiver_api.removeCaregiver(_caregiver.id);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.ellaRemoveSuccess(widget.caregiver.name))),
+          SnackBar(content: Text(context.l10n.ellaRemoveSuccess(_caregiver.name))),
         );
         Navigator.of(context).pop();
       }
@@ -115,12 +158,22 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final cg = widget.caregiver;
-    final statusColor = cg.isActive ? EllaColors.success : EllaColors.warning;
-    final statusLabel = cg.isActive ? context.l10n.ellaCaregiverStatusActive : context.l10n.ellaCaregiverStatusInvited;
+    final cg = _caregiver;
+    final statusColor = cg.isActive
+        ? EllaColors.success
+        : cg.isExpired
+            ? EllaColors.error
+            : EllaColors.warning;
+    final statusLabel = cg.isActive
+        ? context.l10n.ellaCaregiverStatusActive
+        : cg.isExpired
+            ? context.l10n.ellaCaregiverStatusExpired
+            : context.l10n.ellaCaregiverStatusInvited;
     final dateLabel = cg.isActive
         ? context.l10n.ellaJoinedDate(_formatDate(cg.joinedAt))
-        : context.l10n.ellaInvitedDate(_formatDate(cg.invitedAt));
+        : cg.isExpired
+            ? context.l10n.ellaInviteExpiredDate(_formatDate(cg.inviteExpiresAt))
+            : context.l10n.ellaInvitedDate(_formatDate(cg.invitedAt));
 
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -149,7 +202,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
               height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: EllaColors.primary.withOpacity(0.15),
+                color: EllaColors.primary.withValues(alpha: 0.15),
               ),
               child: Center(
                 child: Text(
@@ -197,7 +250,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
                 const SizedBox(height: 4),
                 Text(dateLabel,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary)),
-                if (cg.isInvited) ...[
+                if (cg.isInvited || cg.isExpired) ...[
                   const SizedBox(height: 12),
                   Semantics(
                     button: true,
@@ -282,9 +335,11 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
           _buildSectionHeader('NOTIFICATIONS'),
           EllaPermissionToggle(
             title: context.l10n.ellaPermissionEmergencyAlerts,
-            description: context.l10n.ellaPermissionEmergencyAlertsDescription,
-            isOn: true,
-            locked: true,
+            description: _isEmergencyContact
+                ? '${cg.name} is your emergency contact and will receive critical alerts'
+                : 'Tap to make ${cg.name} your emergency contact for critical alerts',
+            isOn: _isEmergencyContact,
+            onChanged: _loadingEmergency ? null : _toggleEmergencyContact,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
           ),
           const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
