@@ -737,7 +737,73 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
         return ""
 
 
-async def _fetch_recent_timeline(uid: str, limit: int = 12) -> str:
+def _build_recent_channel_flow(events: list[dict], max_chars: int = 4200) -> str:
+    """Build a chronological, conversation-shaped pack from canonical events.
+
+    The goal is to present recent cross-channel context as a single coherent
+    memory layer, not fragmented by storage source. We group adjacent events by
+    session/channel, preserve order, and keep both user/assistant turns.
+    """
+    if not events:
+        return ""
+
+    grouped: list[dict] = []
+    current: dict | None = None
+
+    for event in events:
+        text = " ".join((event.get("text") or "").split())
+        if not text:
+            continue
+
+        channel = (event.get("channel") or "event").strip()
+        provider = (event.get("provider") or "").strip()
+        role = (event.get("role") or "").strip().lower()
+        session_id = (event.get("session_id") or "").strip()
+        ts = event.get("started_at") or event.get("ended_at") or ""
+
+        if not current or current["session_id"] != session_id or current["channel"] != channel:
+            current = {
+                "session_id": session_id,
+                "channel": channel,
+                "provider": provider,
+                "timestamp": ts,
+                "turns": [],
+            }
+            grouped.append(current)
+
+        current["turns"].append((role, text))
+
+    lines: list[str] = []
+    for block in grouped:
+        ts_short = ""
+        if block["timestamp"]:
+            try:
+                ts_short = datetime.fromisoformat(block["timestamp"].replace("Z", "+00:00")).strftime("%b %d %I:%M %p")
+            except Exception:
+                ts_short = str(block["timestamp"])[:16]
+
+        header = f"[{block['channel']}]"
+        if block["provider"]:
+            header += f" ({block['provider']})"
+        if ts_short:
+            header += f" {ts_short}"
+        lines.append(header)
+
+        for role, text in block["turns"]:
+            role_label = "User" if role == "user" else "Ella" if role == "assistant" else (role.title() or "Event")
+            lines.append(f"{role_label}: {text[:320]}")
+        lines.append("")
+
+    flow = "\n".join(lines).strip()
+    if len(flow) > max_chars:
+        flow = flow[-max_chars:]
+        first_break = flow.find("\n")
+        if 0 <= first_break < 200:
+            flow = flow[first_break + 1 :]
+    return flow
+
+
+async def _fetch_recent_timeline(uid: str, limit: int = 25) -> str:
     """Fetch recent cross-channel canonical events for startup voice context.
 
     This is the main bridge between post-call canonical ledger writeback and
@@ -764,36 +830,7 @@ async def _fetch_recent_timeline(uid: str, limit: int = 12) -> str:
     if not events:
         return ""
 
-    lines = []
-    for event in events:
-        channel = (event.get("channel") or "").strip()
-        role = (event.get("role") or "").strip().lower()
-        text = " ".join((event.get("text") or "").split())
-        if not text:
-            continue
-
-        ts = event.get("started_at") or event.get("ended_at") or ""
-        ts_short = ""
-        if ts:
-            try:
-                ts_short = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%b %d %I:%M %p")
-            except Exception:
-                ts_short = str(ts)[:16]
-
-        channel_label = channel or "event"
-        role_label = "User" if role == "user" else "Ella" if role == "assistant" else role.title() or "Event"
-        line = f"- [{channel_label}] {role_label}: {text[:280]}"
-        if ts_short:
-            line += f" ({ts_short})"
-        lines.append(line)
-
-    if not lines:
-        return ""
-
-    timeline = "\n".join(lines)
-    if len(timeline) > 2200:
-        timeline = timeline[-2200:]
-    return timeline
+    return _build_recent_channel_flow(events, max_chars=4200)
 
 
 async def _fetch_memory_context(gateway_url: str, gateway_token: str, user_name: str = "user") -> str:
@@ -888,6 +925,8 @@ async def get_voice_context(request: Request):
         raise HTTPException(status_code=400, detail="uid is required")
 
     budget = body.get("context_budget", 8000)
+    profile = str(body.get("profile", "full") or "full").lower()
+    is_lite = profile in {"gemini-zero", "gemini-lite", "lite", "fast"}
     _start = time.time()
 
     # 1. DB lookup — user + agent cluster
@@ -972,15 +1011,25 @@ async def get_voice_context(request: Request):
     memory_context = ""
     try:
         import asyncio as _aio
-        # Run all fetches concurrently
-        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=5))
-        timeline_task = _aio.create_task(_fetch_recent_timeline(uid, limit=12))
-        mem_task = _aio.create_task(_fetch_memory_context(gateway_url, gateway_token, row["name"] or "user"))
-        recent_conversations, recent_timeline, memory_context = await _aio.gather(
-            conv_task,
-            timeline_task,
-            mem_task,
-        )
+        conv_limit = 2 if is_lite else 5
+        timeline_limit = 10 if is_lite else 25
+        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=conv_limit))
+        timeline_task = _aio.create_task(_fetch_recent_timeline(uid, limit=timeline_limit))
+        if is_lite:
+            recent_conversations, recent_timeline = await _aio.gather(
+                conv_task,
+                timeline_task,
+            )
+            memory_context = ""
+        else:
+            mem_task = _aio.create_task(
+                _fetch_memory_context(gateway_url, gateway_token, row["name"] or "user")
+            )
+            recent_conversations, recent_timeline, memory_context = await _aio.gather(
+                conv_task,
+                timeline_task,
+                mem_task,
+            )
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
 
@@ -989,7 +1038,7 @@ async def get_voice_context(request: Request):
     user_profile = files.get("USER.md", "")[:2000]
     # Read last 2 days of daily voice logs (today + yesterday, UTC)
     voice_summaries = ""
-    if agent_id and PROVISION_API_TOKEN:
+    if not is_lite and agent_id and PROVISION_API_TOKEN:
         try:
             _today = datetime.utcnow()
             _yesterday = _today - timedelta(days=1)
@@ -1014,13 +1063,23 @@ async def get_voice_context(request: Request):
     memory = files.get("MEMORY.md", "")[:500]
     
     # Additional workspace files for richer context
-    tools_md = files.get("TOOLS.md", "")[:500]  # Agent capabilities awareness
     shared_reports = ""
-    for fname, fcontent in files.items():
-        if fname.startswith("shared/reports/") and fcontent:
-            shared_reports += fcontent[:800] + "\n"
-            if len(shared_reports) > 1500:
-                break
+    if not is_lite:
+        for fname, fcontent in files.items():
+            if fname.startswith("shared/reports/") and fcontent:
+                shared_reports += fcontent[:800] + "\n"
+                if len(shared_reports) > 1500:
+                    break
+
+    if is_lite:
+        soul = soul[:1200]
+        user_profile = user_profile[:900]
+        recent_timeline = recent_timeline[:2200]
+        recent_conversations = recent_conversations[:1200]
+        dynamic_rules = dynamic_rules[:3]
+    else:
+        soul = soul[: min(len(soul), max(800, budget // 3))]
+        user_profile = user_profile[: min(len(user_profile), max(600, budget // 4))]
 
     # conditions and medications are text[] arrays in postgres
     conditions_list = list(row["conditions"] or [])
@@ -1029,6 +1088,7 @@ async def get_voice_context(request: Request):
     _elapsed = int((time.time() - _start) * 1000)
     print(
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
+        f"profile={profile} budget={budget} "
         f"files={len(files)} rules={len(dynamic_rules)} "
         f"convos={len(recent_conversations)} timeline={len(recent_timeline)} mem={len(memory_context)} "
         f"latency={_elapsed}ms",
@@ -1048,6 +1108,7 @@ async def get_voice_context(request: Request):
         "recent_voice_summaries": voice_summaries,
         "recent_conversations": recent_conversations,
         "recent_timeline": recent_timeline,
+        "recent_channel_flow": recent_timeline,
         "memory_context": memory_context,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
