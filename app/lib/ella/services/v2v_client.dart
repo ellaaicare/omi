@@ -27,6 +27,10 @@ class V2VEvent {
 /// Uses `record` package for mic input and `just_audio` for WAV playback.
 /// Mic is muted during playback to prevent echo→VAD interruption on Grok's side.
 class V2VClient {
+  static const int _pcmSampleRate = 24000;
+  static const int _pcmBytesPerSample = 2;
+  static const int _pcmChannels = 1;
+
   WebSocketChannel? _channel;
   AudioRecorder? _recorder;
   StreamSubscription? _micSub;
@@ -43,6 +47,7 @@ class V2VClient {
   final FlutterSoundPlayer _streamPlayer = FlutterSoundPlayer();
   bool _streamPlayerOpen = false;
   bool _streamPlaybackStarted = false;
+  DateTime? _streamPlaybackStartedAt;
   Future<void> _streamFeedFuture = Future.value();
 
   /// Callback for JSON events (transcripts, errors, etc.)
@@ -169,6 +174,7 @@ class V2VClient {
     _micMuted = false;
     _pcmBuffer.clear();
     _chunkCount = 0;
+    _streamPlaybackStartedAt = null;
   }
 
   // --- Audio session ---
@@ -377,10 +383,11 @@ class V2VClient {
     _streamPlaybackStarted = true;
     await _streamPlayer.startPlayerFromStream(
       codec: Codec.pcm16,
-      sampleRate: 24000,
-      numChannels: 1,
+      sampleRate: _pcmSampleRate,
+      numChannels: _pcmChannels,
       bufferSize: 4096,
     );
+    _streamPlaybackStartedAt = DateTime.now();
     Logger.debug('[V2V] PCM stream player started');
   }
 
@@ -410,7 +417,18 @@ class V2VClient {
 
     try {
       await _streamFeedFuture.timeout(const Duration(seconds: 5));
-      await Future.delayed(const Duration(milliseconds: 250));
+
+      // `audio_done` means the proxy finished sending bytes, not that the
+      // native PCM player has drained its internal queue. Stop too early and
+      // the user hears only the first words even though transcript is complete.
+      final startedAt = _streamPlaybackStartedAt;
+      final totalAudioMs = (pcmBytes.length / (_pcmSampleRate * _pcmBytesPerSample * _pcmChannels) * 1000).ceil();
+      final elapsedMs = startedAt == null ? 0 : DateTime.now().difference(startedAt).inMilliseconds;
+      final remainingMs = totalAudioMs - elapsedMs;
+      final drainDelayMs = remainingMs > 0 ? remainingMs + 300 : 300;
+      Logger.debug('[V2V] Waiting ${drainDelayMs}ms for PCM drain ($totalAudioMs ms audio, $elapsedMs ms elapsed)');
+      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playing audio: ${(totalAudioMs / 1000).toStringAsFixed(1)}s'));
+      await Future.delayed(Duration(milliseconds: drainDelayMs.clamp(300, 30000)));
       await _onPlaybackComplete();
     } catch (e) {
       Logger.error('[V2V] Stream playback error: $e');
@@ -428,6 +446,7 @@ class V2VClient {
     await _stopStreamingPlayback();
     _isPlaying = false;
     _micMuted = false;
+    _streamPlaybackStartedAt = null;
 
     onEvent?.call(V2VEvent(type: 'playback_complete'));
   }
