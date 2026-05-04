@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
+import 'package:omi/ella/pages/ella_invite_sent_screen.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_permission_toggle.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -89,15 +90,56 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
     if (_resending) return;
     setState(() => _resending = true);
     try {
-      await caregiver_api.resendInvite(
+      final response = await caregiver_api.resendInvite(
         uid: SharedPreferencesUtil().uid,
         caregiverId: _caregiver.id,
       );
+      if (!response.emailSent) {
+        if (mounted) {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => EllaInviteSentScreen(
+                name: _caregiver.name,
+                email: _caregiver.email ?? '',
+                phone: _caregiver.phone,
+                inviteCode: response.inviteCode,
+                caregiverId: _caregiver.id,
+                emailSent: false,
+                deliveryError: response.deliveryError ?? response.failureReason,
+              ),
+            ),
+          );
+        }
+        return;
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(context.l10n.ellaResendSuccess(_caregiver.name))),
         );
         await _refreshFromBackend();
+      }
+    } on CaregiverApiException catch (e) {
+      final inviteResponse = e.inviteResponse;
+      if (mounted && inviteResponse != null && inviteResponse.emailDeliveryFailed) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => EllaInviteSentScreen(
+              name: _caregiver.name,
+              email: _caregiver.email ?? '',
+              phone: _caregiver.phone,
+              inviteCode: inviteResponse.inviteCode,
+              caregiverId: inviteResponse.caregiverId.isNotEmpty ? inviteResponse.caregiverId : _caregiver.id,
+              emailSent: false,
+              deliveryError: inviteResponse.deliveryError ?? inviteResponse.failureReason ?? e.message,
+            ),
+          ),
+        );
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
+        );
       }
     } catch (_) {
       if (mounted) {
@@ -105,8 +147,9 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
           SnackBar(content: Text(context.l10n.ellaInviteErrorNetwork)),
         );
       }
+    } finally {
+      if (mounted) setState(() => _resending = false);
     }
-    if (mounted) setState(() => _resending = false);
   }
 
   Future<void> _removeCaregiver() async {

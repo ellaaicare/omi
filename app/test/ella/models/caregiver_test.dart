@@ -83,5 +83,34 @@ void main() {
       expect(caregiver.isActive, isTrue);
       expect(caregiver.isExpired, isFalse);
     });
+
+    test('invite response preserves failed email delivery recovery fields', () {
+      final response = InviteResponse.fromJson({
+        'caregiver_id': 'cg-1',
+        'invite_id': 'inv-1',
+        'invite_code': '123456',
+        'status': 'created',
+        'email_sent': false,
+        'failure_reason': 'gmail_auth',
+      });
+
+      expect(response.caregiverId, 'cg-1');
+      expect(response.inviteCode, '123456');
+      expect(response.emailSent, isFalse);
+      expect(response.emailDeliveryFailed, isTrue);
+      expect(response.hasInviteRecovery, isTrue);
+      expect(response.failureReason, 'gmail_auth');
+    });
+
+    test('invite response accepts string email_sent values', () {
+      final response = InviteResponse.fromJson({
+        'caregiver_id': 'cg-1',
+        'invite_code': '123456',
+        'email_sent': 'false',
+      });
+
+      expect(response.emailSent, isFalse);
+      expect(response.emailDeliveryFailed, isTrue);
+    });
   });
 }

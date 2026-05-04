@@ -15920,6 +15920,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Gemini Native Live'**
   String get geminiNativeLiveVoiceMode;
+
+  /// Title shown when caregiver invite row exists but invite email delivery failed
+  ///
+  /// In en, this message translates to:
+  /// **'Invite created, email not sent'**
+  String get ellaInviteEmailFailedTitle;
+
+  /// Description shown when caregiver invite email delivery failed after row creation
+  ///
+  /// In en, this message translates to:
+  /// **'The invite for {email} exists, but email delivery failed. Share the code below or retry email.'**
+  String ellaInviteEmailFailedDescription(String email);
+
+  /// Delivery failure reason for caregiver invite email
+  ///
+  /// In en, this message translates to:
+  /// **'Delivery error: {reason}'**
+  String ellaInviteEmailFailedReason(String reason);
+
+  /// Button label to retry caregiver invite email delivery
+  ///
+  /// In en, this message translates to:
+  /// **'Retry Email'**
+  String get ellaRetryEmail;
+
+  /// Snackbar shown when caregiver invite email retry succeeds
+  ///
+  /// In en, this message translates to:
+  /// **'Invite email sent.'**
+  String get ellaRetryEmailSuccess;
+
+  /// Snackbar shown when caregiver invite email retry fails
+  ///
+  /// In en, this message translates to:
+  /// **'Email still could not be sent. You can share the invite code instead.'**
+  String get ellaRetryEmailFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
