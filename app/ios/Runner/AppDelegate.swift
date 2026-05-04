@@ -42,38 +42,28 @@ extension FlutterError: Error {}
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
 
-    // Configure audio session for background recording
-    do {
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-        try audioSession.setActive(true, options: [])
-        print("AppDelegate: Audio session configured for background recording")
+    let audioSession = AVAudioSession.sharedInstance()
+    NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioSessionInterruption),
+        name: AVAudioSession.interruptionNotification,
+        object: audioSession
+    )
 
-        // Observe audio session interruptions
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioSessionInterruption),
-            name: AVAudioSession.interruptionNotification,
-            object: audioSession
-        )
+    NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioSessionRouteChange),
+        name: AVAudioSession.routeChangeNotification,
+        object: audioSession
+    )
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioSessionRouteChange),
-            name: AVAudioSession.routeChangeNotification,
-            object: audioSession
-        )
-
-        // Reactivate audio session when app becomes active
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleApplicationDidBecomeActive),
-            name: UIApplication.didBecomeActiveNotification,
-            object: nil
-        )
-    } catch {
-        print("AppDelegate: Failed to configure audio session: \(error.localizedDescription)")
-    }
+    NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleApplicationDidBecomeActive),
+        name: UIApplication.didBecomeActiveNotification,
+        object: nil
+    )
+    print("AppDelegate: Audio session observers registered without activating session")
 
 
       // Get Flutter view controller
@@ -215,13 +205,6 @@ extension FlutterError: Error {}
           print("AppDelegate: Audio session interrupted")
       case .ended:
           print("AppDelegate: Audio session interruption ended")
-          // Reactivate audio session
-          do {
-              try AVAudioSession.sharedInstance().setActive(true)
-              print("AppDelegate: Audio session reactivated after interruption")
-          } catch {
-              print("AppDelegate: Failed to reactivate audio session: \(error)")
-          }
           GuardianModeManager.shared.repairIfActive(reason: "audio_interruption_ended")
       @unknown default:
           break
@@ -237,34 +220,10 @@ extension FlutterError: Error {}
 
       print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
 
-      // When headphones or Bluetooth are removed, iOS defaults .playAndRecord back to the
-      // earpiece. Override to the loudspeaker so guardian audio stays audible.
-      if reason == .oldDeviceUnavailable {
-          DispatchQueue.main.async {
-              do {
-                  try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-                  print("AppDelegate: Forced output to loudspeaker after device removal")
-              } catch {
-                  print("AppDelegate: Failed to override output port: \(error)")
-              }
-          }
-      }
-
-      // Report new route to backend so consolidator knows current echo risk
-      GuardianModeManager.shared.reportPlaybackEvent()
+      GuardianModeManager.shared.handleAudioRouteChange(reason: reason.rawValue)
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
-      // Ensure audio session is active when app becomes active
-      do {
-          let audioSession = AVAudioSession.sharedInstance()
-          if !audioSession.isOtherAudioPlaying {
-              try audioSession.setActive(true)
-              print("AppDelegate: Audio session reactivated on app becoming active")
-          }
-      } catch {
-          print("AppDelegate: Failed to reactivate audio session on app active: \(error)")
-      }
       GuardianModeManager.shared.repairIfActive(reason: "app_did_become_active")
   }
 

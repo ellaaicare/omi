@@ -24,6 +24,9 @@ class GuardianModePollingService {
     private var lastPollAttemptAt: Date?
     private var lastPollSuccessAt: Date?
     private var lastPollErrorAt: Date?
+    private var isPollInFlight = false
+    private var pollGeneration: UInt = 0
+    private var lastScheduledDelay: TimeInterval = 0
 
     struct PollResponse: Codable {
         let url: String?
@@ -98,11 +101,15 @@ class GuardianModePollingService {
             return
         }
 
+        pollTimer?.cancel()
+        pollTimer = nil
+        pollGeneration += 1
         isPolling = true
+        isPollInFlight = false
         consecutiveErrors = 0
-        NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
+        NSLog("GuardianPolling: Starting poll timer generation=\(pollGeneration) interval=\(pollInterval)s")
 
-        createPollTimerLocked()
+        scheduleNextPollLocked(after: 0, reason: "start")
     }
 
     func stopPolling() {
@@ -111,11 +118,13 @@ class GuardianModePollingService {
 
         guard isPolling else { return }
 
-        NSLog("GuardianPolling: Stopping poll timer")
+        pollGeneration += 1
+        NSLog("GuardianPolling: Stopping poll timer generation=\(pollGeneration)")
 
         pollTimer?.cancel()
         pollTimer = nil
         isPolling = false
+        isPollInFlight = false
     }
 
     /// Keep the poller alive while Guardian Mode is active. Dispatch timers can
@@ -130,7 +139,7 @@ class GuardianModePollingService {
         let staleAfter = max(pollInterval * 5, 20.0)
         let isStale = lastPollAttemptAt.map { now.timeIntervalSince($0) > staleAfter } ?? true
 
-        guard !isPolling || pollTimer == nil || isStale else {
+        guard !isPolling || pollTimer == nil || (isStale && !isPollInFlight) else {
             return
         }
 
@@ -141,9 +150,11 @@ class GuardianModePollingService {
 
         pollTimer?.cancel()
         pollTimer = nil
+        pollGeneration += 1
         isPolling = true
+        isPollInFlight = false
         consecutiveErrors = 0
-        createPollTimerLocked()
+        scheduleNextPollLocked(after: 0, reason: reason)
     }
 
     func statusSnapshot() -> [String: Any] {
@@ -153,6 +164,9 @@ class GuardianModePollingService {
         return [
             "is_polling": isPolling,
             "has_timer": pollTimer != nil,
+            "is_poll_in_flight": isPollInFlight,
+            "poll_generation": pollGeneration,
+            "last_scheduled_delay": lastScheduledDelay,
             "consecutive_errors": consecutiveErrors,
             "last_poll_attempt_at": lastPollAttemptAt?.timeIntervalSince1970 ?? 0,
             "last_poll_success_at": lastPollSuccessAt?.timeIntervalSince1970 ?? 0,
@@ -235,34 +249,61 @@ class GuardianModePollingService {
 
     // MARK: - Private Methods
 
-    private func createPollTimerLocked() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    private func scheduleNextPollLocked(after delay: TimeInterval, reason: String) {
+        pollTimer?.cancel()
+        pollTimer = nil
 
-        timer.schedule(deadline: .now(), repeating: pollInterval)
+        guard isPolling else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        let generation = pollGeneration
+        lastScheduledDelay = delay
+
+        timer.schedule(deadline: .now() + delay)
 
         timer.setEventHandler { [weak self] in
             Task {
-                await self?.executePoll()
+                await self?.executePoll(generation: generation)
             }
         }
 
         timer.resume()
         pollTimer = timer
+        NSLog("GuardianPolling: Scheduled next poll generation=\(generation) delay=\(String(format: "%.2f", delay)) reason=\(reason)")
     }
 
-    private func executePoll() async {
-        stateLock.lock()
-        let active = isPolling
-        if active {
-            lastPollAttemptAt = Date()
-        }
-        stateLock.unlock()
+    private func nextPollDelayLocked() -> TimeInterval {
+        let cappedErrors = min(consecutiveErrors, 5)
+        let backoff = cappedErrors == 0 ? 0 : min(30.0, pow(2.0, Double(cappedErrors)))
+        let jitter = Double.random(in: 0...0.75)
+        return pollInterval + backoff + jitter
+    }
 
-        guard active else { return }
+    private func executePoll(generation: UInt) async {
+        stateLock.lock()
+        guard isPolling, generation == pollGeneration else {
+            stateLock.unlock()
+            return
+        }
+
+        guard !isPollInFlight else {
+            let delay = nextPollDelayLocked()
+            scheduleNextPollLocked(after: delay, reason: "in_flight_skip")
+            stateLock.unlock()
+            return
+        }
+        isPollInFlight = true
+        lastPollAttemptAt = Date()
+        stateLock.unlock()
 
         do {
             if let result = try await pollForNewAudio() {
                 stateLock.lock()
+                let isCurrentGeneration = isPolling && generation == pollGeneration
+                guard isCurrentGeneration else {
+                    stateLock.unlock()
+                    return
+                }
                 consecutiveErrors = 0
                 lastPollSuccessAt = Date()
                 stateLock.unlock()
@@ -321,14 +362,18 @@ class GuardianModePollingService {
                 }
             } else {
                 stateLock.lock()
-                consecutiveErrors = 0
-                lastPollSuccessAt = Date()
+                if isPolling && generation == pollGeneration {
+                    consecutiveErrors = 0
+                    lastPollSuccessAt = Date()
+                }
                 stateLock.unlock()
             }
         } catch {
             stateLock.lock()
-            consecutiveErrors += 1
-            lastPollErrorAt = Date()
+            if isPolling && generation == pollGeneration {
+                consecutiveErrors += 1
+                lastPollErrorAt = Date()
+            }
             let errors = consecutiveErrors
             stateLock.unlock()
 
@@ -341,5 +386,13 @@ class GuardianModePollingService {
         if Int.random(in: 0..<60) == 0 {
             GuardianModeManager.shared.cleanCache()
         }
+
+        stateLock.lock()
+        if isPolling && generation == pollGeneration {
+            isPollInFlight = false
+            let delay = nextPollDelayLocked()
+            scheduleNextPollLocked(after: delay, reason: consecutiveErrors == 0 ? "poll_complete" : "poll_error")
+        }
+        stateLock.unlock()
     }
 }
