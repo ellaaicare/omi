@@ -103,12 +103,34 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
             email: _emailController.text.trim(),
             phone: _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
             inviteCode: inviteResponse.inviteCode,
+            caregiverId: inviteResponse.caregiverId,
+            emailSent: inviteResponse.emailSent,
+            deliveryError: inviteResponse.deliveryError ?? inviteResponse.failureReason,
           ),
         ),
       );
     } on CaregiverApiException catch (e) {
       if (!mounted) return;
       setState(() => _sending = false);
+
+      final inviteResponse = e.inviteResponse;
+      if (inviteResponse != null && inviteResponse.emailDeliveryFailed) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => EllaInviteSentScreen(
+              name: _nameController.text.trim(),
+              email: _emailController.text.trim(),
+              phone: _phoneController.text.trim().isNotEmpty ? _phoneController.text.trim() : null,
+              inviteCode: inviteResponse.inviteCode,
+              caregiverId: inviteResponse.caregiverId,
+              emailSent: false,
+              deliveryError: inviteResponse.deliveryError ?? inviteResponse.failureReason ?? e.message,
+            ),
+          ),
+        );
+        return;
+      }
 
       if (e.statusCode == 409) {
         setState(() => _phoneError = context.l10n.ellaInviteErrorDuplicate);
@@ -303,7 +325,7 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
                   height: 64,
                   decoration: BoxDecoration(
                     color: _sending
-                        ? EllaColors.primary.withOpacity(0.6)
+                        ? EllaColors.primary.withValues(alpha: 0.6)
                         : _isValid
                             ? EllaColors.primary
                             : EllaColors.bgTertiary,

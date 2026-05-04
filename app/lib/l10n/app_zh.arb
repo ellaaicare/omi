@@ -2625,5 +2625,39 @@
   "openClawDirectVoiceMode": "OpenClaw Direct (STT -> OpenClaw -> TTS)",
   "openAIRealtimeVoiceMode": "OpenAI Native Realtime",
   "grokNativeRealtimeVoiceMode": "Grok Native Realtime",
-  "geminiNativeLiveVoiceMode": "Gemini Native Live"
+  "geminiNativeLiveVoiceMode": "Gemini Native Live",
+  "ellaInviteEmailFailedTitle": "Invite created, email not sent",
+  "@ellaInviteEmailFailedTitle": {
+    "description": "Title shown when caregiver invite row exists but invite email delivery failed"
+  },
+  "ellaInviteEmailFailedDescription": "The invite for {email} exists, but email delivery failed. Share the code below or retry email.",
+  "@ellaInviteEmailFailedDescription": {
+    "description": "Description shown when caregiver invite email delivery failed after row creation",
+    "placeholders": {
+      "email": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaInviteEmailFailedReason": "Delivery error: {reason}",
+  "@ellaInviteEmailFailedReason": {
+    "description": "Delivery failure reason for caregiver invite email",
+    "placeholders": {
+      "reason": {
+        "type": "String"
+      }
+    }
+  },
+  "ellaRetryEmail": "Retry Email",
+  "@ellaRetryEmail": {
+    "description": "Button label to retry caregiver invite email delivery"
+  },
+  "ellaRetryEmailSuccess": "Invite email sent.",
+  "@ellaRetryEmailSuccess": {
+    "description": "Snackbar shown when caregiver invite email retry succeeds"
+  },
+  "ellaRetryEmailFailed": "Email still could not be sent. You can share the invite code instead.",
+  "@ellaRetryEmailFailed": {
+    "description": "Snackbar shown when caregiver invite email retry fails"
+  }
 }

@@ -8554,4 +8554,26 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get geminiNativeLiveVoiceMode => 'Gemini Native Live';
+
+  @override
+  String get ellaInviteEmailFailedTitle => 'Invite created, email not sent';
+
+  @override
+  String ellaInviteEmailFailedDescription(String email) {
+    return 'The invite for $email exists, but email delivery failed. Share the code below or retry email.';
+  }
+
+  @override
+  String ellaInviteEmailFailedReason(String reason) {
+    return 'Delivery error: $reason';
+  }
+
+  @override
+  String get ellaRetryEmail => 'Retry Email';
+
+  @override
+  String get ellaRetryEmailSuccess => 'Invite email sent.';
+
+  @override
+  String get ellaRetryEmailFailed => 'Email still could not be sent. You can share the invite code instead.';
 }

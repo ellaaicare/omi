@@ -11,6 +11,31 @@ const String _n8nBase = 'https://n8n.ella-ai-care.com/webhook';
 
 String get _uid => SharedPreferencesUtil().uid;
 
+Map<String, dynamic>? _decodeObject(String body) {
+  try {
+    final data = jsonDecode(body);
+    return data is Map<String, dynamic> ? data : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+InviteResponse? _decodeInviteResponse(String body) {
+  final data = _decodeObject(body);
+  if (data == null) return null;
+  final invitePayload = data['invite'] is Map<String, dynamic> ? data['invite'] as Map<String, dynamic> : data;
+  return InviteResponse.fromJson(invitePayload);
+}
+
+CaregiverApiException _inviteException(http.Response response, String message) {
+  final inviteResponse = _decodeInviteResponse(response.body);
+  return CaregiverApiException(
+    statusCode: response.statusCode,
+    message: inviteResponse?.deliveryError ?? inviteResponse?.failureReason ?? message,
+    inviteResponse: inviteResponse?.hasInviteRecovery == true ? inviteResponse : null,
+  );
+}
+
 /// GET caregiver list via n8n webhook
 Future<List<Caregiver>> getCaregivers() async {
   try {
@@ -55,12 +80,13 @@ Future<InviteResponse> sendCaregiverInvite({
   );
   if (response.statusCode != 200 && response.statusCode != 201) {
     Logger.debug('Caregiver invite failed: ${response.statusCode} ${response.body}');
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to send invite',
-    );
+    throw _inviteException(response, 'Failed to send invite');
   }
-  return InviteResponse.fromJson(jsonDecode(response.body));
+  final inviteResponse = _decodeInviteResponse(response.body);
+  if (inviteResponse == null) {
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Invalid invite response');
+  }
+  return inviteResponse;
 }
 
 /// POST remove caregiver via n8n webhook
@@ -146,16 +172,18 @@ Future<String?> getEmergencyContactId() async {
 }
 
 /// POST resend caregiver invite via n8n webhook
-Future<void> resendInvite({required String uid, required String caregiverId}) async {
+Future<InviteResponse> resendInvite({required String uid, required String caregiverId}) async {
   final response = await http.post(
     Uri.parse('$_n8nBase/caregiver-resend-invite'),
     headers: {'Content-Type': 'application/json'},
     body: jsonEncode({'uid': uid, 'caregiver_id': caregiverId}),
   );
   if (response.statusCode != 200) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to resend invite',
-    );
+    throw _inviteException(response, 'Failed to resend invite');
   }
+  final inviteResponse = _decodeInviteResponse(response.body);
+  if (inviteResponse == null) {
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Invalid resend response');
+  }
+  return inviteResponse;
 }
