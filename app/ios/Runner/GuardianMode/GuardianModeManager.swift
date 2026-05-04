@@ -48,7 +48,9 @@ class GuardianModeManager: NSObject {
     func start() throws {
         try queue.sync {
             guard !isActive else {
-                NSLog("GuardianMode: Already active, ignoring start()")
+                NSLog("GuardianMode: Already active, repairing poller/player if needed")
+                GuardianModePollingService.shared.ensurePolling(reason: "guardian_start_already_active")
+                audioPlayer?.play()
                 return
             }
 
@@ -132,6 +134,28 @@ class GuardianModeManager: NSObject {
         }
     }
 
+    /// Called from app lifecycle hooks. If Guardian Mode is still active, make
+    /// sure both the silent playback loop and network poller survived app
+    /// suspension, backend downtime, and audio-session interruptions.
+    func repairIfActive(reason: String) {
+        queue.async { [weak self] in
+            guard let self = self, self.isActive else { return }
+
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                NSLog("GuardianMode: Failed to reactivate audio session during repair reason=\(reason): \(error.localizedDescription)")
+            }
+
+            if let player = self.audioPlayer, player.rate == 0 {
+                NSLog("GuardianMode: Repair restarting stalled player reason=\(reason)")
+                player.play()
+            }
+
+            GuardianModePollingService.shared.ensurePolling(reason: reason)
+        }
+    }
+
     // MARK: - Queue Management (Progressive Buffering)
 
     private func setupItemEndObserver() {
@@ -199,6 +223,8 @@ class GuardianModeManager: NSObject {
     private func healthCheck() {
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else { return }
+
+        GuardianModePollingService.shared.ensurePolling(reason: "guardian_health_check")
 
         let depth = player.items().count
         let rate = player.rate

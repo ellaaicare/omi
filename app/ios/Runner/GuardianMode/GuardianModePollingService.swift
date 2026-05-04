@@ -20,6 +20,10 @@ class GuardianModePollingService {
 
     var pollInterval: TimeInterval = 3.0
     var backendURL: String = "https://api.ella-ai-care.com"
+    private let stateLock = NSLock()
+    private var lastPollAttemptAt: Date?
+    private var lastPollSuccessAt: Date?
+    private var lastPollErrorAt: Date?
 
     struct PollResponse: Codable {
         let url: String?
@@ -86,6 +90,9 @@ class GuardianModePollingService {
     // MARK: - Public Methods
 
     func startPolling() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         guard !isPolling else {
             NSLog("GuardianPolling: Already polling")
             return
@@ -95,10 +102,13 @@ class GuardianModePollingService {
         consecutiveErrors = 0
         NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
 
-        createPollTimer()
+        createPollTimerLocked()
     }
 
     func stopPolling() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         guard isPolling else { return }
 
         NSLog("GuardianPolling: Stopping poll timer")
@@ -106,6 +116,48 @@ class GuardianModePollingService {
         pollTimer?.cancel()
         pollTimer = nil
         isPolling = false
+    }
+
+    /// Keep the poller alive while Guardian Mode is active. Dispatch timers can
+    /// stop firing across app suspension or service downtime without the user
+    /// explicitly disabling Guardian Mode; foreground and health checks call
+    /// this to repair that state.
+    func ensurePolling(reason: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        let now = Date()
+        let staleAfter = max(pollInterval * 5, 20.0)
+        let isStale = lastPollAttemptAt.map { now.timeIntervalSince($0) > staleAfter } ?? true
+
+        guard !isPolling || pollTimer == nil || isStale else {
+            return
+        }
+
+        NSLog(
+            "GuardianPolling: Restarting poll timer reason=\(reason) " +
+            "isPolling=\(isPolling) hasTimer=\(pollTimer != nil) stale=\(isStale)"
+        )
+
+        pollTimer?.cancel()
+        pollTimer = nil
+        isPolling = true
+        consecutiveErrors = 0
+        createPollTimerLocked()
+    }
+
+    func statusSnapshot() -> [String: Any] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        return [
+            "is_polling": isPolling,
+            "has_timer": pollTimer != nil,
+            "consecutive_errors": consecutiveErrors,
+            "last_poll_attempt_at": lastPollAttemptAt?.timeIntervalSince1970 ?? 0,
+            "last_poll_success_at": lastPollSuccessAt?.timeIntervalSince1970 ?? 0,
+            "last_poll_error_at": lastPollErrorAt?.timeIntervalSince1970 ?? 0
+        ]
     }
 
     func pollForNewAudio() async throws -> PollResponse? {
@@ -183,7 +235,7 @@ class GuardianModePollingService {
 
     // MARK: - Private Methods
 
-    private func createPollTimer() {
+    private func createPollTimerLocked() {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
 
         timer.schedule(deadline: .now(), repeating: pollInterval)
@@ -199,11 +251,22 @@ class GuardianModePollingService {
     }
 
     private func executePoll() async {
-        guard isPolling else { return }
+        stateLock.lock()
+        let active = isPolling
+        if active {
+            lastPollAttemptAt = Date()
+        }
+        stateLock.unlock()
+
+        guard active else { return }
 
         do {
             if let result = try await pollForNewAudio() {
+                stateLock.lock()
                 consecutiveErrors = 0
+                lastPollSuccessAt = Date()
+                stateLock.unlock()
+
                 let metadata = result.metadata?.dict ?? [:]
                 let traceId = result.traceId
                     ?? metadata["trace_id"] as? String
@@ -256,11 +319,21 @@ class GuardianModePollingService {
                     )
                     speakText(message)
                 }
+            } else {
+                stateLock.lock()
+                consecutiveErrors = 0
+                lastPollSuccessAt = Date()
+                stateLock.unlock()
             }
         } catch {
+            stateLock.lock()
             consecutiveErrors += 1
-            if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
-                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x): \(error.localizedDescription)")
+            lastPollErrorAt = Date()
+            let errors = consecutiveErrors
+            stateLock.unlock()
+
+            if errors <= 3 || errors % 10 == 0 {
+                NSLog("GuardianPolling: Poll error (\(errors)x): \(error.localizedDescription)")
             }
         }
 

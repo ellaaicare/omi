@@ -222,6 +222,7 @@ extension FlutterError: Error {}
           } catch {
               print("AppDelegate: Failed to reactivate audio session: \(error)")
           }
+          GuardianModeManager.shared.repairIfActive(reason: "audio_interruption_ended")
       @unknown default:
           break
       }
@@ -264,6 +265,7 @@ extension FlutterError: Error {}
       } catch {
           print("AppDelegate: Failed to reactivate audio session on app active: \(error)")
       }
+      GuardianModeManager.shared.repairIfActive(reason: "app_did_become_active")
   }
 
   // MARK: - Notification Authorization
@@ -787,7 +789,10 @@ extension AppDelegate: WCSessionDelegate {
 
         case "getState":
             let state = GuardianModeManager.shared.getState()
-            result(["status": state])
+            result([
+                "status": state,
+                "poller": GuardianModePollingService.shared.statusSnapshot()
+            ])
 
         case "injectRemoteAudioClip":
             guard let args = call.arguments as? [String: Any],
