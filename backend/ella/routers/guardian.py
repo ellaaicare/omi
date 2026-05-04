@@ -560,7 +560,7 @@ def _enqueue_allows_guardian_audio(mode: str, req: "EnqueueRequest") -> tuple[bo
         "gas leak",
     )
 
-    if trigger == "wake_word":
+    if trigger == "wake_word" or trigger.startswith("wake_word_"):
         return True, None
     if trigger == "safety" and (severity in {"critical", "urgent", "high"} or req.priority == "urgent"):
         return True, None
