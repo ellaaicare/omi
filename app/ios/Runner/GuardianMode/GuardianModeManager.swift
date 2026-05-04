@@ -354,86 +354,80 @@ class GuardianModeManager: NSObject {
             return
         }
 
-        let player = ensureAudioPlayer()
         let audioItem = AVPlayerItem(url: remoteURL)
 
         let itemQueuedAt = Date()
         let itemId = ObjectIdentifier(audioItem)
+        let player: AVQueuePlayer
+        let position: String
 
-        // Insert to play next, not at the end of the silence buffer. This restores
-        // the original audible-alert behavior while still triggering remote loading.
-        let afterItem = player.currentItem
-        if player.canInsert(audioItem, after: afterItem) {
-            player.insert(audioItem, after: afterItem)
-            NSLog("INJECT_OK #\(seq) (\(filename)) position=after_current depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
-            recordPlaybackDebugEvent(
-                "inject_ok",
-                queueItemId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: metadata,
-                extra: [
-                    "position": "after_current",
-                    "depth": player.items().count,
-                    "player_rate": player.rate,
-                    "url": remoteURL.absoluteString,
-                    "is_current_item": player.currentItem === audioItem
-                ]
-            )
-            scheduleCurrentItemProbes(
-                player: player,
-                audioItem: audioItem,
-                itemId: itemId,
-                itemQueuedAt: itemQueuedAt,
-                eventId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: metadata
-            )
-        } else if player.canInsert(audioItem, after: nil) {
-            player.insert(audioItem, after: nil)
-            NSLog("INJECT_OK #\(seq) (\(filename)) position=end depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
-            recordPlaybackDebugEvent(
-                "inject_ok",
-                queueItemId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: metadata,
-                extra: [
-                    "position": "end",
-                    "depth": player.items().count,
-                    "player_rate": player.rate,
-                    "url": remoteURL.absoluteString,
-                    "is_current_item": player.currentItem === audioItem
-                ]
-            )
-            scheduleCurrentItemProbes(
-                player: player,
-                audioItem: audioItem,
-                itemId: itemId,
-                itemQueuedAt: itemQueuedAt,
-                eventId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: metadata
-            )
+        // With the idle silence queue removed, an empty AVQueuePlayer must be
+        // created with the remote item already loaded. Inserting into an empty
+        // existing queue can leave the item non-current and stuck at .unknown.
+        if let existingPlayer = self.audioPlayer,
+           existingPlayer.currentItem != nil || !existingPlayer.items().isEmpty {
+            player = existingPlayer
+            let afterItem = player.currentItem
+            if player.canInsert(audioItem, after: afterItem) {
+                player.insert(audioItem, after: afterItem)
+                position = afterItem == nil ? "end" : "after_current"
+            } else if player.canInsert(audioItem, after: nil) {
+                player.insert(audioItem, after: nil)
+                position = "end"
+            } else {
+                NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
+                var failureMetadata = metadata ?? [:]
+                failureMetadata["url"] = remoteURL.absoluteString
+                failureMetadata["queue_depth"] = player.items().count
+                failureMetadata["player_rate"] = player.rate
+                failureMetadata["current_item_present"] = player.currentItem != nil
+                reportGuardianPlaybackFailure(
+                    queueItemId: eventId,
+                    traceId: traceId,
+                    triggerType: triggerType,
+                    metadata: failureMetadata,
+                    error: "cannot_insert"
+                )
+                deactivateGuardianAudioSessionIfIdle(reason: "cannot_insert")
+                await MainActor.run { self.failedInjections += 1 }
+                return
+            }
         } else {
-            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
-            var failureMetadata = metadata ?? [:]
-            failureMetadata["url"] = remoteURL.absoluteString
-            failureMetadata["queue_depth"] = player.items().count
-            failureMetadata["player_rate"] = player.rate
-            failureMetadata["current_item_present"] = player.currentItem != nil
-            reportGuardianPlaybackFailure(
-                queueItemId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: failureMetadata,
-                error: "cannot_insert"
-            )
-            await MainActor.run { self.failedInjections += 1 }
-            return
+            let queuePlayer = AVQueuePlayer(items: [audioItem])
+            queuePlayer.actionAtItemEnd = .advance
+            self.audioPlayer = queuePlayer
+            player = queuePlayer
+            position = "new_player_current"
         }
+
+        player.play()
+
+        NSLog("INJECT_OK #\(seq) (\(filename)) position=\(position) depth=\(player.items().count) ts=\(Date().timeIntervalSince1970)")
+        recordPlaybackDebugEvent(
+            "inject_ok",
+            queueItemId: eventId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: metadata,
+            extra: [
+                "position": position,
+                "depth": player.items().count,
+                "player_rate": player.rate,
+                "url": remoteURL.absoluteString,
+                "is_current_item": player.currentItem === audioItem,
+                "current_item_present": player.currentItem != nil
+            ]
+        )
+        scheduleCurrentItemProbes(
+            player: player,
+            audioItem: audioItem,
+            itemId: itemId,
+            itemQueuedAt: itemQueuedAt,
+            eventId: eventId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: metadata
+        )
 
         player.publisher(for: \.currentItem)
             .sink { [weak self, weak audioItem] currentItem in
@@ -689,17 +683,6 @@ class GuardianModeManager: NSObject {
         if player.rate == 0 {
             player.play()
         }
-    }
-
-    private func ensureAudioPlayer() -> AVQueuePlayer {
-        if let audioPlayer = audioPlayer {
-            return audioPlayer
-        }
-
-        let queuePlayer = AVQueuePlayer()
-        queuePlayer.actionAtItemEnd = .advance
-        audioPlayer = queuePlayer
-        return queuePlayer
     }
 
     private func activateGuardianAudioSessionForPlayback() throws {
