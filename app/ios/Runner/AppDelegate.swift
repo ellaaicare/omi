@@ -42,12 +42,15 @@ extension FlutterError: Error {}
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
 
-    // Configure audio session for background recording
+    // Configure audio session for background recording.
+    // .mixWithOthers allows other apps (YouTube, Instagram) to keep playing.
+    // Session is activated once at launch for recording; Guardian-specific
+    // re-activation is guarded to only happen when Guardian is active.
     do {
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers])
-        try audioSession.setActive(true, options: [])
-        print("AppDelegate: Audio session configured for background recording")
+        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        NSLog("AppDelegate: Audio session configured for background recording (mixWithOthers)")
 
         // Observe audio session interruptions
         NotificationCenter.default.addObserver(
@@ -212,15 +215,20 @@ extension FlutterError: Error {}
 
       switch type {
       case .began:
-          print("AppDelegate: Audio session interrupted")
+          NSLog("AppDelegate: Audio session interrupted (Guardian active: \(GuardianModeManager.shared.getState()))")
       case .ended:
-          print("AppDelegate: Audio session interruption ended")
-          // Reactivate audio session
-          do {
-              try AVAudioSession.sharedInstance().setActive(true)
-              print("AppDelegate: Audio session reactivated after interruption")
-          } catch {
-              print("AppDelegate: Failed to reactivate audio session: \(error)")
+          NSLog("AppDelegate: Audio session interruption ended (Guardian active: \(GuardianModeManager.shared.getState()))")
+          // Only reactivate audio session if Guardian Mode is actively playing
+          // Unconditional setActive(true) steals audio from other apps (YouTube, Instagram, etc.)
+          if GuardianModeManager.shared.getState() == "active" {
+              do {
+                  try AVAudioSession.sharedInstance().setActive(true)
+                  NSLog("AppDelegate: Audio session reactivated after interruption (Guardian active)")
+              } catch {
+                  NSLog("AppDelegate: Failed to reactivate audio session: \(error)")
+              }
+          } else {
+              NSLog("AppDelegate: Skipping session reactivate — Guardian not active")
           }
       @unknown default:
           break
@@ -234,35 +242,54 @@ extension FlutterError: Error {}
           return
       }
 
-      print("AppDelegate: Audio route changed - reason: \(reason.rawValue)")
+      let guardianActive = GuardianModeManager.shared.getState() == "active"
+      NSLog("AppDelegate: Audio route changed - reason: \(reason.rawValue) Guardian: \(guardianActive)")
 
-      // When headphones or Bluetooth are removed, iOS defaults .playAndRecord back to the
-      // earpiece. Override to the loudspeaker so guardian audio stays audible.
-      if reason == .oldDeviceUnavailable {
+      // Only force speaker and report route when Guardian is actively playing.
+      // Unconditional overrideOutputAudioPort(.speaker) disrupts Bluetooth audio
+      // in other apps (YouTube, Instagram, etc.) and causes HFP/A2DP churn.
+      if guardianActive && reason == .oldDeviceUnavailable {
           DispatchQueue.main.async {
               do {
                   try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-                  print("AppDelegate: Forced output to loudspeaker after device removal")
+                  NSLog("AppDelegate: Forced output to loudspeaker after device removal (Guardian active)")
               } catch {
-                  print("AppDelegate: Failed to override output port: \(error)")
+                  NSLog("AppDelegate: Failed to override output port: \(error)")
               }
           }
       }
 
-      // Report new route to backend so consolidator knows current echo risk
-      GuardianModeManager.shared.reportPlaybackEvent()
+      // Only report playback event when Guardian is active and has a current item.
+      // Spurious reportPlaybackEvent() with no active queue item creates noise on the
+      // backend and fires POST requests every time Bluetooth connects/disconnects.
+      if guardianActive {
+          GuardianModeManager.shared.reportPlaybackEvent()
+      }
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {
-      // Ensure audio session is active when app becomes active
-      do {
-          let audioSession = AVAudioSession.sharedInstance()
-          if !audioSession.isOtherAudioPlaying {
-              try audioSession.setActive(true)
-              print("AppDelegate: Audio session reactivated on app becoming active")
+      let guardianActive = GuardianModeManager.shared.getState() == "active"
+
+      // Only reactivate audio session if Guardian Mode is actively playing.
+      // Unconditional setActive(true) when Guardian is idle steals the audio
+      // session from other apps (YouTube, Instagram, etc.) and causes
+      // Bluetooth HFP/A2DP route churn.
+      if guardianActive {
+          do {
+              let audioSession = AVAudioSession.sharedInstance()
+              if !audioSession.isOtherAudioPlaying {
+                  try audioSession.setActive(true)
+                  NSLog("AppDelegate: Audio session reactivated on foreground (Guardian active)")
+              }
+          } catch {
+              NSLog("AppDelegate: Failed to reactivate audio session on app active: \(error)")
           }
-      } catch {
-          print("AppDelegate: Failed to reactivate audio session on app active: \(error)")
+
+          // Restart Guardian polling — iOS suspends background dispatch timers
+          // when the app goes to background, and they don't auto-resume.
+          GuardianModePollingService.shared.restartPollingIfActive()
+      } else {
+          NSLog("AppDelegate: Foreground transition — Guardian not active, skipping session/poller restart")
       }
   }
 

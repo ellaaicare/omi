@@ -13,12 +13,12 @@ class GuardianModePollingService {
 
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10.0
-        config.timeoutIntervalForResource = 10.0
+        config.timeoutIntervalForRequest = 8.0
+        config.timeoutIntervalForResource = 8.0
         return URLSession(configuration: config)
     }()
 
-    var pollInterval: TimeInterval = 3.0
+    var basePollInterval: TimeInterval = 3.0
     var backendURL: String = "https://api.ella-ai-care.com"
 
     struct PollResponse: Codable {
@@ -80,32 +80,55 @@ class GuardianModePollingService {
         }
     }
 
-    private var isPolling = false
+    private(set) var isPolling = false
     private var consecutiveErrors: Int = 0
+    private var isPollInFlight = false  // Guard against overlapping poll requests
+    private var pollGeneration: Int = 0 // Incremented on each startPolling to invalidate stale timers
 
     // MARK: - Public Methods
 
     func startPolling() {
-        guard !isPolling else {
-            NSLog("GuardianPolling: Already polling")
-            return
-        }
+        // Deterministic cancel-then-start: always kill old timer first
+        pollTimer?.cancel()
+        pollTimer = nil
 
         isPolling = true
         consecutiveErrors = 0
-        NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
+        isPollInFlight = false
+        pollGeneration += 1
+        let gen = pollGeneration
 
-        createPollTimer()
+        let jitter = TimeInterval.random(in: 0...1.0) // 0-1s jitter on start
+        NSLog("GuardianPolling: Starting poll timer (base: \(basePollInterval)s, jitter: \(String(format: "%.2f", jitter))s, gen: \(gen))")
+
+        createPollTimer(initialDelay: jitter, generation: gen)
     }
 
     func stopPolling() {
         guard isPolling else { return }
 
-        NSLog("GuardianPolling: Stopping poll timer")
+        NSLog("GuardianPolling: Stopping poll timer (gen: \(pollGeneration))")
 
+        pollGeneration += 1 // Invalidate any in-flight timer callbacks
         pollTimer?.cancel()
         pollTimer = nil
         isPolling = false
+        isPollInFlight = false
+    }
+
+    /// Restart polling if Guardian is active (safe to call from foreground transitions)
+    func restartPollingIfActive() {
+        guard GuardianModeManager.shared.getState() == "active" else {
+            NSLog("GuardianPolling: Skip restart — Guardian not active")
+            return
+        }
+        if isPolling {
+            NSLog("GuardianPolling: Already polling, forcing cancel/restart for foreground transition")
+            startPolling()
+        } else {
+            NSLog("GuardianPolling: Was suspended, restarting for foreground transition")
+            startPolling()
+        }
     }
 
     func pollForNewAudio() async throws -> PollResponse? {
@@ -154,16 +177,30 @@ class GuardianModePollingService {
         NSLog("TTS_SPEAK: \(text.prefix(80))")
     }
 
+    // MARK: - Backoff
+
+    /// Current effective poll interval with exponential backoff on errors.
+    private var effectivePollInterval: TimeInterval {
+        if consecutiveErrors == 0 {
+            return basePollInterval
+        }
+        // Exponential backoff: 3s, 6s, 12s, 24s, 30s cap
+        let backoff = min(basePollInterval * Double(1 << min(consecutiveErrors, 4)), 30.0)
+        return backoff
+    }
+
     // MARK: - Private Methods
 
-    private func createPollTimer() {
+    private func createPollTimer(initialDelay: TimeInterval = 0, generation: Int) {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
 
-        timer.schedule(deadline: .now(), repeating: pollInterval)
+        // First poll after initialDelay, then repeat at effective interval
+        timer.schedule(deadline: .now() + initialDelay, repeating: basePollInterval)
 
         timer.setEventHandler { [weak self] in
+            guard let self = self, self.pollGeneration == generation else { return }
             Task {
-                await self?.executePoll()
+                await self.executePoll(generation: generation)
             }
         }
 
@@ -171,11 +208,22 @@ class GuardianModePollingService {
         pollTimer = timer
     }
 
-    private func executePoll() async {
-        guard isPolling else { return }
+    private func executePoll(generation: Int) async {
+        // Guard: skip if stopped, generation mismatch, or previous poll still in flight
+        guard isPolling, pollGeneration == generation else { return }
+        guard !isPollInFlight else {
+            NSLog("GuardianPolling: Skipping — previous poll still in flight")
+            return
+        }
+
+        isPollInFlight = true
+        defer { isPollInFlight = false }
 
         do {
             if let result = try await pollForNewAudio() {
+                // Re-check generation after async work
+                guard pollGeneration == generation else { return }
+
                 consecutiveErrors = 0
                 let metadata = result.metadata?.dict ?? [:]
                 let traceId = result.traceId
@@ -219,12 +267,13 @@ class GuardianModePollingService {
             }
         } catch {
             consecutiveErrors += 1
+            let interval = effectivePollInterval
             if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
-                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x): \(error.localizedDescription)")
+                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x, backing off to \(String(format: "%.1f", interval))s): \(error.localizedDescription)")
             }
         }
 
-        // Periodic cache cleanup every ~60 polls (5 minutes at 5s interval)
+        // Periodic cache cleanup every ~60 polls
         if Int.random(in: 0..<60) == 0 {
             GuardianModeManager.shared.cleanCache()
         }

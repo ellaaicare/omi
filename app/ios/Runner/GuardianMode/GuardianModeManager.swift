@@ -225,10 +225,17 @@ class GuardianModeManager: NSObject {
             player.play()
         }
 
+        // Detect dead poller — iOS can suspend background dispatch timers and
+        // they don't auto-resume when the app returns to foreground.
+        if !GuardianModePollingService.shared.isPolling {
+            NSLog("GuardianMode: HEALTH WARNING - Poller stopped while Guardian active, restarting")
+            GuardianModePollingService.shared.startPolling()
+        }
+
         let stats = totalInjections > 0
             ? "\(successfulInjections)/\(totalInjections)"
             : "0/0"
-        NSLog("GuardianMode: Health OK (depth: \(depth), rate: \(rate), injections: \(stats))")
+        NSLog("GuardianMode: Health OK (depth: \(depth), rate: \(rate), injections: \(stats), poller: \(GuardianModePollingService.shared.isPolling ? "up" : "down"))")
     }
 
     // MARK: - Playback Route Reporting
@@ -243,6 +250,19 @@ class GuardianModeManager: NSObject {
         durationMs: Int = 0,
         metadata: [String: Any]? = nil
     ) {
+        // Guard: don't post playback events when Guardian is idle or there is
+        // no queue item context. Spurious events fire on every Bluetooth route
+        // change even when Guardian is off, creating backend noise and network
+        // traffic.
+        guard isActive else {
+            NSLog("PLAYBACK_EVENT_SKIP Guardian not active (type=\(eventType) item=\(queueItemId ?? "none"))")
+            return
+        }
+        guard queueItemId != nil || eventType == "route_change" else {
+            NSLog("PLAYBACK_EVENT_SKIP no queue item (type=\(eventType))")
+            return
+        }
+
         let session = AVAudioSession.sharedInstance()
         guard let port = session.currentRoute.outputs.first else { return }
 
