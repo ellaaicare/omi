@@ -55,19 +55,36 @@ async def get_omi_github_releases(cache_key: str) -> Optional[List[Dict]]:
     if cached_releases:
         return cached_releases
 
-    # Make GitHub API request if not cached
+    # Make GitHub API request if not cached. Firmware releases can be older than
+    # the first page because mobile/desktop CI creates frequent releases.
     async with httpx.AsyncClient() as client:
-        url = "https://api.github.com/repos/BasedHardware/omi/releases?per_page=100"
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
         }
-        response = await client.get(url, headers=headers)
-        if response.status_code != 200:
-            print(f"Error fetching GitHub releases: {response.status_code} {response.text}")
-            raise HTTPException(status_code=500, detail="Failed to fetch release information")
-        releases = response.json()
+        github_token = os.getenv('GITHUB_TOKEN')
+        if github_token:
+            headers["Authorization"] = f"Bearer {github_token}"
+
+        releases = []
+        per_page = 100
+        page = 1
+        max_pages = 10
+
+        while page <= max_pages:
+            url = f"https://api.github.com/repos/BasedHardware/omi/releases?per_page={per_page}&page={page}"
+            response = await client.get(url, headers=headers)
+            if response.status_code != 200:
+                print(f"Error fetching GitHub releases: {response.status_code} {response.text}")
+                raise HTTPException(status_code=500, detail="Failed to fetch release information")
+
+            page_releases = response.json()
+            releases.extend(page_releases)
+
+            if len(page_releases) < per_page:
+                break
+            page += 1
+
         # Cache successful response for 5 minutes
         set_generic_cache(cache_key, releases, ttl=300)
         return releases
