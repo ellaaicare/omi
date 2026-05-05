@@ -51,18 +51,40 @@ class GuardianModeManager: NSObject {
                 return
             }
 
-            // Activate audio session (configured in AppDelegate, activated here before playback)
+            // Activate audio session (configured in AppDelegate, activated here before playback).
+            // OSStatus -50 (paramErr) can occur when Bluetooth is in a transitional state,
+            // another app holds conflicting audio routes, or the category/options combo
+            // is temporarily invalid. Retry with simplified options if the first attempt fails.
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setActive(true)
+            do {
+                try audioSession.setActive(true)
+            } catch {
+                NSLog("GuardianMode: setActive failed with current config, retrying with .mixWithOthers only: \(error.localizedDescription)")
+                // Retry: re-set category with .mixWithOthers to avoid Bluetooth/route conflicts
+                do {
+                    try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers])
+                    try audioSession.setActive(true)
+                    NSLog("GuardianMode: Session activated on retry with simplified options")
+                } catch let retryError {
+                    NSLog("GuardianMode: Session activation failed on retry: \(retryError.localizedDescription)")
+                    // Final attempt: try playback-only category as last resort
+                    do {
+                        try audioSession.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                        try audioSession.setActive(true)
+                        NSLog("GuardianMode: Session activated with .playback category (no recording)")
+                    } catch let finalError {
+                        NSLog("GuardianMode: All session activation attempts failed: \(finalError.localizedDescription)")
+                        throw finalError
+                    }
+                }
+            }
 
             // Detailed audio session diagnostics
-            NSLog("🔊 SESSION_STATE_DETAILED:")
+            NSLog("GuardianMode: SESSION_STATE:")
             NSLog("   Category: \(audioSession.category.rawValue)")
             NSLog("   Mode: \(audioSession.mode.rawValue)")
             NSLog("   Options: \(audioSession.categoryOptions.rawValue)")
             NSLog("   Output: \(audioSession.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", "))")
-            NSLog("   Sample Rate: \(audioSession.sampleRate)")
-            NSLog("   IO Buffer Duration: \(audioSession.ioBufferDuration)")
             NSLog("   Other audio playing: \(audioSession.isOtherAudioPlaying)")
 
             guard let silenceURL = Bundle.main.url(forResource: "silence_100ms", withExtension: "wav") else {
@@ -312,9 +334,12 @@ class GuardianModeManager: NSObject {
         NSLog("PLAYBACK_EVENT type=\(eventType) trace=\(traceId ?? "none") item=\(queueItemId ?? "none") port=\(portType) device=\(portName.isEmpty ? "unknown" : portName) uid=\(uid)")
     }
 
-    // MARK: - Audio Injection with Pre-download + Retry
+    // MARK: - Audio Injection with Pre-load
 
-    /// Inject remote audio with pre-download and retry logic
+    /// Inject remote audio with pre-load logic.
+    /// Pre-loads the AVURLAsset before inserting into the AVQueuePlayer to avoid
+    /// the ready_timeout failure where AVQueuePlayer defers loading non-current
+    /// items and the item status stays at .unknown indefinitely.
     func injectRemoteAudio(
         audioURL: URL,
         eventId: String,
@@ -334,135 +359,144 @@ class GuardianModeManager: NSObject {
 
             NSLog("INJECT_START #\(seq) (\(filename)) id=\(eventId) ts=\(Date().timeIntervalSince1970)")
 
-            // Inject remote audio directly (no download - progressive streaming)
+            // Pre-load the remote asset on a background task, then insert when ready
             Task {
-                await self.injectRemoteAudioDirect(
+                await self.injectRemoteAudioPreloaded(
                     remoteURL: audioURL,
                     eventId: eventId,
                     traceId: traceId,
                     triggerType: triggerType,
                     metadata: playbackMetadata,
                     seq: seq,
-                    filename: filename,
-                    attempt: 1
+                    filename: filename
                 )
             }
         }
     }
 
-    /// Inject remote audio directly into the player queue (progressive streaming)
-    /// KEY: Inserts FIRST (triggers loading), THEN waits for .readyToPlay
-    private func injectRemoteAudioDirect(
+    /// Pre-load AVURLAsset, create AVPlayerItem from loaded asset, then insert.
+    /// This eliminates the ready_timeout failure because the item is .readyToPlay
+    /// at the moment of insertion — AVQueuePlayer doesn't need to defer loading.
+    private func injectRemoteAudioPreloaded(
         remoteURL: URL,
         eventId: String,
         traceId: String?,
         triggerType: String?,
         metadata: [String: Any]?,
         seq: Int,
-        filename: String,
-        attempt: Int
+        filename: String
     ) async {
-        // Must be called on self.queue
-        guard let player = self.audioPlayer, self.isActive else {
-            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")
+        let startTime = Date()
+
+        // Step 1: Pre-load the AVURLAsset's "playable" key asynchronously.
+        // This fetches enough of the remote file to determine if it's playable
+        // WITHOUT inserting into the AVQueuePlayer first.
+        let asset = AVURLAsset(url: remoteURL)
+
+        do {
+            // Load the "playable" key — this triggers HTTP range requests to
+            // fetch the audio header and confirm the file is playable.
+            // Timeout is handled by the URLSession, not by us.
+            try await asset.load(.isPlayable)
+        } catch {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=asset_load_error: \(error.localizedDescription)")
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: metadata,
-                error: "not_active"
+                error: "asset_load_error: \(error.localizedDescription)"
             )
-            await MainActor.run { self.failedInjections += 1 }
+            self.failedInjections += 1
             return
         }
 
-        let audioItem = AVPlayerItem(url: remoteURL)
+        guard asset.isPlayable else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=asset_not_playable")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "asset_not_playable"
+            )
+            self.failedInjections += 1
+            return
+        }
 
-        // Insert into queue FIRST - this triggers AVPlayer to start loading!
+        let loadTime = Date().timeIntervalSince(startTime)
+        NSLog("ASSET_READY #\(seq) (\(filename)) load=\(String(format: "%.2f", loadTime))s")
+
+        // Step 2: Create AVPlayerItem from the pre-loaded asset.
+        // Because the asset is already loaded, the item should transition to
+        // .readyToPlay immediately or very quickly.
+        let audioItem = AVPlayerItem(asset: asset)
+
+        // Step 3: Insert into queue. Since the asset is pre-loaded, AVQueuePlayer
+        // can begin playback without waiting for network buffering.
+        // Re-check that player is still active (could have been stopped during pre-load).
+        guard let player = self.audioPlayer, self.isActive else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active_after_preload")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "not_active_after_preload"
+            )
+            self.failedInjections += 1
+            return
+        }
+
+        guard player.canInsert(audioItem, after: nil) else {
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=cannot_insert")
+            reportGuardianPlaybackFailure(
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: metadata,
+                error: "cannot_insert"
+            )
+            self.failedInjections += 1
+            return
+        }
+
         player.insert(audioItem, after: nil)
 
-        // Wait for item to become ready (production logging - minimal)
-        let startTime = Date()
-        let timeout: TimeInterval = 10.0
-        var iteration = 0
-
-        while audioItem.status == .unknown {
-            iteration += 1
-
-            // Check for error
-            if let error = audioItem.error {
-                NSLog("❌ ITEM_ERROR #\(seq) (\(filename)) - \(error.localizedDescription)")
-                reportGuardianPlaybackFailure(
-                    queueItemId: eventId,
-                    traceId: traceId,
-                    triggerType: triggerType,
-                    metadata: metadata,
-                    error: error.localizedDescription
-                )
-                await MainActor.run { self.failedInjections += 1 }
-                return
-            }
-
-            // Check timeout
-            if Date().timeIntervalSince(startTime) > timeout {
-                NSLog("❌ TIMEOUT #\(seq) (\(filename)) after 10s - status: \(audioItem.status.rawValue)")
-                reportGuardianPlaybackFailure(
-                    queueItemId: eventId,
-                    traceId: traceId,
-                    triggerType: triggerType,
-                    metadata: metadata,
-                    error: "ready_timeout"
-                )
-                await MainActor.run { self.failedInjections += 1 }
-                return
-            }
-
-            // Only log if taking unusually long (> 5 seconds)
-            if iteration == 100 {
-                NSLog("⚠️ Slow load #\(seq) (\(filename)) - still waiting after 5s")
-            }
-
-            // Wait 50ms before checking again
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-
-        // Check if buffering succeeded
-        if audioItem.status == .failed {
-            let errorMsg = audioItem.error?.localizedDescription ?? "unknown"
-            NSLog("ITEM_FAILED #\(seq) (\(filename)) error=\(errorMsg)")
-            reportGuardianPlaybackFailure(
-                queueItemId: eventId,
-                traceId: traceId,
-                triggerType: triggerType,
-                metadata: metadata,
-                error: errorMsg
-            )
-            await MainActor.run { self.failedInjections += 1 }
-            return
+        // Step 4: Brief wait for item to reach .readyToPlay (should be near-instant
+        // with pre-loaded asset, but AVFoundation may need a run-loop cycle)
+        var waitIterations = 0
+        while audioItem.status == .unknown && waitIterations < 100 {
+            waitIterations += 1
+            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
 
         guard audioItem.status == .readyToPlay else {
-            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=unexpected_status_\(audioItem.status.rawValue)")
+            let statusRaw = audioItem.status.rawValue
+            let errorMsg = audioItem.error?.localizedDescription ?? "status_\(statusRaw)"
+            NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=item_not_ready status=\(statusRaw) wait=\(waitIterations)")
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: metadata,
-                error: "unexpected_status_\(audioItem.status.rawValue)"
+                error: "item_not_ready: \(errorMsg)"
             )
-            await MainActor.run { self.failedInjections += 1 }
+            self.failedInjections += 1
+            // Remove the failed item from the queue to prevent stall
+            player.removeItem(audioItem)
             return
         }
 
         let readyTime = Date().timeIntervalSince(startTime)
 
-        // Only log unusual load times (production logging - minimal)
+        // Log load performance
         if readyTime > 5.0 {
             NSLog("⚠️ Slow load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         } else if readyTime < 0.5 {
             NSLog("⚡ Fast load #\(seq) (\(filename)) - took \(String(format: "%.2f", readyTime))s")
         }
-        // Normal loads (0.5-5s) are silent - tracked by successfulInjections counter
+
         reportPlaybackEvent(
             eventType: "started",
             queueItemId: eventId,

@@ -242,14 +242,47 @@ class GuardianModePollingService {
                 } else if let urlString = result.url, !urlString.isEmpty,
                           let audioURL = URL(string: urlString) {
                     NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-                    // Inject via GuardianModeManager (handles pre-download + retry)
-                    GuardianModeManager.shared.injectRemoteAudio(
-                        audioURL: audioURL,
-                        eventId: eventId,
-                        traceId: traceId,
-                        triggerType: result.triggerType,
-                        metadata: metadata
-                    )
+
+                    // Check if Guardian player is actually active before injecting.
+                    // If the player is dead (Guardian stopped, audio session failed,
+                    // or app came back from background with invalid state), fall back
+                    // to on-device TTS so the user still gets the response.
+                    let guardianActive = GuardianModeManager.shared.getState() == "active"
+                    if guardianActive {
+                        GuardianModeManager.shared.injectRemoteAudio(
+                            audioURL: audioURL,
+                            eventId: eventId,
+                            traceId: traceId,
+                            triggerType: result.triggerType,
+                            metadata: metadata
+                        )
+                    } else {
+                        // Player is dead — fall back to TTS if message is available
+                        NSLog("POLL_FALLBACK_TTS(\(eventId)) reason=player_not_active")
+                        var fallbackMetadata = metadata
+                        fallbackMetadata["playback_source"] = "on_device_tts_fallback"
+                        fallbackMetadata["fallback_reason"] = "player_not_active"
+                        GuardianModeManager.shared.reportPlaybackEvent(
+                            eventType: "started",
+                            queueItemId: eventId,
+                            traceId: traceId,
+                            triggerType: result.triggerType,
+                            metadata: fallbackMetadata
+                        )
+                        if let message = result.message, !message.isEmpty {
+                            speakText(message)
+                        } else {
+                            // No message field — report failure, can't play audio or TTS
+                            NSLog("POLL_NO_FALLBACK(\(eventId)) reason=no_message_and_no_player")
+                            GuardianModeManager.shared.reportPlaybackEvent(
+                                eventType: "failed",
+                                queueItemId: eventId,
+                                traceId: traceId,
+                                triggerType: result.triggerType,
+                                metadata: ["error": "no_player_no_message", "fallback_attempted": true]
+                            )
+                        }
+                    }
                 } else if let message = result.message, !message.isEmpty {
                     // Text-only (consolidated) — use on-device TTS
                     NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
