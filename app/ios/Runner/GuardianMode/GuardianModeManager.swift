@@ -9,7 +9,7 @@ import Combine
 /// - Activates AVAudioSession only while a real Guardian playback item is queued
 /// - Serializes player mutations on a single DispatchQueue
 /// - Reports playback events only for concrete queue items
-class GuardianModeManager: NSObject {
+class GuardianModeManager: NSObject, AVSpeechSynthesizerDelegate {
     static let shared = GuardianModeManager()
 
     private var audioPlayer: AVQueuePlayer?
@@ -25,6 +25,8 @@ class GuardianModeManager: NSObject {
     private var injectionSequence: Int = 0  // Sequential counter for easy log tracking
     private var playbackStartedItems = Set<ObjectIdentifier>()
     private var playbackContexts: [ObjectIdentifier: PlaybackContext] = [:]
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private var fallbackTTSContexts: [ObjectIdentifier: (context: PlaybackContext, startedAt: Date)] = [:]
 
     private struct PlaybackContext {
         let queueItemId: String
@@ -42,6 +44,7 @@ class GuardianModeManager: NSObject {
 
     private override init() {
         super.init()
+        speechSynthesizer.delegate = self
     }
 
     // MARK: - Public API
@@ -254,7 +257,8 @@ class GuardianModeManager: NSObject {
         eventId: String,
         traceId: String? = nil,
         triggerType: String? = nil,
-        metadata: [String: Any]? = nil
+        metadata: [String: Any]? = nil,
+        fallbackText: String? = nil
     ) {
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
@@ -276,6 +280,7 @@ class GuardianModeManager: NSObject {
                     traceId: traceId,
                     triggerType: triggerType,
                     metadata: playbackMetadata,
+                    fallbackText: fallbackText,
                     seq: seq,
                     filename: filename,
                     attempt: 1
@@ -292,6 +297,7 @@ class GuardianModeManager: NSObject {
         traceId: String?,
         triggerType: String?,
         metadata: [String: Any]?,
+        fallbackText: String?,
         seq: Int,
         filename: String,
         attempt: Int
@@ -336,19 +342,28 @@ class GuardianModeManager: NSObject {
             return
         }
 
+        let activationPath: String
         do {
-            try activateGuardianAudioSessionForPlayback()
+            activationPath = try activateGuardianAudioSessionForPlayback()
         } catch {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=audio_session_activate_failed error=\(error.localizedDescription)")
             var failureMetadata = metadata ?? [:]
             failureMetadata["url"] = remoteURL.absoluteString
             failureMetadata["audio_session_error"] = error.localizedDescription
+            failureMetadata["fallback_tts_attempted"] = true
             reportGuardianPlaybackFailure(
                 queueItemId: eventId,
                 traceId: traceId,
                 triggerType: triggerType,
                 metadata: failureMetadata,
                 error: "audio_session_activate_failed"
+            )
+            speakFallbackText(
+                fallbackText ?? extractFallbackText(from: metadata),
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: failureMetadata
             )
             await MainActor.run { self.failedInjections += 1 }
             return
@@ -414,6 +429,7 @@ class GuardianModeManager: NSObject {
                 "depth": player.items().count,
                 "player_rate": player.rate,
                 "url": remoteURL.absoluteString,
+                "audio_session_activation_path": activationPath,
                 "is_current_item": player.currentItem === audioItem,
                 "current_item_present": player.currentItem != nil
             ]
@@ -685,15 +701,126 @@ class GuardianModeManager: NSObject {
         }
     }
 
-    private func activateGuardianAudioSessionForPlayback() throws {
+    @discardableResult
+    private func activateGuardianAudioSessionForPlayback() throws -> String {
         let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(
-            .playback,
-            mode: .default,
-            options: [.mixWithOthers, .allowBluetoothA2DP, .allowAirPlay]
+        let attempts: [(label: String, category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)] = [
+            ("playback_mix", .playback, .default, [.mixWithOthers]),
+            ("playback_plain", .playback, .default, []),
+            ("ambient_mix", .ambient, .default, [.mixWithOthers])
+        ]
+        var attemptErrors: [String] = []
+
+        for attempt in attempts {
+            do {
+                try audioSession.setCategory(attempt.category, mode: attempt.mode, options: attempt.options)
+                try audioSession.setActive(true, options: [])
+                NSLog("GuardianMode: Audio session activated path=\(attempt.label)")
+                return attempt.label
+            } catch {
+                let errorMessage = "\(attempt.label): \(error.localizedDescription)"
+                attemptErrors.append(errorMessage)
+                NSLog("GuardianMode: Audio session activation attempt failed \(errorMessage)")
+            }
+        }
+
+        throw NSError(domain: "GuardianMode", code: -50, userInfo: [
+            NSLocalizedDescriptionKey: attemptErrors.joined(separator: " | ")
+        ])
+    }
+
+    private func extractFallbackText(from metadata: [String: Any]?) -> String? {
+        let keys = ["message", "text", "response_text", "response", "content", "transcript"]
+        for key in keys {
+            if let value = metadata?[key] as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func speakFallbackText(
+        _ text: String?,
+        queueItemId: String,
+        traceId: String?,
+        triggerType: String?,
+        metadata: [String: Any]?
+    ) {
+        let fallback = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spokenText = (fallback?.isEmpty == false)
+            ? fallback!
+            : "Ella has a Guardian response, but the audio could not be played."
+        var fallbackMetadata = metadata ?? [:]
+        fallbackMetadata["fallback_tts"] = true
+        fallbackMetadata["fallback_tts_text_available"] = fallback?.isEmpty == false
+
+        let utterance = AVSpeechUtterance(string: spokenText)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = 0.5
+
+        let utteranceId = ObjectIdentifier(utterance)
+        fallbackTTSContexts[utteranceId] = (
+            context: PlaybackContext(
+                queueItemId: queueItemId,
+                traceId: traceId,
+                triggerType: triggerType,
+                metadata: fallbackMetadata
+            ),
+            startedAt: Date()
         )
-        try audioSession.setActive(true, options: [])
-        NSLog("GuardianMode: Audio session activated for Guardian playback")
+
+        recordPlaybackDebugEvent(
+            "fallback_tts_start",
+            queueItemId: queueItemId,
+            traceId: traceId,
+            triggerType: triggerType,
+            metadata: fallbackMetadata,
+            extra: ["text_length": spokenText.count]
+        )
+        reportPlaybackEvent(
+            eventType: "fallback_tts_started",
+            queueItemId: queueItemId,
+            traceId: traceId,
+            triggerType: triggerType,
+            durationMs: 0,
+            metadata: fallbackMetadata
+        )
+        speechSynthesizer.speak(utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        finishFallbackTTS(utterance, eventType: "fallback_tts_completed")
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        finishFallbackTTS(utterance, eventType: "fallback_tts_cancelled")
+    }
+
+    private func finishFallbackTTS(_ utterance: AVSpeechUtterance, eventType: String) {
+        let utteranceId = ObjectIdentifier(utterance)
+        queue.async { [weak self] in
+            guard let self = self,
+                  let ttsContext = self.fallbackTTSContexts.removeValue(forKey: utteranceId) else { return }
+
+            let durationMs = Int(Date().timeIntervalSince(ttsContext.startedAt) * 1000)
+            self.recordPlaybackDebugEvent(
+                eventType,
+                queueItemId: ttsContext.context.queueItemId,
+                traceId: ttsContext.context.traceId,
+                triggerType: ttsContext.context.triggerType,
+                metadata: ttsContext.context.metadata,
+                extra: ["duration_ms": durationMs]
+            )
+            self.reportPlaybackEvent(
+                eventType: eventType,
+                queueItemId: ttsContext.context.queueItemId,
+                traceId: ttsContext.context.traceId,
+                triggerType: ttsContext.context.triggerType,
+                durationMs: durationMs,
+                metadata: ttsContext.context.metadata
+            )
+            self.deactivateGuardianAudioSessionIfIdle(reason: eventType)
+        }
     }
 
     private func finishPlaybackItem(_ itemId: ObjectIdentifier, reason: String) {
@@ -703,7 +830,7 @@ class GuardianModeManager: NSObject {
     }
 
     private func deactivateGuardianAudioSessionIfIdle(reason: String) {
-        guard playbackStartedItems.isEmpty, playbackContexts.isEmpty else { return }
+        guard playbackStartedItems.isEmpty, playbackContexts.isEmpty, fallbackTTSContexts.isEmpty else { return }
 
         if let player = audioPlayer, player.items().isEmpty {
             player.pause()

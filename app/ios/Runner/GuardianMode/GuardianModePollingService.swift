@@ -333,7 +333,8 @@ class GuardianModePollingService {
                         eventId: eventId,
                         traceId: traceId,
                         triggerType: result.triggerType,
-                        metadata: metadata
+                        metadata: metadata,
+                        fallbackText: result.message
                     )
                 } else if result.priority == "debug" {
                     // Metadata-only debug items never play audio; debug items with a URL are injected above.
