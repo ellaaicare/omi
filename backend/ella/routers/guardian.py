@@ -90,6 +90,162 @@ _ECHO_RISK = {
     "USBAudio": "low",
 }
 
+_WAKE_WORD_USER_RESPONSE_TRIGGERS = {
+    "wake_word",
+    "wake_word_user_support",
+    "scanner_fastpath_semantic_wake",
+}
+
+_WAKE_WORD_USER_RESPONSE_REASONS = {
+    "wake_word_user_support",
+    "direct_user_support",
+}
+
+_WAKE_WORD_USER_RESPONSE_SOURCES = {
+    "scanner_wake_word_user_support",
+    "scanner_fastpath_semantic_wake",
+    "scanner_fastpath",
+}
+
+
+def _metadata_trace_id(metadata: Optional[dict]) -> Optional[str]:
+    """Return the stable trace/conversation id carried by n8n metadata."""
+    if not isinstance(metadata, dict):
+        return None
+    trace_id = (
+        metadata.get("trace_id")
+        or metadata.get("traceId")
+        or metadata.get("conversation_id")
+        or metadata.get("conversationId")
+    )
+    if trace_id is None:
+        return None
+    trace_id = str(trace_id).strip()
+    return trace_id or None
+
+
+def _is_wake_word_user_response(trigger: Optional[str], metadata: Optional[dict]) -> bool:
+    """True for scanner paths that produce user-facing wake-word audio."""
+    trigger_norm = str(trigger or "").strip().lower()
+    if trigger_norm in _WAKE_WORD_USER_RESPONSE_TRIGGERS:
+        return True
+
+    if not isinstance(metadata, dict):
+        return False
+
+    source = str(metadata.get("source") or "").strip().lower()
+    reason = str(metadata.get("reason") or "").strip().lower()
+    category = str(metadata.get("category") or "").strip().lower()
+
+    return (
+        source in _WAKE_WORD_USER_RESPONSE_SOURCES
+        or reason in _WAKE_WORD_USER_RESPONSE_REASONS
+        or category == "wake_word"
+    )
+
+
+def _wake_word_response_rank(trigger: Optional[str], metadata: Optional[dict]) -> int:
+    """Higher rank wins when two wake-word user responses race for a trace."""
+    trigger_norm = str(trigger or "").strip().lower()
+    source = ""
+    reason = ""
+    hermes_present = False
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            metadata = None
+    if isinstance(metadata, dict):
+        source = str(metadata.get("source") or "").strip().lower()
+        reason = str(metadata.get("reason") or "").strip().lower()
+        hermes_present = metadata.get("hermes_response_present") is True
+
+    if trigger_norm == "wake_word_user_support" or source == "scanner_wake_word_user_support" or hermes_present:
+        return 30
+    if reason == "wake_word_user_support":
+        return 25
+    if trigger_norm == "scanner_fastpath_semantic_wake" or source == "scanner_fastpath_semantic_wake":
+        return 10
+    if trigger_norm == "wake_word":
+        return 5
+    return 1
+
+
+async def _dedupe_wake_word_trace_enqueue(
+    pool: asyncpg.Pool,
+    uid: str,
+    item_id: str,
+    trigger: Optional[str],
+    metadata: Optional[dict],
+) -> Optional[dict]:
+    """Reject or supersede duplicate wake-word user responses for one trace.
+
+    Returns:
+        None when enqueue may continue.
+        dict response when the enqueue should return early.
+    """
+    if not _is_wake_word_user_response(trigger, metadata):
+        return None
+
+    trace_id = _metadata_trace_id(metadata)
+    if not trace_id:
+        return None
+
+    incoming_rank = _wake_word_response_rank(trigger, metadata)
+    rows = await pool.fetch(
+        """
+        SELECT id, trigger_type, consumed_at, metadata
+        FROM guardian_queue
+        WHERE uid = $1
+          AND created_at > NOW() - INTERVAL '10 minutes'
+          AND COALESCE(metadata->>'trace_id', metadata->>'traceId', metadata->>'conversation_id', metadata->>'conversationId') = $2
+          AND (
+            trigger_type = ANY($3::text[])
+            OR metadata->>'source' = ANY($4::text[])
+            OR metadata->>'reason' = ANY($5::text[])
+            OR metadata->>'category' = 'wake_word'
+          )
+        ORDER BY created_at ASC
+        """,
+        uid,
+        trace_id,
+        list(_WAKE_WORD_USER_RESPONSE_TRIGGERS),
+        list(_WAKE_WORD_USER_RESPONSE_SOURCES),
+        list(_WAKE_WORD_USER_RESPONSE_REASONS),
+    )
+
+    if not rows:
+        return None
+
+    best_rank = max(_wake_word_response_rank(r["trigger_type"], r["metadata"]) for r in rows)
+    consumed = [r for r in rows if r["consumed_at"] is not None]
+
+    if consumed or best_rank >= incoming_rank:
+        existing = consumed[0] if consumed else rows[0]
+        return {
+            "ok": False,
+            "rejected": True,
+            "reason": "duplicate_wake_word_trace",
+            "trace_id": trace_id,
+            "existing_id": existing["id"],
+            "existing_trigger": existing["trigger_type"],
+        }
+
+    superseded_ids = [r["id"] for r in rows if r["consumed_at"] is None]
+    if superseded_ids:
+        await pool.execute(
+            """
+            UPDATE guardian_queue
+            SET consumed_at = NOW(),
+                metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+            WHERE id = ANY($1::text[])
+            """,
+            superseded_ids,
+            json.dumps({"superseded_by": item_id, "superseded_reason": "higher_rank_wake_word_trace_response"}),
+        )
+
+    return None
+
 
 async def _get_pool() -> asyncpg.Pool:
     """Get or create the asyncpg connection pool."""
@@ -494,7 +650,9 @@ def _is_wake_word_row(row: dict[str, Any]) -> bool:
     return trigger == "wake_word"
 
 
-def _select_same_trace_supersede_rows(pending_rows: list[dict[str, Any]]) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+def _select_same_trace_supersede_rows(
+    pending_rows: list[dict[str, Any]],
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
     """Pick one primary same-trace row to keep and return superseded siblings."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in pending_rows:
@@ -536,11 +694,7 @@ def _enqueue_allows_guardian_audio(mode: str, req: "EnqueueRequest") -> tuple[bo
 
     metadata = _coerce_metadata_dict(req.metadata)
     trigger = str(
-        req.trigger
-        or metadata.get("trigger_type")
-        or metadata.get("event_type")
-        or metadata.get("category")
-        or ""
+        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
     ).lower()
     severity = str(metadata.get("severity") or metadata.get("urgency") or req.priority or "").lower()
     message = str(req.message or metadata.get("message") or "").lower()
@@ -1045,6 +1199,33 @@ async def enqueue(
     metadata.setdefault("trace_id", trace_id)
     metadata.setdefault("queue_item_id", item_id)
     metadata_str = json.dumps(metadata)
+
+    dedupe_response = await _dedupe_wake_word_trace_enqueue(pool, uid, item_id, req.trigger, metadata)
+    if dedupe_response is not None:
+        _elapsed = int((time.time() - _start) * 1000)
+        print(
+            "[FLOW:GUARDIAN-ENQUEUE] "
+            f"uid={uid} id={item_id} trigger={req.trigger} REJECTED "
+            f"reason={dedupe_response.get('reason')} trace={dedupe_response.get('trace_id')} "
+            f"existing={dedupe_response.get('existing_id')} latency={_elapsed}ms",
+            flush=True,
+        )
+        await _log_pipeline_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="queue_rejected",
+            status="rejected",
+            latency_ms=_elapsed,
+            metadata={
+                "queue_item_id": item_id,
+                "priority": req.priority,
+                "trigger_type": req.trigger,
+                "reason": dedupe_response.get("reason"),
+                "existing_queue_item_id": dedupe_response.get("existing_id"),
+                "existing_trigger_type": dedupe_response.get("existing_trigger"),
+            },
+        )
+        return dedupe_response
 
     await pool.execute(
         """
