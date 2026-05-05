@@ -38,6 +38,8 @@ class V2VClient {
   bool _isConnected = false;
   bool _isPlaying = false;
   bool _micMuted = false;
+  int _micChunksSent = 0;
+  int _micBytesSent = 0;
 
   /// PCM buffer for accumulating audio chunks before WAV playback
   final BytesBuilder _pcmBuffer = BytesBuilder(copy: false);
@@ -83,6 +85,11 @@ class V2VClient {
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
     provider = normalizeProvider(provider);
+    if (_isConnected || _channel != null || _recorder != null) {
+      Logger.debug('[V2V] connect() called with existing session state, disconnecting first');
+      await disconnect();
+    }
+
     final uid = SharedPreferencesUtil().uid;
     if (uid.isEmpty) {
       Logger.debug('[V2V] No uid, cannot connect');
@@ -136,6 +143,7 @@ class V2VClient {
       return true;
     } catch (e) {
       Logger.error('[V2V] WebSocket connect failed: $e');
+      await disconnect();
       return false;
     }
   }
@@ -161,6 +169,7 @@ class V2VClient {
         _streamPlayerOpen = false;
       }
     } catch (_) {}
+    _resetTurnState();
   }
 
   /// Interrupt current playback (e.g., user started speaking).
@@ -175,6 +184,25 @@ class V2VClient {
     _pcmBuffer.clear();
     _chunkCount = 0;
     _streamPlaybackStartedAt = null;
+  }
+
+  void _muteMicForPlayback(String reason) {
+    if (_micMuted) return;
+    _micMuted = true;
+    Logger.debug('[V2V] Mic muted for playback/assistant response: $reason');
+    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic muted during response'));
+  }
+
+  void _resetTurnState() {
+    _isPlaying = false;
+    _micMuted = false;
+    _pcmBuffer.clear();
+    _chunkCount = 0;
+    _micChunksSent = 0;
+    _micBytesSent = 0;
+    _streamPlaybackStarted = false;
+    _streamPlaybackStartedAt = null;
+    _streamFeedFuture = Future.value();
   }
 
   // --- Audio session ---
@@ -317,9 +345,16 @@ class V2VClient {
         noiseSuppress: true,
       ));
 
+      _micChunksSent = 0;
+      _micBytesSent = 0;
       _micSub = stream.listen((data) {
-        if (_isConnected && _channel != null && !_micMuted) {
+        if (_isConnected && _channel != null && !_micMuted && !_isPlaying) {
           _channel!.sink.add(data);
+          _micChunksSent++;
+          _micBytesSent += data.length;
+          if (_micChunksSent % 50 == 0) {
+            Logger.debug('[V2V] Mic streamed $_micChunksSent chunks, $_micBytesSent bytes');
+          }
         }
       });
 
@@ -348,6 +383,9 @@ class V2VClient {
   void _streamAudioChunk(Uint8List pcmData) {
     if (pcmData.isEmpty) return;
 
+    // Gate the microphone before enqueueing playback so provider VAD cannot
+    // hear Ella's own response audio and interrupt the active turn.
+    _muteMicForPlayback('audio_chunk');
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
@@ -359,11 +397,9 @@ class V2VClient {
       onEvent?.call(V2VEvent(type: 'error', text: 'Audio stream error: $error'));
     });
 
-    // Mute mic on first chunk to avoid echo/VAD self-interrupt.
-    if (!_micMuted) {
-      _micMuted = true;
+    if (_chunkCount == 1) {
       onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
-      Logger.debug('[V2V] First audio chunk, streaming playback started, mic muted');
+      Logger.debug('[V2V] First audio chunk, streaming playback gate active');
     }
 
     if (_chunkCount % 20 == 0) {
@@ -435,6 +471,7 @@ class V2VClient {
       onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Stream play error: $e'));
       _isPlaying = false;
       _micMuted = false;
+      _streamPlaybackStartedAt = null;
       onEvent?.call(V2VEvent(type: 'playback_complete'));
     }
   }
@@ -474,6 +511,7 @@ class V2VClient {
         }
 
         if (_isAssistantTranscriptEvent(type)) {
+          _muteMicForPlayback(type);
           onEvent?.call(V2VEvent(type: 'transcript', text: text));
           return;
         }
@@ -486,6 +524,11 @@ class V2VClient {
 
         switch (type) {
           case 'speech_started':
+            if (_isPlaying || _micMuted || _streamPlaybackStarted) {
+              Logger.debug('[V2V] Ignoring speech_started while playback gate is active');
+              onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Ignoring speech_started during response'));
+              break;
+            }
             interruptPlayback();
             onEvent?.call(V2VEvent(type: 'speech_started'));
             break;
