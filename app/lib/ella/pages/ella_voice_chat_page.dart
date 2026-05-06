@@ -70,6 +70,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
   bool _isV2VMode = false;
+  bool _isStartingV2V = false;
+  int _v2vClientGeneration = 0;
   String? _voiceSessionId;
   DateTime? _voiceSessionStartedAt;
   String _voiceSessionProvider = 'elevenlabs';
@@ -452,66 +454,104 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _startV2V(String provider) async {
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
-    _isV2VMode = true;
-    _startUnifiedVoiceSession(provider);
-
-    // Stop any existing mic recording from CaptureProvider
-    if (mounted) {
-      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
-      if (captureProvider.recordingState == RecordingState.record) {
-        debugPrint('[VoiceChat] Pausing capture recording for V2V');
-        await captureProvider.stopStreamRecording();
-        _didPauseCaptureRecording = true;
-      }
-    }
-
-    setState(() {
-      _orbState = VoiceOrbState.processing;
-      _statusText = 'Connecting...';
-      _audioLevel = 0.0;
-    });
-
-    // Stop any playing audio
-    try {
-      await _audioPlayer.stop();
-    } catch (_) {}
-
-    _v2vClient = V2VClient(
-      onEvent: _onV2VEvent,
-      onConnectionChanged: (connected) {
-        if (!mounted) return;
-        if (!connected && _isV2VMode) {
-          debugPrint('[VoiceChat] V2V disconnected unexpectedly');
-          setState(() {
-            _orbState = VoiceOrbState.idle;
-            _statusText = 'Disconnected — Tap to Reconnect';
-            _isV2VMode = false;
-            _voiceModeActive = false;
-          });
-        }
-      },
-    );
-
-    final success = await _v2vClient!.connect(provider: provider);
-    if (!mounted) return;
-
-    if (!success) {
-      debugPrint('[VoiceChat] V2V connect failed, falling back to STT mode');
-      _isV2VMode = false;
-      _v2vClient = null;
-      // Fall back to standard STT→LLM→TTS
-      _startListening();
+    if (_isStartingV2V) {
+      debugPrint('[VoiceChat] V2V start already in progress, ignoring duplicate start');
       return;
     }
 
-    setState(() {
-      _orbState = VoiceOrbState.listening;
-      _statusText = 'V2V Active — Tap to Stop';
-    });
+    _isStartingV2V = true;
+    final generation = ++_v2vClientGeneration;
+    _isV2VMode = true;
+    _startUnifiedVoiceSession(provider);
+
+    try {
+      // A reconnect must not leave the previous socket or recorder alive.
+      final previousClient = _v2vClient;
+      _v2vClient = null;
+      if (previousClient != null) {
+        debugPrint('[VoiceChat] Closing previous V2V client before reconnect');
+        await previousClient.disconnect();
+      }
+
+      // Stop any existing mic recording from CaptureProvider
+      if (mounted) {
+        final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+        if (captureProvider.recordingState == RecordingState.record) {
+          debugPrint('[VoiceChat] Pausing capture recording for V2V');
+          await captureProvider.stopStreamRecording();
+          _didPauseCaptureRecording = true;
+        }
+      }
+
+      if (!mounted || generation != _v2vClientGeneration) return;
+      setState(() {
+        _orbState = VoiceOrbState.processing;
+        _statusText = 'Connecting...';
+        _audioLevel = 0.0;
+        _lastUserText = '';
+        _lastEllaText = '';
+        _ellaDisplayText = '';
+      });
+
+      // Stop any playing audio
+      try {
+        await _audioPlayer.stop();
+      } catch (_) {}
+
+      final client = V2VClient(
+        onEvent: (event) {
+          if (generation == _v2vClientGeneration) {
+            _onV2VEvent(event);
+          }
+        },
+        onConnectionChanged: (connected) {
+          if (!mounted || generation != _v2vClientGeneration) return;
+          if (!connected && _isV2VMode) {
+            debugPrint('[VoiceChat] V2V disconnected unexpectedly');
+            setState(() {
+              _orbState = VoiceOrbState.idle;
+              _statusText = 'Disconnected — Tap to Reconnect';
+              _isV2VMode = false;
+              _voiceModeActive = false;
+            });
+          }
+        },
+      );
+      _v2vClient = client;
+
+      final success = await client.connect(provider: provider);
+      if (!mounted || generation != _v2vClientGeneration) {
+        await client.disconnect();
+        return;
+      }
+
+      if (!success) {
+        debugPrint('[VoiceChat] V2V connect failed');
+        _isV2VMode = false;
+        _v2vClient = null;
+        setState(() {
+          _orbState = VoiceOrbState.idle;
+          _statusText = 'Voice provider unavailable. Tap to retry or choose another provider.';
+          _voiceModeActive = false;
+        });
+        return;
+      }
+
+      setState(() {
+        _orbState = VoiceOrbState.listening;
+        _statusText = 'V2V Active — Tap to Stop';
+      });
+    } finally {
+      if (generation == _v2vClientGeneration) {
+        _isStartingV2V = false;
+      }
+    }
   }
 
   Future<void> _stopV2V() async {
     debugPrint('[VoiceChat] Stopping V2V mode');
+    _v2vClientGeneration++;
+    _isStartingV2V = false;
     await _v2vClient?.disconnect();
     _v2vClient = null;
     await _completeUnifiedVoiceSession();

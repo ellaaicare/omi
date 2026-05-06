@@ -20,6 +20,13 @@ class GuardianModePollingService {
 
     var pollInterval: TimeInterval = 3.0
     var backendURL: String = "https://api.ella-ai-care.com"
+    private let stateLock = NSLock()
+    private var lastPollAttemptAt: Date?
+    private var lastPollSuccessAt: Date?
+    private var lastPollErrorAt: Date?
+    private var isPollInFlight = false
+    private var pollGeneration: UInt = 0
+    private var lastScheduledDelay: TimeInterval = 0
 
     struct PollResponse: Codable {
         let url: String?
@@ -86,26 +93,85 @@ class GuardianModePollingService {
     // MARK: - Public Methods
 
     func startPolling() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         guard !isPolling else {
             NSLog("GuardianPolling: Already polling")
             return
         }
 
+        pollTimer?.cancel()
+        pollTimer = nil
+        pollGeneration += 1
         isPolling = true
+        isPollInFlight = false
         consecutiveErrors = 0
-        NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
+        NSLog("GuardianPolling: Starting poll timer generation=\(pollGeneration) interval=\(pollInterval)s")
 
-        createPollTimer()
+        scheduleNextPollLocked(after: 0, reason: "start")
     }
 
     func stopPolling() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         guard isPolling else { return }
 
-        NSLog("GuardianPolling: Stopping poll timer")
+        pollGeneration += 1
+        NSLog("GuardianPolling: Stopping poll timer generation=\(pollGeneration)")
 
         pollTimer?.cancel()
         pollTimer = nil
         isPolling = false
+        isPollInFlight = false
+    }
+
+    /// Keep the poller alive while Guardian Mode is active. Dispatch timers can
+    /// stop firing across app suspension or service downtime without the user
+    /// explicitly disabling Guardian Mode; foreground and health checks call
+    /// this to repair that state.
+    func ensurePolling(reason: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        let now = Date()
+        let staleAfter = max(pollInterval * 5, 20.0)
+        let isStale = lastPollAttemptAt.map { now.timeIntervalSince($0) > staleAfter } ?? true
+
+        guard !isPolling || pollTimer == nil || (isStale && !isPollInFlight) else {
+            return
+        }
+
+        NSLog(
+            "GuardianPolling: Restarting poll timer reason=\(reason) " +
+            "isPolling=\(isPolling) hasTimer=\(pollTimer != nil) stale=\(isStale)"
+        )
+
+        pollTimer?.cancel()
+        pollTimer = nil
+        pollGeneration += 1
+        isPolling = true
+        isPollInFlight = false
+        consecutiveErrors = 0
+        scheduleNextPollLocked(after: 0, reason: reason)
+    }
+
+    func statusSnapshot() -> [String: Any] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        return [
+            "is_polling": isPolling,
+            "has_timer": pollTimer != nil,
+            "is_poll_in_flight": isPollInFlight,
+            "poll_generation": pollGeneration,
+            "last_scheduled_delay": lastScheduledDelay,
+            "consecutive_errors": consecutiveErrors,
+            "last_poll_attempt_at": lastPollAttemptAt?.timeIntervalSince1970 ?? 0,
+            "last_poll_success_at": lastPollSuccessAt?.timeIntervalSince1970 ?? 0,
+            "last_poll_error_at": lastPollErrorAt?.timeIntervalSince1970 ?? 0
+        ]
     }
 
     func pollForNewAudio() async throws -> PollResponse? {
@@ -183,27 +249,65 @@ class GuardianModePollingService {
 
     // MARK: - Private Methods
 
-    private func createPollTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    private func scheduleNextPollLocked(after delay: TimeInterval, reason: String) {
+        pollTimer?.cancel()
+        pollTimer = nil
 
-        timer.schedule(deadline: .now(), repeating: pollInterval)
+        guard isPolling else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+        let generation = pollGeneration
+        lastScheduledDelay = delay
+
+        timer.schedule(deadline: .now() + delay)
 
         timer.setEventHandler { [weak self] in
             Task {
-                await self?.executePoll()
+                await self?.executePoll(generation: generation)
             }
         }
 
         timer.resume()
         pollTimer = timer
+        NSLog("GuardianPolling: Scheduled next poll generation=\(generation) delay=\(String(format: "%.2f", delay)) reason=\(reason)")
     }
 
-    private func executePoll() async {
-        guard isPolling else { return }
+    private func nextPollDelayLocked() -> TimeInterval {
+        let cappedErrors = min(consecutiveErrors, 5)
+        let backoff = cappedErrors == 0 ? 0 : min(30.0, pow(2.0, Double(cappedErrors)))
+        let jitter = Double.random(in: 0...0.75)
+        return pollInterval + backoff + jitter
+    }
+
+    private func executePoll(generation: UInt) async {
+        stateLock.lock()
+        guard isPolling, generation == pollGeneration else {
+            stateLock.unlock()
+            return
+        }
+
+        guard !isPollInFlight else {
+            let delay = nextPollDelayLocked()
+            scheduleNextPollLocked(after: delay, reason: "in_flight_skip")
+            stateLock.unlock()
+            return
+        }
+        isPollInFlight = true
+        lastPollAttemptAt = Date()
+        stateLock.unlock()
 
         do {
             if let result = try await pollForNewAudio() {
+                stateLock.lock()
+                let isCurrentGeneration = isPolling && generation == pollGeneration
+                guard isCurrentGeneration else {
+                    stateLock.unlock()
+                    return
+                }
                 consecutiveErrors = 0
+                lastPollSuccessAt = Date()
+                stateLock.unlock()
+
                 let metadata = result.metadata?.dict ?? [:]
                 let traceId = result.traceId
                     ?? metadata["trace_id"] as? String
@@ -229,7 +333,8 @@ class GuardianModePollingService {
                         eventId: eventId,
                         traceId: traceId,
                         triggerType: result.triggerType,
-                        metadata: metadata
+                        metadata: metadata,
+                        fallbackText: result.message
                     )
                 } else if result.priority == "debug" {
                     // Metadata-only debug items never play audio; debug items with a URL are injected above.
@@ -256,11 +361,25 @@ class GuardianModePollingService {
                     )
                     speakText(message)
                 }
+            } else {
+                stateLock.lock()
+                if isPolling && generation == pollGeneration {
+                    consecutiveErrors = 0
+                    lastPollSuccessAt = Date()
+                }
+                stateLock.unlock()
             }
         } catch {
-            consecutiveErrors += 1
-            if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
-                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x): \(error.localizedDescription)")
+            stateLock.lock()
+            if isPolling && generation == pollGeneration {
+                consecutiveErrors += 1
+                lastPollErrorAt = Date()
+            }
+            let errors = consecutiveErrors
+            stateLock.unlock()
+
+            if errors <= 3 || errors % 10 == 0 {
+                NSLog("GuardianPolling: Poll error (\(errors)x): \(error.localizedDescription)")
             }
         }
 
@@ -268,5 +387,13 @@ class GuardianModePollingService {
         if Int.random(in: 0..<60) == 0 {
             GuardianModeManager.shared.cleanCache()
         }
+
+        stateLock.lock()
+        if isPolling && generation == pollGeneration {
+            isPollInFlight = false
+            let delay = nextPollDelayLocked()
+            scheduleNextPollLocked(after: delay, reason: consecutiveErrors == 0 ? "poll_complete" : "poll_error")
+        }
+        stateLock.unlock()
     }
 }

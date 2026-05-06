@@ -11,11 +11,13 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-/// Feature flag — production Ella chat uses Pattern C direct OpenClaw.
+/// Feature flag for direct gateway streaming.
 ///
-/// Any backend proxy fallback must also force OpenClaw; Level 0 is the legacy
-/// OMI/Grok path and is not valid for Ella chat.
-const bool _useDirectChat = true;
+/// Keep this disabled for MVP: the backend proxy owns Hermes routing, session
+/// continuity, and fallback behavior. Direct gateway failures can be swallowed
+/// by the streaming HTTP helper before the proxy fallback gets a chance to run.
+/// Cached direct gateway endpoints are cleared when chat is sent.
+const bool _useDirectChat = false;
 
 bool isEllaOperationalChatText(String text) {
   final normalized = text.trim();
@@ -255,7 +257,9 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
   // Feature flag — delegate to existing proxy path if disabled
   if (!_useDirectChat) {
-    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-flag-off'));
+    _invalidateResolveCache();
+    Logger.debug('[EllaChat] Direct gateway disabled, forcing proxy chat stream');
+    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-forced'));
     return;
   }
 

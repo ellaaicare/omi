@@ -11,6 +11,8 @@ import 'package:omi/utils/logger.dart';
 const _pendingWritesKey = 'ellaUnifiedMemoryPendingWrites';
 const _writeEnabledKey = 'ellaUnifiedMemoryWriteEnabled';
 const _mockAdapterKey = 'ellaUnifiedMemoryMockAdapter';
+const _chatSessionIdKey = 'ellaUnifiedMemoryChatSessionId';
+const _chatTurnIndexKeyPrefix = 'ellaUnifiedMemoryChatTurnIndex:';
 const _liveCanonicalBaseUrl = 'https://api.ella-ai-care.com/';
 
 /// Staged adapter for the canonical event/timeline APIs tracked by ella-ai#789.
@@ -26,7 +28,17 @@ class UnifiedMemoryService {
 
   static String createVoiceSessionId() => 'ios_voice_${const Uuid().v4()}';
 
-  static String createChatSessionId() => 'ios_chat_${const Uuid().v4()}';
+  static String createChatSessionId() {
+    final prefs = SharedPreferencesUtil();
+    final existing = prefs.getString(_chatSessionIdKey);
+    if (existing.isNotEmpty) return existing;
+
+    final uid = _uid.trim();
+    final safeUid = uid.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_').toLowerCase();
+    final sessionId = safeUid.isNotEmpty ? 'ios_chat_$safeUid' : 'ios_chat_${const Uuid().v4()}';
+    prefs.saveString(_chatSessionIdKey, sessionId);
+    return sessionId;
+  }
 
   static List<CanonicalEllaEvent> buildTurnEvents({
     required String channel,
@@ -84,11 +96,12 @@ class UnifiedMemoryService {
     if (!isWriteEnabled) return;
     if (_uid.isEmpty) return;
 
+    final turnIndex = await _nextChatTurnIndex(sessionId);
     final events = buildTurnEvents(
       channel: 'ios_chat',
       sessionId: sessionId,
-      provider: 'openclaw',
-      turnIndex: 1,
+      provider: 'hermes',
+      turnIndex: turnIndex,
       userText: userText,
       assistantText: assistantText,
       startedAt: startedAt,
@@ -97,6 +110,14 @@ class UnifiedMemoryService {
 
     if (events.isEmpty) return;
     await _writePayload({'events': events.map((event) => event.toJson()).toList()});
+  }
+
+  static Future<int> _nextChatTurnIndex(String sessionId) async {
+    final prefs = SharedPreferencesUtil();
+    final key = '$_chatTurnIndexKeyPrefix$sessionId';
+    final next = prefs.getInt(key) + 1;
+    await prefs.saveInt(key, next);
+    return next;
   }
 
   static Future<void> writeVoiceTurn({
