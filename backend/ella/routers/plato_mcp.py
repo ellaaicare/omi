@@ -10,6 +10,7 @@ the bearer token from the runtime environment.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -728,11 +729,21 @@ async def plato_mcp_token(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid token request body") from exc
 
-    client_id = str(data.get("client_id") or "")
+    basic_client_id = ""
+    basic_client_secret = ""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+            basic_client_id, basic_client_secret = decoded.split(":", 1)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid client authentication")
+
+    client_id = str(data.get("client_id") or basic_client_id or "")
     if client_id != _oauth_client_id():
         raise HTTPException(status_code=400, detail="Invalid client_id")
 
-    client_secret = str(data.get("client_secret") or "")
+    client_secret = str(data.get("client_secret") or basic_client_secret or "")
     if client_secret not in _allowed_tokens():
         raise HTTPException(status_code=401, detail="Invalid client_secret")
 
