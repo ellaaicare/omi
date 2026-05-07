@@ -122,6 +122,43 @@ def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
     assert result["trace_id"]
 
 
+def test_plato_recent_context_falls_back_when_canonical_is_empty(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def empty_timeline(limit, channels, since):
+        return []
+
+    monkeypatch.setattr(module, "_fetch_canonical_timeline", empty_timeline)
+    monkeypatch.setattr(
+        module.conversations_db,
+        "get_conversations",
+        MagicMock(
+            return_value=[
+                {
+                    "id": "conv-1",
+                    "created_at": "2026-05-07T01:00:00Z",
+                    "structured": {"title": "Latest OMI", "overview": "Discussed the last OMI conversation."},
+                }
+            ]
+        ),
+    )
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={"name": "plato_latest_omi", "arguments": {"limit": 3}},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline_empty_omi_firestore_fallback"
+    assert result["latest"]["event_id"] == "conv-1"
+
+
 def test_plato_search_memory_rejects_missing_query(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)

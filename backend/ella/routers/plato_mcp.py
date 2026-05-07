@@ -248,6 +248,11 @@ async def _recent_context(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         events = await _fetch_canonical_timeline(limit, channels, since)
         source = "canonical_timeline"
+        if not events:
+            fallback_events = _fallback_recent_context(limit, channels, since)
+            if fallback_events:
+                events = fallback_events
+                source = "canonical_timeline_empty_omi_firestore_fallback"
     except Exception as exc:
         logger.warning("plato_mcp timeline fallback: %s", exc)
         events = _fallback_recent_context(limit, channels, since)
