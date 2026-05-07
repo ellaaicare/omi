@@ -37,6 +37,11 @@ from ella.services.escalation_policy import (
     _normalize_mode,
     evaluate_escalation_policy,
 )
+from utils.ella.canonical_context import (
+    DEFAULT_CONTEXT_CHANNELS,
+    canonical_events_to_chat_turns,
+    fetch_canonical_timeline,
+)
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 
@@ -59,6 +64,11 @@ CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
 # Provision API for chat history lookups
 _PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
 _PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
+_GUARDIAN_CONTEXT_CHANNELS = [
+    channel.strip()
+    for channel in os.getenv("ELLA_GUARDIAN_CANONICAL_CHANNELS", ",".join(DEFAULT_CONTEXT_CHANNELS)).split(",")
+    if channel.strip()
+]
 
 # LLM settings for consolidator — prefers OpenRouter, falls back to XAI direct
 _OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -607,10 +617,34 @@ async def _log_pipeline_event(
 
 
 async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
-    """Fetch recent conversation turns for a UID from the chat history endpoint.
+    """Fetch recent turns for Guardian consolidation from canonical timeline.
 
+    Provision/OpenClaw history is retained only as a logged migration fallback.
     Returns list of {role, content} dicts, newest first. Returns [] on any error.
     """
+    try:
+        events = await fetch_canonical_timeline(
+            uid,
+            limit=max(limit, 10),
+            channels=_GUARDIAN_CONTEXT_CHANNELS,
+        )
+        if events:
+            turns = canonical_events_to_chat_turns(events, limit=limit)
+            print(
+                f"[FLOW:GUARDIAN-CONTEXT] uid={uid} source=canonical_timeline events={len(events)} turns={len(turns)}",
+                flush=True,
+            )
+            return turns
+        print(
+            f"[FLOW:GUARDIAN-CONTEXT] uid={uid} source=canonical_timeline empty fallback=provision_openclaw_history_migration",
+            flush=True,
+        )
+    except Exception as e:
+        print(
+            f"[FLOW:GUARDIAN-CONTEXT] uid={uid} canonical_error={e} fallback=provision_openclaw_history_migration",
+            flush=True,
+        )
+
     try:
         resolved = await resolve_user_routing(uid)
         if not resolved:
@@ -648,6 +682,10 @@ async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
             content = m.get("content", m.get("text", ""))
             if content:
                 turns.append({"role": role, "content": str(content)[:500]})
+        print(
+            f"[FLOW:GUARDIAN-CONTEXT] uid={uid} source=provision_openclaw_history_migration turns={len(turns)}",
+            flush=True,
+        )
         return turns
     except Exception as e:
         print(f"[CONSOLIDATOR] chat history fetch error: {e}", flush=True)

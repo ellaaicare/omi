@@ -33,6 +33,12 @@ from pydantic import BaseModel
 from ella.config import ELLA_CONFIG
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
+from utils.ella.canonical_context import (
+    DEFAULT_CONTEXT_CHANNELS,
+    canonical_events_to_server_messages,
+    fetch_canonical_timeline,
+    format_canonical_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,13 @@ HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642"
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
+CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
+CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
+CHAT_CONTEXT_CHANNELS = [
+    channel.strip()
+    for channel in os.getenv("ELLA_CHAT_CANONICAL_CHANNELS", ",".join(DEFAULT_CONTEXT_CHANNELS)).split(",")
+    if channel.strip()
+]
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -76,6 +89,25 @@ def _resolve_debug_level(header_value: str = None) -> int:
         except (ValueError, TypeError):
             logger.warning(f"[FLOW:CHAT] Non-integer debug level in header: {header_value}, using config default")
     return ELLA_CONFIG.debug_level
+
+
+async def _fetch_chat_canonical_events(uid: str, *, limit: int, before: str = None) -> list[dict]:
+    try:
+        events = await fetch_canonical_timeline(
+            uid,
+            limit=limit,
+            channels=CHAT_CONTEXT_CHANNELS,
+            before=before,
+        )
+        logger.info("[FLOW:CANONICAL-CONTEXT] uid=%s events=%s source=timeline", uid, len(events))
+        return events
+    except Exception as e:
+        logger.warning(
+            "[FLOW:CANONICAL-CONTEXT] uid=%s unavailable=%s fallback=migration_legacy_history",
+            uid,
+            e,
+        )
+        return []
 
 
 async def _stream_level_1_ack(user_message: str):
@@ -277,6 +309,28 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         _l4_trace.notes.append("WARNING: No cluster found, using fallback")
         print(f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent=main source=FALLBACK (no cluster)", flush=True)
 
+    canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
+    canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
+    messages = []
+    if canonical_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Use this canonical timeline as the freshest available user context. "
+                    "It may include OMI, iOS chat, voice, iMessage, Guardian, Telegram, and memory events. "
+                    "Prefer it over older OpenClaw session history when answering.\n\n"
+                    f"{canonical_context}"
+                ),
+            }
+        )
+    else:
+        print(
+            f"[FLOW:CHAT-L4] uid={uid} canonical_context=empty fallback=openclaw_session_history_migration",
+            flush=True,
+        )
+    messages.append({"role": "user", "content": user_message})
+
     # Use asyncio.Task so we can yield keep-alives while waiting
     async def _call_openclaw():
         async with httpx.AsyncClient() as client:
@@ -290,9 +344,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
                 },
                 json={
                     "model": f"openclaw:{agent_id}",
-                    "messages": [
-                        {"role": "user", "content": user_message},
-                    ],
+                    "messages": messages,
                     "stream": False,
                     "user": session_key,
                 },
@@ -387,7 +439,31 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
 
     session_key = f"ella:omi:{uid.lower()}:ios-chat"
     text = []
-    print(f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key}", flush=True)
+    canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
+    canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
+    messages = []
+    if canonical_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Use this canonical timeline as the freshest available user context. "
+                    "It may include OMI, iOS chat, voice, iMessage, Guardian, Telegram, and memory events. "
+                    "Prefer it over older Hermes/OpenClaw session history when answering.\n\n"
+                    f"{canonical_context}"
+                ),
+            }
+        )
+    else:
+        print(
+            f"[FLOW:CHAT-HERMES] uid={uid} canonical_context=empty fallback=hermes_session_history_migration",
+            flush=True,
+        )
+    messages.append({"role": "user", "content": user_message})
+    print(
+        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} canonical_events={len(canonical_events)}",
+        flush=True,
+    )
 
     try:
         async with httpx.AsyncClient(timeout=None) as client:
@@ -401,7 +477,7 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
                 },
                 json={
                     "model": HERMES_MODEL,
-                    "messages": [{"role": "user", "content": user_message}],
+                    "messages": messages,
                     "stream": True,
                 },
             ) as response:
@@ -610,10 +686,10 @@ async def ella_chat_history(
     limit: int = 50,
     before: str = None,
 ):
-    """Return recent chat messages for a user from OpenClaw session history.
+    """Return recent chat/context messages for a user from canonical timeline.
 
-    Resolves the user's agent routing, then proxies to the Mac Mini provision
-    API which reads JSONL session files directly.
+    Canonical timeline is primary. The Mac Mini provision/OpenClaw session
+    history path is kept only as a logged migration fallback.
 
     Returns messages in reverse-chronological order (newest first) in the
     iOS ServerMessage schema format.
@@ -629,16 +705,37 @@ async def ella_chat_history(
 
     limit = min(limit, 200)
 
-    # Resolve user to get their OpenClaw user ID
+    canonical_events = await _fetch_chat_canonical_events(uid, limit=limit, before=before)
+    if canonical_events:
+        _elapsed = int((_time.time() - _start) * 1000)
+        logger.info(
+            "[FLOW:HISTORY] uid=%s source=canonical_timeline messages=%s latency=%sms",
+            uid,
+            len(canonical_events),
+            _elapsed,
+        )
+        return {
+            "messages": canonical_events_to_server_messages(canonical_events, limit=limit),
+            "hasMore": len(canonical_events) >= limit,
+            "source": "canonical_timeline",
+            "fallback": False,
+        }
+
+    logger.warning(
+        "[FLOW:HISTORY] uid=%s source=canonical_timeline empty fallback=provision_openclaw_history_migration",
+        uid,
+    )
+
+    # Resolve user to get their OpenClaw user ID for migration fallback only.
     resolved = await resolve_user_routing(uid)
     if not resolved:
         logger.warning(f"[FLOW:HISTORY] uid={uid} user_not_found")
-        return {"messages": [], "hasMore": False}
+        return {"messages": [], "hasMore": False, "source": "canonical_timeline_empty", "fallback": False}
 
     routing = resolved.get("routing")
     if not routing:
         logger.warning(f"[FLOW:HISTORY] uid={uid} no_routing")
-        return {"messages": [], "hasMore": False}
+        return {"messages": [], "hasMore": False, "source": "canonical_timeline_empty", "fallback": False}
 
     # Extract the OpenClaw user ID from the workspace path or agent ID
     agent_id = routing.get("agentId", "")
@@ -675,22 +772,30 @@ async def ella_chat_history(
         if response.status_code == 200:
             result = response.json()
             msg_count = len(result.get("messages", []))
-            logger.info(f"[FLOW:HISTORY] uid={uid} agent={agent_id} messages={msg_count} latency={_elapsed}ms")
+            logger.warning(
+                "[FLOW:HISTORY] uid=%s agent=%s messages=%s latency=%sms source=provision_openclaw_history_migration",
+                uid,
+                agent_id,
+                msg_count,
+                _elapsed,
+            )
+            result["source"] = "provision_openclaw_history_migration"
+            result["fallback"] = True
             return result
         elif response.status_code == 404:
             logger.warning(f"[FLOW:HISTORY] uid={uid} agent={agent_id} no_sessions latency={_elapsed}ms")
-            return {"messages": [], "hasMore": False}
+            return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
         else:
             logger.error(
                 f"[FLOW:HISTORY] uid={uid} agent={agent_id} status={response.status_code} latency={_elapsed}ms"
             )
-            return {"messages": [], "hasMore": False}
+            return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
 
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
         logger.error(f"[FLOW:HISTORY] uid={uid} timeout latency={_elapsed}ms")
-        return {"messages": [], "hasMore": False}
+        return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
     except Exception as e:
         _elapsed = int((_time.time() - _start) * 1000)
         logger.error(f"[FLOW:HISTORY] uid={uid} error={e} latency={_elapsed}ms")
-        return {"messages": [], "hasMore": False}
+        return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
