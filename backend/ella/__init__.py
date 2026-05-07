@@ -311,6 +311,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella canonical events not available: {e}", flush=True)
 
+    # Plato/Hermes read-only MCP bridge for Grok custom connector testing
+    try:
+        from ella.routers.plato_mcp import router as plato_mcp_router
+
+        app.include_router(plato_mcp_router, tags=["Ella Plato MCP"])
+        print("  🌐 /v1/ella/plato/mcp - Plato/Hermes read-only MCP bridge", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella Plato MCP not available: {e}", flush=True)
+
     # Escalation policy resolver (classifier output -> deterministic delivery plan)
     try:
         from ella.routers.escalations import router as escalations_router
