@@ -32,6 +32,7 @@ class V2VClient {
   static const int _pcmBytesPerSample = 2;
   static const int _pcmChannels = 1;
   static const Duration _postPlaybackMicCooldown = Duration(seconds: 2);
+  static const Duration _playbackFinishQuietPeriod = Duration(milliseconds: 900);
 
   static V2VClient? _activeClient;
 
@@ -57,6 +58,8 @@ class V2VClient {
   bool _streamPlaybackStarted = false;
   DateTime? _streamPlaybackStartedAt;
   Future<void> _streamFeedFuture = Future.value();
+  Timer? _finishPlaybackTimer;
+  bool _finishingPlayback = false;
 
   /// Callback for JSON events (transcripts, errors, etc.)
   final void Function(V2VEvent event)? onEvent;
@@ -234,6 +237,9 @@ class V2VClient {
     _streamPlaybackStarted = false;
     _streamPlaybackStartedAt = null;
     _streamFeedFuture = Future.value();
+    _finishPlaybackTimer?.cancel();
+    _finishPlaybackTimer = null;
+    _finishingPlayback = false;
     _micGateFuture = Future.value();
   }
 
@@ -351,8 +357,22 @@ class V2VClient {
     return normalized == 'audio_done' ||
         normalized == 'response.audio.done' ||
         normalized == 'output_audio.done' ||
-        normalized == 'turn_complete' ||
-        normalized == 'response.done';
+        normalized == 'audio.done';
+  }
+
+  static bool _isResponseCompleteEvent(String type) {
+    final normalized = type.toLowerCase();
+    return normalized == 'turn_complete' || normalized == 'response.done';
+  }
+
+  @visibleForTesting
+  static bool treatsAsAudioDoneEvent(String type) {
+    return _isAudioDoneEvent(type);
+  }
+
+  @visibleForTesting
+  static bool treatsAsResponseCompleteEvent(String type) {
+    return _isResponseCompleteEvent(type);
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
@@ -462,6 +482,7 @@ class V2VClient {
     // Gate the microphone before enqueueing playback so provider VAD cannot
     // hear Ella's own response audio and interrupt the active turn.
     _suspendMicForPlayback('audio_chunk');
+    _deferPendingPlaybackFinish('audio_chunk');
     _chunkCount++;
     _pcmBuffer.add(pcmData);
 
@@ -511,11 +532,34 @@ class V2VClient {
     _streamPlaybackStarted = false;
   }
 
-  /// Called on audio_done — wait for queued PCM to drain, then return to listening.
-  Future<void> _finishPlayback() async {
+  void _scheduleFinishPlayback(String reason) {
+    _finishPlaybackTimer?.cancel();
+    Logger.debug('[V2V] Playback finish scheduled after quiet period: reason=$reason');
+    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Playback finish pending: $reason'));
+    _finishPlaybackTimer = Timer(_playbackFinishQuietPeriod, () {
+      _finishPlaybackTimer = null;
+      Future<void>(() async {
+        await _finishPlayback(reason: reason);
+      });
+    });
+  }
+
+  void _deferPendingPlaybackFinish(String reason) {
+    if (_finishPlaybackTimer == null) return;
+    _scheduleFinishPlayback(reason);
+  }
+
+  /// Called after audio/output completion quiets — wait for queued PCM to drain,
+  /// then return to listening.
+  Future<void> _finishPlayback({required String reason}) async {
+    if (_finishingPlayback) {
+      Logger.debug('[V2V] Playback finish already in progress, ignoring reason=$reason');
+      return;
+    }
+    _finishingPlayback = true;
     final pcmBytes = _pcmBuffer.toBytes();
     final stats = '$_chunkCount chunks, ${(pcmBytes.length / 1024).toStringAsFixed(1)}KB';
-    Logger.debug('[V2V] Audio stream done: $stats');
+    Logger.debug('[V2V] Audio stream done: reason=$reason $stats');
     onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Finishing audio: $stats'));
 
     _pcmBuffer.clear();
@@ -524,6 +568,7 @@ class V2VClient {
     if (pcmBytes.isEmpty) {
       Logger.debug('[V2V] No audio data to play');
       await _onPlaybackComplete();
+      _finishingPlayback = false;
       return;
     }
 
@@ -549,6 +594,8 @@ class V2VClient {
       _streamPlaybackStartedAt = null;
       await _resumeMicAfterPlayback();
       onEvent?.call(V2VEvent(type: 'playback_complete'));
+    } finally {
+      _finishingPlayback = false;
     }
   }
 
@@ -588,13 +635,19 @@ class V2VClient {
 
         if (_isAssistantTranscriptEvent(type)) {
           _suspendMicForPlayback(type);
+          _deferPendingPlaybackFinish(type);
           onEvent?.call(V2VEvent(type: 'transcript', text: text));
           return;
         }
 
         if (_isAudioDoneEvent(type)) {
-          _finishPlayback();
+          _scheduleFinishPlayback(type);
           onEvent?.call(V2VEvent(type: 'audio_done'));
+          return;
+        }
+
+        if (_isResponseCompleteEvent(type)) {
+          _scheduleFinishPlayback(type);
           return;
         }
 

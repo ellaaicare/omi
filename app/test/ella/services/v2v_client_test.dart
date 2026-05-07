@@ -34,5 +34,17 @@ void main() {
       expect(V2VClient.treatsAsAssistantTranscriptEvent('response.audio_transcript.delta'), isTrue);
       expect(V2VClient.treatsAsAssistantTranscriptEvent('user_transcript'), isFalse);
     });
+
+    test('separates audio completion from generic response completion', () {
+      expect(V2VClient.treatsAsAudioDoneEvent('audio_done'), isTrue);
+      expect(V2VClient.treatsAsAudioDoneEvent('response.audio.done'), isTrue);
+      expect(V2VClient.treatsAsAudioDoneEvent('output_audio.done'), isTrue);
+      expect(V2VClient.treatsAsAudioDoneEvent('response.done'), isFalse);
+      expect(V2VClient.treatsAsAudioDoneEvent('turn_complete'), isFalse);
+
+      expect(V2VClient.treatsAsResponseCompleteEvent('response.done'), isTrue);
+      expect(V2VClient.treatsAsResponseCompleteEvent('turn_complete'), isTrue);
+      expect(V2VClient.treatsAsResponseCompleteEvent('audio_done'), isFalse);
+    });
   });
 }
