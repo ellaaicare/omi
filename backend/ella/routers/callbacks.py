@@ -28,6 +28,7 @@ import logging
 import os
 import secrets
 import string
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -48,6 +49,7 @@ from database.ella_contacts import create_contact, delete_contact, get_contact, 
 from ella.config import ELLA_CONFIG
 from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
 from utils.notifications import send_notification
+from utils.ella.canonical_omi import write_omi_canonical_event
 from utils.other.storage import storage_client
 
 logger = logging.getLogger(__name__)
@@ -419,6 +421,43 @@ async def update_conversation_summary(
     except Exception as e:
         logging.error(f"Failed to update conversation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+    canonical_base = dict(conversation) if isinstance(conversation, dict) else {}
+    canonical_conversation = {
+        **canonical_base,
+        "id": conversation_id,
+        "structured": structured,
+        "summary_versions": version_update["summary_versions"],
+        "active_summary_version_id": version_update["active_summary_version_id"],
+        "enrichment_state": update_data.get("enrichment_state"),
+        "internal_assessment": update_data.get("internal_assessment", canonical_base.get("internal_assessment")),
+        "ella_tags": update_data.get("ella_tags", canonical_base.get("ella_tags") or []),
+        "ella_signal": update_data.get("ella_signal", canonical_base.get("ella_signal")),
+    }
+    try:
+        canonical_result = await asyncio.to_thread(
+            write_omi_canonical_event,
+            uid,
+            canonical_conversation,
+            summary_source=update.summary_source,
+            summary_kind=update.summary_kind,
+            trace_id=update.trace_id,
+        )
+        logger.info(
+            "Wrote OMI summary to canonical ledger",
+            extra={
+                "uid": uid,
+                "conversation_id": conversation_id,
+                "inserted": canonical_result.get("inserted"),
+                "duplicates": canonical_result.get("duplicates"),
+            },
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to write OMI summary to canonical ledger",
+            extra={"uid": uid, "conversation_id": conversation_id},
+        )
+        logger.warning(str(e))
 
     if update.correction_id:
         try:

@@ -31,6 +31,15 @@ assert _callbacks_spec is not None and _callbacks_spec.loader is not None
 _callbacks_spec.loader.exec_module(callbacks)
 
 
+@pytest.fixture(autouse=True)
+def disable_canonical_omi_network(monkeypatch):
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: {"ok": True, "inserted": 1, "duplicates": 0},
+    )
+
+
 def test_update_conversation_summary_clears_stale_app_results(monkeypatch):
     captured = {}
 
@@ -332,3 +341,70 @@ def test_update_conversation_summary_persists_internal_assessment_when_available
 
     assert captured["update_data"]["internal_assessment"]["media_likelihood"] == 0.92
     assert captured["update_data"]["internal_assessment"]["reason_codes"] == ["likely_media_or_background_audio"]
+
+
+def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatch):
+    canonical_writes = []
+
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "created_at": "2026-05-07T18:56:59Z",
+            "started_at": "2026-05-07T18:56:59Z",
+            "finished_at": "2026-05-07T18:58:12Z",
+            "structured": {
+                "title": "Original cafe title",
+                "overview": "[Ella] Original cafe overview with enough detail.",
+                "emoji": "☕",
+                "category": callbacks.CategoryEnum.other,
+            },
+            "transcript_segments": [{"is_user": True, "text": "I ordered a waffle."}],
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "build_summary_version_update",
+        lambda conversation, **kwargs: {
+            "summary_versions": [{"id": "obs-v2", "title": kwargs["next_structured"]["title"]}],
+            "active_summary_version_id": "obs-v2",
+            "new_summary_version_id": "obs-v2",
+        },
+    )
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda uid, conversation, **kwargs: canonical_writes.append(
+            {"uid": uid, "conversation": conversation, "kwargs": kwargs}
+        )
+        or {"ok": True, "inserted": 1, "duplicates": 0},
+    )
+
+    asyncio.run(
+        callbacks.update_conversation_summary(
+            "cafe-123",
+            callbacks.ConversationSummaryUpdate(
+                title="Cafe Coffee and Waffle Stop",
+                overview="[Ella] You ordered a noah drink and a waffle with oat.",
+                summary_source="observer",
+                summary_kind="observer_enriched",
+                trace_id="trace-cafe",
+            ),
+            uid="user-123",
+        )
+    )
+
+    assert canonical_writes[0]["uid"] == "user-123"
+    assert canonical_writes[0]["conversation"]["id"] == "cafe-123"
+    assert canonical_writes[0]["conversation"]["structured"]["title"] == "Cafe Coffee and Waffle Stop"
+    assert canonical_writes[0]["conversation"]["structured"]["overview"] == (
+        "[Ella] You ordered a noah drink and a waffle with oat."
+    )
+    assert canonical_writes[0]["conversation"]["active_summary_version_id"] == "obs-v2"
+    assert canonical_writes[0]["kwargs"] == {
+        "summary_source": "observer",
+        "summary_kind": "observer_enriched",
+        "trace_id": "trace-cafe",
+    }
