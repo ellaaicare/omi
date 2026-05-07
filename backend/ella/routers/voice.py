@@ -32,6 +32,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from database.conversations import _decrypt_conversation_data
+from utils.ella.canonical_context import fetch_canonical_timeline
 
 # JWT handling
 try:
@@ -1388,6 +1389,7 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
                 "timestamp": ts_text,
                 "score": score + role_boost,
                 "metadata": {
+                    "provenance": "canonical_event",
                     "channel": channel,
                     "provider": provider,
                     "role": role,
@@ -1441,6 +1443,7 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
             "timestamp": top.get("timestamp") or "",
             "score": score,
             "metadata": {
+                "provenance": "hermes_voice_memory",
                 "path": data.get("path"),
                 "confidence": confidence,
                 "latency_ms": data.get("latency_ms"),
@@ -1531,7 +1534,7 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
                         "content": (item.get("snippet", "") or item.get("content", ""))[:500],
                         "timestamp": "",
                         "score": item.get("score", 1),
-                        "metadata": {"file": item.get("file", "")},
+                        "metadata": {"provenance": "hermes_workspace_mirror", "file": item.get("file", "")},
                     })
                 return results
 
@@ -1577,7 +1580,7 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
                         "content": snippet,
                         "timestamp": "",
                         "score": score,
-                        "metadata": {"file": fname},
+                        "metadata": {"provenance": "hermes_workspace_mirror", "file": fname},
                     })
 
             # Sort by score desc, limit
@@ -1587,6 +1590,109 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
     except Exception as e:
         logger.warning(f"[FLOW:UNIFIED-SEARCH] Workspace search error: {e}")
         return results
+
+
+def _canonical_event_title(event: dict) -> str:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+    return str(event.get("title") or structured.get("title") or "OMI conversation")
+
+
+def _canonical_event_timestamp(event: dict) -> str:
+    raw = event.get("started_at") or event.get("created_at") or event.get("timestamp") or ""
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d %I:%M %p")
+    except Exception:
+        return str(raw)[:16]
+
+
+async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_access: bool) -> list:
+    """Search OMI canonical summary events via GET /v1/ella/timeline first."""
+    results = []
+    try:
+        events = await fetch_canonical_timeline(uid, limit=120, channels=["omi"])
+    except Exception as e:
+        logger.warning(f"[FLOW:UNIFIED-SEARCH] Canonical OMI timeline fetch error: {e}")
+        return results
+
+    query_terms = _expand_query_terms(_significant_query_terms(query))
+    matches = []
+    for event in events:
+        title = _canonical_event_title(event)
+        text = str(event.get("text") or "")
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+        searchable = " ".join(
+            str(part or "")
+            for part in (
+                title,
+                text,
+                structured.get("overview"),
+                structured.get("category"),
+                structured.get("emoji"),
+                event.get("provider"),
+                event.get("source_identity"),
+            )
+        )
+        score = _keyword_score(searchable, query_terms) if query_terms else 1
+        if score <= 0:
+            continue
+
+        started_raw = event.get("started_at") or ""
+        try:
+            started_sort = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+        except Exception:
+            started_sort = datetime.min.replace(tzinfo=timezone.utc)
+
+        content = text
+        if not full_access:
+            content = content[:300] + ("..." if len(content) > 300 else "")
+        matches.append((score, started_sort, event, title, content))
+
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for score, _started_sort, event, title, content in matches[:limit]:
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+        results.append({
+            "source": "omi",
+            "title": title,
+            "content": content[:1400],
+            "timestamp": _canonical_event_timestamp(event),
+            "score": score + 45,
+            "metadata": {
+                "provenance": "canonical_event",
+                "fallback": False,
+                "event_id": event.get("event_id"),
+                "source_identity": event.get("source_identity"),
+                "channel": event.get("channel"),
+                "provider": event.get("provider"),
+                "emoji": structured.get("emoji", ""),
+                "category": structured.get("category", ""),
+            },
+        })
+    return results
+
+
+async def _search_omi_canonical_first(uid: str, query: str, limit: int, full_access: bool) -> list:
+    canonical_results = await _search_canonical_omi_events(uid, query, limit, full_access)
+    if canonical_results:
+        logger.info(
+            f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}"
+        )
+        return canonical_results
+
+    logger.warning(
+        f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results=0 fallback=firestore_legacy_omi"
+    )
+    fallback_results = await _search_omi_conversations(uid, query, limit, full_access)
+    for item in fallback_results:
+        metadata = item.setdefault("metadata", {})
+        metadata["provenance"] = "firestore_legacy_omi"
+        metadata["fallback"] = True
+    return fallback_results
 
 
 async def _search_omi_conversations(uid: str, query: str, limit: int, full_access: bool) -> list:
@@ -1776,6 +1882,8 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                 "timestamp": ts,
                 "score": score + 18,
                 "metadata": {
+                    "provenance": "firestore_legacy_omi",
+                    "fallback": True,
                     "emoji": structured.get("emoji", ""),
                     "category": structured.get("category", ""),
                     "has_transcript_detail": bool(transcript_text and full_access),
@@ -2073,6 +2181,7 @@ async def unified_search(request: Request):
                 "results": fast_results,
                 "sources_searched": ["voice_memory"],
                 "sources_denied": [],
+                "provenance": {"hermes_voice_memory": len(fast_results)},
                 "total_results": len(fast_results),
                 "query": query,
                 "fast_path": True,
@@ -2123,7 +2232,7 @@ async def unified_search(request: Request):
 
     if allowed.get("omi_full") or allowed.get("omi_meta"):
         full_access = bool(allowed.get("omi_full"))
-        tasks.append(_search_omi_conversations(uid, query, limit, full_access))
+        tasks.append(_search_omi_canonical_first(uid, query, limit, full_access))
         task_source_names.append("omi")
 
     if allowed.get("memories"):
@@ -2163,18 +2272,24 @@ async def unified_search(request: Request):
 
     # Sort merged results by score (desc)
     all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    provenance: dict[str, int] = {}
+    for item in all_results:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        key = str(metadata.get("provenance") or item.get("source") or "unknown")
+        provenance[key] = provenance.get(key, 0) + 1
 
     _elapsed = int((time.time() - _start) * 1000)
     logger.info(
         f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
         f"sources={sorted(sources_searched)} results={len(all_results)} "
-        f"denied={sources_denied} latency={_elapsed}ms"
+        f"denied={sources_denied} provenance={provenance} latency={_elapsed}ms"
     )
 
     return {
         "results": all_results,
         "sources_searched": sorted(sources_searched),
         "sources_denied": sources_denied,
+        "provenance": provenance,
         "total_results": len(all_results),
         "query": query,
     }
