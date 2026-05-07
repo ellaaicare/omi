@@ -2,6 +2,7 @@ import importlib
 import json
 import sys
 import types
+import base64
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -209,6 +210,21 @@ def test_oauth_token_exchanges_client_secret_for_bearer(monkeypatch):
     assert payload["access_token"] == "test-token"
     assert payload["token_type"] == "Bearer"
     assert payload["scope"] == "plato:read"
+
+
+def test_oauth_token_accepts_basic_client_auth(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    credentials = base64.b64encode(b"plato-grok:test-token").decode()
+
+    token_response = client.post(
+        "/v1/ella/plato/mcp/token",
+        headers={"Authorization": f"Basic {credentials}"},
+        data={"grant_type": "authorization_code", "code": "plato_mcp"},
+    )
+
+    assert token_response.status_code == 200
+    assert token_response.json()["access_token"] == "test-token"
 
 
 def test_oauth_authorize_redirects_with_code_and_state(monkeypatch):
