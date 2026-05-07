@@ -13,6 +13,7 @@ The Ella extensions add healthcare-focused features to the OMI backend:
 1. **n8n/Letta Processing** - Routes summary/memory generation to Letta agents via n8n
 2. **Push Notifications with Audio** - Firestore-based notifications with TTS playback
 3. **Voice V2 (Grok V2V)** - Ultra-low latency voice-to-voice via Grok API
+4. **Unified Memory Context** - Canonical `/v1/ella/events` ingestion and `/v1/ella/timeline` reads
 
 ---
 
@@ -44,6 +45,7 @@ backend/
 │   │
 │   └── docs/                      # Ella-specific documentation
 │       ├── N8N_INTEGRATION.md
+│       ├── UNIFIED_MEMORY_CONTEXT.md
 │       ├── VOICE_V2_PROTOCOL.md
 │       └── UPSTREAM_HOOKS.md
 │
