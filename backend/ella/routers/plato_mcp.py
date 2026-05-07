@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -77,6 +78,10 @@ def _plato_canonical_identity() -> str:
 
 def _plato_agent_id() -> str:
     return _env("ELLA_PLATO_AGENT_ID", f"ella-omi-{_plato_uid().lower()}")
+
+
+def _oauth_client_id() -> str:
+    return _env("ELLA_PLATO_MCP_OAUTH_CLIENT_ID", "plato-grok")
 
 
 def _allowed_tokens() -> set[str]:
@@ -687,15 +692,77 @@ async def plato_mcp_delete_session(
     return Response(status_code=204)
 
 
+@router.get("/mcp/authorize")
+async def plato_mcp_authorize(
+    response_type: str,
+    client_id: str,
+    redirect_uri: str,
+    state: Optional[str] = None,
+    scope: Optional[str] = None,
+    code_challenge: Optional[str] = None,
+    code_challenge_method: Optional[str] = None,
+):
+    if response_type != "code":
+        raise HTTPException(status_code=400, detail="response_type must be code")
+    if client_id != _oauth_client_id():
+        raise HTTPException(status_code=400, detail="Invalid client_id")
+
+    query = {"code": "plato_mcp"}
+    if state:
+        query["state"] = state
+    location = f"{redirect_uri}{'&' if '?' in redirect_uri else '?'}{urllib.parse.urlencode(query)}"
+    return Response(status_code=302, headers={"Location": location})
+
+
+@router.post("/mcp/token")
+async def plato_mcp_token(request: Request):
+    data: dict[str, Any]
+    try:
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            data = await request.json()
+        else:
+            raw_body = (await request.body()).decode("utf-8")
+            parsed = urllib.parse.parse_qs(raw_body, keep_blank_values=True)
+            data = {key: values[-1] if values else "" for key, values in parsed.items()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid token request body") from exc
+
+    client_id = str(data.get("client_id") or "")
+    if client_id != _oauth_client_id():
+        raise HTTPException(status_code=400, detail="Invalid client_id")
+
+    client_secret = str(data.get("client_secret") or "")
+    if client_secret not in _allowed_tokens():
+        raise HTTPException(status_code=401, detail="Invalid client_secret")
+
+    return {
+        "access_token": client_secret,
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "plato:read",
+    }
+
+
 @router.get("/mcp/info")
 async def plato_mcp_info(request: Request):
     base_url = str(request.base_url).rstrip("/")
+    endpoint = f"{base_url}/v1/ella/plato/mcp"
     return {
-        "endpoint": f"{base_url}/v1/ella/plato/mcp",
+        "endpoint": endpoint,
         "transport": "streamable-http",
         "protocol_version": "2025-03-26",
         "profile_scope": {"uid": _plato_uid(), "canonical_identity": _plato_canonical_identity()},
-        "authentication": {"header": "Authorization", "format": "Bearer <ELLA_PLATO_MCP_TOKEN>"},
+        "authentication": {
+            "header": "Authorization",
+            "format": "Bearer <ELLA_PLATO_MCP_TOKEN>",
+            "oauth": {
+                "client_id": _oauth_client_id(),
+                "authorization_endpoint": f"{endpoint}/authorize",
+                "token_endpoint": f"{endpoint}/token",
+                "scopes": ["plato:read"],
+            },
+        },
         "tools": [tool["name"] for tool in MCP_TOOLS],
         "write_tools_enabled": False,
         "rollback": "remove or rotate ELLA_PLATO_MCP_TOKEN / ELLA_PLATO_MCP_TOKENS",

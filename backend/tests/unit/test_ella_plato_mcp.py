@@ -188,3 +188,43 @@ def test_initialize_returns_session_header(monkeypatch):
     assert response.status_code == 200
     assert response.headers["mcp-session-id"]
     assert response.json()["result"]["serverInfo"]["name"] == "ella-plato-hermes-mcp"
+
+
+def test_oauth_token_exchanges_client_secret_for_bearer(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    token_response = client.post(
+        "/v1/ella/plato/mcp/token",
+        data={
+            "client_id": "plato-grok",
+            "client_secret": "test-token",
+            "grant_type": "authorization_code",
+            "code": "plato_mcp",
+        },
+    )
+
+    assert token_response.status_code == 200
+    payload = token_response.json()
+    assert payload["access_token"] == "test-token"
+    assert payload["token_type"] == "Bearer"
+    assert payload["scope"] == "plato:read"
+
+
+def test_oauth_authorize_redirects_with_code_and_state(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.get(
+        "/v1/ella/plato/mcp/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "plato-grok",
+            "redirect_uri": "https://grok.example/callback",
+            "state": "abc",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://grok.example/callback?code=plato_mcp&state=abc"
