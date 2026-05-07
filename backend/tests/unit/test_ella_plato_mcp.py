@@ -180,6 +180,103 @@ def test_plato_recent_context_falls_back_when_canonical_is_empty(monkeypatch):
     assert result["latest"]["event_id"] == "conv-1"
 
 
+def test_plato_recent_context_merges_omi_fallback_when_canonical_has_other_channels(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def voice_only_timeline(limit, channels, since):
+        assert channels == []
+        return [
+            {
+                "event_id": "voice-1",
+                "channel": "ios_voice",
+                "text": "Older voice turn about bookkeeping.",
+                "started_at": "2026-05-07T01:05:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(module, "_fetch_canonical_timeline", voice_only_timeline)
+    monkeypatch.setattr(
+        module.conversations_db,
+        "get_conversations",
+        MagicMock(
+            return_value=[
+                {
+                    "id": "cafe-1",
+                    "started_at": "2026-05-07T18:56:59Z",
+                    "created_at": "2026-05-07T18:56:59Z",
+                    "structured": {
+                        "title": "Cafe Coffee and Waffle Stop",
+                        "overview": "Ordered a noah drink and a waffle with oat.",
+                    },
+                }
+            ]
+        ),
+    )
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc("tools/call", params={"name": "plato_recent_context", "arguments": {"limit": 10}}),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline_with_omi_firestore_fallback"
+    assert result["events"][0]["event_id"] == "cafe-1"
+    assert result["events"][1]["event_id"] == "voice-1"
+
+
+def test_plato_search_memory_uses_merged_omi_fallback(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def voice_only_timeline(limit, channels, since):
+        return [
+            {
+                "event_id": "voice-1",
+                "channel": "ios_voice",
+                "text": "Older voice turn about bookkeeping.",
+                "started_at": "2026-05-07T01:05:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(module, "_fetch_canonical_timeline", voice_only_timeline)
+    monkeypatch.setattr(
+        module.conversations_db,
+        "get_conversations",
+        MagicMock(
+            return_value=[
+                {
+                    "id": "cafe-1",
+                    "started_at": "2026-05-07T18:56:59Z",
+                    "structured": {
+                        "title": "Cafe Coffee and Waffle Stop",
+                        "overview": "Ordered a noah drink and a waffle with oat.",
+                    },
+                }
+            ]
+        ),
+    )
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_search_memory",
+                "arguments": {"query": "cafe waffle order", "max_results": 5},
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline_with_omi_firestore_fallback"
+    assert result["results"][0]["event_id"] == "cafe-1"
+
+
 def test_plato_search_memory_rejects_missing_query(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)

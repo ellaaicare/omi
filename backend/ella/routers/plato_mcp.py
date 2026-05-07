@@ -178,6 +178,35 @@ def _event_time(item: dict[str, Any]) -> str:
     )
 
 
+def _include_omi_channel(channels: list[str]) -> bool:
+    normalized = {str(channel).strip().lower() for channel in channels}
+    return not normalized or bool(normalized & {"omi", "omi_transcript", "omi_summary", "omi_conversation"})
+
+
+def _event_identity(item: dict[str, Any]) -> str:
+    source_ref = item.get("source_ref") or {}
+    if isinstance(source_ref, dict):
+        for key in ("conversation_id", "event_id", "id", "source_identity"):
+            if source_ref.get(key):
+                return f"source_ref:{key}:{source_ref[key]}"
+    for key in ("event_id", "id", "source_identity"):
+        if item.get(key):
+            return f"{key}:{item[key]}"
+    return f"{item.get('channel')}:{_event_time(item)}:{item.get('title')}:{item.get('text')}"
+
+
+def _merge_chronological_events(*event_lists: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for events in event_lists:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            merged.setdefault(_event_identity(event), event)
+    ordered = list(merged.values())
+    ordered.sort(key=_event_time, reverse=True)
+    return ordered[:limit]
+
+
 def _conversation_to_event(conversation: dict[str, Any]) -> dict[str, Any]:
     structured = conversation.get("structured") or {}
     title = structured.get("title") or conversation.get("title") or "OMI conversation"
@@ -256,11 +285,23 @@ async def _recent_context(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         events = await _fetch_canonical_timeline(limit, channels, since)
         source = "canonical_timeline"
-        if not events:
+        if _include_omi_channel(channels):
+            # The canonical ledger is live, but OMI enriched summaries are not
+            # yet guaranteed to be written there. Until OMI ingestion/backfill is
+            # complete, merge the same enriched OMI conversations the app shows.
+            fallback_events = _fallback_recent_context(limit, ["omi"], since)
+            if fallback_events:
+                if events:
+                    events = _merge_chronological_events(events, fallback_events, limit=limit)
+                    source = "canonical_timeline_with_omi_firestore_fallback"
+                else:
+                    events = fallback_events[:limit]
+                    source = "canonical_timeline_empty_omi_firestore_fallback"
+        elif not events:
             fallback_events = _fallback_recent_context(limit, channels, since)
             if fallback_events:
-                events = fallback_events
-                source = "canonical_timeline_empty_omi_firestore_fallback"
+                events = fallback_events[:limit]
+                source = "canonical_timeline_empty_firestore_fallback"
     except Exception as exc:
         logger.warning("plato_mcp timeline fallback: %s", exc)
         events = _fallback_recent_context(limit, channels, since)
