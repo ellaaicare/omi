@@ -890,6 +890,7 @@ async def plato_mcp_info(request: Request):
         "authentication": {
             "header": "Authorization",
             "format": "Bearer <ELLA_PLATO_MCP_TOKEN>",
+            "generic_onboarding_endpoint": f"{base_url}/v1/ella/mcp/onboarding",
             "oauth": {
                 "client_id": _oauth_client_id(),
                 "authorization_endpoint": f"{endpoint}/authorize",

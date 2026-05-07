@@ -320,6 +320,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella Plato MCP not available: {e}", flush=True)
 
+    # Generic MCP onboarding and profile-role resolution
+    try:
+        from ella.routers.mcp_onboarding import router as mcp_onboarding_router
+
+        app.include_router(mcp_onboarding_router, tags=["Ella MCP Onboarding"])
+        print("  🌐 /v1/ella/mcp/* - MCP onboarding and profile-role resolution", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella MCP onboarding not available: {e}", flush=True)
+
     # Escalation policy resolver (classifier output -> deterministic delivery plan)
     try:
         from ella.routers.escalations import router as escalations_router
