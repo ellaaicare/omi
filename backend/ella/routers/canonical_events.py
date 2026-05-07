@@ -71,6 +71,17 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value or {}, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _should_replace_existing_event(item: dict[str, Any]) -> bool:
+    """Allow derived OMI summary rows to refresh while preserving raw source data.
+
+    Normal turn events remain immutable. OMI summary events are app-facing
+    derived summaries; Observer corrections/enrichment should update the single
+    canonical summary row instead of creating duplicate timeline entries.
+    """
+    metadata = item.get("metadata") or {}
+    return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
+
+
 def _derive_source_identity(
     *,
     uid: str,
@@ -209,8 +220,29 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             async with conn.transaction():
                 for event in events:
                     item = event.normalized()
-                    inserted = await conn.fetchval(
+                    conflict_clause = (
                         """
+                        DO UPDATE SET
+                            uid = EXCLUDED.uid,
+                            canonical_identity = EXCLUDED.canonical_identity,
+                            session_id = EXCLUDED.session_id,
+                            channel = EXCLUDED.channel,
+                            provider = EXCLUDED.provider,
+                            role = EXCLUDED.role,
+                            text = EXCLUDED.text,
+                            started_at = EXCLUDED.started_at,
+                            ended_at = EXCLUDED.ended_at,
+                            privacy_scope = EXCLUDED.privacy_scope,
+                            scan_policy = EXCLUDED.scan_policy,
+                            source_ref = EXCLUDED.source_ref,
+                            metadata = EXCLUDED.metadata,
+                            raw_event = EXCLUDED.raw_event
+                        """
+                        if _should_replace_existing_event(item)
+                        else "DO NOTHING"
+                    )
+                    row = await conn.fetchrow(
+                        f"""
                         INSERT INTO canonical_events (
                             uid, canonical_identity, event_id, source_identity,
                             session_id, channel, provider, role, text,
@@ -221,8 +253,8 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             $1, $2, $3, $4, $5, $6, $7, $8, $9,
                             $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb
                         )
-                        ON CONFLICT (event_id, source_identity) DO NOTHING
-                        RETURNING id
+                        ON CONFLICT (event_id, source_identity) {conflict_clause}
+                        RETURNING id, (xmax = 0) AS inserted
                         """,
                         item["uid"],
                         item["canonical_identity"],
@@ -245,15 +277,18 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         {
                             "event_id": item["event_id"],
                             "source_identity": item["source_identity"],
-                            "inserted": inserted is not None,
+                            "inserted": bool(row and row["inserted"]),
+                            "updated": bool(row and not row["inserted"]),
                         }
                     )
 
         inserted_count = sum(1 for status in statuses if status["inserted"])
+        updated_count = sum(1 for status in statuses if status.get("updated"))
         return {
             "ok": True,
             "inserted": inserted_count,
-            "duplicates": len(statuses) - inserted_count,
+            "updated": updated_count,
+            "duplicates": len(statuses) - inserted_count - updated_count,
             "events": statuses,
         }
 
