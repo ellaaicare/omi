@@ -44,6 +44,7 @@ DEFAULT_PROVISION_API_URL = "http://100.76.138.56:8200"
 MAX_CONTEXT_LIMIT = 50
 MAX_SEARCH_RESULTS = 20
 MAX_PROMPT_CHARS = 4000
+MAX_CONSULT_CONTEXT_CHARS = 7000
 RATE_LIMIT_WINDOW_SECONDS = 60
 
 _active_sessions: dict[str, "MCPSession"] = {}
@@ -290,6 +291,20 @@ def _score_item(query_tokens: set[str], item: dict[str, Any]) -> int:
     return len(query_tokens & _tokens(haystack))
 
 
+def _format_consult_context(context: dict[str, Any], limit: int) -> str:
+    lines = [
+        f"source={context.get('source') or 'unknown'}",
+        f"uid={context.get('uid') or _plato_uid()}",
+    ]
+    for event in (context.get("events") or [])[:limit]:
+        timestamp = event.get("started_at") or event.get("created_at") or event.get("timestamp") or ""
+        channel = event.get("channel") or ""
+        title = event.get("title") or "Untitled"
+        text = _compact_text(event.get("text") or event.get("overview") or event.get("summary") or "", 700)
+        lines.append(f"- {timestamp} [{channel}] {title}: {text}")
+    return _compact_text("\n".join(lines), MAX_CONSULT_CONTEXT_CHARS)
+
+
 async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
     query = _compact_text(arguments.get("query"), 500)
     if not query:
@@ -352,6 +367,9 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     mode = str(arguments.get("mode") or "brief")
     if mode not in {"brief", "normal", "deep"}:
         raise ToolExecutionError("mode must be one of: brief, normal, deep", code=-32602)
+    context_limit = _clamp_int(arguments.get("context_limit"), 15, 1, MAX_CONTEXT_LIMIT)
+    context = await _recent_context({"limit": context_limit})
+    context_block = _format_consult_context(context, context_limit)
     token = _env("HERMES_API_SERVER_KEY", _env("API_SERVER_KEY", ""))
     if not token:
         raise ToolExecutionError("HERMES_API_SERVER_KEY is not configured", code=-32003)
@@ -360,9 +378,12 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     session_key = _env("ELLA_PLATO_MCP_HERMES_SESSION", f"grok-mcp:plato:{_plato_uid().lower()}")
     system = (
         "You are serving a read-only external MCP consult for Plato. "
-        "Answer from Hermes/canonical context when available. "
+        "Use the supplied current MCP context as the freshest available evidence, "
+        "then use Hermes memory only to fill gaps. "
+        "If current MCP context conflicts with older memory, prefer current MCP context. "
         "Do not expose internal secrets, filesystem paths, tokens, or caregiver escalation controls."
     )
+    prompt = f"Current MCP context:\n{context_block}\n\nUser request:\n{prompt}"
     if mode == "brief":
         prompt = f"{prompt}\n\nAnswer in 1-3 concise sentences."
     elif mode == "deep":
@@ -388,7 +409,14 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     text = ""
     if choices:
         text = ((choices[0].get("message") or {}).get("content") or "").strip()
-    return {"answer": text, "mode": mode, "agent_id": agent_id, "session": session_key}
+    return {
+        "answer": text,
+        "mode": mode,
+        "agent_id": agent_id,
+        "session": session_key,
+        "context_source": context.get("source"),
+        "context_events": len(context.get("events") or []),
+    }
 
 
 MCP_TOOLS: list[dict[str, Any]] = [
@@ -442,6 +470,13 @@ MCP_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "prompt": {"type": "string"},
                 "mode": {"type": "string", "enum": ["brief", "normal", "deep"], "default": "brief"},
+                "context_limit": {
+                    "type": "integer",
+                    "default": 15,
+                    "minimum": 1,
+                    "maximum": MAX_CONTEXT_LIMIT,
+                    "description": "Number of freshest MCP context events to include before consulting Hermes.",
+                },
             },
             "required": ["prompt"],
         },

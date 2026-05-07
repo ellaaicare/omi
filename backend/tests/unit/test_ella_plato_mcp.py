@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import json
 import sys
 import types
@@ -193,6 +194,61 @@ def test_plato_search_memory_rejects_missing_query(monkeypatch):
     payload = response.json()
     assert payload["error"]["code"] == -32602
     assert "query is required" in payload["error"]["message"]
+
+
+def test_plato_consult_includes_fresh_mcp_context(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "hermes-test-token")
+    captured = {}
+
+    async def fake_recent_context(arguments):
+        assert arguments["limit"] == 15
+        return {
+            "uid": "test-uid",
+            "source": "canonical_timeline_empty_omi_firestore_fallback",
+            "events": [
+                {
+                    "channel": "omi",
+                    "started_at": "2026-05-07T18:56:59Z",
+                    "title": "Cafe Coffee and Waffle Stop",
+                    "text": "Ordered a noah drink and a waffle with oat.",
+                }
+            ],
+        }
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "The cafe order is in the fresh MCP context."}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            captured["url"] = url
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(module._consult_plato({"prompt": "Did I order at a cafe today?", "mode": "normal"}))
+
+    user_message = captured["json"]["messages"][1]["content"]
+    assert "Current MCP context" in user_message
+    assert "Cafe Coffee and Waffle Stop" in user_message
+    assert "Ordered a noah drink and a waffle" in user_message
+    assert "freshest available evidence" in captured["json"]["messages"][0]["content"]
+    assert result["context_source"] == "canonical_timeline_empty_omi_firestore_fallback"
+    assert result["context_events"] == 1
 
 
 def test_initialize_returns_session_header(monkeypatch):
