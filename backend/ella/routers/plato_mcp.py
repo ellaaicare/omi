@@ -20,7 +20,7 @@ import time
 import urllib.parse
 import uuid
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -56,6 +56,7 @@ class MCPSession:
     token_fingerprint: str
     created_at: datetime
     initialized: bool = False
+    sse_queue: asyncio.Queue[dict[str, Any] | None] = field(default_factory=asyncio.Queue)
 
 
 class ToolExecutionError(Exception):
@@ -636,7 +637,8 @@ async def plato_mcp_streamable_http(
     if new_session_id:
         headers["Mcp-Session-Id"] = new_session_id
 
-    if accept and "text/event-stream" in accept:
+    accepts_sse_only = accept and "text/event-stream" in accept and "application/json" not in accept
+    if accepts_sse_only:
 
         async def event_generator():
             for response in responses:
@@ -657,23 +659,68 @@ async def plato_mcp_sse_keepalive(
     request: Request,
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
-    _authenticate(authorization)
+    token_fingerprint = _authenticate(authorization)
+    session_id = str(uuid.uuid4())
+    session = MCPSession(
+        session_id=session_id,
+        token_fingerprint=token_fingerprint,
+        created_at=datetime.now(timezone.utc),
+    )
+    _active_sessions[session_id] = session
+    endpoint = f"/v1/ella/plato/mcp/sse/message?session_id={urllib.parse.quote(session_id)}"
 
     async def event_generator():
         try:
+            yield f"event: endpoint\ndata: {endpoint}\n\n"
             while True:
                 if await request.is_disconnected():
                     break
-                yield "event: ping\ndata: {}\n\n"
-                await asyncio.sleep(30)
+                try:
+                    response = await asyncio.wait_for(session.sse_queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
+                if response is None:
+                    break
+                yield f"event: message\ndata: {json.dumps(response, default=str)}\n\n"
         except asyncio.CancelledError:
             pass
+        finally:
+            _active_sessions.pop(session_id, None)
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/mcp/sse/message")
+async def plato_mcp_sse_message(
+    request: Request,
+    session_id: str,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+):
+    token_fingerprint = _authenticate(authorization)
+    session = _active_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="MCP session not found")
+    if session.token_fingerprint != token_fingerprint:
+        raise HTTPException(status_code=403, detail="MCP session does not belong to this token")
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    messages = body if isinstance(body, list) else [body]
+    if not all(isinstance(message, dict) for message in messages):
+        raise HTTPException(status_code=400, detail="MCP body must be a JSON-RPC object or array")
+
+    for message in messages:
+        response, _ = await _handle_mcp_message(token_fingerprint, message, session)
+        if response:
+            await session.sse_queue.put(response)
+    return Response(status_code=202)
 
 
 @router.delete("/mcp")

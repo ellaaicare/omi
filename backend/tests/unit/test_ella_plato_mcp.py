@@ -88,6 +88,25 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert "update_conversation_summary" not in tool_names
 
 
+def test_streamable_http_prefers_json_when_client_accepts_json_and_sse(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={
+            "Authorization": "Bearer test-token",
+            "Accept": "application/json, text/event-stream",
+        },
+        json=_rpc("tools/list"),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert "plato_consult" in tool_names
+
+
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
