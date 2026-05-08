@@ -26,6 +26,11 @@ resolve_module = types.ModuleType("ella.routers.resolve")
 resolve_module.resolve_user_routing = None
 sys.modules["ella.routers.resolve"] = resolve_module
 
+app_settings_module = types.ModuleType("database.app_settings")
+app_settings_module.get_voice_settings = lambda _uid: {}
+app_settings_module.save_voice_settings = lambda _uid, voice: voice
+sys.modules["database.app_settings"] = app_settings_module
+
 _ROUTER_PATH = _BACKEND / "ella" / "routers" / "guardian.py"
 _ROUTER_SPEC = importlib.util.spec_from_file_location("ella_guardian_under_test", _ROUTER_PATH)
 guardian = importlib.util.module_from_spec(_ROUTER_SPEC)
@@ -61,6 +66,8 @@ class _FakePool:
 class _FakeResponse:
     status_code = 200
     text = "ok"
+    content = b"mp3-bytes"
+    headers = {"content-type": "audio/mpeg"}
 
 
 class _FakeAsyncClient:
@@ -187,6 +194,27 @@ def test_deliver_dispatches_pending_backend_resolved_recipient(monkeypatch):
     step = kwargs["json"]["delivery_plan"][0]
     assert step["target"] == "user"
     assert step["recipient_phone"] == "+15550000001"
+
+
+def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
+    _FakeAsyncClient.posts = []
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(guardian.app_settings_db, "get_voice_settings", lambda uid: {"voice_mode": "grok-voice"})
+
+    response = asyncio.run(
+        guardian.synthesize_audio(
+            guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+        )
+    )
+
+    assert response.body == b"mp3-bytes"
+    url, kwargs = _FakeAsyncClient.posts[0]
+    assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
+    assert kwargs["headers"]["X-TTS-Provider"] == "kokoro"
+    assert kwargs["json"]["text"] == "Hello"
+    assert response.headers["x-guardian-tts-provider"] == "kokoro"
+    assert response.headers["x-guardian-voice-mode"] == "grok-voice"
 
 
 def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):

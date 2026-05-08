@@ -24,10 +24,12 @@ from typing import Any, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
+from database import app_settings as app_settings_db
+from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
@@ -57,6 +59,8 @@ N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
     "N8N_GUARDIAN_DELIVER_WEBHOOK",
     "https://n8n.ella-ai-care.com/webhook/guardian-deliver",
 )
+ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
+ELLA_INTERNAL_VOICE_TTS_URL = os.getenv("ELLA_INTERNAL_VOICE_TTS_URL", "http://127.0.0.1:8000/v1/voice/tts")
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
@@ -460,6 +464,16 @@ class UploadJsonRequest(BaseModel):
     uid: str
     audio_base64: str
     filename: Optional[str] = None
+
+
+class SynthesizeRequest(BaseModel):
+    """JSON body for provider-aware Guardian synthesis."""
+
+    uid: str
+    text: str
+    voice_id: Optional[str] = None
+    provider: Optional[str] = None
+    trace_id: Optional[str] = None
 
 
 def _trace_id_from_metadata(metadata: Optional[dict], fallback: str) -> str:
@@ -1132,6 +1146,64 @@ async def enqueue(
 # POST /v1/ella/guardian/upload
 # n8n uploads TTS audio binary (multipart form).
 # ---------------------------------------------------------------------------
+
+
+@router.post("/synthesize")
+async def synthesize_audio(
+    req: SynthesizeRequest,
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = None,
+):
+    """Resolve user voice settings and synthesize Guardian one-shot audio."""
+    _verify_key(x_guardian_key, key)
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+
+    voice_settings = app_settings_db.get_voice_settings(req.uid)
+    effective = build_effective_voice_settings(req.uid, voice_settings)["effective_voice_settings"]
+    provider = (req.provider or effective["one_shot_tts_provider"]).strip().lower()
+    if provider not in TTS_PROVIDERS:
+        raise HTTPException(status_code=422, detail=f"Provider {provider!r} cannot synthesize Guardian one-shot audio")
+
+    payload = {"text": text}
+    if req.voice_id:
+        payload["voice_id"] = req.voice_id
+
+    _start = time.time()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                ELLA_INTERNAL_VOICE_TTS_URL,
+                json=payload,
+                headers={"X-TTS-Provider": provider},
+                timeout=30.0,
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail=f"{provider} Guardian synthesis timed out")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"{provider} Guardian synthesis failed: {exc}") from exc
+
+    elapsed_ms = int((time.time() - _start) * 1000)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"{provider} Guardian synthesis error: {response.status_code}")
+
+    print(
+        f"[FLOW:GUARDIAN-SYNTHESIZE] uid={req.uid} trace={req.trace_id} "
+        f"provider={provider} voice_mode={effective['voice_mode']} bytes={len(response.content)} latency={elapsed_ms}ms",
+        flush=True,
+    )
+    return Response(
+        content=response.content,
+        media_type=response.headers.get("content-type", "audio/mpeg"),
+        headers={
+            "X-Guardian-TTS-Provider": provider,
+            "X-Guardian-Voice-Mode": effective["voice_mode"],
+            "X-Guardian-Settings-Source": "server",
+            "X-Guardian-Fallback-Used": str(bool(effective.get("fallback_used"))).lower(),
+            "X-Guardian-Synthesis-Latency-Ms": str(elapsed_ms),
+        },
+    )
 
 
 def _store_audio_content(uid: str, content: bytes, filename: Optional[str] = None) -> dict:
