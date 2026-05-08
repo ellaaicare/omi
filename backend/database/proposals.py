@@ -54,8 +54,16 @@ def list_proposals(profile_uid: str, status: str = "", limit: int = 20) -> list[
     query = _collection(profile_uid)
     if status:
         query = query.where(filter=FieldFilter("status", "==", status))
-    query = query.order_by("created_at", direction=firestore.Query.DESCENDING).limit(max(1, min(int(limit), 100)))
-    return [proposal for doc in query.stream() if (proposal := proposal_from_dict(doc.to_dict() or {})) is not None]
+        docs = query.limit(100).stream()
+    else:
+        docs = (
+            query.order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(max(1, min(int(limit), 100)))
+            .stream()
+        )
+    proposals = [proposal for doc in docs if (proposal := proposal_from_dict(doc.to_dict() or {})) is not None]
+    proposals.sort(key=lambda proposal: proposal.created_at, reverse=True)
+    return proposals[: max(1, min(int(limit), 100))]
 
 
 def update_proposal_status(
