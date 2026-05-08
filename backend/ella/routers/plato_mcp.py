@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import database.conversations as conversations_db
 import database.memories as memories_db
+from ella.services import proposal_ingest
 from ella.services.mcp_startup import build_startup_context
 
 logger = logging.getLogger("ella.plato_mcp")
@@ -461,34 +462,59 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _companion_start_here(arguments: dict[str, Any]) -> dict[str, Any]:
-    channels = arguments.get("channels") or []
-    if channels and not isinstance(channels, list):
-        raise ToolExecutionError("channels must be a list", code=-32602)
-    onboarding = {
+def _legacy_plato_onboarding() -> dict[str, Any]:
+    scopes = ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"]
+    tools = [
+        "companion_start_here",
+        "companion_get_proposal_status",
+        "plato_recent_context",
+        "plato_search_memory",
+        "plato_consult",
+    ]
+    return {
         "state": "authenticated_mapped",
         "trace_id": str(uuid.uuid4()),
         "selected_profile": {
             "profile_uid": _plato_uid(),
             "role": "self",
             "profile_label": _env("ELLA_MCP_DEFAULT_PROFILE_LABEL", "Plato"),
-            "scopes": ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"],
-            "allowed_tools": ["companion_start_here", "plato_recent_context", "plato_search_memory", "plato_consult"],
+            "scopes": scopes,
+            "allowed_tools": tools,
         },
         "available_profiles": [],
         "session_claims": {
             "profile_uid": _plato_uid(),
             "role": "self",
-            "scopes": ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"],
-            "allowed_tools": ["companion_start_here", "plato_recent_context", "plato_search_memory", "plato_consult"],
+            "scopes": scopes,
+            "allowed_tools": tools,
             "grant_id": "legacy-plato-mcp",
+            "external_provider": "static_bearer",
         },
     }
+
+
+async def _companion_start_here(arguments: dict[str, Any]) -> dict[str, Any]:
+    channels = arguments.get("channels") or []
+    if channels and not isinstance(channels, list):
+        raise ToolExecutionError("channels must be a list", code=-32602)
     return await build_startup_context(
-        onboarding=onboarding,
+        onboarding=_legacy_plato_onboarding(),
         limit=_clamp_int(arguments.get("limit"), 12, 1, MAX_CONTEXT_LIMIT),
         channels=[str(channel).strip() for channel in channels if str(channel).strip()],
     )
+
+
+async def _companion_get_proposal_status(arguments: dict[str, Any]) -> dict[str, Any]:
+    proposal_id = _compact_text(arguments.get("proposal_id"), 160)
+    if not proposal_id:
+        raise ToolExecutionError("proposal_id is required", code=-32602)
+    try:
+        return proposal_ingest.get_proposal_status(
+            session_claims=_legacy_plato_onboarding()["session_claims"],
+            proposal_id=proposal_id,
+        )
+    except proposal_ingest.ProposalIngestError as exc:
+        raise ToolExecutionError(str(exc), code=-32004) from exc
 
 
 MCP_TOOLS: list[dict[str, Any]] = [
@@ -501,6 +527,15 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
                 "channels": {"type": "array", "items": {"type": "string"}, "default": []},
             },
+        },
+    },
+    {
+        "name": "companion_get_proposal_status",
+        "description": "Return the status of an auditable proposal record for this profile.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"proposal_id": {"type": "string"}},
+            "required": ["proposal_id"],
         },
     },
     {
@@ -568,6 +603,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
 
 _TOOL_HANDLERS = {
     "companion_start_here": _companion_start_here,
+    "companion_get_proposal_status": _companion_get_proposal_status,
     "plato_recent_context": _recent_context,
     "plato_search_memory": _search_memory,
     "plato_latest_omi": _latest_omi,

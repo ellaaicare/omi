@@ -37,6 +37,12 @@ READ_ONLY_SCOPES = {
     "tools:read",
 }
 
+PROPOSAL_SCOPES = {
+    "proposals:read",
+    "proposals:write",
+    "rules:propose",
+}
+
 DEFAULT_ROLE_SCOPES = {
     ROLE_SELF: ["context:read", "timeline:read", "memory:read", "profile:read", "startup:read", "tools:read"],
     ROLE_CAREGIVER: ["care_context:read", "context:read", "profile:read", "startup:read", "timeline:read"],
@@ -235,7 +241,9 @@ def resolve_mcp_identity(
             message="Authentication is required before MCP tools can be exposed.",
         )
 
-    active_grants = [grant for grant in (grants if grants is not None else load_identity_grants(identity)) if grant.active]
+    active_grants = [
+        grant for grant in (grants if grants is not None else load_identity_grants(identity)) if grant.active
+    ]
     if not active_grants:
         return MCPIdentityResolution(
             state=STATE_AUTHENTICATED_NEEDS_INVITE,

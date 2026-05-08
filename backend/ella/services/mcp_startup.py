@@ -30,6 +30,12 @@ READ_ONLY_TOOL_CATALOG = [
         "scope": "memory:read",
         "description": "Search canonical timeline and memory representations.",
     },
+    {
+        "name": "companion_get_proposal_status",
+        "status": "available",
+        "scope": "startup:read",
+        "description": "Read status for an auditable proposal record by ID.",
+    },
 ]
 
 
