@@ -29,9 +29,12 @@ def _cafe_event():
 
 
 def test_format_canonical_context_includes_latest_omi_summary():
-    context = format_canonical_context([_cafe_event()])
+    context = format_canonical_context([_cafe_event()], user_timezone="America/Los_Angeles")
 
     assert "Recent canonical timeline context" in context
+    assert "Current user-local time" in context
+    assert "America/Los_Angeles" in context
+    assert "2026-05-07T11:56:59" in context
     assert "Cafe Coffee and Waffle Stop" in context
     assert "waffle with oat" in context
 
