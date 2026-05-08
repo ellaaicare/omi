@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from google.cloud.firestore_v1.transforms import Sentinel
+
 
 TTS_PROVIDERS = {"elevenlabs", "fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro", "inworld"}
 V2V_PROVIDERS = {"openclaw-direct", "grok-voice", "gemini-native-live", "openai-native-realtime"}
@@ -109,8 +111,8 @@ def extract_voice_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_settings_response(uid: str, voice: dict[str, Any] | None = None) -> dict[str, Any]:
-    resolved_voice = extract_voice_settings({"settings": {"voice": voice or {}}})
-    return {
+    resolved_voice = _json_safe(extract_voice_settings({"settings": {"voice": voice or {}}}))
+    return _json_safe({
         "uid": uid,
         "voice_mode": resolved_voice["voice_mode"],
         "tts_provider": resolved_voice["tts_provider"],
@@ -119,11 +121,11 @@ def build_settings_response(uid: str, voice: dict[str, Any] | None = None) -> di
             "voice": resolved_voice,
         },
         "updated_at": resolved_voice.get("updated_at"),
-    }
+    })
 
 
 def build_effective_voice_settings(uid: str, voice: dict[str, Any] | None = None) -> dict[str, Any]:
-    resolved_voice = extract_voice_settings({"settings": {"voice": voice or {}}})
+    resolved_voice = _json_safe(extract_voice_settings({"settings": {"voice": voice or {}}}))
     voice_mode = resolved_voice["voice_mode"]
     fallback_used = voice_mode in V2V_PROVIDERS
     fallback_reason = None
@@ -138,7 +140,7 @@ def build_effective_voice_settings(uid: str, voice: dict[str, Any] | None = None
         "fallback_reason": fallback_reason,
         "resolved_at": utc_now_iso(),
     }
-    return {
+    return _json_safe({
         "uid": uid,
         "voice_mode": voice_mode,
         "tts_provider": resolved_voice["tts_provider"],
@@ -148,4 +150,16 @@ def build_effective_voice_settings(uid: str, voice: dict[str, Any] | None = None
             "voice": resolved_voice,
         },
         "effective_voice_settings": effective,
-    }
+    })
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Sentinel):
+        return None
+    return value

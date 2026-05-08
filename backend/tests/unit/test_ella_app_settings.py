@@ -4,6 +4,7 @@ import types
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 
 from ella.services import app_settings as service
 from utils.other import endpoints as auth
@@ -55,7 +56,7 @@ def _load_router(monkeypatch, stored_voice=None):
 
     def save_voice_settings(uid, voice):
         assert uid == "uid-1"
-        state["voice"] = dict(voice)
+        state["voice"] = {**voice, "server_updated_at": SERVER_TIMESTAMP}
         return dict(state["voice"])
 
     fake_db.get_voice_settings = get_voice_settings
@@ -87,6 +88,7 @@ def test_settings_router_accepts_ios_patch_and_returns_effective(monkeypatch):
     payload = response.json()
     assert payload["voice_mode"] == "openai-native-realtime"
     assert state["voice"]["session_voice_mode"] == "openai-native-realtime-v1"
+    assert payload["settings"]["voice"]["server_updated_at"] is None
 
     effective = client.get("/v1/ella/settings/effective").json()
     assert effective["voice_mode"] == "openai-native-realtime"
