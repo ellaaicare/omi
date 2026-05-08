@@ -13,6 +13,7 @@ from ella.services.mcp_identity import (
     MCPProfileGrant,
     resolve_mcp_identity,
 )
+from ella.services.mcp_startup import build_startup_context
 
 router = APIRouter(prefix="/v1/ella/mcp", tags=["Ella MCP Onboarding"])
 
@@ -112,10 +113,24 @@ async def get_mcp_onboarding(
     return resolve_static_connector_session(token_fingerprint, selected_profile_uid)
 
 
+@router.get("/start_here")
+async def get_mcp_start_here(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    selected_profile_uid: str = Query("", description="Optional profile UID selected after multi-profile mapping."),
+    limit: int = Query(12, ge=1, le=50),
+    channels: str = Query("", description="Optional comma-separated canonical channels."),
+):
+    token_fingerprint = _authenticate_static(authorization)
+    onboarding = resolve_static_connector_session(token_fingerprint, selected_profile_uid)
+    channel_list = [item.strip() for item in channels.split(",") if item.strip()] if channels else None
+    return await build_startup_context(onboarding=onboarding, limit=limit, channels=channel_list)
+
+
 @router.get("/info")
 async def get_mcp_onboarding_info():
     return {
         "onboarding_endpoint": "/v1/ella/mcp/onboarding",
+        "start_here_endpoint": "/v1/ella/mcp/start_here",
         "auth": "Bearer token for dev/static fallback; OAuth-backed grants are resolved by the same identity service.",
         "states": [
             "authenticated_mapped",

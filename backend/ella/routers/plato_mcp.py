@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import database.conversations as conversations_db
 import database.memories as memories_db
+from ella.services.mcp_startup import build_startup_context
 
 logger = logging.getLogger("ella.plato_mcp")
 
@@ -460,7 +461,48 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _companion_start_here(arguments: dict[str, Any]) -> dict[str, Any]:
+    channels = arguments.get("channels") or []
+    if channels and not isinstance(channels, list):
+        raise ToolExecutionError("channels must be a list", code=-32602)
+    onboarding = {
+        "state": "authenticated_mapped",
+        "trace_id": str(uuid.uuid4()),
+        "selected_profile": {
+            "profile_uid": _plato_uid(),
+            "role": "self",
+            "profile_label": _env("ELLA_MCP_DEFAULT_PROFILE_LABEL", "Plato"),
+            "scopes": ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"],
+            "allowed_tools": ["companion_start_here", "plato_recent_context", "plato_search_memory", "plato_consult"],
+        },
+        "available_profiles": [],
+        "session_claims": {
+            "profile_uid": _plato_uid(),
+            "role": "self",
+            "scopes": ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"],
+            "allowed_tools": ["companion_start_here", "plato_recent_context", "plato_search_memory", "plato_consult"],
+            "grant_id": "legacy-plato-mcp",
+        },
+    }
+    return await build_startup_context(
+        onboarding=onboarding,
+        limit=_clamp_int(arguments.get("limit"), 12, 1, MAX_CONTEXT_LIMIT),
+        channels=[str(channel).strip() for channel in channels if str(channel).strip()],
+    )
+
+
 MCP_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "companion_start_here",
+        "description": "Return the safe startup context packet for this authenticated companion profile.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
+                "channels": {"type": "array", "items": {"type": "string"}, "default": []},
+            },
+        },
+    },
     {
         "name": "plato_recent_context",
         "description": "Read recent Plato timeline context from canonical events, with OMI Firestore fallback.",
@@ -525,6 +567,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
 ]
 
 _TOOL_HANDLERS = {
+    "companion_start_here": _companion_start_here,
     "plato_recent_context": _recent_context,
     "plato_search_memory": _search_memory,
     "plato_latest_omi": _latest_omi,
