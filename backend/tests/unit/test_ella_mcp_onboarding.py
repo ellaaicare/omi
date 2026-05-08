@@ -247,6 +247,24 @@ def test_mcp_start_here_returns_canonical_startup_packet(monkeypatch):
     assert payload["escalation_boundaries"]["emergency_actions"] == "not_available_from_mcp"
 
 
+def test_mcp_surface_prompt_returns_bootstrap_without_secret(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.get(
+        "/v1/ella/mcp/surface-prompt?surface=hosted-gpt",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["surface"] == "hosted-gpt"
+    assert payload["profile_uid"] == "user-1"
+    assert payload["auth_policy"]["prompt_contains_secrets"] is False
+    assert "companion_start_here" in payload["prompt"]
+    assert "test-token" not in payload["prompt"]
+
+
 def test_mcp_start_here_does_not_leak_context_when_unmapped(monkeypatch):
     module = _load_module(monkeypatch)
     monkeypatch.delenv("ELLA_MCP_DEFAULT_PROFILE_UID", raising=False)

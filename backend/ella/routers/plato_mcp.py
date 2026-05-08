@@ -33,6 +33,7 @@ import database.conversations as conversations_db
 import database.memories as memories_db
 from ella.services import proposal_ingest
 from ella.services.mcp_startup import build_startup_context
+from ella.services.mcp_surface_prompt import build_surface_prompt
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
 
 logger = logging.getLogger("ella.plato_mcp")
@@ -698,6 +699,7 @@ def _legacy_plato_onboarding() -> dict[str, Any]:
     scopes = ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"]
     tools = [
         "companion_start_here",
+        "companion_surface_prompt",
         "companion_get_proposal_status",
         "plato_recent_context",
         "plato_search_memory",
@@ -738,6 +740,20 @@ async def _companion_start_here(arguments: dict[str, Any]) -> dict[str, Any]:
         onboarding=_legacy_plato_onboarding(),
         limit=_clamp_int(arguments.get("limit"), 12, 1, MAX_CONTEXT_LIMIT),
         channels=[str(channel).strip() for channel in channels if str(channel).strip()],
+    )
+
+
+async def _companion_surface_prompt(arguments: dict[str, Any]) -> dict[str, Any]:
+    onboarding = _legacy_plato_onboarding()
+    selected = onboarding["selected_profile"]
+    claims = onboarding["session_claims"]
+    return build_surface_prompt(
+        profile_uid=str(selected.get("profile_uid") or _plato_uid()),
+        profile_label=str(selected.get("profile_label") or "Plato"),
+        surface=_compact_text(arguments.get("surface") or "generic", 80),
+        scopes=[str(item) for item in (claims.get("scopes") or [])],
+        allowed_tools=[str(item) for item in (claims.get("allowed_tools") or [])],
+        proposal_write_enabled=_proposal_write_enabled(),
     )
 
 
@@ -819,6 +835,17 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
                 "channels": {"type": "array", "items": {"type": "string"}, "default": []},
             },
+        },
+    },
+    {
+        "name": "companion_surface_prompt",
+        "description": (
+            "Return the current hosted-surface bootstrap prompt and tool/writeback policy for this profile. "
+            "Use this when configuring Grok, hosted GPTs, Gemini, or other external companion surfaces."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"surface": {"type": "string", "default": "generic"}},
         },
     },
     {
@@ -944,6 +971,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
 
 _TOOL_HANDLERS = {
     "companion_start_here": _companion_start_here,
+    "companion_surface_prompt": _companion_surface_prompt,
     "companion_get_proposal_status": _companion_get_proposal_status,
     "companion_propose_change": _companion_propose_change,
     "plato_recent_context": _recent_context,

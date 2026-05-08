@@ -86,6 +86,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert tool_names == {
         "companion_start_here",
+        "companion_surface_prompt",
         "companion_get_proposal_status",
         "plato_recent_context",
         "plato_search_memory",
@@ -98,6 +99,28 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert "delete_memory" not in tool_names
     assert "update_conversation_summary" not in tool_names
     assert "companion_propose_change" not in tool_names
+
+
+def test_companion_surface_prompt_returns_no_secret_bootstrap(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={"name": "companion_surface_prompt", "arguments": {"surface": "grok"}},
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = _tool_result(response)
+    assert payload["surface"] == "grok"
+    assert payload["auth_policy"]["prompt_contains_secrets"] is False
+    assert "companion_start_here" in payload["prompt"]
+    assert "Never claim" in payload["prompt"]
+    assert "test-token" not in payload["prompt"]
 
 
 def test_plato_mcp_lists_proposal_tool_only_when_enabled(monkeypatch):

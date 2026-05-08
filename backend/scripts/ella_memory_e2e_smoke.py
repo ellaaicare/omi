@@ -71,6 +71,14 @@ class MemorySmoke:
         self.metrics: dict[str, int] = {}
         self.artifacts: dict[str, Any] = {}
 
+    def enforce_profile_safety(self) -> None:
+        writes_real_plato = self.args.uid == DEFAULT_PLATO_UID or self.args.canonical_identity.lower() == "plato"
+        if writes_real_plato and not self.args.allow_real_profile:
+            raise SmokeFailure(
+                "Refusing to write live memory smoke data to Plato without --allow-real-profile. "
+                "Use an ephemeral test uid/profile for routine regression runs."
+            )
+
     def _mcp_call(self, method: str, params: dict[str, Any] | None = None, request_id: int = 1) -> dict[str, Any]:
         if not self.args.mcp_token:
             raise SmokeFailure("MCP token is required for MCP smoke")
@@ -134,7 +142,7 @@ class MemorySmoke:
                     "description": f"Remember the E2E memory smoke phrase: {phrase}.",
                     "requested_change": {"memory": f"The E2E memory smoke phrase is {phrase}."},
                     "target": {"canonical_identity": self.args.canonical_identity},
-                    "evidence": [{"kind": "automated_e2e_smoke", "at": _now_iso()}],
+                    "evidence": [{"kind": "automated_e2e_smoke", "synthetic": True, "at": _now_iso()}],
                     "confidence": 0.96,
                     "idempotency_key": f"ella-memory-e2e:{phrase}",
                 },
@@ -223,7 +231,7 @@ class MemorySmoke:
                     "text": f"E2E multichannel memory continuity phrase for {channel}: {phrase}.",
                     "started_at": _now_iso(),
                     "source_ref": {"source_id": f"ella-memory-e2e:{channel}:{phrase}"},
-                    "metadata": {"test": "ella_memory_e2e_smoke", "phrase": phrase},
+                    "metadata": {"test": "ella_memory_e2e_smoke", "synthetic": True, "phrase": phrase},
                 }
             )
         response, elapsed = _json_request("POST", self.backend_url + "/v1/ella/events", {"events": batch})
@@ -250,6 +258,7 @@ class MemorySmoke:
             raise SmokeFailure(f"latency threshold exceeded: {slow}")
 
     def run(self) -> dict[str, Any]:
+        self.enforce_profile_safety()
         self.check_health()
         self.check_mcp_tools()
         proposal_id = self.create_memory_proposal()
@@ -283,6 +292,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--seed-multichannel", action="store_true")
     parser.add_argument("--enforce-latency", action="store_true")
     parser.add_argument("--max-latency-ms", type=int, default=5000)
+    parser.add_argument(
+        "--allow-real-profile",
+        action="store_true",
+        help="Allow writes to the real Plato profile. Required because this smoke creates durable proposals/events.",
+    )
     return parser.parse_args(argv)
 
 

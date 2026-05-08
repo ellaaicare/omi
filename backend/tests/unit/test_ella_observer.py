@@ -237,6 +237,56 @@ def test_heuristic_extractor_does_not_treat_memory_questions_as_instructions():
     assert instruction_log.decisions[0].proposal_type == "memory_note"
 
 
+def test_observer_extractors_ignore_synthetic_e2e_events():
+    service = _load_observer_service()
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    synthetic = _event(
+        event_id="e2e:ios_chat:123",
+        channel="ios_chat",
+        provider="ella-memory-e2e",
+        role="user",
+        text="Please remember the E2E phrase synthetic anchor.",
+        metadata={"synthetic": True, "test": "ella_memory_e2e_smoke"},
+    )
+    structured_synthetic = _event(
+        event_id="e2e:structured",
+        metadata={
+            "synthetic": True,
+            "observer": {
+                "proposals": [
+                    {
+                        "proposal_type": "memory_note",
+                        "title": "Synthetic",
+                        "description": "Synthetic",
+                        "requested_change": {"memory": "synthetic"},
+                        "confidence": 0.95,
+                    }
+                ]
+            },
+        },
+    )
+
+    heuristic_log = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[synthetic],
+        extractor=extractor_module.heuristic_candidate_extractor,
+        run_id="run-synthetic-heuristic",
+    )
+    structured_log = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[structured_synthetic],
+        extractor=extractor_module.combined_extractor(extractor_module.ExtractionResult()),
+        run_id="run-synthetic-structured",
+    )
+
+    assert heuristic_log.proposal_count == 0
+    assert structured_log.proposal_count == 0
+
+
 def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
