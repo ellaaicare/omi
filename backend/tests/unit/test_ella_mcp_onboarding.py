@@ -14,6 +14,9 @@ def _load_module(monkeypatch):
     monkeypatch.setenv("ELLA_MCP_TOKEN", "test-token")
     monkeypatch.setenv("ELLA_MCP_SESSION_SECRET", "test-session-secret-with-32-bytes-minimum")
     monkeypatch.setenv("ELLA_MCP_OAUTH_CLIENT_ID", "ella-mcp-test")
+    monkeypatch.setenv("FIREBASE_API_KEY", "firebase-api-key")
+    monkeypatch.setenv("FIREBASE_AUTH_DOMAIN", "example.firebaseapp.com")
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "example-project")
     monkeypatch.setenv("ELLA_MCP_DEFAULT_PROFILE_UID", "user-1")
     monkeypatch.setenv("ELLA_MCP_DEFAULT_PROFILE_LABEL", "Test User")
     monkeypatch.setenv("ELLA_MCP_ALLOWED_TOOLS", "companion_start_here,companion_recent_context")
@@ -320,6 +323,45 @@ def test_authorize_code_flow_selected_profile_success(monkeypatch):
 
     assert token.status_code == 200
     assert token.json()["profile_uid"] == "mom-1"
+
+
+def test_authorize_without_firebase_token_renders_google_handoff_page(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.get(
+        "/v1/ella/mcp/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "ella-mcp-test",
+            "redirect_uri": "https://connector.example/callback",
+            "state": "state-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "Continue with Google" in response.text
+    assert "firebase-api-key" in response.text
+    assert "/v1/ella/mcp/onboarding/oauth" in response.text
+
+
+def test_authorize_page_fails_closed_when_firebase_web_config_missing(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.delenv("FIREBASE_API_KEY", raising=False)
+    client = _client(module)
+
+    response = client.get(
+        "/v1/ella/mcp/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "ella-mcp-test",
+            "redirect_uri": "https://connector.example/callback",
+        },
+    )
+
+    assert response.status_code == 503
+    assert "OAuth setup incomplete" in response.text
 
 
 def test_oauth_token_exchange_rejects_invalid_firebase_token(monkeypatch):
