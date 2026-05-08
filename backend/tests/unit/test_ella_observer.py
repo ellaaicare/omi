@@ -217,3 +217,16 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     )
     assert readback.status_code == 200
     assert readback.json()["observer_run"]["run_id"] == run_id
+
+
+def test_observer_log_store_keeps_datetimes_for_postgres(monkeypatch):
+    service = _load_observer_service()
+    sys.modules.pop("ella.services.observer_logs", None)
+    logs_module = importlib.import_module("ella.services.observer_logs")
+
+    log = service.run_observer(profile_uid="user-1", dry_run=True, events=[_event()], run_id="run-python-dates")
+    data = logs_module._log_to_python(log)
+
+    assert hasattr(data["started_at"], "isoformat")
+    assert hasattr(data["completed_at"], "isoformat")
+    assert isinstance(service.observer_log_to_dict(log)["started_at"], str)
