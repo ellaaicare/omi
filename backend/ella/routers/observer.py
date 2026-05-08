@@ -14,6 +14,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from ella.routers.canonical_events import CanonicalEventStore, PostgresCanonicalEventStore
+from ella.services.observer_apply import apply_pending_observer_memory_proposals
 from ella.services.observer import observer_log_to_dict, run_observer
 from ella.services.observer_extractor import build_extraction_result, combined_extractor, normalize_extractor_mode
 from ella.services.observer_logs import ObserverRunLogStore, PostgresObserverRunLogStore
@@ -34,6 +35,14 @@ class ObserverRunRequest(BaseModel):
     extractor_limit: int = 60
     extractor_timeout_seconds: float = 45.0
     model_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ObserverApplyRequest(BaseModel):
+    uid: str
+    dry_run: bool = True
+    limit: int = 20
+    min_confidence: float = 0.9
+    proposal_types: list[str] = Field(default_factory=list)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -129,6 +138,24 @@ def create_observer_router(
         )
         await logs.save(log)
         return {"ok": True, "observer_run": observer_log_to_dict(log)}
+
+    @router.post("/apply-pending")
+    async def apply_pending(
+        request: ObserverApplyRequest,
+        authorization: Optional[str] = Header(default=None),
+        x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
+    ):
+        _authenticate(authorization, x_ella_observer_token)
+        if not request.uid:
+            raise HTTPException(status_code=400, detail="uid is required")
+        return await apply_pending_observer_memory_proposals(
+            profile_uid=request.uid,
+            event_store=events,
+            dry_run=request.dry_run,
+            limit=_sanitize_limit(request.limit),
+            min_confidence=max(0.0, min(float(request.min_confidence), 1.0)),
+            proposal_types={str(item) for item in request.proposal_types if str(item)} or None,
+        )
 
     @router.get("/runs/{run_id}")
     async def get_run(

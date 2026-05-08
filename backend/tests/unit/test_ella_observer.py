@@ -11,7 +11,9 @@ def _install_proposal_stubs():
     proposals = types.ModuleType("database.proposals")
     proposals.get_proposal = MagicMock(return_value=None)
     proposals.get_proposal_by_idempotency_key = MagicMock(return_value=None)
+    proposals.list_proposals = MagicMock(return_value=[])
     proposals.save_proposal = MagicMock(side_effect=lambda proposal: proposal)
+    proposals.update_proposal_status = MagicMock(return_value=None)
     database = sys.modules.setdefault("database", types.ModuleType("database"))
     setattr(database, "proposals", proposals)
     sys.modules["database.proposals"] = proposals
@@ -239,6 +241,7 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
     sys.modules.pop("ella.routers.observer", None)
+    sys.modules.pop("ella.services.observer_apply", None)
     router_module = importlib.import_module("ella.routers.observer")
     canonical_module = importlib.import_module("ella.routers.canonical_events")
     logs_module = importlib.import_module("ella.services.observer_logs")
@@ -309,6 +312,7 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
     sys.modules.pop("ella.routers.observer", None)
+    sys.modules.pop("ella.services.observer_apply", None)
     router_module = importlib.import_module("ella.routers.observer")
     canonical_module = importlib.import_module("ella.routers.canonical_events")
     logs_module = importlib.import_module("ella.services.observer_logs")
@@ -393,6 +397,64 @@ def test_model_extractor_rejects_assistant_only_evidence():
     )
 
     assert candidate is None
+
+
+def test_observer_apply_pending_writes_safe_memory_event(monkeypatch):
+    _install_proposal_stubs()
+    monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
+    sys.modules.pop("ella.routers.observer", None)
+    sys.modules.pop("ella.services.observer_apply", None)
+    router_module = importlib.import_module("ella.routers.observer")
+    canonical_module = importlib.import_module("ella.routers.canonical_events")
+    logs_module = importlib.import_module("ella.services.observer_logs")
+    proposals_db = importlib.import_module("database.proposals")
+    proposal_models = importlib.import_module("models.proposals")
+
+    proposal = proposal_models.Proposal.from_claims(
+        session_claims={
+            "profile_uid": "user-1",
+            "role": "system_observer",
+            "external_provider": "ella_backend",
+            "trace_id": "observer:test",
+        },
+        tool_name="ella_observer_fact_promotion",
+        proposal_type="memory_note",
+        payload={
+            "title": "Spare glasses location",
+            "description": "Spare glasses are in the blue backpack.",
+            "source": "ella_observer_cron",
+            "confidence": 0.94,
+            "requested_change": {"memory": "Spare glasses are in the blue backpack."},
+            "target": {"canonical_identity": "plato"},
+        },
+        proposal_id="proposal-safe-memory",
+    )
+    proposals_db.list_proposals.return_value = [proposal]
+
+    event_store = canonical_module.InMemoryCanonicalEventStore()
+    log_store = logs_module.InMemoryObserverRunLogStore()
+    app = FastAPI()
+    app.include_router(router_module.create_observer_router(event_store=event_store, log_store=log_store))
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/ella/observer/apply-pending",
+        headers={"X-Ella-Observer-Token": "observer-token"},
+        json={"uid": "user-1", "dry_run": False, "min_confidence": 0.9},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied_count"] == 1
+    assert body["decisions"][0]["action"] == "applied"
+    proposals_db.update_proposal_status.assert_called_once()
+
+    import asyncio
+
+    events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
+    assert len(events) == 1
+    assert events[0]["channel"] == "observer_memory"
+    assert "Spare glasses are in the blue backpack" in events[0]["text"]
 
 
 def test_observer_log_store_keeps_datetimes_for_postgres(monkeypatch):
