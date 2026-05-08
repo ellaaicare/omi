@@ -78,6 +78,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert response.status_code == 200
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert tool_names == {
+        "companion_start_here",
         "plato_recent_context",
         "plato_search_memory",
         "plato_latest_omi",
@@ -106,6 +107,42 @@ def test_streamable_http_prefers_json_when_client_accepts_json_and_sse(monkeypat
     assert response.headers["content-type"].startswith("application/json")
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert "plato_consult" in tool_names
+    assert "companion_start_here" in tool_names
+
+
+def test_companion_start_here_tool_returns_generic_startup_packet(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def fake_startup_context(*, onboarding, limit, channels):
+        assert onboarding["state"] == "authenticated_mapped"
+        assert onboarding["selected_profile"]["profile_uid"] == module._plato_uid()
+        assert limit == 4
+        assert channels == ["omi"]
+        return {
+            "schema_version": "ella.mcp.start_here.v1",
+            "startup_ready": True,
+            "account": {"profile_uid": module._plato_uid(), "role": "self"},
+            "memory": {"source": "canonical_timeline", "event_count": 1},
+            "writeback_policy": {"mode": "read_only"},
+        }
+
+    monkeypatch.setattr(module, "build_startup_context", fake_startup_context)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={"name": "companion_start_here", "arguments": {"limit": 4, "channels": ["omi"]}},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["schema_version"] == "ella.mcp.start_here.v1"
+    assert result["startup_ready"] is True
+    assert result["account"]["role"] == "self"
 
 
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
