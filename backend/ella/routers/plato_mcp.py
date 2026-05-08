@@ -289,6 +289,21 @@ def _compact_text(value: Any, limit: int = 1200) -> str:
     return clean[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _event_display_title(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or "").strip()
+    if title:
+        return title
+    metadata = item.get("metadata") or {}
+    structured = metadata.get("structured") if isinstance(metadata, dict) else {}
+    if isinstance(structured, dict) and structured.get("title"):
+        return str(structured["title"]).strip()
+    text = str(item.get("text") or "").strip()
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if first_line:
+        return _compact_text(first_line, 120)
+    return "OMI conversation"
+
+
 def _event_time(item: dict[str, Any]) -> str:
     return str(
         item.get("started_at") or item.get("finished_at") or item.get("created_at") or item.get("timestamp") or ""
@@ -480,6 +495,7 @@ async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
     low_salience_fragments: list[dict[str, Any]] = []
     for event in window_events:
         item = dict(event)
+        item["title"] = _event_display_title(item)
         item["salience"] = _event_salience(item)
         item["duration_seconds"] = _event_duration_seconds(item)
         item["is_low_salience_fragment"] = _is_low_salience_fragment(item)
