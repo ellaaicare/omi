@@ -18,6 +18,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 import database.conversations as conversations_db
 from database._client import db
 from ella.config import ELLA_CONFIG
+from ella.services import proposal_ingest
 from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class ConversationCorrectionResponse(BaseModel):
     trace_id: str
     status: str
     queued: bool
+    proposal_id: Optional[str] = None
 
 
 def _now_iso() -> str:
@@ -146,6 +148,73 @@ def _append_correction_event(
     events = list((existing or {}).get("events") or [])
     events.append(event)
     ref.set({"events": events, "updated_at": event.get("at") or _now_iso()}, merge=True)
+
+
+def _summary_correction_claims(*, uid: str, trace_id: str) -> dict[str, Any]:
+    return {
+        "sub": f"omi-user:{uid}",
+        "profile_uid": uid,
+        "role": "self",
+        "external_provider": "omi-ios-correction",
+        "grant_id": "conversation-correction-widget",
+        "trace_id": trace_id,
+        "scopes": ["proposals:write"],
+        "allowed_tools": ["conversation_correction_submit"],
+    }
+
+
+def _create_summary_correction_proposal(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    structured: dict[str, Any],
+    transcript: str,
+    segment_count: int,
+    active_summary_version_id: Optional[str],
+) -> Optional[str]:
+    result = proposal_ingest.create_proposal(
+        session_claims=_summary_correction_claims(uid=uid, trace_id=trace_id),
+        tool_name="conversation_correction_submit",
+        proposal_type="summary_correction",
+        payload={
+            "title": f"Summary correction for conversation {conversation_id}",
+            "description": request.correction_text,
+            "target": {
+                "kind": "omi_conversation_summary",
+                "conversation_id": conversation_id,
+                "correction_id": correction_id,
+                "active_summary_version_id": active_summary_version_id,
+            },
+            "evidence": [
+                {
+                    "kind": "current_summary",
+                    "content": structured,
+                },
+                {
+                    "kind": "summary_context",
+                    "content": request.summary_context.model_dump(),
+                },
+                {
+                    "kind": "transcript_excerpt",
+                    "content": transcript[:4000],
+                    "segment_count": segment_count,
+                },
+            ],
+            "requested_change": {
+                "correction_text": request.correction_text,
+                "correction_type": _correction_category(request.correction_text, request.summary_context),
+                "source": request.source,
+            },
+            "source": "conversation_correction_widget",
+            "write_policy": "proposal_only",
+        },
+        idempotency_key=f"summary-correction:{uid}:{conversation_id}:{correction_id}",
+    )
+    proposal = result.get("proposal") or {}
+    return proposal.get("proposal_id")
 
 
 def _n8n_correction_response_is_accepted(response_body: Any) -> bool:
@@ -258,6 +327,53 @@ async def _submit_conversation_correction(
     }
     _persist_correction_audit(uid, conversation_id, correction_id, audit_payload)
 
+    proposal_id = None
+    try:
+        proposal_id = _create_summary_correction_proposal(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=request,
+            structured=structured,
+            transcript=transcript,
+            segment_count=segment_count,
+            active_summary_version_id=submitted_state.get("active_summary_version_id"),
+        )
+        if proposal_id:
+            _persist_correction_audit(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "proposal_id": proposal_id,
+                    "updated_at": _now_iso(),
+                },
+            )
+            _append_correction_event(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "stage": "proposal_created",
+                    "status": "ok",
+                    "at": _now_iso(),
+                    "trace_id": trace_id,
+                    "proposal_id": proposal_id,
+                },
+            )
+    except Exception as exc:
+        logger.exception(
+            "Failed to create summary correction proposal",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id, "error": str(exc)},
+        )
+
     try:
         queue_result = await _submit_correction_to_n8n(
             uid=uid,
@@ -313,6 +429,7 @@ async def _submit_conversation_correction(
             trace_id=trace_id,
             status="queue_failed",
             queued=False,
+            proposal_id=proposal_id,
         )
 
     queued_at = _now_iso()
@@ -345,6 +462,7 @@ async def _submit_conversation_correction(
         trace_id=trace_id,
         status="queued",
         queued=True,
+        proposal_id=proposal_id,
     )
 
 
