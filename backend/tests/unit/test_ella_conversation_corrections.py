@@ -46,6 +46,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     events = []
     submitted = {}
     conversation_updates = []
+    proposals = []
 
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
     monkeypatch.setattr(
@@ -75,6 +76,11 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
         "_append_correction_event",
         lambda uid, conversation_id, correction_id, event: events.append(event),
     )
+    monkeypatch.setattr(
+        corrections,
+        "_create_summary_correction_proposal",
+        lambda **kwargs: proposals.append(kwargs) or "proposal-123",
+    )
 
     async def fake_submit_to_n8n(**kwargs):
         submitted.update(kwargs)
@@ -100,6 +106,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
 
     assert result.status == "queued"
     assert result.queued is True
+    assert result.proposal_id == "proposal-123"
     assert result.conversation_id == "conv-123"
     assert result.correction_id
     assert result.trace_id.startswith("correction:conv-123:")
@@ -111,6 +118,9 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     assert submitted["conversation_id"] == "conv-123"
     assert "The podcast said memory can be tricky." in submitted["transcript"]
     assert submitted["request"].summary_context.app_summary == "The app summary was too clinical."
+    assert proposals[0]["conversation_id"] == "conv-123"
+    assert proposals[0]["request"].correction_text == "This was background TV audio, not a real memory concern."
+    assert any(event["stage"] == "proposal_created" for event in events)
     assert events[-1]["stage"] == "queued"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
     assert conversation_updates[0]["active_summary_version_id"] == "legacy-v1"
@@ -180,6 +190,7 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
         "_append_correction_event",
         lambda uid, conversation_id, correction_id, event: events.append(event),
     )
+    monkeypatch.setattr(corrections, "_create_summary_correction_proposal", lambda **kwargs: "proposal-123")
 
     async def failing_submit_to_n8n(**kwargs):
         raise RuntimeError("n8n offline")
@@ -196,6 +207,7 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
 
     assert result.status == "queue_failed"
     assert result.queued is False
+    assert result.proposal_id == "proposal-123"
     assert audits[-1]["status"] == "queue_failed"
     assert audits[-1]["queue_error"] == "n8n offline"
     assert events[-1]["stage"] == "queue_failed"
@@ -216,6 +228,44 @@ def test_submit_correction_accepts_text_alias():
     request = corrections.ConversationCorrectionRequest(text="Please fix the doctor name.")
 
     assert request.correction_text == "Please fix the doctor name."
+
+
+def test_create_summary_correction_proposal_uses_proposal_only_policy(monkeypatch):
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return {"proposal": {"proposal_id": "proposal-123"}}
+
+    monkeypatch.setattr(corrections.proposal_ingest, "create_proposal", fake_create)
+
+    proposal_id = corrections._create_summary_correction_proposal(
+        uid="user-123",
+        conversation_id="conv-123",
+        correction_id="corr-123",
+        trace_id="trace-123",
+        request=corrections.ConversationCorrectionRequest(
+            correction_text="Actually, that was Dr. Pu, not Dr. Cuu.",
+            source="ios",
+            summary_context={"title": "Doctor visit"},
+        ),
+        structured={"title": "Doctor visit", "overview": "Mentioned Dr. Cuu."},
+        transcript="Speaker: Dr. Pu helped.",
+        segment_count=1,
+        active_summary_version_id="version-1",
+    )
+
+    assert proposal_id == "proposal-123"
+    assert captured["tool_name"] == "conversation_correction_submit"
+    assert captured["proposal_type"] == "summary_correction"
+    assert captured["idempotency_key"] == "summary-correction:user-123:conv-123:corr-123"
+    assert captured["session_claims"]["profile_uid"] == "user-123"
+    assert captured["session_claims"]["scopes"] == ["proposals:write"]
+    assert captured["payload"]["write_policy"] == "proposal_only"
+    assert captured["payload"]["target"]["conversation_id"] == "conv-123"
+    assert captured["payload"]["target"]["active_summary_version_id"] == "version-1"
+    assert captured["payload"]["requested_change"]["correction_text"] == "Actually, that was Dr. Pu, not Dr. Cuu."
+    assert captured["payload"]["evidence"][2]["kind"] == "transcript_excerpt"
 
 
 def test_submit_to_n8n_posts_single_structured_workflow_payload(monkeypatch):
