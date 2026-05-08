@@ -13,6 +13,12 @@ from ella.services.observer import ObserverRunLog, observer_log_to_dict
 _pool: Optional[asyncpg.Pool] = None
 
 
+def _log_to_python(log: ObserverRunLog) -> dict[str, Any]:
+    if hasattr(log, "model_dump"):
+        return log.model_dump(mode="python")
+    return log.dict()
+
+
 async def _get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
@@ -78,7 +84,7 @@ class PostgresObserverRunLogStore(ObserverRunLogStore):
 
     async def save(self, log: ObserverRunLog) -> ObserverRunLog:
         await self._ensure_table()
-        data = observer_log_to_dict(log)
+        data = _log_to_python(log)
         pool = await _get_pool()
         await pool.execute(
             """
