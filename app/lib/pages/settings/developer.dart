@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,6 +16,7 @@ import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/settings_sync_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
@@ -817,8 +819,9 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           onChanged: (value) {
                             if (value != null) {
                               setState(() {
-                                SharedPreferencesUtil().ttsProvider = value;
+                                SharedPreferencesUtil().ttsProvider = EllaSettingsSyncService.normalizeVoiceMode(value);
                               });
+                              unawaited(EllaSettingsSyncService.setVoiceMode(value));
                             }
                           },
                         );

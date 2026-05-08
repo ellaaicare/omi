@@ -17,6 +17,7 @@ import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/settings_sync_service.dart';
 import 'package:omi/ella/services/unified_memory_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
@@ -135,7 +136,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         final provider = SharedPreferencesUtil().ttsProvider;
         final normalizedProvider = V2VClient.normalizeProvider(provider);
         if (normalizedProvider != provider) {
-          SharedPreferencesUtil().ttsProvider = normalizedProvider;
+          unawaited(EllaSettingsSyncService.setVoiceMode(normalizedProvider));
         }
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && _orbState == VoiceOrbState.idle) {
@@ -231,7 +232,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       final provider = SharedPreferencesUtil().ttsProvider;
       final normalizedProvider = V2VClient.normalizeProvider(provider);
       if (normalizedProvider != provider) {
-        SharedPreferencesUtil().ttsProvider = normalizedProvider;
+        unawaited(EllaSettingsSyncService.setVoiceMode(normalizedProvider));
       }
       if (_isV2VProvider(normalizedProvider)) {
         await _startV2V(normalizedProvider);

@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/desktop/desktop_app.dart';
+import 'package:omi/ella/services/settings_sync_service.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/settings/asana_settings_page.dart';
@@ -316,6 +317,7 @@ class _AppShellState extends State<AppShell> {
       context.read<MessageProvider>().refreshMessages();
       context.read<UsageProvider>().fetchSubscription();
       context.read<TaskIntegrationProvider>().loadFromBackend();
+      unawaited(EllaSettingsSyncService.syncOnAppStart());
 
       NotificationService.instance.saveNotificationToken();
     } else {
