@@ -33,7 +33,7 @@ import database.conversations as conversations_db
 import database.memories as memories_db
 from ella.services import proposal_ingest
 from ella.services.mcp_startup import build_startup_context
-from utils.ella.time_context import annotate_event_time, build_time_context, timezone_name
+from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
 
 logger = logging.getLogger("ella.plato_mcp")
 
@@ -496,6 +496,13 @@ async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
     for event in window_events:
         item = dict(event)
         item["title"] = _event_display_title(item)
+        end_fields = local_time_fields(item.get("ended_at") or item.get("finished_at"), tz_name=tz_name, now=until)
+        if end_fields["utc"]:
+            item["ended_at_utc"] = end_fields["utc"]
+            item["ended_at_local"] = end_fields["local"]
+            item["ended_at_local_date"] = end_fields["local_date"]
+            item["ended_at_local_time"] = end_fields["local_time"]
+            item["ended_relative_to_now"] = end_fields["relative_to_now"]
         item["salience"] = _event_salience(item)
         item["duration_seconds"] = _event_duration_seconds(item)
         item["is_low_salience_fragment"] = _is_low_salience_fragment(item)
