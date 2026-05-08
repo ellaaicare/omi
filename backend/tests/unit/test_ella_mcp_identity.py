@@ -1,4 +1,6 @@
 import pytest
+import sys
+import types
 
 from ella.services.mcp_identity import (
     ExternalConnectorIdentity,
@@ -8,6 +10,8 @@ from ella.services.mcp_identity import (
     STATE_AUTHENTICATED_NEEDS_PROFILE_SELECTION,
     STATE_UNAUTHENTICATED,
     build_session_claims,
+    grant_to_firestore_data,
+    provision_identity_grant,
     resolve_mcp_identity,
 )
 
@@ -112,3 +116,70 @@ def test_cannot_build_claims_for_unmapped_identity():
 
     with pytest.raises(ValueError):
         build_session_claims(resolution)
+
+
+def test_grant_to_firestore_data_filters_write_scopes():
+    data = grant_to_firestore_data(
+        identity=_identity(),
+        profile_uid="user-1",
+        role="self",
+        scopes=["context:read", "proposals:write", "rules:propose"],
+        allowed_tools=["companion_start_here", "companion_submit_note"],
+        profile_label="Test User",
+        created_by="unit-test",
+    )
+
+    assert data["provider_subject"] == "google:google-sub-1"
+    assert data["email_norm"] == "person@example.com"
+    assert data["profile_uid"] == "user-1"
+    assert data["role"] == "self"
+    assert data["scopes"] == ["context:read"]
+    assert "proposals:write" not in data["scopes"]
+    assert data["allowed_tools"] == ["companion_start_here", "companion_submit_note"]
+    assert data["created_by"] == "unit-test"
+
+
+def test_provision_identity_grant_writes_durable_record(monkeypatch):
+    writes = {}
+
+    class FakeSnapshot:
+        exists = False
+
+    class FakeDocument:
+        def __init__(self, doc_id):
+            self.doc_id = doc_id
+
+        def get(self):
+            return FakeSnapshot()
+
+        def set(self, data, merge=False):
+            writes[self.doc_id] = {"data": data, "merge": merge}
+
+    class FakeCollection:
+        def document(self, doc_id):
+            return FakeDocument(doc_id)
+
+    class FakeDb:
+        def collection(self, name):
+            assert name == "mcp_identity_grants"
+            return FakeCollection()
+
+    fake_client = types.ModuleType("database._client")
+    fake_client.db = FakeDb()
+    monkeypatch.setitem(sys.modules, "database._client", fake_client)
+
+    grant = provision_identity_grant(
+        identity=_identity(),
+        profile_uid="user-1",
+        role="self",
+        scopes=["startup:read", "proposals:write"],
+        allowed_tools=["companion_start_here"],
+    )
+
+    assert grant.profile_uid == "user-1"
+    assert grant.scopes == ["startup:read"]
+    assert len(writes) == 1
+    write = next(iter(writes.values()))
+    assert write["merge"] is True
+    assert write["data"]["provider_subject"] == "google:google-sub-1"
+    assert write["data"]["created_at"] == write["data"]["updated_at"]

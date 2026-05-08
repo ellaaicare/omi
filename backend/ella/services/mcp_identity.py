@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger("ella.mcp_identity")
@@ -223,6 +225,106 @@ def load_identity_grants(identity: ExternalConnectorIdentity) -> list[MCPProfile
         return []
 
     return [grant for row in rows.values() if (grant := MCPProfileGrant.from_mapping(row)).active]
+
+
+def _grant_document_id(identity: ExternalConnectorIdentity, profile_uid: str, role: str) -> str:
+    seed = f"{identity.provider_subject}:{profile_uid}:{_normalized_role(role)}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+
+def grant_to_firestore_data(
+    *,
+    identity: ExternalConnectorIdentity,
+    profile_uid: str,
+    role: str = ROLE_SELF,
+    profile_label: str = "",
+    scopes: Optional[list[str]] = None,
+    allowed_tools: Optional[list[str]] = None,
+    status: str = "active",
+    grant_id: str = "",
+    created_by: str = "",
+) -> dict[str, Any]:
+    """Build the durable grant record stored in `mcp_identity_grants`.
+
+    Proposal/write scopes are intentionally filtered out by `MCPProfileGrant`.
+    A later writeback PR must explicitly add role-scoped proposal permissions.
+    """
+    normalized_role = _normalized_role(role)
+    grant = MCPProfileGrant.from_mapping(
+        {
+            "grant_id": grant_id or _grant_document_id(identity, profile_uid, normalized_role),
+            "profile_uid": profile_uid,
+            "role": normalized_role,
+            "profile_label": profile_label,
+            "scopes": scopes or [],
+            "allowed_tools": allowed_tools or [],
+            "status": status,
+        }
+    )
+    if not identity.authenticated or not identity.provider_subject:
+        raise ValueError("authenticated external identity with provider and subject is required")
+    if not grant.active:
+        raise ValueError("active profile_uid is required")
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "grant_id": grant.grant_id,
+        "provider": identity.provider,
+        "subject": identity.subject,
+        "provider_subject": identity.provider_subject,
+        "email_norm": identity.email if identity.email_verified else "",
+        "email_verified": identity.email_verified,
+        "display_name": identity.display_name,
+        "profile_uid": grant.profile_uid,
+        "profile_label": grant.profile_label,
+        "role": grant.role,
+        "scopes": grant.scopes,
+        "allowed_tools": grant.allowed_tools,
+        "status": status,
+        "created_by": created_by,
+        "updated_at": now,
+    }
+    return data
+
+
+def provision_identity_grant(
+    *,
+    identity: ExternalConnectorIdentity,
+    profile_uid: str,
+    role: str = ROLE_SELF,
+    profile_label: str = "",
+    scopes: Optional[list[str]] = None,
+    allowed_tools: Optional[list[str]] = None,
+    status: str = "active",
+    grant_id: str = "",
+    created_by: str = "",
+) -> MCPProfileGrant:
+    """Create or update a durable MCP identity grant.
+
+    This is a backend/admin helper, not an external MCP tool. It only writes
+    grant metadata and does not enable proposal writeback, delivery, scanner,
+    or memory mutation.
+    """
+    data = grant_to_firestore_data(
+        identity=identity,
+        profile_uid=profile_uid,
+        role=role,
+        profile_label=profile_label,
+        scopes=scopes,
+        allowed_tools=allowed_tools,
+        status=status,
+        grant_id=grant_id,
+        created_by=created_by,
+    )
+    collection_name = os.getenv("ELLA_MCP_IDENTITY_GRANTS_COLLECTION", "mcp_identity_grants")
+    from database._client import db
+
+    ref = db.collection(collection_name).document(data["grant_id"])
+    snapshot = ref.get()
+    if not getattr(snapshot, "exists", False):
+        data["created_at"] = data["updated_at"]
+    ref.set(data, merge=True)
+    return MCPProfileGrant.from_mapping(data)
 
 
 def resolve_mcp_identity(

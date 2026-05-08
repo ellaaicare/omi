@@ -7,6 +7,7 @@ import os
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ella.services.mcp_identity import (
     ExternalConnectorIdentity,
@@ -16,6 +17,12 @@ from ella.services.mcp_identity import (
 from ella.services.mcp_startup import build_startup_context
 
 router = APIRouter(prefix="/v1/ella/mcp", tags=["Ella MCP Onboarding"])
+
+
+class MCPOAuthOnboardingRequest(BaseModel):
+    firebase_id_token: str = Field(..., min_length=1)
+    selected_profile_uid: str = ""
+    ttl_seconds: int = Field(default=3600, ge=60, le=24 * 60 * 60)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -94,6 +101,37 @@ def _static_identity(token_fingerprint: str) -> ExternalConnectorIdentity:
     )
 
 
+def _identity_from_firebase_claims(decoded: dict[str, Any]) -> ExternalConnectorIdentity:
+    firebase_info = decoded.get("firebase") if isinstance(decoded.get("firebase"), dict) else {}
+    identities = firebase_info.get("identities") if isinstance(firebase_info.get("identities"), dict) else {}
+    google_subjects = identities.get("google.com") if isinstance(identities.get("google.com"), list) else []
+    google_subject = str(google_subjects[0]).strip() if google_subjects else ""
+    firebase_uid = str(decoded.get("uid") or decoded.get("user_id") or decoded.get("sub") or "").strip()
+    provider = "google" if google_subject or firebase_info.get("sign_in_provider") == "google.com" else "firebase"
+    subject = google_subject or firebase_uid
+    return ExternalConnectorIdentity(
+        provider=provider,
+        subject=subject,
+        email=str(decoded.get("email") or "").strip().lower(),
+        email_verified=bool(decoded.get("email_verified")),
+        authenticated=bool(subject),
+        display_name=str(decoded.get("name") or "").strip(),
+    )
+
+
+def _verify_firebase_identity(firebase_id_token: str) -> ExternalConnectorIdentity:
+    try:
+        from firebase_admin import auth as firebase_auth
+
+        decoded = firebase_auth.verify_id_token(firebase_id_token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid Firebase ID token") from exc
+    identity = _identity_from_firebase_claims(decoded or {})
+    if not identity.authenticated:
+        raise HTTPException(status_code=401, detail="Firebase token did not contain a usable subject")
+    return identity
+
+
 def resolve_static_connector_session(token_fingerprint: str, selected_profile_uid: str = "") -> dict[str, Any]:
     identity = _static_identity(token_fingerprint)
     resolution = resolve_mcp_identity(
@@ -104,6 +142,17 @@ def resolve_static_connector_session(token_fingerprint: str, selected_profile_ui
     return resolution.to_public_dict(include_claims=True)
 
 
+def resolve_oauth_connector_session(
+    firebase_id_token: str,
+    *,
+    selected_profile_uid: str = "",
+    ttl_seconds: int = 3600,
+) -> dict[str, Any]:
+    identity = _verify_firebase_identity(firebase_id_token)
+    resolution = resolve_mcp_identity(identity, selected_profile_uid=selected_profile_uid)
+    return resolution.to_public_dict(include_claims=True, ttl_seconds=ttl_seconds)
+
+
 @router.get("/onboarding")
 async def get_mcp_onboarding(
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -111,6 +160,15 @@ async def get_mcp_onboarding(
 ):
     token_fingerprint = _authenticate_static(authorization)
     return resolve_static_connector_session(token_fingerprint, selected_profile_uid)
+
+
+@router.post("/onboarding/oauth")
+async def post_mcp_oauth_onboarding(request: MCPOAuthOnboardingRequest):
+    return resolve_oauth_connector_session(
+        request.firebase_id_token,
+        selected_profile_uid=request.selected_profile_uid,
+        ttl_seconds=request.ttl_seconds,
+    )
 
 
 @router.get("/start_here")
@@ -130,8 +188,9 @@ async def get_mcp_start_here(
 async def get_mcp_onboarding_info():
     return {
         "onboarding_endpoint": "/v1/ella/mcp/onboarding",
+        "oauth_onboarding_endpoint": "/v1/ella/mcp/onboarding/oauth",
         "start_here_endpoint": "/v1/ella/mcp/start_here",
-        "auth": "Bearer token for dev/static fallback; OAuth-backed grants are resolved by the same identity service.",
+        "auth": "POST Firebase ID token to OAuth onboarding for production; Bearer token remains dev/static fallback.",
         "states": [
             "authenticated_mapped",
             "authenticated_needs_profile_selection",
