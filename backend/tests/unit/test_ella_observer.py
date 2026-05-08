@@ -171,6 +171,30 @@ def test_heuristic_extractor_promotes_explicit_memory_and_scanner_requests():
     assert {decision.proposal_type for decision in result.decisions} == {"memory_note", "scanner_rule_change"}
 
 
+def test_heuristic_extractor_ignores_omi_summary_language():
+    service = _load_observer_service()
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    event = _event(
+        event_id="evt-omi-summary",
+        channel="omi",
+        role="system",
+        metadata={},
+        text="[Ella] This summary says Ella should remember that the voice memory fix worked.",
+    )
+    result = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[event],
+        extractor=extractor_module.heuristic_candidate_extractor,
+        run_id="run-omi-summary",
+    )
+
+    assert result.proposal_count == 0
+    assert result.decisions[0].reason == "no_structured_observer_candidates"
+
+
 def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")

@@ -21,15 +21,13 @@ from ella.services.observer import ObserverCandidate, structured_candidate_extra
 MAX_EXTRACTOR_EVENTS = 60
 MAX_EVENT_TEXT_CHARS = 1800
 SUPPORTED_EXTRACTOR_MODES = {"structured", "heuristic", "hermes"}
+HEURISTIC_USER_CHANNELS = {"ios_chat", "ios_voice", "imessage", "telegram"}
 
 _REMEMBER_RE = re.compile(
     r"\b(?:please\s+)?(?:remember|note|keep track of|log this|save this)\b(?P<fact>.*)",
     re.IGNORECASE | re.DOTALL,
 )
-_CORRECTION_RE = re.compile(
-    r"\b(?:actually|correction|correct(?:ion)?|it was|that was|the correct)\b(?P<fact>.*)",
-    re.IGNORECASE | re.DOTALL,
-)
+_CORRECTION_RE = re.compile(r"\b(?:actually|correction|it was|that was|the correct)\b(?P<fact>.*)", re.I | re.S)
 _REMINDER_RE = re.compile(r"\b(?:remind me|reminder|don't let me forget)\b(?P<fact>.*)", re.IGNORECASE | re.DOTALL)
 _SCANNER_RE = re.compile(
     r"\b(?:watch for|listen for|scan for|alert me|tell me if|notify me if|guardian should|necklace should)\b(?P<fact>.*)",
@@ -123,7 +121,9 @@ def _candidate(
 
 def heuristic_candidate_extractor(event: dict[str, Any]) -> list[ObserverCandidate]:
     """High-precision local extractor for explicit user commands/corrections."""
-    if not isinstance(event, dict) or str(event.get("role") or "").lower() not in {"user", "speaker", "system"}:
+    if not isinstance(event, dict) or str(event.get("role") or "").lower() not in {"user", "speaker"}:
+        return []
+    if str(event.get("channel") or "") not in HEURISTIC_USER_CHANNELS:
         return []
     if _is_low_signal(event):
         return []
