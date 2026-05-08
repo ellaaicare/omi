@@ -347,6 +347,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella escalation policy not available: {e}", flush=True)
 
+    # Server-backed app settings used by iOS, voice, and Guardian routing
+    try:
+        from ella.routers.settings import router as settings_router
+
+        app.include_router(settings_router, tags=["Ella Settings"])
+        print("  🌐 /v1/ella/settings* - Server-backed app settings", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella settings not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
