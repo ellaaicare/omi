@@ -1,8 +1,11 @@
 import importlib
 import sys
+import types
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from ella.services.mcp_identity import MCPProfileGrant
 
 
 def _load_module(monkeypatch):
@@ -18,6 +21,45 @@ def _client(module):
     app = FastAPI()
     app.include_router(module.router)
     return TestClient(app)
+
+
+def _install_firebase_stub(monkeypatch, decoded=None, error=None):
+    firebase_admin = types.ModuleType("firebase_admin")
+    firebase_auth = types.ModuleType("firebase_admin.auth")
+
+    def verify_id_token(token):
+        if error:
+            raise error
+        assert token == "firebase-token"
+        return decoded or {
+            "uid": "firebase-uid",
+            "email": "person@example.com",
+            "email_verified": True,
+            "name": "Test Person",
+            "firebase": {
+                "sign_in_provider": "google.com",
+                "identities": {"google.com": ["google-sub-1"]},
+            },
+        }
+
+    firebase_auth.verify_id_token = verify_id_token
+    firebase_admin.auth = firebase_auth
+    monkeypatch.setitem(sys.modules, "firebase_admin", firebase_admin)
+    monkeypatch.setitem(sys.modules, "firebase_admin.auth", firebase_auth)
+
+
+def _grant(profile_uid="user-1", role="self"):
+    return MCPProfileGrant.from_mapping(
+        {
+            "grant_id": f"grant-{profile_uid}",
+            "profile_uid": profile_uid,
+            "role": role,
+            "profile_label": profile_uid,
+            "scopes": ["context:read", "startup:read", "proposals:write"],
+            "allowed_tools": ["companion_start_here", "companion_recent_context"],
+            "status": "active",
+        }
+    )
 
 
 def test_mcp_onboarding_rejects_missing_or_invalid_static_token(monkeypatch):
@@ -59,6 +101,93 @@ def test_mcp_onboarding_without_default_profile_returns_invite_state(monkeypatch
     assert payload["state"] == "authenticated_needs_invite"
     assert payload["selected_profile"] is None
     assert "session_claims" not in payload
+
+
+def test_oauth_onboarding_maps_verified_google_identity_to_grant(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+
+    service = importlib.import_module("ella.services.mcp_identity")
+
+    def fake_grants(identity):
+        assert identity.provider == "google"
+        assert identity.subject == "google-sub-1"
+        assert identity.email == "person@example.com"
+        assert identity.email_verified is True
+        return [_grant()]
+
+    monkeypatch.setattr(service, "load_identity_grants", fake_grants)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/mcp/onboarding/oauth",
+        json={"firebase_id_token": "firebase-token", "ttl_seconds": 600},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "authenticated_mapped"
+    assert payload["identity"]["provider"] == "google"
+    assert payload["selected_profile"]["profile_uid"] == "user-1"
+    claims = payload["session_claims"]
+    assert claims["sub"] == "google:google-sub-1"
+    assert claims["profile_uid"] == "user-1"
+    assert claims["role"] == "self"
+    assert "startup:read" in claims["scopes"]
+    assert "proposals:write" not in claims["scopes"]
+
+
+def test_oauth_onboarding_unknown_identity_needs_invite(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(service, "load_identity_grants", lambda _identity: [])
+    client = _client(module)
+
+    response = client.post("/v1/ella/mcp/onboarding/oauth", json={"firebase_id_token": "firebase-token"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "authenticated_needs_invite"
+    assert payload["selected_profile"] is None
+    assert "session_claims" not in payload
+
+
+def test_oauth_onboarding_requires_profile_selection_for_multiple_grants(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")])
+    client = _client(module)
+
+    response = client.post("/v1/ella/mcp/onboarding/oauth", json={"firebase_id_token": "firebase-token"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "authenticated_needs_profile_selection"
+    assert "session_claims" not in payload
+    assert [item["profile_uid"] for item in payload["available_profiles"]] == ["user-1", "mom-1"]
+
+    selected = client.post(
+        "/v1/ella/mcp/onboarding/oauth",
+        json={"firebase_id_token": "firebase-token", "selected_profile_uid": "mom-1"},
+    )
+
+    assert selected.status_code == 200
+    selected_payload = selected.json()
+    assert selected_payload["state"] == "authenticated_mapped"
+    assert selected_payload["session_claims"]["profile_uid"] == "mom-1"
+    assert selected_payload["session_claims"]["role"] == "caregiver"
+
+
+def test_oauth_onboarding_rejects_invalid_firebase_token(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch, error=ValueError("bad token"))
+    client = _client(module)
+
+    response = client.post("/v1/ella/mcp/onboarding/oauth", json={"firebase_id_token": "firebase-token"})
+
+    assert response.status_code == 401
 
 
 def test_mcp_start_here_returns_canonical_startup_packet(monkeypatch):
