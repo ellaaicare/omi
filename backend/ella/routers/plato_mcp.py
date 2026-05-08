@@ -21,8 +21,9 @@ import urllib.parse
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -49,6 +50,7 @@ MAX_SEARCH_RESULTS = 20
 MAX_PROMPT_CHARS = 4000
 MAX_CONSULT_CONTEXT_CHARS = 7000
 RATE_LIMIT_WINDOW_SECONDS = 60
+SALIENCE_RANKS = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 _active_sessions: dict[str, "MCPSession"] = {}
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
@@ -88,6 +90,18 @@ def _plato_agent_id() -> str:
 
 def _plato_timezone() -> str:
     return timezone_name(_env("ELLA_PLATO_TIMEZONE", _env("ELLA_USER_TIMEZONE", "")))
+
+
+def _argument_timezone(arguments: dict[str, Any]) -> str:
+    raw = str(arguments.get("timezone") or arguments.get("local_time_zone") or _plato_timezone()).strip()
+    aliases = {
+        "PT": "America/Los_Angeles",
+        "PST": "America/Los_Angeles",
+        "PDT": "America/Los_Angeles",
+        "PACIFIC": "America/Los_Angeles",
+        "PACIFIC TIME": "America/Los_Angeles",
+    }
+    return timezone_name(aliases.get(raw.upper(), raw))
 
 
 def _oauth_client_id() -> str:
@@ -160,6 +174,102 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_duration_seconds(value: Any, default_seconds: int = 30 * 60) -> int:
+    if value is None:
+        return default_seconds
+    if isinstance(value, (int, float)):
+        return max(60, min(7 * 24 * 60 * 60, int(value)))
+    text = str(value or "").strip().lower().replace("_", " ")
+    if not text:
+        return default_seconds
+    normalized = re.sub(r"\s+", " ", text)
+    patterns = [
+        r"^(?:last\s+)?(\d+)\s*(minute|minutes|min|mins|m)$",
+        r"^(?:last\s+)?(\d+)\s*(hour|hours|hr|hrs|h)$",
+        r"^(?:last\s+)?(\d+)\s*(day|days|d)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, normalized)
+        if not match:
+            continue
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith(("minute", "min", "m")):
+            seconds = amount * 60
+        elif unit.startswith(("hour", "hr", "h")):
+            seconds = amount * 60 * 60
+        else:
+            seconds = amount * 24 * 60 * 60
+        return max(60, min(7 * 24 * 60 * 60, seconds))
+    raise ToolExecutionError(f"Invalid time_range: {value}", code=-32602)
+
+
+def _event_datetime(item: dict[str, Any], *keys: str) -> Optional[datetime]:
+    for key in keys:
+        try:
+            parsed = _parse_iso_datetime(item.get(key))
+        except ToolExecutionError:
+            parsed = None
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _event_salience(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") or {}
+    signal = metadata.get("ella_signal") if isinstance(metadata, dict) else {}
+    salience = ""
+    if isinstance(signal, dict):
+        salience = str(signal.get("salience") or "").strip().lower()
+    tags = metadata.get("ella_tags") if isinstance(metadata, dict) else []
+    if not salience and isinstance(tags, list) and "low_signal" in tags:
+        salience = "low"
+    if salience not in SALIENCE_RANKS:
+        salience = "medium"
+    return salience
+
+
+def _meets_min_salience(item: dict[str, Any], min_salience: str) -> bool:
+    min_rank = SALIENCE_RANKS.get(min_salience, SALIENCE_RANKS["medium"])
+    return SALIENCE_RANKS.get(_event_salience(item), SALIENCE_RANKS["medium"]) >= min_rank
+
+
+def _event_duration_seconds(item: dict[str, Any]) -> Optional[int]:
+    start = _event_datetime(item, "started_at", "created_at", "timestamp")
+    end = _event_datetime(item, "ended_at", "finished_at")
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds()))
+
+
+def _is_low_salience_fragment(item: dict[str, Any]) -> bool:
+    salience = _event_salience(item)
+    if salience != "low":
+        return False
+    duration = _event_duration_seconds(item)
+    text = _compact_text(item.get("text") or item.get("overview") or item.get("summary") or "", 5000)
+    metadata = item.get("metadata") or {}
+    segment_count = metadata.get("segment_count") if isinstance(metadata, dict) else None
+    title = str(item.get("title") or "").lower()
+    if duration is not None and duration >= 120:
+        return False
+    if duration is not None and duration <= 30:
+        return True
+    if len(text) <= 240:
+        return True
+    if isinstance(segment_count, int) and segment_count <= 2 and "brief" in title:
+        return True
+    return False
+
+
+def _event_overlaps_window(item: dict[str, Any], since: datetime, until: datetime) -> bool:
+    start = _event_datetime(item, "started_at", "created_at", "timestamp")
+    end = _event_datetime(item, "ended_at", "finished_at") or start
+    if start is None or end is None:
+        return False
+    return end >= since and start <= until
 
 
 def _json_safe(value: Any) -> Any:
@@ -345,6 +455,64 @@ async def _latest_omi(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
+    tz_name = _argument_timezone(arguments)
+    until = _parse_iso_datetime(arguments.get("until")) or datetime.now(timezone.utc)
+    since = _parse_iso_datetime(arguments.get("since"))
+    duration_seconds = None
+    if since is None:
+        duration_seconds = _parse_duration_seconds(arguments.get("time_range"), default_seconds=30 * 60)
+        since = until - timedelta(seconds=duration_seconds)
+    limit = _clamp_int(arguments.get("limit"), MAX_CONTEXT_LIMIT, 1, MAX_CONTEXT_LIMIT)
+
+    # Pull a recent OMI window without relying on model-side filtering. We do
+    # not pass since here because a multi-minute conversation can start before
+    # the window but end inside it.
+    context = await _recent_context({"limit": limit, "channels": ["omi"]})
+    events = [
+        annotate_event_time(dict(event), tz_name=tz_name)
+        for event in context.get("events", [])
+        if isinstance(event, dict) and str(event.get("channel", "")).startswith("omi")
+    ]
+    window_events = [event for event in events if _event_overlaps_window(event, since, until)]
+
+    meaningful: list[dict[str, Any]] = []
+    low_salience_fragments: list[dict[str, Any]] = []
+    for event in window_events:
+        item = dict(event)
+        item["salience"] = _event_salience(item)
+        item["duration_seconds"] = _event_duration_seconds(item)
+        item["is_low_salience_fragment"] = _is_low_salience_fragment(item)
+        if item["is_low_salience_fragment"]:
+            low_salience_fragments.append(item)
+        else:
+            meaningful.append(item)
+
+    return {
+        "uid": _plato_uid(),
+        "canonical_identity": _plato_canonical_identity(),
+        "source": context.get("source"),
+        "time_context": build_time_context(tz_name, now=until),
+        "window": {
+            "since_utc": since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "until_utc": until.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "since_local": since.astimezone(ZoneInfo(tz_name)).isoformat(),
+            "until_local": until.astimezone(ZoneInfo(tz_name)).isoformat(),
+            "timezone": tz_name,
+            "time_range_seconds": duration_seconds,
+        },
+        "counts": {
+            "window_events": len(window_events),
+            "meaningful_moments": len(meaningful),
+            "low_salience_fragments": len(low_salience_fragments),
+        },
+        "meaningful_moments": meaningful,
+        "low_salience_fragments": (
+            low_salience_fragments if arguments.get("include_fragments", True) is not False else []
+        ),
+    }
+
+
 def _tokens(text: str) -> set[str]:
     return {token for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", text.lower())}
 
@@ -494,6 +662,7 @@ def _legacy_plato_onboarding() -> dict[str, Any]:
         "companion_get_proposal_status",
         "plato_recent_context",
         "plato_search_memory",
+        "plato_omi_activity_window",
         "plato_consult",
     ]
     return {
@@ -598,6 +767,29 @@ MCP_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "plato_omi_activity_window",
+        "description": (
+            "Return OMI/necklace conversations in a local-time activity window, split into meaningful moments "
+            "and low-salience fragments. Use this for questions like 'what happened in OMI in the last 30 minutes'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "time_range": {
+                    "type": "string",
+                    "default": "30 minutes",
+                    "description": "Relative window such as 'last 30 minutes', '2 hours', or '1 day'.",
+                },
+                "since": {"type": "string", "description": "Optional ISO timestamp lower bound."},
+                "until": {"type": "string", "description": "Optional ISO timestamp upper bound; defaults to now."},
+                "timezone": {"type": "string", "default": "America/Los_Angeles"},
+                "local_time_zone": {"type": "string", "description": "Alias accepted for timezone, e.g. PDT."},
+                "limit": {"type": "integer", "default": MAX_CONTEXT_LIMIT, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
+                "include_fragments": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
         "name": "plato_get_scanner_rules",
         "description": "Read Plato scanner rule files from the Hermes/OpenClaw workspace through the provision API.",
         "inputSchema": {
@@ -632,6 +824,7 @@ _TOOL_HANDLERS = {
     "plato_recent_context": _recent_context,
     "plato_search_memory": _search_memory,
     "plato_latest_omi": _latest_omi,
+    "plato_omi_activity_window": _omi_activity_window,
     "plato_get_scanner_rules": _scanner_rules,
     "plato_consult": _consult_plato,
 }

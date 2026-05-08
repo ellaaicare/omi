@@ -90,6 +90,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
         "plato_recent_context",
         "plato_search_memory",
         "plato_latest_omi",
+        "plato_omi_activity_window",
         "plato_get_scanner_rules",
         "plato_consult",
     }
@@ -249,6 +250,74 @@ def test_plato_recent_context_falls_back_when_canonical_is_empty(monkeypatch):
     result = _tool_result(response)
     assert result["source"] == "canonical_timeline_empty_omi_firestore_fallback"
     assert result["latest"]["event_id"] == "conv-1"
+
+
+def test_plato_omi_activity_window_splits_meaningful_from_fragments(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def fake_recent_context(arguments):
+        assert arguments["channels"] == ["omi"]
+        return {
+            "uid": module._plato_uid(),
+            "source": "canonical_timeline_with_omi_firestore_fallback",
+            "events": [
+                {
+                    "event_id": "brief-color",
+                    "channel": "omi",
+                    "title": "Brief Color Comment",
+                    "text": "Not white.",
+                    "started_at": "2026-05-08T03:21:53Z",
+                    "ended_at": "2026-05-08T03:21:57Z",
+                    "metadata": {"ella_signal": {"salience": "low"}, "segment_count": 1},
+                },
+                {
+                    "event_id": "ai-music",
+                    "channel": "omi",
+                    "title": "AI Music and U.S. Government Question",
+                    "text": "AI music discussion, pink one, and repeated U.S. government question.",
+                    "started_at": "2026-05-08T03:14:03Z",
+                    "ended_at": "2026-05-08T03:18:48Z",
+                    "metadata": {"ella_signal": {"salience": "low"}, "segment_count": 10},
+                },
+                {
+                    "event_id": "old",
+                    "channel": "omi",
+                    "title": "Older event",
+                    "text": "Outside the requested window.",
+                    "started_at": "2026-05-08T02:00:00Z",
+                    "ended_at": "2026-05-08T02:05:00Z",
+                    "metadata": {"ella_signal": {"salience": "medium"}},
+                },
+            ],
+        }
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_omi_activity_window",
+                "arguments": {
+                    "time_range": "last 30 minutes",
+                    "until": "2026-05-08T03:36:18Z",
+                    "timezone": "America/Los_Angeles",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["window"]["since_local"].startswith("2026-05-07T20:06:18")
+    assert result["counts"] == {"window_events": 2, "meaningful_moments": 1, "low_salience_fragments": 1}
+    assert result["meaningful_moments"][0]["event_id"] == "ai-music"
+    assert result["meaningful_moments"][0]["salience"] == "low"
+    assert result["meaningful_moments"][0]["is_low_salience_fragment"] is False
+    assert result["low_salience_fragments"][0]["event_id"] == "brief-color"
 
 
 def test_plato_recent_context_merges_omi_fallback_when_canonical_has_other_channels(monkeypatch):
