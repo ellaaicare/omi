@@ -89,6 +89,25 @@ def _is_low_signal(event: dict[str, Any]) -> bool:
     return False
 
 
+def _is_synthetic_or_test_event(event: dict[str, Any]) -> bool:
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    source_ref = event.get("source_ref") if isinstance(event.get("source_ref"), dict) else {}
+    if metadata.get("synthetic") is True or metadata.get("test") is True:
+        return True
+    for value in (
+        metadata.get("test"),
+        metadata.get("source"),
+        metadata.get("fixture"),
+        event.get("provider"),
+        event.get("event_id"),
+        source_ref.get("source_id"),
+    ):
+        text = str(value or "").lower()
+        if any(marker in text for marker in ("ella_memory_e2e", "ella-memory-e2e", "automated_e2e_smoke")):
+            return True
+    return False
+
+
 def _is_memory_instruction(text: str, match: re.Match[str]) -> bool:
     lower = text.lower().strip()
     prefix = lower[: match.start()].strip()
@@ -139,6 +158,8 @@ def _candidate(
 def heuristic_candidate_extractor(event: dict[str, Any]) -> list[ObserverCandidate]:
     """High-precision local extractor for explicit user commands/corrections."""
     if not isinstance(event, dict) or str(event.get("role") or "").lower() not in {"user", "speaker"}:
+        return []
+    if _is_synthetic_or_test_event(event):
         return []
     if str(event.get("channel") or "") not in HEURISTIC_USER_CHANNELS:
         return []
@@ -293,7 +314,11 @@ async def hermes_candidate_extraction(
     limit: int = MAX_EXTRACTOR_EVENTS,
 ) -> ExtractionResult:
     """Ask Hermes for proposal candidates using a strict JSON-only contract."""
-    selected = [event for event in events if isinstance(event, dict) and not _is_low_signal(event)]
+    selected = [
+        event
+        for event in events
+        if isinstance(event, dict) and not _is_low_signal(event) and not _is_synthetic_or_test_event(event)
+    ]
     selected = selected[-max(1, min(limit, MAX_EXTRACTOR_EVENTS)) :]
     if not selected:
         return ExtractionResult(metadata={"extractor": "hermes", "event_count": 0, "skipped": "no_signal_events"})
@@ -429,6 +454,8 @@ def combined_extractor(result: ExtractionResult):
     """Return an event extractor combining structured metadata and extracted candidates."""
 
     def _extract(event: dict[str, Any]) -> list[ObserverCandidate]:
+        if _is_synthetic_or_test_event(event):
+            return []
         candidates = list(structured_candidate_extractor(event))
         event_id = _event_id(event)
         if event_id:

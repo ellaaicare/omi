@@ -15,6 +15,7 @@ from ella.services.mcp_identity import (
     resolve_mcp_identity,
 )
 from ella.services.mcp_startup import build_startup_context
+from ella.services.mcp_surface_prompt import build_surface_prompt
 
 router = APIRouter(prefix="/v1/ella/mcp", tags=["Ella MCP Onboarding"])
 
@@ -184,12 +185,35 @@ async def get_mcp_start_here(
     return await build_startup_context(onboarding=onboarding, limit=limit, channels=channel_list)
 
 
+@router.get("/surface-prompt")
+async def get_mcp_surface_prompt(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    selected_profile_uid: str = Query("", description="Optional profile UID selected after multi-profile mapping."),
+    surface: str = Query("generic", description="External surface, e.g. grok, hosted-gpt, gemini."),
+):
+    token_fingerprint = _authenticate_static(authorization)
+    onboarding = resolve_static_connector_session(token_fingerprint, selected_profile_uid)
+    selected = onboarding.get("selected_profile") or {}
+    claims = onboarding.get("session_claims") or {}
+    if onboarding.get("state") != "authenticated_mapped" or not selected:
+        raise HTTPException(status_code=403, detail="No mapped Ella profile for this connector session")
+    return build_surface_prompt(
+        profile_uid=str(selected.get("profile_uid") or claims.get("profile_uid") or ""),
+        profile_label=str(selected.get("profile_label") or "Ella profile"),
+        surface=surface,
+        scopes=[str(item) for item in (claims.get("scopes") or selected.get("scopes") or [])],
+        allowed_tools=[str(item) for item in (claims.get("allowed_tools") or selected.get("allowed_tools") or [])],
+        proposal_write_enabled="proposals:write" in set(claims.get("scopes") or selected.get("scopes") or []),
+    )
+
+
 @router.get("/info")
 async def get_mcp_onboarding_info():
     return {
         "onboarding_endpoint": "/v1/ella/mcp/onboarding",
         "oauth_onboarding_endpoint": "/v1/ella/mcp/onboarding/oauth",
         "start_here_endpoint": "/v1/ella/mcp/start_here",
+        "surface_prompt_endpoint": "/v1/ella/mcp/surface-prompt",
         "auth": "POST Firebase ID token to OAuth onboarding for production; Bearer token remains dev/static fallback.",
         "states": [
             "authenticated_mapped",
