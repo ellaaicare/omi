@@ -1,15 +1,19 @@
 import importlib
 import sys
+import time
 import types
 
+import jwt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ella.services.mcp_identity import MCPProfileGrant
+from ella.services.mcp_identity import MCPProfileGrant, MCP_SESSION_AUDIENCE, MCP_SESSION_ISSUER
 
 
 def _load_module(monkeypatch):
     monkeypatch.setenv("ELLA_MCP_TOKEN", "test-token")
+    monkeypatch.setenv("ELLA_MCP_SESSION_SECRET", "test-session-secret-with-32-bytes-minimum")
+    monkeypatch.setenv("ELLA_MCP_OAUTH_CLIENT_ID", "ella-mcp-test")
     monkeypatch.setenv("ELLA_MCP_DEFAULT_PROFILE_UID", "user-1")
     monkeypatch.setenv("ELLA_MCP_DEFAULT_PROFILE_LABEL", "Test User")
     monkeypatch.setenv("ELLA_MCP_ALLOWED_TOOLS", "companion_start_here,companion_recent_context")
@@ -188,6 +192,186 @@ def test_oauth_onboarding_rejects_invalid_firebase_token(monkeypatch):
     client = _client(module)
 
     response = client.post("/v1/ella/mcp/onboarding/oauth", json={"firebase_id_token": "firebase-token"})
+
+    assert response.status_code == 401
+
+
+def test_oauth_token_exchange_unknown_identity_needs_invite(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(service, "load_identity_grants", lambda _identity: [])
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/mcp/token",
+        json={
+            "client_id": "ella-mcp-test",
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": "firebase-token",
+        },
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["state"] == "authenticated_needs_invite"
+    assert "access_token" not in response.text
+
+
+def test_oauth_token_exchange_requires_profile_selection(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(
+        service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")]
+    )
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/mcp/token",
+        json={
+            "client_id": "ella-mcp-test",
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": "firebase-token",
+        },
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["state"] == "authenticated_needs_profile_selection"
+    assert [item["profile_uid"] for item in detail["available_profiles"]] == ["user-1", "mom-1"]
+
+
+def test_oauth_token_exchange_selected_profile_issues_scoped_session(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(
+        service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")]
+    )
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/mcp/token",
+        json={
+            "client_id": "ella-mcp-test",
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": "firebase-token",
+            "selected_profile_uid": "mom-1",
+            "ttl_seconds": 600,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["token_type"] == "Bearer"
+    assert payload["profile_uid"] == "mom-1"
+    assert payload["role"] == "caregiver"
+    assert payload["allowed_tools"] == ["companion_recent_context", "companion_start_here"]
+    assert "proposals:write" not in payload["scopes"]
+    claims = jwt.decode(
+        payload["access_token"],
+        "test-session-secret-with-32-bytes-minimum",
+        algorithms=["HS256"],
+        audience=MCP_SESSION_AUDIENCE,
+        issuer=MCP_SESSION_ISSUER,
+    )
+    assert claims["profile_uid"] == "mom-1"
+    assert claims["profile_label"] == "mom-1"
+    assert claims["role"] == "caregiver"
+    assert claims["grant_id"] == "grant-mom-1"
+
+    session_response = client.get("/v1/ella/mcp/onboarding", headers={"Authorization": f"Bearer {payload['access_token']}"})
+    assert session_response.status_code == 200
+    assert session_response.json()["session_claims"]["profile_uid"] == "mom-1"
+
+
+def test_authorize_code_flow_selected_profile_success(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch)
+    service = importlib.import_module("ella.services.mcp_identity")
+    monkeypatch.setattr(
+        service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")]
+    )
+    client = _client(module)
+
+    authorize = client.get(
+        "/v1/ella/mcp/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "ella-mcp-test",
+            "redirect_uri": "https://connector.example/callback",
+            "state": "state-1",
+            "firebase_id_token": "firebase-token",
+            "selected_profile_uid": "mom-1",
+        },
+        follow_redirects=False,
+    )
+
+    assert authorize.status_code == 302
+    location = authorize.headers["location"]
+    assert "state=state-1" in location
+    code = location.split("code=", 1)[1].split("&", 1)[0]
+
+    token = client.post(
+        "/v1/ella/mcp/token",
+        data={"client_id": "ella-mcp-test", "grant_type": "authorization_code", "code": code},
+    )
+
+    assert token.status_code == 200
+    assert token.json()["profile_uid"] == "mom-1"
+
+
+def test_oauth_token_exchange_rejects_invalid_firebase_token(monkeypatch):
+    module = _load_module(monkeypatch)
+    _install_firebase_stub(monkeypatch, error=ValueError("bad token"))
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/mcp/token",
+        json={
+            "client_id": "ella-mcp-test",
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": "firebase-token",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_expired_mcp_session_token_is_rejected(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": MCP_SESSION_ISSUER,
+            "aud": MCP_SESSION_AUDIENCE,
+            "sub": "google:google-sub-1",
+            "iat": now - 120,
+            "exp": now - 60,
+            "trace_id": "trace-expired",
+            "profile_uid": "user-1",
+            "role": "self",
+            "scopes": ["tools:read", "startup:read"],
+            "allowed_tools": ["companion_start_here"],
+            "grant_id": "grant-user-1",
+            "external_provider": "google",
+        },
+        "test-session-secret-with-32-bytes-minimum",
+        algorithm="HS256",
+    )
+
+    response = client.get("/v1/ella/mcp/onboarding", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 401
+
+
+def test_invalid_mcp_session_token_is_rejected(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.get("/v1/ella/mcp/onboarding", headers={"Authorization": "Bearer not-a-valid-session"})
 
     assert response.status_code == 401
 
