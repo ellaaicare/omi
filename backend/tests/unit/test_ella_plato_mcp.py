@@ -79,6 +79,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert tool_names == {
         "companion_start_here",
+        "companion_get_proposal_status",
         "plato_recent_context",
         "plato_search_memory",
         "plato_latest_omi",
@@ -143,6 +144,32 @@ def test_companion_start_here_tool_returns_generic_startup_packet(monkeypatch):
     assert result["schema_version"] == "ella.mcp.start_here.v1"
     assert result["startup_ready"] is True
     assert result["account"]["role"] == "self"
+
+
+def test_companion_get_proposal_status_tool_is_read_only(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    def fake_status(*, session_claims, proposal_id):
+        assert session_claims["profile_uid"] == module._plato_uid()
+        assert proposal_id == "proposal-1"
+        return {"proposal_id": "proposal-1", "status": "submitted", "profile_uid": module._plato_uid()}
+
+    monkeypatch.setattr(module.proposal_ingest, "get_proposal_status", fake_status)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={"name": "companion_get_proposal_status", "arguments": {"proposal_id": "proposal-1"}},
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["proposal_id"] == "proposal-1"
+    assert result["status"] == "submitted"
 
 
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
