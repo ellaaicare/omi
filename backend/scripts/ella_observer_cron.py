@@ -33,6 +33,12 @@ def main() -> int:
     parser.add_argument("--lookback-minutes", type=int, default=int(_env("ELLA_OBSERVER_LOOKBACK_MINUTES", "30")))
     parser.add_argument("--limit", type=int, default=int(_env("ELLA_OBSERVER_LIMIT", "100")))
     parser.add_argument("--channels", default=_env("ELLA_OBSERVER_CHANNELS", ""))
+    parser.add_argument("--extractor-mode", default=_env("ELLA_OBSERVER_EXTRACTOR_MODE", "hermes"))
+    parser.add_argument(
+        "--extractor-timeout-seconds",
+        type=float,
+        default=float(_env("ELLA_OBSERVER_EXTRACTOR_TIMEOUT_SECONDS", "45")),
+    )
     parser.add_argument("--live", action="store_true", help="Create proposals instead of dry-running")
     args = parser.parse_args()
 
@@ -51,6 +57,8 @@ def main() -> int:
         "dry_run": not args.live,
         "limit": args.limit,
         "channels": [part.strip() for part in args.channels.split(",") if part.strip()],
+        "extractor_mode": args.extractor_mode,
+        "extractor_timeout_seconds": args.extractor_timeout_seconds,
         "model_metadata": {
             "invoked_by": "hermes_cron_script",
             "script": "backend/scripts/ella_observer_cron.py",

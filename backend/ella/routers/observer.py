@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from ella.routers.canonical_events import CanonicalEventStore, PostgresCanonicalEventStore
 from ella.services.observer import observer_log_to_dict, run_observer
+from ella.services.observer_extractor import build_extraction_result, combined_extractor, normalize_extractor_mode
 from ella.services.observer_logs import ObserverRunLogStore, PostgresObserverRunLogStore
 
 DEFAULT_OBSERVER_LIMIT = 100
@@ -29,6 +30,9 @@ class ObserverRunRequest(BaseModel):
     dry_run: bool = True
     limit: int = DEFAULT_OBSERVER_LIMIT
     channels: list[str] = Field(default_factory=list)
+    extractor_mode: str = ""
+    extractor_limit: int = 60
+    extractor_timeout_seconds: float = 45.0
     model_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -103,14 +107,23 @@ def create_observer_router(
             limit=_sanitize_limit(request.limit),
             channels=request.channels or None,
         )
+        extractor_mode = normalize_extractor_mode(request.extractor_mode)
+        extraction = await build_extraction_result(
+            source_events,
+            mode=extractor_mode,
+            timeout_seconds=max(5.0, min(float(request.extractor_timeout_seconds or 45.0), 120.0)),
+            limit=max(1, min(int(request.extractor_limit or 60), 100)),
+        )
         log = run_observer(
             profile_uid=request.uid,
             canonical_identity=request.canonical_identity,
             cursor_before=request.cursor_before,
             dry_run=request.dry_run,
             events=source_events,
+            extractor=combined_extractor(extraction),
             model_metadata={
-                "extractor": "structured_candidate_extractor",
+                "extractor_mode": extractor_mode,
+                **(extraction.metadata or {}),
                 **(request.model_metadata or {}),
             },
         )
@@ -135,7 +148,12 @@ def create_observer_router(
         x_ella_observer_token: Optional[str] = Header(default=None, alias="X-Ella-Observer-Token"),
     ):
         _authenticate(authorization, x_ella_observer_token)
-        return {"ok": True, "mode": "proposal_only", "default_dry_run": True}
+        return {
+            "ok": True,
+            "mode": "proposal_only",
+            "default_dry_run": True,
+            "default_extractor_mode": normalize_extractor_mode(""),
+        }
 
     return router
 
