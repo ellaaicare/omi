@@ -265,6 +265,24 @@ def test_mcp_surface_prompt_returns_bootstrap_without_secret(monkeypatch):
     assert "test-token" not in payload["prompt"]
 
 
+def test_public_mcp_surface_prompt_is_unauthenticated_and_secret_free(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.get("/v1/ella/mcp/surface-prompt/public?surface=grok")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "ella.mcp.surface_prompt.public.v1"
+    assert payload["public"] is True
+    assert payload["surface"] == "grok"
+    assert payload["profile_uid"] == "selected-after-auth"
+    assert payload["auth_policy"]["prompt_contains_secrets"] is False
+    assert payload["auth_policy"]["runtime_auth_required"] is True
+    assert "companion_start_here" in payload["prompt"]
+    assert "test-token" not in payload["prompt"]
+
+
 def test_mcp_start_here_does_not_leak_context_when_unmapped(monkeypatch):
     module = _load_module(monkeypatch)
     monkeypatch.delenv("ELLA_MCP_DEFAULT_PROFILE_UID", raising=False)
