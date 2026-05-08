@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
+from google.cloud.firestore_v1.transforms import Sentinel
 
 from database._client import db
 
@@ -45,4 +46,6 @@ def _json_safe(value: Any) -> Any:
         return [_json_safe(item) for item in value]
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, Sentinel):
+        return None
     return value
