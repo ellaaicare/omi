@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
+from utils.ella.time_context import annotate_event_time, build_time_context, timezone_name
 
 DEFAULT_TIMELINE_URL = os.getenv("ELLA_CANONICAL_TIMELINE_URL", "http://127.0.0.1:8000/v1/ella/timeline")
 DEFAULT_TIMEOUT_SECONDS = float(os.getenv("ELLA_CANONICAL_TIMELINE_TIMEOUT", "5"))
@@ -66,6 +67,7 @@ async def fetch_canonical_timeline(
     channels: Optional[list[str]] = None,
     since: Optional[str] = None,
     before: Optional[str] = None,
+    user_timezone: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> list[dict[str, Any]]:
     """Read canonical timeline over HTTP per the unified memory contract."""
@@ -84,6 +86,8 @@ async def fetch_canonical_timeline(
         params["channels"] = ",".join(channel for channel in channels if channel)
     if since:
         params["since"] = since
+    if user_timezone:
+        params["timezone"] = user_timezone
 
     async with httpx.AsyncClient(timeout=timeout or DEFAULT_TIMEOUT_SECONDS) as client:
         response = await client.get(DEFAULT_TIMELINE_URL, params=params)
@@ -91,7 +95,7 @@ async def fetch_canonical_timeline(
 
     payload = response.json()
     events = payload if isinstance(payload, list) else payload.get("events") or payload.get("timeline") or []
-    normalized = [event for event in events if isinstance(event, dict)]
+    normalized = [annotate_event_time(event, tz_name=user_timezone) for event in events if isinstance(event, dict)]
     if before_dt:
         normalized = [
             event
@@ -101,19 +105,38 @@ async def fetch_canonical_timeline(
     return normalized[-effective_limit:]
 
 
-def format_canonical_context(events: list[dict[str, Any]], *, max_chars: int = 6000) -> str:
+def format_canonical_context(
+    events: list[dict[str, Any]],
+    *,
+    max_chars: int = 6000,
+    user_timezone: Optional[str] = None,
+) -> str:
     if not events:
         return ""
-    lines = ["Recent canonical timeline context, oldest to newest:"]
+    time_context = build_time_context(user_timezone)
+    tz_name = time_context["user_timezone"]
+    lines = [
+        "Recent canonical timeline context, oldest to newest.",
+        (
+            f"Current user-local time: {time_context['now_local']} "
+            f"({tz_name}); current UTC: {time_context['now_utc']}."
+        ),
+        "Each event includes user-local time first, then canonical UTC.",
+    ]
     for event in events:
+        if not event.get("started_at_local"):
+            event = annotate_event_time(event, tz_name=user_timezone)
         timestamp = _event_time(event)
+        local = event.get("started_at_local") or timestamp
+        relative = event.get("relative_to_now") or ""
         channel = str(event.get("channel") or "unknown")
         title = _event_title(event)
         text = _event_text(event)
+        prefix = f"- {local} ({tz_name}; UTC {timestamp}; {relative}) [{channel}] {title}"
         if text:
-            lines.append(f"- {timestamp} [{channel}] {title}: {text}")
+            lines.append(f"{prefix}: {text}")
         else:
-            lines.append(f"- {timestamp} [{channel}] {title}")
+            lines.append(prefix)
     context = "\n".join(lines)
     if len(context) <= max_chars:
         return context
@@ -155,4 +178,3 @@ def canonical_events_to_server_messages(events: list[dict[str, Any]], *, limit: 
             }
         )
     return messages
-

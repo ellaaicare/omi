@@ -32,6 +32,7 @@ import database.conversations as conversations_db
 import database.memories as memories_db
 from ella.services import proposal_ingest
 from ella.services.mcp_startup import build_startup_context
+from utils.ella.time_context import annotate_event_time, build_time_context, timezone_name
 
 logger = logging.getLogger("ella.plato_mcp")
 
@@ -83,6 +84,10 @@ def _plato_canonical_identity() -> str:
 
 def _plato_agent_id() -> str:
     return _env("ELLA_PLATO_AGENT_ID", f"ella-omi-{_plato_uid().lower()}")
+
+
+def _plato_timezone() -> str:
+    return timezone_name(_env("ELLA_PLATO_TIMEZONE", _env("ELLA_USER_TIMEZONE", "")))
 
 
 def _oauth_client_id() -> str:
@@ -213,30 +218,36 @@ def _conversation_to_event(conversation: dict[str, Any]) -> dict[str, Any]:
     structured = conversation.get("structured") or {}
     title = structured.get("title") or conversation.get("title") or "OMI conversation"
     overview = structured.get("overview") or conversation.get("overview") or ""
-    return {
-        "event_id": conversation.get("id"),
-        "channel": "omi",
-        "provider": "omi-backend",
-        "role": "user",
-        "started_at": _json_safe(conversation.get("started_at") or conversation.get("created_at")),
-        "ended_at": _json_safe(conversation.get("finished_at")),
-        "title": title,
-        "text": _compact_text(overview, 1600),
-        "source_ref": {"conversation_id": conversation.get("id")},
-    }
+    return annotate_event_time(
+        {
+            "event_id": conversation.get("id"),
+            "channel": "omi",
+            "provider": "omi-backend",
+            "role": "user",
+            "started_at": _json_safe(conversation.get("started_at") or conversation.get("created_at")),
+            "ended_at": _json_safe(conversation.get("finished_at")),
+            "title": title,
+            "text": _compact_text(overview, 1600),
+            "source_ref": {"conversation_id": conversation.get("id")},
+        },
+        tz_name=_plato_timezone(),
+    )
 
 
 def _memory_to_event(memory: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "event_id": memory.get("id"),
-        "channel": "memory",
-        "provider": "omi-backend",
-        "role": "memory",
-        "started_at": _json_safe(memory.get("created_at")),
-        "title": memory.get("category") or "memory",
-        "text": _compact_text(memory.get("content"), 1200),
-        "source_ref": {"memory_id": memory.get("id")},
-    }
+    return annotate_event_time(
+        {
+            "event_id": memory.get("id"),
+            "channel": "memory",
+            "provider": "omi-backend",
+            "role": "memory",
+            "started_at": _json_safe(memory.get("created_at")),
+            "title": memory.get("category") or "memory",
+            "text": _compact_text(memory.get("content"), 1200),
+            "source_ref": {"memory_id": memory.get("id")},
+        },
+        tz_name=_plato_timezone(),
+    )
 
 
 async def _fetch_canonical_timeline(limit: int, channels: list[str], since: Optional[str]) -> list[dict[str, Any]]:
@@ -246,13 +257,16 @@ async def _fetch_canonical_timeline(limit: int, channels: list[str], since: Opti
         params["channels"] = ",".join(channels)
     if since:
         params["since"] = since
+    params["timezone"] = _plato_timezone()
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(timeline_url, params=params)
     if response.status_code != 200:
         raise RuntimeError(f"timeline_http_{response.status_code}")
     payload = response.json()
     events = payload if isinstance(payload, list) else payload.get("events") or payload.get("timeline") or []
-    return [_json_safe(event) for event in events if isinstance(event, dict)]
+    return [
+        annotate_event_time(_json_safe(event), tz_name=_plato_timezone()) for event in events if isinstance(event, dict)
+    ]
 
 
 def _fallback_recent_context(limit: int, channels: list[str], since: Optional[str]) -> list[dict[str, Any]]:
@@ -312,6 +326,7 @@ async def _recent_context(arguments: dict[str, Any]) -> dict[str, Any]:
         "uid": _plato_uid(),
         "canonical_identity": _plato_canonical_identity(),
         "source": source,
+        "time_context": build_time_context(_plato_timezone()),
         "events": events[:limit],
     }
 
@@ -322,7 +337,12 @@ async def _latest_omi(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     events = [event for event in context.get("events", []) if str(event.get("channel", "")).startswith("omi")]
     latest = events[0] if events else None
-    return {"latest": latest, "source": context.get("source"), "uid": _plato_uid()}
+    return {
+        "latest": latest,
+        "source": context.get("source"),
+        "uid": _plato_uid(),
+        "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
+    }
 
 
 def _tokens(text: str) -> set[str]:
@@ -341,10 +361,14 @@ def _format_consult_context(context: dict[str, Any], limit: int) -> str:
     ]
     for event in (context.get("events") or [])[:limit]:
         timestamp = event.get("started_at") or event.get("created_at") or event.get("timestamp") or ""
+        local = event.get("started_at_local") or timestamp
+        relative = event.get("relative_to_now") or ""
         channel = event.get("channel") or ""
         title = event.get("title") or "Untitled"
         text = _compact_text(event.get("text") or event.get("overview") or event.get("summary") or "", 700)
-        lines.append(f"- {timestamp} [{channel}] {title}: {text}")
+        lines.append(
+            f"- {local} ({event.get('started_at_timezone') or _plato_timezone()}; UTC {timestamp}; {relative}) [{channel}] {title}: {text}"
+        )
     return _compact_text("\n".join(lines), MAX_CONSULT_CONTEXT_CHARS)
 
 
@@ -370,6 +394,7 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "query": query,
         "source": context.get("source"),
+        "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
         "results": [item for _score, _idx, item in ranked[:max_results]],
     }
 

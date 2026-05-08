@@ -16,6 +16,7 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
 
@@ -440,6 +441,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             if channel_set and event["channel"] not in channel_set:
                 continue
             events.append(event)
+
         def role_order(item: dict[str, Any]) -> int:
             if item["role"] == "user":
                 return 0
@@ -473,24 +475,26 @@ def _row_to_event(row: Any) -> dict[str, Any]:
             return raw.astimezone(timezone.utc).isoformat()
         return str(raw)
 
-    return {
-        "uid": value("uid"),
-        "canonical_identity": value("canonical_identity"),
-        "event_id": value("event_id"),
-        "source_identity": value("source_identity"),
-        "session_id": value("session_id"),
-        "channel": value("channel"),
-        "provider": value("provider"),
-        "role": value("role"),
-        "text": value("text"),
-        "started_at": iso("started_at"),
-        "ended_at": iso("ended_at"),
-        "privacy_scope": value("privacy_scope"),
-        "scan_policy": value("scan_policy"),
-        "source_ref": json_value("source_ref"),
-        "metadata": json_value("metadata"),
-        "raw_event": json_value("raw_event"),
-    }
+    return annotate_event_time(
+        {
+            "uid": value("uid"),
+            "canonical_identity": value("canonical_identity"),
+            "event_id": value("event_id"),
+            "source_identity": value("source_identity"),
+            "session_id": value("session_id"),
+            "channel": value("channel"),
+            "provider": value("provider"),
+            "role": value("role"),
+            "text": value("text"),
+            "started_at": iso("started_at"),
+            "ended_at": iso("ended_at"),
+            "privacy_scope": value("privacy_scope"),
+            "scan_policy": value("scan_policy"),
+            "source_ref": json_value("source_ref"),
+            "metadata": json_value("metadata"),
+            "raw_event": json_value("raw_event"),
+        }
+    )
 
 
 def _parse_channels(channels: Optional[str]) -> Optional[list[str]]:
@@ -534,6 +538,7 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         since: Optional[str] = None,
         limit: int = Query(default=DEFAULT_TIMELINE_LIMIT),
         channels: Optional[str] = None,
+        timezone: Optional[str] = Query(default=None, alias="timezone"),
     ):
         """
         Read a single chronological timeline across channels for one uid.
@@ -550,7 +555,9 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
             limit=_sanitize_limit(limit),
             channels=_parse_channels(channels),
         )
-        return {"ok": True, "uid": uid, "events": events}
+        if timezone:
+            events = [annotate_event_time(event, tz_name=timezone) for event in events]
+        return {"ok": True, "uid": uid, "time_context": build_time_context(timezone), "events": events}
 
     return router
 

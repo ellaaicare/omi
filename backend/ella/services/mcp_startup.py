@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from utils.ella.canonical_context import DEFAULT_CONTEXT_CHANNELS, fetch_canonical_timeline, format_canonical_context
+from utils.ella.time_context import annotate_event_time, build_time_context, timezone_name
 
 DEFAULT_STARTUP_LIMIT = 12
 MAX_STARTUP_LIMIT = 50
@@ -67,6 +68,14 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         "provider": event.get("provider"),
         "role": event.get("role"),
         "started_at": _event_time(event),
+        "started_at_utc": event.get("started_at_utc") or _event_time(event),
+        "started_at_local": event.get("started_at_local"),
+        "started_at_local_date": event.get("started_at_local_date"),
+        "started_at_local_time": event.get("started_at_local_time"),
+        "started_at_timezone": event.get("started_at_timezone"),
+        "relative_to_now": event.get("relative_to_now"),
+        "seconds_from_now": event.get("seconds_from_now"),
+        "time": event.get("time") if isinstance(event.get("time"), dict) else {},
         "title": _event_title(event),
         "text": _event_text(event),
         "source_identity": event.get("source_identity"),
@@ -128,6 +137,7 @@ async def build_startup_context(
         return {
             "schema_version": "ella.mcp.start_here.v1",
             "generated_at": _utc_now(),
+            "time_context": build_time_context(),
             "onboarding": onboarding,
             "startup_ready": False,
             "reason": "identity_not_mapped",
@@ -135,14 +145,30 @@ async def build_startup_context(
         }
 
     uid = str(selected_profile.get("profile_uid") or session_claims.get("profile_uid") or "")
+    user_tz = timezone_name(
+        str(
+            selected_profile.get("timezone")
+            or selected_profile.get("time_zone")
+            or session_claims.get("timezone")
+            or session_claims.get("time_zone")
+            or ""
+        )
+    )
     requested_channels = channels or DEFAULT_CONTEXT_CHANNELS
     effective_limit = _clamp_limit(limit)
-    events = await fetch_canonical_timeline(uid, limit=effective_limit, channels=requested_channels)
+    events = await fetch_canonical_timeline(
+        uid,
+        limit=effective_limit,
+        channels=requested_channels,
+        user_timezone=user_tz,
+    )
+    events = [annotate_event_time(event, tz_name=user_tz) for event in events]
     compact_events = [_compact_event(event) for event in events]
     channel_counts = Counter(str(event.get("channel") or "unknown") for event in events)
     return {
         "schema_version": "ella.mcp.start_here.v1",
         "generated_at": _utc_now(),
+        "time_context": build_time_context(user_tz),
         "startup_ready": True,
         "onboarding": {
             "state": state,
@@ -163,7 +189,7 @@ async def build_startup_context(
             "channel_counts": dict(channel_counts),
             "latest_by_channel": _latest_by_channel(events),
             "recent_events": compact_events,
-            "summary": format_canonical_context(events, max_chars=5000),
+            "summary": format_canonical_context(events, max_chars=5000, user_timezone=user_tz),
         },
         "tools": {
             "read_only": True,

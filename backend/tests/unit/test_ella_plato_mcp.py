@@ -17,11 +17,18 @@ def _install_stubs():
     memories = types.ModuleType("database.memories")
     memories.get_memories = MagicMock(return_value=[])
 
+    proposals = types.ModuleType("database.proposals")
+    proposals.get_proposal = MagicMock(return_value=None)
+    proposals.get_proposal_by_idempotency_key = MagicMock(return_value=None)
+    proposals.save_proposal = MagicMock(side_effect=lambda proposal: proposal)
+
     database = sys.modules.setdefault("database", types.ModuleType("database"))
     setattr(database, "conversations", conversations)
     setattr(database, "memories", memories)
+    setattr(database, "proposals", proposals)
     sys.modules["database.conversations"] = conversations
     sys.modules["database.memories"] = memories
+    sys.modules["database.proposals"] = proposals
 
 
 def _load_module(monkeypatch):

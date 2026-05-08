@@ -157,7 +157,9 @@ def test_oauth_onboarding_requires_profile_selection_for_multiple_grants(monkeyp
     module = _load_module(monkeypatch)
     _install_firebase_stub(monkeypatch)
     service = importlib.import_module("ella.services.mcp_identity")
-    monkeypatch.setattr(service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")])
+    monkeypatch.setattr(
+        service, "load_identity_grants", lambda _identity: [_grant("user-1"), _grant("mom-1", "caregiver")]
+    )
     client = _client(module)
 
     response = client.post("/v1/ella/mcp/onboarding/oauth", json={"firebase_id_token": "firebase-token"})
@@ -194,10 +196,11 @@ def test_mcp_start_here_returns_canonical_startup_packet(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
 
-    async def fake_timeline(uid, *, limit, channels, since=None, before=None, timeout=None):
+    async def fake_timeline(uid, *, limit, channels, since=None, before=None, user_timezone=None, timeout=None):
         assert uid == "user-1"
         assert limit == 2
         assert channels == ["omi", "ios_chat"]
+        assert user_timezone == "America/Los_Angeles"
         return [
             {
                 "event_id": "evt-omi",
@@ -233,10 +236,13 @@ def test_mcp_start_here_returns_canonical_startup_packet(monkeypatch):
     payload = response.json()
     assert payload["schema_version"] == "ella.mcp.start_here.v1"
     assert payload["startup_ready"] is True
+    assert payload["time_context"]["user_timezone"] == "America/Los_Angeles"
     assert payload["account"]["profile_uid"] == "user-1"
     assert payload["memory"]["source"] == "canonical_timeline"
     assert payload["memory"]["channel_counts"] == {"omi": 1, "ios_chat": 1}
     assert payload["memory"]["latest_by_channel"]["omi"]["title"] == "Cafe stop"
+    assert payload["memory"]["latest_by_channel"]["omi"]["started_at_local"].startswith("2026-05-07T11:00:00")
+    assert "Current user-local time" in payload["memory"]["summary"]
     assert payload["writeback_policy"]["mode"] == "read_only"
     assert payload["escalation_boundaries"]["emergency_actions"] == "not_available_from_mcp"
 
