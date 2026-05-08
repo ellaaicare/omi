@@ -149,6 +149,28 @@ def test_observer_logs_events_with_no_candidates():
     assert log.decisions[0].reason == "no_structured_observer_candidates"
 
 
+def test_heuristic_extractor_promotes_explicit_memory_and_scanner_requests():
+    service = _load_observer_service()
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    event = _event(
+        event_id="evt-heuristic",
+        metadata={},
+        text="Hey Ella, please remember my spare glasses are in the blue backpack. Also alert me if I ask where they are.",
+    )
+    result = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[event],
+        extractor=extractor_module.heuristic_candidate_extractor,
+        run_id="run-heuristic",
+    )
+
+    assert result.proposal_count == 2
+    assert {decision.proposal_type for decision in result.decisions} == {"memory_note", "scanner_rule_change"}
+
+
 def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
@@ -217,6 +239,68 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     )
     assert readback.status_code == 200
     assert readback.json()["observer_run"]["run_id"] == run_id
+
+
+def test_observer_router_can_use_extraction_result(monkeypatch):
+    _install_proposal_stubs()
+    monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
+    sys.modules.pop("ella.routers.observer", None)
+    router_module = importlib.import_module("ella.routers.observer")
+    canonical_module = importlib.import_module("ella.routers.canonical_events")
+    logs_module = importlib.import_module("ella.services.observer_logs")
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    event_store = canonical_module.InMemoryCanonicalEventStore()
+    log_store = logs_module.InMemoryObserverRunLogStore()
+
+    import asyncio
+
+    asyncio.run(
+        event_store.write_batch(
+            [
+                canonical_module.CanonicalEventIn(
+                    uid="user-1",
+                    canonical_identity="plato",
+                    event_id="evt-router-extracted",
+                    channel="ios_chat",
+                    provider="ella-ios",
+                    role="user",
+                    text="Please remember that the valet key is in the blue ceramic bowl.",
+                    started_at="2026-05-07T20:05:00+00:00",
+                    source_ref={"message_id": "m-2"},
+                    metadata={},
+                )
+            ]
+        )
+    )
+
+    async def fake_build_extraction_result(events, *, mode, timeout_seconds=45.0, limit=60):
+        assert mode == "heuristic"
+        return await extractor_module.build_extraction_result(
+            events,
+            mode=mode,
+            timeout_seconds=timeout_seconds,
+            limit=limit,
+        )
+
+    monkeypatch.setattr(router_module, "build_extraction_result", fake_build_extraction_result)
+
+    app = FastAPI()
+    app.include_router(router_module.create_observer_router(event_store=event_store, log_store=log_store))
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/ella/observer/run",
+        headers={"X-Ella-Observer-Token": "observer-token"},
+        json={"uid": "user-1", "dry_run": True, "extractor_mode": "heuristic", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    body = response.json()["observer_run"]
+    assert body["source_event_count"] == 1
+    assert body["proposal_count"] == 1
+    assert body["model_metadata"]["extractor_mode"] == "heuristic"
+    assert body["model_metadata"]["extractor"] == "heuristic_candidate_extractor"
 
 
 def test_observer_log_store_keeps_datetimes_for_postgres(monkeypatch):
