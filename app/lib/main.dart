@@ -22,6 +22,7 @@ import 'package:window_manager/window_manager.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/ella/services/settings_sync_service.dart';
 import 'package:omi/env/dev_env.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/env/prod_env.dart';
@@ -306,6 +307,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
     if (state == AppLifecycleState.paused) {
       _onAppPaused();
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(EllaSettingsSyncService.retryPendingVoiceMode());
     } else if (state == AppLifecycleState.detached) {
       _deinit();
     }
