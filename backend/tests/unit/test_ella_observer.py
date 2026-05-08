@@ -195,6 +195,46 @@ def test_heuristic_extractor_ignores_omi_summary_language():
     assert result.decisions[0].reason == "no_structured_observer_candidates"
 
 
+def test_heuristic_extractor_does_not_treat_memory_questions_as_instructions():
+    service = _load_observer_service()
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    question = _event(
+        event_id="evt-memory-question",
+        metadata={},
+        channel="ios_chat",
+        role="user",
+        text="Hey Ella, do you remember what I ordered for breakfast this morning?",
+    )
+    instruction = _event(
+        event_id="evt-memory-instruction",
+        metadata={},
+        channel="ios_chat",
+        role="user",
+        text="Hey Ella, please remember where I put the valet key.",
+    )
+
+    question_log = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[question],
+        extractor=extractor_module.heuristic_candidate_extractor,
+        run_id="run-memory-question",
+    )
+    instruction_log = service.run_observer(
+        profile_uid="user-1",
+        dry_run=True,
+        events=[instruction],
+        extractor=extractor_module.heuristic_candidate_extractor,
+        run_id="run-memory-instruction",
+    )
+
+    assert question_log.proposal_count == 0
+    assert instruction_log.proposal_count == 1
+    assert instruction_log.decisions[0].proposal_type == "memory_note"
+
+
 def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     _install_proposal_stubs()
     monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")

@@ -24,7 +24,7 @@ SUPPORTED_EXTRACTOR_MODES = {"structured", "heuristic", "hermes"}
 HEURISTIC_USER_CHANNELS = {"ios_chat", "ios_voice", "imessage", "telegram"}
 
 _REMEMBER_RE = re.compile(
-    r"\b(?:please\s+)?(?:remember|note|keep track of|log this|save this)\b(?P<fact>.*)",
+    r"\b(?:(?:please\s+)?remember|note(?:\s+that)?|keep track of|log this|save this)\b(?P<fact>.*)",
     re.IGNORECASE | re.DOTALL,
 )
 _CORRECTION_RE = re.compile(r"\b(?:actually|correction|it was|that was|the correct)\b(?P<fact>.*)", re.I | re.S)
@@ -89,6 +89,23 @@ def _is_low_signal(event: dict[str, Any]) -> bool:
     return False
 
 
+def _is_memory_instruction(text: str, match: re.Match[str]) -> bool:
+    lower = text.lower().strip()
+    prefix = lower[: match.start()].strip()
+    fact = (match.group("fact") or "").strip(" .:-\n\t").lower()
+    if re.search(r"\b(?:do you|can you|could you|what do you|what did i|did i)\s+$", prefix):
+        return False
+    if prefix.endswith(("what", "where", "when", "why", "how")):
+        return False
+    if fact.startswith(("what ", "who ", "when ", "why ", "how ", "anything ", "the last ")):
+        return False
+    if "?" in text and not re.search(
+        r"\b(?:please remember|remember that|remember this|remember my|remember where)\b", lower
+    ):
+        return False
+    return bool(fact)
+
+
 def _candidate(
     *,
     proposal_type: str,
@@ -133,7 +150,7 @@ def heuristic_candidate_extractor(event: dict[str, Any]) -> list[ObserverCandida
     candidates: list[ObserverCandidate] = []
 
     remember = _REMEMBER_RE.search(text)
-    if remember:
+    if remember and _is_memory_instruction(text, remember):
         fact = (remember.group("fact") or text).strip(" .:-\n\t")
         memory = fact or text
         candidates.append(
