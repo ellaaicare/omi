@@ -51,6 +51,13 @@ MAX_PROMPT_CHARS = 4000
 MAX_CONSULT_CONTEXT_CHARS = 7000
 RATE_LIMIT_WINDOW_SECONDS = 60
 SALIENCE_RANKS = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+COMPANION_PROPOSAL_TYPES = {
+    "scanner_rule_change",
+    "reminder_request",
+    "profile_update",
+    "memory_note",
+    "summary_correction",
+}
 
 _active_sessions: dict[str, "MCPSession"] = {}
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
@@ -74,6 +81,11 @@ class ToolExecutionError(Exception):
 
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = _env(name, "true" if default else "false").lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _plato_uid() -> str:
@@ -678,6 +690,10 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _proposal_write_enabled() -> bool:
+    return _env_bool("ELLA_PLATO_MCP_ENABLE_PROPOSALS", False)
+
+
 def _legacy_plato_onboarding() -> dict[str, Any]:
     scopes = ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"]
     tools = [
@@ -685,9 +701,13 @@ def _legacy_plato_onboarding() -> dict[str, Any]:
         "companion_get_proposal_status",
         "plato_recent_context",
         "plato_search_memory",
+        "plato_latest_omi",
         "plato_omi_activity_window",
         "plato_consult",
     ]
+    if _proposal_write_enabled():
+        scopes.extend(["proposals:read", "proposals:write"])
+        tools.append("companion_propose_change")
     return {
         "state": "authenticated_mapped",
         "trace_id": str(uuid.uuid4()),
@@ -734,6 +754,52 @@ async def _companion_get_proposal_status(arguments: dict[str, Any]) -> dict[str,
         raise ToolExecutionError(str(exc), code=-32004) from exc
 
 
+async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]:
+    proposal_type = str(arguments.get("proposal_type") or "").strip()
+    if proposal_type not in COMPANION_PROPOSAL_TYPES:
+        allowed = ", ".join(sorted(COMPANION_PROPOSAL_TYPES))
+        raise ToolExecutionError(f"proposal_type must be one of: {allowed}", code=-32602)
+    title = _compact_text(arguments.get("title"), 240)
+    description = _compact_text(arguments.get("description"), 4000)
+    if not title:
+        raise ToolExecutionError("title is required", code=-32602)
+    if not description:
+        raise ToolExecutionError("description is required", code=-32602)
+    evidence = arguments.get("evidence") or []
+    if evidence and not isinstance(evidence, list):
+        raise ToolExecutionError("evidence must be a list", code=-32602)
+    target = arguments.get("target") or {}
+    requested_change = arguments.get("requested_change") or {}
+    if target and not isinstance(target, dict):
+        raise ToolExecutionError("target must be an object", code=-32602)
+    if requested_change and not isinstance(requested_change, dict):
+        raise ToolExecutionError("requested_change must be an object", code=-32602)
+    payload = {
+        "title": title,
+        "description": description,
+        "target": target,
+        "evidence": evidence,
+        "requested_change": requested_change,
+        "source": "plato_mcp",
+        "write_policy": "proposal_only",
+    }
+    try:
+        return proposal_ingest.create_proposal(
+            session_claims=_legacy_plato_onboarding()["session_claims"],
+            tool_name="companion_propose_change",
+            proposal_type=proposal_type,
+            payload=payload,
+            idempotency_key=_compact_text(arguments.get("idempotency_key"), 240),
+        )
+    except proposal_ingest.ProposalIngestError as exc:
+        raise ToolExecutionError(str(exc), code=-32004) from exc
+
+
+def _visible_tools() -> list[dict[str, Any]]:
+    allowed = set(_legacy_plato_onboarding()["session_claims"].get("allowed_tools") or [])
+    return [tool for tool in MCP_TOOLS if tool["name"] in allowed or tool["name"] == "plato_get_scanner_rules"]
+
+
 MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "companion_start_here",
@@ -753,6 +819,30 @@ MCP_TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"proposal_id": {"type": "string"}},
             "required": ["proposal_id"],
+        },
+    },
+    {
+        "name": "companion_propose_change",
+        "description": (
+            "Create an auditable proposal only; this never directly changes scanner rules, reminders, profile data, "
+            "memory, summaries, caregiver delivery, or other live state. Use for requested scanner, reminder, "
+            "profile, memory, or summary changes that need later approval/application."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "proposal_type": {
+                    "type": "string",
+                    "enum": sorted(COMPANION_PROPOSAL_TYPES),
+                },
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "target": {"type": "object", "default": {}},
+                "evidence": {"type": "array", "items": {"type": "object"}, "default": []},
+                "requested_change": {"type": "object", "default": {}},
+                "idempotency_key": {"type": "string"},
+            },
+            "required": ["proposal_type", "title", "description"],
         },
     },
     {
@@ -844,6 +934,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
 _TOOL_HANDLERS = {
     "companion_start_here": _companion_start_here,
     "companion_get_proposal_status": _companion_get_proposal_status,
+    "companion_propose_change": _companion_propose_change,
     "plato_recent_context": _recent_context,
     "plato_search_memory": _search_memory,
     "plato_latest_omi": _latest_omi,
@@ -937,7 +1028,7 @@ async def _handle_mcp_message(
         return None, None
 
     if method == "tools/list":
-        return _mcp_response(msg_id, {"tools": MCP_TOOLS}), None
+        return _mcp_response(msg_id, {"tools": _visible_tools()}), None
 
     if method == "tools/call":
         tool_name = params.get("name")
@@ -946,7 +1037,8 @@ async def _handle_mcp_message(
         started = time.monotonic()
         if not isinstance(arguments, dict):
             return _mcp_error(msg_id, -32602, "Tool arguments must be an object"), None
-        if tool_name not in _TOOL_HANDLERS:
+        visible_tool_names = {tool["name"] for tool in _visible_tools()}
+        if tool_name not in _TOOL_HANDLERS or tool_name not in visible_tool_names:
             return _mcp_error(msg_id, -32601, f"Unknown tool: {tool_name}"), None
         try:
             result = await _TOOL_HANDLERS[tool_name](arguments)
