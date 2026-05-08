@@ -15,7 +15,7 @@ from ella.services.mcp_identity import (
     resolve_mcp_identity,
 )
 from ella.services.mcp_startup import build_startup_context
-from ella.services.mcp_surface_prompt import build_surface_prompt
+from ella.services.mcp_surface_prompt import build_public_surface_prompt, build_surface_prompt
 
 router = APIRouter(prefix="/v1/ella/mcp", tags=["Ella MCP Onboarding"])
 
@@ -207,6 +207,13 @@ async def get_mcp_surface_prompt(
     )
 
 
+@router.get("/surface-prompt/public")
+async def get_public_mcp_surface_prompt(
+    surface: str = Query("generic", description="External surface, e.g. grok, hosted-gpt, gemini."),
+):
+    return build_public_surface_prompt(surface=surface)
+
+
 @router.get("/info")
 async def get_mcp_onboarding_info():
     return {
@@ -214,6 +221,7 @@ async def get_mcp_onboarding_info():
         "oauth_onboarding_endpoint": "/v1/ella/mcp/onboarding/oauth",
         "start_here_endpoint": "/v1/ella/mcp/start_here",
         "surface_prompt_endpoint": "/v1/ella/mcp/surface-prompt",
+        "public_surface_prompt_endpoint": "/v1/ella/mcp/surface-prompt/public",
         "auth": "POST Firebase ID token to OAuth onboarding for production; Bearer token remains dev/static fallback.",
         "states": [
             "authenticated_mapped",

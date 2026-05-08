@@ -6,6 +6,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 SURFACE_PROMPT_VERSION = "2026-05-08.1"
+PUBLIC_PROFILE_UID = "selected-after-auth"
+PUBLIC_PROFILE_LABEL = "Ella companion profile"
+PUBLIC_ALLOWED_TOOLS = [
+    "companion_start_here",
+    "companion_surface_prompt",
+    "companion_get_proposal_status",
+    "companion_propose_change",
+    "plato_recent_context",
+    "plato_search_memory",
+    "plato_latest_omi",
+    "plato_omi_activity_window",
+    "plato_consult",
+]
 
 
 def _csv(values: list[str]) -> str:
@@ -95,3 +108,33 @@ Current allowed tools: {_csv(allowed_tools)}
             "token_visibility": "The assistant may see safe auth status and scopes, never raw secrets.",
         },
     }
+
+
+def build_public_surface_prompt(*, surface: str = "generic") -> dict[str, Any]:
+    """Return an unauthenticated bootstrap prompt safe to host as JSON.
+
+    This is meant for copy/paste or URL-based onboarding of hosted agents. It
+    intentionally contains no profile memory, no scoped claims, and no secrets.
+    Runtime profile context must still come from authenticated MCP tools.
+    """
+
+    payload = build_surface_prompt(
+        profile_uid=PUBLIC_PROFILE_UID,
+        profile_label=PUBLIC_PROFILE_LABEL,
+        surface=surface,
+        scopes=[],
+        allowed_tools=PUBLIC_ALLOWED_TOOLS,
+        proposal_write_enabled=False,
+    )
+    payload["schema_version"] = "ella.mcp.surface_prompt.public.v1"
+    payload["public"] = True
+    payload["usage"] = {
+        "copy_prompt": "Use the `prompt` value as the hosted assistant system/developer instructions.",
+        "connector_auth": "Configure the Ella MCP connector separately with OAuth or a scoped bearer token.",
+        "runtime_context": "After auth, the assistant must call companion_start_here before personalized work.",
+    }
+    payload["auth_policy"]["runtime_auth_required"] = True
+    payload["auth_policy"][
+        "public_prompt_boundary"
+    ] = "This public JSON is only onboarding guidance; it does not authorize tools or expose profile memory."
+    return payload
