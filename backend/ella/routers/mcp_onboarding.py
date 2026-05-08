@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import os
 import time
 import urllib.parse
@@ -75,6 +77,19 @@ def _mcp_session_ttl_seconds(value: Any = None) -> int:
     except (TypeError, ValueError):
         requested = 3600
     return max(60, min(24 * 60 * 60, requested))
+
+
+def _firebase_web_config() -> dict[str, str]:
+    return {
+        "apiKey": _env("FIREBASE_API_KEY"),
+        "authDomain": _env("FIREBASE_AUTH_DOMAIN"),
+        "projectId": _env("FIREBASE_PROJECT_ID"),
+    }
+
+
+def _firebase_web_configured() -> bool:
+    config = _firebase_web_config()
+    return bool(config["apiKey"] and config["authDomain"] and config["projectId"])
 
 
 def _allowed_static_tokens() -> set[str]:
@@ -268,6 +283,149 @@ def _redirect_with_params(redirect_uri: str, params: dict[str, Any]) -> Response
     return Response(status_code=302, headers={"Location": f"{redirect_uri}{separator}{query}"})
 
 
+def _render_mcp_oauth_page(
+    *,
+    response_type: str,
+    client_id: str,
+    redirect_uri: str,
+    state: str = "",
+    scope: str = "",
+) -> Response:
+    if not _firebase_web_configured():
+        return Response(
+            content=(
+                "<!doctype html><html><head><title>Ella MCP OAuth</title></head>"
+                "<body><h1>OAuth setup incomplete</h1>"
+                "<p>Firebase web auth is not configured for this backend.</p></body></html>"
+            ),
+            status_code=503,
+            media_type="text/html",
+        )
+
+    page_data = {
+        "responseType": response_type,
+        "clientId": client_id,
+        "redirectUri": redirect_uri,
+        "state": state,
+        "scope": scope,
+        "authorizeUrl": "/v1/ella/mcp/authorize",
+        "onboardingUrl": "/v1/ella/mcp/onboarding/oauth",
+        "firebaseConfig": _firebase_web_config(),
+    }
+    page_json = json.dumps(page_data, separators=(",", ":"))
+    escaped_client = html.escape(client_id)
+    html_body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Ella MCP</title>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+  <style>
+    :root {{ color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7f9; color: #111827; }}
+    main {{ width: min(440px, calc(100vw - 32px)); background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 28px; box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08); }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; line-height: 1.2; letter-spacing: 0; }}
+    p {{ margin: 0 0 18px; color: #4b5563; line-height: 1.45; }}
+    button {{ width: 100%; min-height: 44px; border: 0; border-radius: 6px; background: #111827; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }}
+    button:disabled {{ opacity: .55; cursor: wait; }}
+    .profiles {{ display: grid; gap: 8px; margin-top: 12px; }}
+    .profile {{ background: #f9fafb; color: #111827; border: 1px solid #d1d5db; }}
+    .status {{ min-height: 20px; margin-top: 14px; color: #374151; font-size: 14px; }}
+    .error {{ color: #b91c1c; }}
+    .meta {{ margin-top: 18px; font-size: 12px; color: #6b7280; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Connect Ella</h1>
+    <p>Sign in with Google to connect this MCP client to an authorized Ella profile.</p>
+    <button id="sign-in">Continue with Google</button>
+    <div id="profiles" class="profiles"></div>
+    <div id="status" class="status"></div>
+    <div class="meta">Client: {escaped_client}</div>
+  </main>
+  <script>
+    const page = {page_json};
+    const statusEl = document.getElementById("status");
+    const signInButton = document.getElementById("sign-in");
+    const profilesEl = document.getElementById("profiles");
+
+    firebase.initializeApp(page.firebaseConfig);
+
+    function setStatus(message, isError) {{
+      statusEl.textContent = message || "";
+      statusEl.className = isError ? "status error" : "status";
+    }}
+
+    function authorizeRedirect(idToken, selectedProfileUid) {{
+      const params = new URLSearchParams({{
+        response_type: page.responseType,
+        client_id: page.clientId,
+        redirect_uri: page.redirectUri,
+        firebase_id_token: idToken
+      }});
+      if (page.state) params.set("state", page.state);
+      if (page.scope) params.set("scope", page.scope);
+      if (selectedProfileUid) params.set("selected_profile_uid", selectedProfileUid);
+      window.location.href = page.authorizeUrl + "?" + params.toString();
+    }}
+
+    function renderProfiles(idToken, profiles) {{
+      signInButton.style.display = "none";
+      profilesEl.innerHTML = "";
+      setStatus("Choose which Ella profile to connect.", false);
+      profiles.forEach((profile) => {{
+        const button = document.createElement("button");
+        button.className = "profile";
+        button.textContent = (profile.profile_label || profile.profile_uid) + " (" + profile.role + ")";
+        button.onclick = () => authorizeRedirect(idToken, profile.profile_uid);
+        profilesEl.appendChild(button);
+      }});
+    }}
+
+    async function handleToken(idToken) {{
+      setStatus("Checking Ella profile access...", false);
+      const response = await fetch(page.onboardingUrl, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ firebase_id_token: idToken }})
+      }});
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Authorization failed");
+      if (payload.state === "authenticated_mapped") {{
+        authorizeRedirect(idToken, payload.selected_profile && payload.selected_profile.profile_uid);
+        return;
+      }}
+      if (payload.state === "authenticated_needs_profile_selection" && payload.available_profiles && payload.available_profiles.length) {{
+        renderProfiles(idToken, payload.available_profiles);
+        return;
+      }}
+      throw new Error(payload.message || "This Google account is not authorized for an Ella profile yet.");
+    }}
+
+    signInButton.onclick = async () => {{
+      signInButton.disabled = true;
+      setStatus("Opening Google sign-in...", false);
+      try {{
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({{ prompt: "select_account" }});
+        const result = await firebase.auth().signInWithPopup(provider);
+        const idToken = await result.user.getIdToken();
+        await handleToken(idToken);
+      }} catch (error) {{
+        console.error(error);
+        signInButton.disabled = false;
+        setStatus(error.message || "Sign-in failed.", true);
+      }}
+    }};
+  </script>
+</body>
+</html>"""
+    return Response(content=html_body, media_type="text/html")
+
+
 @router.get("/onboarding")
 async def get_mcp_onboarding(
     authorization: Optional[str] = Header(None, alias="Authorization"),
@@ -300,13 +458,12 @@ async def get_mcp_authorize(
     if client_id != _oauth_client_id():
         raise HTTPException(status_code=400, detail="Invalid client_id")
     if not firebase_id_token:
-        return _redirect_with_params(
-            redirect_uri,
-            {
-                "error": "login_required",
-                "error_description": "A Firebase/Google auth handoff must authenticate the user before code issue.",
-                "state": state,
-            },
+        return _render_mcp_oauth_page(
+            response_type=response_type,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            state=state or "",
+            scope=scope or "",
         )
 
     resolution = resolve_oauth_connector_resolution(
