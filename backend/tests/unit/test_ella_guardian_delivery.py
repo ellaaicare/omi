@@ -215,6 +215,69 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     assert kwargs["json"]["text"] == "Hello"
     assert response.headers["x-guardian-tts-provider"] == "kokoro"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
+    assert response.headers["x-guardian-tts-candidates"] == "kokoro,elevenlabs"
+
+
+def test_synthesize_audio_uses_matching_tts_provider(monkeypatch):
+    _FakeAsyncClient.posts = []
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(guardian.app_settings_db, "get_voice_settings", lambda uid: {"voice_mode": "fish-audio-s2"})
+
+    response = asyncio.run(
+        guardian.synthesize_audio(
+            guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+        )
+    )
+
+    assert response.body == b"mp3-bytes"
+    _url, kwargs = _FakeAsyncClient.posts[0]
+    assert kwargs["headers"]["X-TTS-Provider"] == "fish-audio-s2"
+    assert response.headers["x-guardian-tts-provider"] == "fish-audio-s2"
+    assert response.headers["x-guardian-tts-candidates"] == "fish-audio-s2,fish-audio,kokoro,elevenlabs"
+
+
+def test_synthesize_audio_falls_back_to_next_candidate(monkeypatch):
+    class _FallbackResponse:
+        text = "ok"
+        headers = {"content-type": "audio/mpeg"}
+
+        def __init__(self, status_code, content=b"mp3-bytes"):
+            self.status_code = status_code
+            self.content = content
+
+    class _FallbackAsyncClient:
+        posts = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, **kwargs):
+            self.posts.append((url, kwargs))
+            provider = kwargs["headers"]["X-TTS-Provider"]
+            if provider == "fish-audio-s2":
+                return _FallbackResponse(502, b"")
+            return _FallbackResponse(200, b"fallback-mp3")
+
+    _FallbackAsyncClient.posts = []
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FallbackAsyncClient)
+    monkeypatch.setattr(guardian.app_settings_db, "get_voice_settings", lambda uid: {"voice_mode": "fish-audio-s2"})
+
+    response = asyncio.run(
+        guardian.synthesize_audio(
+            guardian.SynthesizeRequest(uid="uid-1", text="Hello", trace_id="trace-1"),
+            x_guardian_key=guardian.GUARDIAN_WEBHOOK_KEY,
+        )
+    )
+
+    assert response.body == b"fallback-mp3"
+    attempted = [kwargs["headers"]["X-TTS-Provider"] for _url, kwargs in _FallbackAsyncClient.posts]
+    assert attempted == ["fish-audio-s2", "fish-audio"]
+    assert response.headers["x-guardian-tts-provider"] == "fish-audio"
+    assert response.headers["x-guardian-fallback-used"] == "true"
 
 
 def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):

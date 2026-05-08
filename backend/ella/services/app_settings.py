@@ -18,6 +18,7 @@ NORMALIZED_SUPPORTED_VOICE_MODES = (TTS_PROVIDERS | V2V_PROVIDERS) - set(VOICE_M
 
 _DEFAULT_VOICE_MODE = os.getenv("ELLA_DEFAULT_VOICE_MODE", "elevenlabs")
 _DEFAULT_ONE_SHOT_TTS_PROVIDER = os.getenv("ELLA_DEFAULT_GUARDIAN_TTS_PROVIDER", "kokoro")
+_DEFAULT_ONE_SHOT_TTS_FALLBACK_CHAIN = os.getenv("ELLA_GUARDIAN_TTS_FALLBACK_CHAIN", "kokoro,elevenlabs")
 
 _SESSION_MODE_BY_PROVIDER = {
     "openclaw-direct": "openclaw-direct-v1",
@@ -25,19 +26,19 @@ _SESSION_MODE_BY_PROVIDER = {
     "openai-native-realtime": "openai-native-realtime-v1",
 }
 
-_ONE_SHOT_PROVIDER_BY_VOICE_MODE = {
-    "elevenlabs": "elevenlabs",
-    "fish-audio": "fish-audio",
-    "fish-audio-s1": "fish-audio-s1",
-    "fish-audio-s2": "fish-audio-s2",
-    "kokoro": "kokoro",
-    "inworld": "inworld",
+_ONE_SHOT_CANDIDATES_BY_VOICE_MODE = {
+    "elevenlabs": ["elevenlabs", "kokoro"],
+    "fish-audio": ["fish-audio", "fish-audio-s2", "kokoro", "elevenlabs"],
+    "fish-audio-s1": ["fish-audio-s1", "fish-audio", "fish-audio-s2", "kokoro", "elevenlabs"],
+    "fish-audio-s2": ["fish-audio-s2", "fish-audio", "kokoro", "elevenlabs"],
+    "kokoro": ["kokoro", "fish-audio-s2", "elevenlabs"],
+    "inworld": ["inworld", "kokoro", "elevenlabs"],
     # V2V modes keep conversation routing intact, but Guardian one-shots need
     # explicit TTS routing until provider-native one-shot adapters are wired in.
-    "openclaw-direct": _DEFAULT_ONE_SHOT_TTS_PROVIDER,
-    "grok-voice": os.getenv("ELLA_GROK_VOICE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER),
-    "gemini-native-live": os.getenv("ELLA_GEMINI_LIVE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER),
-    "openai-native-realtime": os.getenv("ELLA_OPENAI_REALTIME_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER),
+    "openclaw-direct": [os.getenv("ELLA_OPENCLAW_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
+    "grok-voice": [os.getenv("ELLA_GROK_VOICE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
+    "gemini-native-live": [os.getenv("ELLA_GEMINI_LIVE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
+    "openai-native-realtime": [os.getenv("ELLA_OPENAI_REALTIME_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
 }
 
 
@@ -69,10 +70,29 @@ def session_voice_mode(value: str) -> str | None:
 
 
 def one_shot_tts_provider(value: str) -> str:
-    provider = _ONE_SHOT_PROVIDER_BY_VOICE_MODE.get(normalize_voice_mode(value), _DEFAULT_ONE_SHOT_TTS_PROVIDER)
-    if provider not in TTS_PROVIDERS:
-        return _DEFAULT_ONE_SHOT_TTS_PROVIDER
-    return provider
+    return one_shot_tts_candidates(value)[0]
+
+
+def one_shot_tts_candidates(value: str) -> list[str]:
+    """Return ordered Guardian one-shot providers, closest match first."""
+    voice_mode = normalize_voice_mode(value)
+    candidates = list(_ONE_SHOT_CANDIDATES_BY_VOICE_MODE.get(voice_mode, []))
+    candidates.extend(_split_provider_chain(_DEFAULT_ONE_SHOT_TTS_FALLBACK_CHAIN))
+    candidates.extend([_DEFAULT_ONE_SHOT_TTS_PROVIDER, "kokoro", "elevenlabs"])
+    return _dedupe_supported_tts(candidates)
+
+
+def _split_provider_chain(value: str) -> list[str]:
+    return [item.strip().lower() for item in str(value or "").split(",") if item.strip()]
+
+
+def _dedupe_supported_tts(candidates: list[str]) -> list[str]:
+    result: list[str] = []
+    for provider in candidates:
+        normalized = str(provider or "").strip().lower()
+        if normalized in TTS_PROVIDERS and normalized not in result:
+            result.append(normalized)
+    return result or ["kokoro"]
 
 
 def extract_voice_settings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -135,6 +155,7 @@ def build_effective_voice_settings(uid: str, voice: dict[str, Any] | None = None
     effective = {
         **resolved_voice,
         "one_shot_tts_provider": one_shot_tts_provider(voice_mode),
+        "one_shot_tts_candidates": one_shot_tts_candidates(voice_mode),
         "provider_type": "v2v" if is_v2v_voice_mode(voice_mode) else "tts",
         "fallback_used": fallback_used,
         "fallback_reason": fallback_reason,

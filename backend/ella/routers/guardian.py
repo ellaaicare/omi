@@ -1162,35 +1162,53 @@ async def synthesize_audio(
 
     voice_settings = app_settings_db.get_voice_settings(req.uid)
     effective = build_effective_voice_settings(req.uid, voice_settings)["effective_voice_settings"]
-    provider = (req.provider or effective["one_shot_tts_provider"]).strip().lower()
-    if provider not in TTS_PROVIDERS:
-        raise HTTPException(status_code=422, detail=f"Provider {provider!r} cannot synthesize Guardian one-shot audio")
+    requested_provider = (req.provider or "").strip().lower()
+    provider_candidates = _guardian_tts_candidates(effective, requested_provider)
+    if not provider_candidates:
+        raise HTTPException(status_code=422, detail="No supported Guardian one-shot TTS providers available")
 
     payload = {"text": text}
     if req.voice_id:
         payload["voice_id"] = req.voice_id
 
     _start = time.time()
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                ELLA_INTERNAL_VOICE_TTS_URL,
-                json=payload,
-                headers={"X-TTS-Provider": provider},
-                timeout=30.0,
-            )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail=f"{provider} Guardian synthesis timed out")
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"{provider} Guardian synthesis failed: {exc}") from exc
+    attempts: list[dict[str, Any]] = []
+    response: httpx.Response | None = None
+    provider = provider_candidates[0]
+    async with httpx.AsyncClient() as client:
+        for candidate in provider_candidates:
+            provider = candidate
+            try:
+                response = await client.post(
+                    ELLA_INTERNAL_VOICE_TTS_URL,
+                    json=payload,
+                    headers={"X-TTS-Provider": candidate},
+                    timeout=30.0,
+                )
+            except httpx.TimeoutException:
+                attempts.append({"provider": candidate, "status": "timeout"})
+                continue
+            except Exception as exc:
+                attempts.append({"provider": candidate, "status": "error", "detail": str(exc)[:160]})
+                continue
+            if response.status_code < 400:
+                break
+            attempts.append({"provider": candidate, "status": response.status_code})
+        else:
+            response = None
 
     elapsed_ms = int((time.time() - _start) * 1000)
-    if response.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"{provider} Guardian synthesis error: {response.status_code}")
+    if response is None or response.status_code >= 400:
+        raise HTTPException(status_code=502, detail={"error": "Guardian synthesis failed", "attempts": attempts})
+
+    runtime_fallback_used = provider != provider_candidates[0]
+    if runtime_fallback_used:
+        attempts.append({"provider": provider, "status": response.status_code})
 
     print(
         f"[FLOW:GUARDIAN-SYNTHESIZE] uid={req.uid} trace={req.trace_id} "
-        f"provider={provider} voice_mode={effective['voice_mode']} bytes={len(response.content)} latency={elapsed_ms}ms",
+        f"provider={provider} candidates={provider_candidates} voice_mode={effective['voice_mode']} "
+        f"bytes={len(response.content)} latency={elapsed_ms}ms",
         flush=True,
     )
     return Response(
@@ -1200,10 +1218,26 @@ async def synthesize_audio(
             "X-Guardian-TTS-Provider": provider,
             "X-Guardian-Voice-Mode": effective["voice_mode"],
             "X-Guardian-Settings-Source": "server",
-            "X-Guardian-Fallback-Used": str(bool(effective.get("fallback_used"))).lower(),
+            "X-Guardian-TTS-Candidates": ",".join(provider_candidates),
+            "X-Guardian-Fallback-Used": str(bool(effective.get("fallback_used") or runtime_fallback_used)).lower(),
             "X-Guardian-Synthesis-Latency-Ms": str(elapsed_ms),
         },
     )
+
+
+def _guardian_tts_candidates(effective: dict[str, Any], requested_provider: str = "") -> list[str]:
+    raw_candidates = []
+    if requested_provider:
+        raw_candidates.append(requested_provider)
+    raw_candidates.extend(effective.get("one_shot_tts_candidates") or [])
+    raw_candidates.append(effective.get("one_shot_tts_provider"))
+
+    candidates: list[str] = []
+    for provider in raw_candidates:
+        normalized = str(provider or "").strip().lower()
+        if normalized in TTS_PROVIDERS and normalized not in candidates:
+            candidates.append(normalized)
+    return candidates
 
 
 def _store_audio_content(uid: str, content: bytes, filename: Optional[str] = None) -> dict:
