@@ -97,6 +97,23 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert "create_memory" not in tool_names
     assert "delete_memory" not in tool_names
     assert "update_conversation_summary" not in tool_names
+    assert "companion_propose_change" not in tool_names
+
+
+def test_plato_mcp_lists_proposal_tool_only_when_enabled(monkeypatch):
+    monkeypatch.setenv("ELLA_PLATO_MCP_ENABLE_PROPOSALS", "true")
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc("tools/list"),
+    )
+
+    assert response.status_code == 200
+    tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
+    assert "companion_propose_change" in tool_names
 
 
 def test_streamable_http_prefers_json_when_client_accepts_json_and_sse(monkeypatch):
@@ -178,6 +195,109 @@ def test_companion_get_proposal_status_tool_is_read_only(monkeypatch):
     result = _tool_result(response)
     assert result["proposal_id"] == "proposal-1"
     assert result["status"] == "submitted"
+
+
+def test_companion_propose_change_creates_proposal_when_enabled(monkeypatch):
+    monkeypatch.setenv("ELLA_PLATO_MCP_ENABLE_PROPOSALS", "true")
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    captured = {}
+
+    def fake_create(*, session_claims, tool_name, proposal_type, payload, idempotency_key):
+        captured["session_claims"] = session_claims
+        captured["tool_name"] = tool_name
+        captured["proposal_type"] = proposal_type
+        captured["payload"] = payload
+        captured["idempotency_key"] = idempotency_key
+        return {
+            "created": True,
+            "deduped": False,
+            "proposal": {"proposal_id": "proposal-1", "status": "submitted"},
+        }
+
+    monkeypatch.setattr(module.proposal_ingest, "create_proposal", fake_create)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_propose_change",
+                "arguments": {
+                    "proposal_type": "scanner_rule_change",
+                    "title": "Temporarily watch for glasses",
+                    "description": "User asked Ella to remember where glasses are usually kept.",
+                    "target": {"file": "scanner-tuning.md"},
+                    "requested_change": {"add_phrase": "where are my glasses"},
+                    "idempotency_key": "glasses-1",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["created"] is True
+    assert result["proposal"]["proposal_id"] == "proposal-1"
+    assert captured["tool_name"] == "companion_propose_change"
+    assert captured["proposal_type"] == "scanner_rule_change"
+    assert "proposals:write" in captured["session_claims"]["scopes"]
+    assert "companion_propose_change" in captured["session_claims"]["allowed_tools"]
+    assert captured["payload"]["write_policy"] == "proposal_only"
+    assert captured["idempotency_key"] == "glasses-1"
+
+
+def test_companion_propose_change_is_unknown_when_disabled(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_propose_change",
+                "arguments": {
+                    "proposal_type": "scanner_rule_change",
+                    "title": "Nope",
+                    "description": "Disabled",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["error"]["code"] == -32601
+
+
+def test_companion_propose_change_rejects_unsupported_type(monkeypatch):
+    monkeypatch.setenv("ELLA_PLATO_MCP_ENABLE_PROPOSALS", "true")
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_propose_change",
+                "arguments": {
+                    "proposal_type": "direct_mutation",
+                    "title": "Bad",
+                    "description": "Should not be accepted.",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["error"]["code"] == -32602
+    assert "proposal_type must be one of" in payload["error"]["message"]
 
 
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):

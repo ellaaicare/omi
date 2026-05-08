@@ -24,6 +24,11 @@ class ProposalType(str, Enum):
     preference = "preference"
     rule_change = "rule_change"
     external_context = "external_context"
+    scanner_rule_change = "scanner_rule_change"
+    reminder_request = "reminder_request"
+    profile_update = "profile_update"
+    memory_note = "memory_note"
+    summary_correction = "summary_correction"
 
 
 class ProposalEvent(BaseModel):
