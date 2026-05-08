@@ -774,6 +774,13 @@ async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]
         raise ToolExecutionError("target must be an object", code=-32602)
     if requested_change and not isinstance(requested_change, dict):
         raise ToolExecutionError("requested_change must be an object", code=-32602)
+    confidence = arguments.get("confidence")
+    parsed_confidence = None
+    if confidence is not None:
+        try:
+            parsed_confidence = max(0.0, min(float(confidence), 1.0))
+        except Exception as exc:
+            raise ToolExecutionError("confidence must be a number between 0 and 1", code=-32602) from exc
     payload = {
         "title": title,
         "description": description,
@@ -783,6 +790,8 @@ async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]
         "source": "plato_mcp",
         "write_policy": "proposal_only",
     }
+    if parsed_confidence is not None:
+        payload["confidence"] = parsed_confidence
     try:
         return proposal_ingest.create_proposal(
             session_claims=_legacy_plato_onboarding()["session_claims"],
@@ -826,7 +835,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Create an auditable proposal only; this never directly changes scanner rules, reminders, profile data, "
             "memory, summaries, caregiver delivery, or other live state. Use for requested scanner, reminder, "
-            "profile, memory, or summary changes that need later approval/application."
+            "profile, memory, or summary changes that need later approval/application. Trusted memory_note and "
+            "profile_update proposals may be applied later by the Observer safe applier."
         ),
         "inputSchema": {
             "type": "object",
@@ -840,6 +850,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "target": {"type": "object", "default": {}},
                 "evidence": {"type": "array", "items": {"type": "object"}, "default": []},
                 "requested_change": {"type": "object", "default": {}},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "idempotency_key": {"type": "string"},
             },
             "required": ["proposal_type", "title", "description"],

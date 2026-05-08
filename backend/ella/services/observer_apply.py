@@ -16,6 +16,9 @@ from models.proposals import Proposal, ProposalStatus
 
 AUTO_APPLY_TYPES = {"memory_note", "profile_update"}
 OBSERVER_SOURCE = "ella_observer_cron"
+MCP_SOURCE = "plato_mcp"
+MCP_TOOL_NAME = "companion_propose_change"
+TRUSTED_MCP_DEFAULT_CONFIDENCE = 0.92
 
 
 def _now() -> datetime:
@@ -43,6 +46,24 @@ def _observer_owned(proposal: Proposal) -> bool:
     return payload.get("source") == OBSERVER_SOURCE or proposal.tool_name == "ella_observer_fact_promotion"
 
 
+def _trusted_mcp_owned(proposal: Proposal) -> bool:
+    payload = _payload(proposal)
+    return payload.get("source") == MCP_SOURCE and proposal.tool_name == MCP_TOOL_NAME
+
+
+def _allowed_owner(proposal: Proposal) -> bool:
+    return _observer_owned(proposal) or _trusted_mcp_owned(proposal)
+
+
+def _effective_confidence(proposal: Proposal) -> float:
+    confidence = _confidence(proposal)
+    if confidence:
+        return confidence
+    if _trusted_mcp_owned(proposal) and _proposal_type(proposal) in AUTO_APPLY_TYPES:
+        return TRUSTED_MCP_DEFAULT_CONFIDENCE
+    return 0.0
+
+
 def _event_text(proposal: Proposal) -> str:
     payload = _payload(proposal)
     requested_change = payload.get("requested_change") if isinstance(payload.get("requested_change"), dict) else {}
@@ -64,7 +85,7 @@ def _decision(action: str, proposal: Proposal, reason: str = "", error: str = ""
         "proposal_id": proposal.proposal_id,
         "proposal_type": _proposal_type(proposal),
         "title": str(_payload(proposal).get("title") or ""),
-        "confidence": _confidence(proposal),
+        "confidence": _effective_confidence(proposal),
         "reason": reason,
         "error": error,
     }
@@ -86,13 +107,13 @@ async def apply_pending_observer_memory_proposals(
 
     for proposal in proposals:
         proposal_type = _proposal_type(proposal)
-        if not _observer_owned(proposal):
-            decisions.append(_decision("skip", proposal, "not_observer_owned"))
+        if not _allowed_owner(proposal):
+            decisions.append(_decision("skip", proposal, "not_observer_or_trusted_mcp_owned"))
             continue
         if proposal_type not in allowed_types:
             decisions.append(_decision("skip", proposal, "unsupported_auto_apply_type"))
             continue
-        confidence = _confidence(proposal)
+        confidence = _effective_confidence(proposal)
         if confidence < min_confidence:
             decisions.append(_decision("skip", proposal, "below_min_confidence"))
             continue
@@ -124,6 +145,7 @@ async def apply_pending_observer_memory_proposals(
                             "proposal_id": proposal.proposal_id,
                             "proposal_type": proposal_type,
                             "confidence": confidence,
+                            "proposal_source": _payload(proposal).get("source") or proposal.tool_name,
                             "source_run_id": _payload(proposal).get("observer_run_id"),
                             "requested_change": _payload(proposal).get("requested_change") or {},
                             "evidence": _payload(proposal).get("evidence") or [],

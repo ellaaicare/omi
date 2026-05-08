@@ -457,6 +457,63 @@ def test_observer_apply_pending_writes_safe_memory_event(monkeypatch):
     assert "Spare glasses are in the blue backpack" in events[0]["text"]
 
 
+def test_observer_apply_pending_accepts_trusted_mcp_memory_proposal(monkeypatch):
+    _install_proposal_stubs()
+    monkeypatch.setenv("ELLA_OBSERVER_ADMIN_TOKEN", "observer-token")
+    sys.modules.pop("ella.routers.observer", None)
+    sys.modules.pop("ella.services.observer_apply", None)
+    router_module = importlib.import_module("ella.routers.observer")
+    canonical_module = importlib.import_module("ella.routers.canonical_events")
+    logs_module = importlib.import_module("ella.services.observer_logs")
+    proposals_db = importlib.import_module("database.proposals")
+    proposal_models = importlib.import_module("models.proposals")
+
+    proposal = proposal_models.Proposal.from_claims(
+        session_claims={
+            "profile_uid": "user-1",
+            "role": "self",
+            "external_provider": "static_bearer",
+            "trace_id": "mcp:test",
+        },
+        tool_name="companion_propose_change",
+        proposal_type="memory_note",
+        payload={
+            "title": "MCP memory test",
+            "description": "Remember the MCP test phrase copper sailboat.",
+            "source": "plato_mcp",
+            "requested_change": {"memory": "The MCP test phrase is copper sailboat."},
+            "target": {"canonical_identity": "plato"},
+        },
+        proposal_id="proposal-mcp-memory",
+    )
+    proposals_db.list_proposals.return_value = [proposal]
+
+    event_store = canonical_module.InMemoryCanonicalEventStore()
+    log_store = logs_module.InMemoryObserverRunLogStore()
+    app = FastAPI()
+    app.include_router(router_module.create_observer_router(event_store=event_store, log_store=log_store))
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/ella/observer/apply-pending",
+        headers={"X-Ella-Observer-Token": "observer-token"},
+        json={"uid": "user-1", "dry_run": False, "min_confidence": 0.9},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied_count"] == 1
+    assert body["decisions"][0]["action"] == "applied"
+    assert body["decisions"][0]["confidence"] == 0.92
+
+    import asyncio
+
+    events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
+    assert len(events) == 1
+    assert events[0]["metadata"]["proposal_source"] == "plato_mcp"
+    assert "copper sailboat" in events[0]["text"]
+
+
 def test_observer_log_store_keeps_datetimes_for_postgres(monkeypatch):
     service = _load_observer_service()
     sys.modules.pop("ella.services.observer_logs", None)
