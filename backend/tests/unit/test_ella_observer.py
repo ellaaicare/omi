@@ -367,6 +367,34 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     assert body["model_metadata"]["extractor"] == "heuristic_candidate_extractor"
 
 
+def test_model_extractor_rejects_assistant_only_evidence():
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+
+    event_lookup = {
+        "assistant-event": _event(
+            event_id="assistant-event",
+            channel="ios_chat",
+            role="assistant",
+            metadata={},
+            text="I will remind you every evening.",
+        )
+    }
+    candidate = extractor_module._candidate_from_model(
+        {
+            "proposal_type": "reminder_request",
+            "title": "Evening reminder",
+            "description": "Assistant said it would remind the user.",
+            "requested_change": {"reminder_text": "evening reminder"},
+            "confidence": 0.9,
+            "evidence_event_ids": ["assistant-event"],
+        },
+        event_lookup,
+    )
+
+    assert candidate is None
+
+
 def test_observer_log_store_keeps_datetimes_for_postgres(monkeypatch):
     service = _load_observer_service()
     sys.modules.pop("ella.services.observer_logs", None)

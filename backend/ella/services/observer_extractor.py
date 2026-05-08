@@ -256,6 +256,8 @@ def _candidate_from_model(raw: dict[str, Any], event_lookup: dict[str, dict[str,
     event = event_lookup.get(str(evidence_event_ids[0])) if evidence_event_ids else None
     if not event:
         return None
+    if str(event.get("channel") or "") != "omi" and str(event.get("role") or "").lower() not in {"user", "speaker"}:
+        return None
     try:
         return ObserverCandidate(
             proposal_type=str(raw.get("proposal_type") or "").strip(),
