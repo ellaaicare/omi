@@ -18,6 +18,7 @@ def _claims(**overrides):
         "external_provider": "google",
         "grant_id": "grant-1",
         "trace_id": "trace-1",
+        "scopes": ["proposals:write"],
         "allowed_tools": ["companion_submit_note", "companion_get_proposal_status"],
         **overrides,
     }
@@ -90,6 +91,38 @@ def test_create_proposal_rejects_unallowed_tool():
         )
     except service.ProposalPermissionError as exc:
         assert "not allowed" in str(exc)
+    else:
+        raise AssertionError("expected ProposalPermissionError")
+
+
+def test_create_proposal_rejects_missing_write_scope():
+    service = _load_service()
+
+    try:
+        service.create_proposal(
+            session_claims=_claims(scopes=[]),
+            tool_name="companion_submit_note",
+            proposal_type="note",
+            payload={"content": "No write scope"},
+        )
+    except service.ProposalPermissionError as exc:
+        assert "proposals:write" in str(exc)
+    else:
+        raise AssertionError("expected ProposalPermissionError")
+
+
+def test_create_proposal_rejects_empty_allowed_tools():
+    service = _load_service()
+
+    try:
+        service.create_proposal(
+            session_claims=_claims(allowed_tools=[]),
+            tool_name="companion_submit_note",
+            proposal_type="note",
+            payload={"content": "No explicit tool grant"},
+        )
+    except service.ProposalPermissionError as exc:
+        assert "allowed_tools" in str(exc)
     else:
         raise AssertionError("expected ProposalPermissionError")
 

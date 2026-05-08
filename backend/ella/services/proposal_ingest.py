@@ -55,8 +55,16 @@ def _profile_uid(session_claims: dict[str, Any]) -> str:
 
 def check_tool_allowed(session_claims: dict[str, Any], tool_name: str) -> None:
     allowed = [str(tool) for tool in session_claims.get("allowed_tools") or [] if str(tool)]
-    if allowed and tool_name not in allowed:
+    if not allowed:
+        raise ProposalPermissionError("session_claims.allowed_tools must explicitly allow proposal writes")
+    if tool_name not in allowed:
         raise ProposalPermissionError(f"Tool '{tool_name}' is not allowed for this MCP session")
+
+
+def check_write_scope(session_claims: dict[str, Any]) -> None:
+    scopes = {str(scope) for scope in session_claims.get("scopes") or [] if str(scope)}
+    if "proposals:write" not in scopes:
+        raise ProposalPermissionError("scope 'proposals:write' is required to create proposals")
 
 
 def create_proposal(
@@ -67,6 +75,7 @@ def create_proposal(
     payload: dict[str, Any],
     idempotency_key: str = "",
 ) -> dict[str, Any]:
+    check_write_scope(session_claims)
     check_tool_allowed(session_claims, tool_name)
     profile_uid = _profile_uid(session_claims)
     if idempotency_key:
