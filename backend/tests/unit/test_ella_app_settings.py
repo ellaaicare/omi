@@ -41,9 +41,23 @@ def test_effective_settings_maps_v2v_to_explicit_one_shot_fallback():
 
     assert effective["voice_mode"] == "grok-voice"
     assert effective["one_shot_tts_provider"] == "kokoro"
+    assert effective["effective_voice_settings"]["one_shot_tts_candidates"] == ["kokoro", "elevenlabs"]
     assert effective["effective_voice_settings"]["provider_type"] == "v2v"
     assert effective["effective_voice_settings"]["fallback_used"] is True
     assert "Guardian one-shots" in effective["effective_voice_settings"]["fallback_reason"]
+
+
+def test_effective_settings_maps_tts_mode_to_closest_guardian_candidates():
+    effective = service.build_effective_voice_settings("uid-1", {"voice_mode": "fish-audio-s2"})
+
+    assert effective["one_shot_tts_provider"] == "fish-audio-s2"
+    assert effective["effective_voice_settings"]["one_shot_tts_candidates"] == [
+        "fish-audio-s2",
+        "fish-audio",
+        "kokoro",
+        "elevenlabs",
+    ]
+    assert effective["effective_voice_settings"]["fallback_used"] is False
 
 
 def _load_router(monkeypatch, stored_voice=None):
