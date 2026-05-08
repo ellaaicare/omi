@@ -311,6 +311,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella canonical events not available: {e}", flush=True)
 
+    # Observer cron runner (proposal-only fact promotion)
+    try:
+        from ella.routers.observer import router as observer_router
+
+        app.include_router(observer_router, tags=["Ella Observer"])
+        print("  🌐 /v1/ella/observer/* - Proposal-only Observer runner", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella Observer not available: {e}", flush=True)
+
     # Plato/Hermes read-only MCP bridge for Grok custom connector testing
     try:
         from ella.routers.plato_mcp import router as plato_mcp_router
