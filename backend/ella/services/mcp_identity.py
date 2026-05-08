@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
+import jwt
+
 logger = logging.getLogger("ella.mcp_identity")
 
 STATE_AUTHENTICATED_MAPPED = "authenticated_mapped"
@@ -50,6 +52,9 @@ DEFAULT_ROLE_SCOPES = {
     ROLE_CAREGIVER: ["care_context:read", "context:read", "profile:read", "startup:read", "timeline:read"],
     ROLE_ADMIN: ["admin:read", "profile:read", "startup:read", "tools:read"],
 }
+
+MCP_SESSION_ISSUER = "ella-mcp"
+MCP_SESSION_AUDIENCE = "ella-mcp-tools"
 
 
 def _clean_string(value: Any) -> str:
@@ -399,16 +404,96 @@ def build_session_claims(resolution: MCPIdentityResolution, *, ttl_seconds: int 
     grant = resolution.selected_grant
     now = int(time.time())
     return {
-        "iss": "ella-mcp",
+        "iss": MCP_SESSION_ISSUER,
         "sub": resolution.identity.provider_subject,
-        "aud": "ella-mcp-tools",
+        "aud": MCP_SESSION_AUDIENCE,
         "iat": now,
         "exp": now + max(60, ttl_seconds),
+        "jti": str(uuid.uuid4()),
         "trace_id": resolution.trace_id,
         "profile_uid": grant.profile_uid,
+        "profile_label": grant.profile_label,
         "role": grant.role,
         "scopes": list(grant.scopes),
         "allowed_tools": list(grant.allowed_tools),
         "grant_id": grant.grant_id,
         "external_provider": resolution.identity.provider,
+    }
+
+
+def mcp_session_secret() -> str:
+    """Return the signing key for short-lived external MCP bearer sessions."""
+    return os.getenv("ELLA_MCP_SESSION_SECRET") or os.getenv("ELLA_SESSION_SECRET", "")
+
+
+def issue_mcp_session_token(resolution: MCPIdentityResolution, *, ttl_seconds: int = 3600) -> tuple[str, dict[str, Any]]:
+    secret = mcp_session_secret()
+    if not secret:
+        raise RuntimeError("ELLA_MCP_SESSION_SECRET or ELLA_SESSION_SECRET must be configured")
+    claims = build_session_claims(resolution, ttl_seconds=ttl_seconds)
+    return jwt.encode(claims, secret, algorithm="HS256"), claims
+
+
+def validate_mcp_session_token(token: str) -> dict[str, Any]:
+    secret = mcp_session_secret()
+    if not secret:
+        raise ValueError("MCP session token verification is not configured")
+    try:
+        claims = jwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            audience=MCP_SESSION_AUDIENCE,
+            issuer=MCP_SESSION_ISSUER,
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise ValueError("MCP session token expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise ValueError("Invalid MCP session token") from exc
+
+    if not claims.get("profile_uid") or not claims.get("role") or not isinstance(claims.get("allowed_tools"), list):
+        raise ValueError("MCP session token missing required claims")
+    return claims
+
+
+def session_claims_to_public_resolution(claims: dict[str, Any]) -> dict[str, Any]:
+    profile_uid = _clean_string(claims.get("profile_uid"))
+    role = _normalized_role(claims.get("role"))
+    scopes = [scope for scope in claims.get("scopes") or [] if _clean_string(scope)]
+    allowed_tools = [tool for tool in claims.get("allowed_tools") or [] if _clean_string(tool)]
+    grant_id = _clean_string(claims.get("grant_id"))
+    external_provider = _clean_string(claims.get("external_provider"))
+    subject = _clean_string(claims.get("sub"))
+    selected_profile = {
+        "grant_id": grant_id,
+        "profile_uid": profile_uid,
+        "role": role,
+        "profile_label": _clean_string(claims.get("profile_label")),
+        "scopes": scopes,
+        "allowed_tools": allowed_tools,
+    }
+    return {
+        "state": STATE_AUTHENTICATED_MAPPED,
+        "trace_id": _clean_string(claims.get("trace_id")),
+        "identity": {
+            "provider": external_provider,
+            "subject": subject.split(":", 1)[1] if ":" in subject else subject,
+            "email": "",
+            "email_verified": False,
+            "authenticated": True,
+            "display_name": "",
+        },
+        "selected_profile": selected_profile,
+        "available_profiles": [selected_profile],
+        "session_claims": {
+            "profile_uid": profile_uid,
+            "role": role,
+            "scopes": scopes,
+            "allowed_tools": allowed_tools,
+            "grant_id": grant_id,
+            "external_provider": external_provider,
+            "trace_id": _clean_string(claims.get("trace_id")),
+            "exp": claims.get("exp"),
+        },
+        "message": "Identity is mapped through a short-lived MCP session token.",
     }

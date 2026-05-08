@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import database.conversations as conversations_db
 import database.memories as memories_db
 from ella.services import proposal_ingest
+from ella.services.mcp_identity import validate_mcp_session_token
 from ella.services.mcp_startup import build_startup_context
 from ella.services.mcp_surface_prompt import build_surface_prompt
 from utils.ella.time_context import annotate_event_time, build_time_context, local_time_fields, timezone_name
@@ -140,12 +141,24 @@ def _fingerprint(token: str) -> str:
 
 
 def _authenticate(authorization: Optional[str]) -> str:
-    tokens = _allowed_tokens()
-    if not tokens:
-        raise HTTPException(status_code=503, detail="Plato MCP token is not configured")
     token = _token_from_authorization(authorization)
-    if not token or token not in tokens:
+    if not token:
         raise HTTPException(status_code=401, detail="Invalid or missing Plato MCP bearer token")
+
+    tokens = _allowed_tokens()
+    if token in tokens:
+        _check_rate_limit(token)
+        return _fingerprint(token)
+
+    try:
+        claims = validate_mcp_session_token(token)
+    except ValueError as exc:
+        if not tokens and "not configured" in str(exc):
+            raise HTTPException(status_code=503, detail="Plato MCP token is not configured") from exc
+        raise HTTPException(status_code=401, detail="Invalid or missing Plato MCP bearer token") from exc
+
+    if "tools:read" not in set(claims.get("scopes") or []):
+        raise HTTPException(status_code=403, detail="MCP bearer token is missing tools:read scope")
     _check_rate_limit(token)
     return _fingerprint(token)
 
@@ -1343,10 +1356,10 @@ async def plato_mcp_info(request: Request):
             "format": "Bearer <ELLA_PLATO_MCP_TOKEN>",
             "generic_onboarding_endpoint": f"{base_url}/v1/ella/mcp/onboarding",
             "oauth": {
-                "client_id": _oauth_client_id(),
-                "authorization_endpoint": f"{endpoint}/authorize",
-                "token_endpoint": f"{endpoint}/token",
-                "scopes": ["plato:read"],
+                "client_id": _env("ELLA_MCP_OAUTH_CLIENT_ID", "ella-mcp"),
+                "authorization_endpoint": f"{base_url}/v1/ella/mcp/authorize",
+                "token_endpoint": f"{base_url}/v1/ella/mcp/token",
+                "scopes": ["tools:read", "startup:read", "timeline:read", "memory:read"],
             },
         },
         "tools": [tool["name"] for tool in MCP_TOOLS],
