@@ -440,21 +440,55 @@ def _render_mcp_oauth_page(
       throw new Error(payload.message || "This Google account is not authorized for an Ella profile yet.");
     }}
 
-    signInButton.onclick = async () => {{
+    async function doSignIn() {{
       signInButton.disabled = true;
-      setStatus("Opening Google sign-in...", false);
+      setStatus("Redirecting to Google sign-in...", false);
       try {{
         const provider = new firebase.auth.GoogleAuthProvider();
         provider.setCustomParameters({{ prompt: "select_account" }});
-        const result = await firebase.auth().signInWithPopup(provider);
-        const idToken = await result.user.getIdToken();
-        await handleToken(idToken);
+        // Try popup first, fall back to redirect if blocked
+        try {{
+          const result = await firebase.auth().signInWithPopup(provider);
+          const idToken = await result.user.getIdToken();
+          await handleToken(idToken);
+        }} catch (popupErr) {{
+          if (popupErr.code === "auth/popup-blocked" ||
+              popupErr.code === "auth/popup-closed-by-browser" ||
+              popupErr.code === "auth/cancelled-popup-request") {{
+            // Popup blocked (common in MCP OAuth iframes) — use redirect flow
+            setStatus("Redirecting to Google...", false);
+            firebase.auth().signInWithRedirect(provider);
+          }} else {{
+            throw popupErr;
+          }}
+        }}
       }} catch (error) {{
         console.error(error);
         signInButton.disabled = false;
         setStatus(error.message || "Sign-in failed.", true);
       }}
-    }};
+    }}
+
+    // Check for redirect result on page load (fires after Google redirects back)
+    firebase.auth().getRedirectResult().then(async (result) => {{
+      if (result && result.user) {{
+        signInButton.disabled = true;
+        setStatus("Signed in, connecting Ella profile...", false);
+        try {{
+          const idToken = await result.user.getIdToken();
+          await handleToken(idToken);
+        }} catch (error) {{
+          console.error(error);
+          signInButton.disabled = false;
+          setStatus(error.message || "Sign-in failed.", true);
+        }}
+      }}
+    }}).catch((error) => {{
+      console.error("Redirect result error:", error);
+      setStatus(error.message || "Sign-in redirect failed.", true);
+    }});
+
+    signInButton.onclick = doSignIn;
   </script>
 </body>
 </html>"""
