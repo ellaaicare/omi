@@ -43,8 +43,8 @@ def test_effective_settings_maps_v2v_to_explicit_one_shot_fallback():
     assert effective["one_shot_tts_provider"] == "xai-tts"
     assert effective["effective_voice_settings"]["one_shot_tts_candidates"] == ["xai-tts", "kokoro", "elevenlabs"]
     assert effective["effective_voice_settings"]["provider_type"] == "v2v"
-    assert effective["effective_voice_settings"]["fallback_used"] is True
-    assert "Guardian one-shots" in effective["effective_voice_settings"]["fallback_reason"]
+    assert effective["effective_voice_settings"]["fallback_used"] is False
+    assert effective["effective_voice_settings"]["fallback_reason"] is None
 
 
 def test_effective_settings_maps_tts_mode_to_closest_guardian_candidates():

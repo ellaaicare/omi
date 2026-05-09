@@ -148,14 +148,16 @@ def build_settings_response(uid: str, voice: dict[str, Any] | None = None) -> di
 def build_effective_voice_settings(uid: str, voice: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved_voice = _json_safe(extract_voice_settings({"settings": {"voice": voice or {}}}))
     voice_mode = resolved_voice["voice_mode"]
-    fallback_used = voice_mode in V2V_PROVIDERS
+    one_shot_provider = one_shot_tts_provider(voice_mode)
+    provider_matched_one_shot = voice_mode == "grok-voice" and one_shot_provider == "xai-tts"
+    fallback_used = voice_mode in V2V_PROVIDERS and not provider_matched_one_shot
     fallback_reason = None
     if fallback_used:
         fallback_reason = f"{voice_mode} is a V2V mode; Guardian one-shots require a TTS provider"
 
     effective = {
         **resolved_voice,
-        "one_shot_tts_provider": one_shot_tts_provider(voice_mode),
+        "one_shot_tts_provider": one_shot_provider,
         "one_shot_tts_candidates": one_shot_tts_candidates(voice_mode),
         "provider_type": "v2v" if is_v2v_voice_mode(voice_mode) else "tts",
         "fallback_used": fallback_used,
