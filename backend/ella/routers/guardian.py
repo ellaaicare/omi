@@ -581,6 +581,14 @@ def _enqueue_rejects_guardian_echo(uid: str, req: "EnqueueRequest") -> tuple[boo
     return False, None
 
 
+def _is_wake_ack_request(req: "EnqueueRequest") -> bool:
+    metadata = _coerce_metadata_dict(req.metadata)
+    trigger = str(
+        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
+    ).lower()
+    return trigger == "wake_word_ack" or metadata.get("ack_only") is True
+
+
 def _is_wake_word_row(row: dict[str, Any]) -> bool:
     metadata = _coerce_metadata_dict(row.get("metadata"))
     trigger = str(row.get("trigger_type") or metadata.get("trigger_type") or metadata.get("category") or "").lower()
@@ -1185,6 +1193,42 @@ async def enqueue(
                 "rejected": True,
                 "reason": reject_reason,
                 "suggestion": "Route critical alerts to iMessage instead",
+            }
+
+    if _is_wake_ack_request(req):
+        duplicate_ack_id = await pool.fetchval(
+            """
+            SELECT id
+            FROM guardian_queue
+            WHERE uid = $1
+              AND trigger_type = 'wake_word_ack'
+              AND metadata->>'trace_id' = $2
+              AND created_at > NOW() - INTERVAL '15 seconds'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            uid,
+            trace_id,
+        )
+        if duplicate_ack_id:
+            _elapsed = int((time.time() - _start) * 1000)
+            await _log_pipeline_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="ack_deduped",
+                status="skipped",
+                latency_ms=_elapsed,
+                metadata={
+                    "queue_item_id": item_id,
+                    "duplicate_queue_item_id": duplicate_ack_id,
+                    "trigger_type": req.trigger,
+                },
+            )
+            return {
+                "ok": True,
+                "deduped": True,
+                "id": duplicate_ack_id,
+                "trace_id": trace_id,
             }
 
     # Serialize metadata to JSON string for the JSONB column

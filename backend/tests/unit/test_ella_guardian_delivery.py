@@ -326,6 +326,30 @@ def test_enqueue_does_not_reject_real_wake_word_question():
     assert reason is None
 
 
+def test_wake_ack_request_detects_trigger_and_metadata_flag():
+    assert guardian._is_wake_ack_request(
+        guardian.EnqueueRequest(
+            uid="uid-1",
+            url="https://example.test/wake.mp3",
+            trigger="wake_word_ack",
+        )
+    )
+    assert guardian._is_wake_ack_request(
+        guardian.EnqueueRequest(
+            uid="uid-1",
+            url="https://example.test/wake.mp3",
+            metadata={"ack_only": True},
+        )
+    )
+    assert not guardian._is_wake_ack_request(
+        guardian.EnqueueRequest(
+            uid="uid-1",
+            url="https://example.test/full.mp3",
+            trigger="wake_word_user_support",
+        )
+    )
+
+
 def test_wake_word_row_matches_fallback_variants():
     assert guardian._is_wake_word_row({"trigger_type": "wake_word_fallback", "metadata": {}})
 
