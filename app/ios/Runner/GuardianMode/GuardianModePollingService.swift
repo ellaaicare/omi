@@ -190,6 +190,17 @@ class GuardianModePollingService {
         lastImmediatePollRequestedAt = now
 
         let delay = isPollInFlight ? 0.35 : 0.0
+        DebugEventBuffer.shared.add(
+            id: "next-audio-poll-request-\(Int(now.timeIntervalSince1970 * 1000))",
+            triggerType: "guardian_next_audio_poll_requested",
+            message: "Immediate Guardian next-audio poll requested",
+            metadata: [
+                "reason": reason,
+                "scheduled_delay_ms": Int(delay * 1000),
+                "is_poll_in_flight": isPollInFlight,
+                "client_native_requested_at_ms": Int(now.timeIntervalSince1970 * 1000)
+            ]
+        )
         scheduleNextPollLocked(after: delay, reason: reason)
     }
 

@@ -89,11 +89,46 @@ class GuardianModeService {
     try {
       await _channel.invokeMethod('requestWakeAckPoll', {
         'reason': reason,
+        'client_requested_at_ms': DateTime.now().toUtc().millisecondsSinceEpoch,
         if (transcript != null) 'transcript': transcript,
       });
     } catch (e) {
       debugPrint('GuardianMode: Error requesting wake ack poll: $e');
     }
+  }
+
+  /// Records a Guardian latency breadcrumb through native iOS. Native side
+  /// drops it unless Guardian Mode is active, which avoids idle battery/network
+  /// work when the feature is off.
+  Future<void> recordLatencyBreadcrumb(String eventName, Map<String, Object?> fields) async {
+    try {
+      final now = DateTime.now().toUtc();
+      await _channel.invokeMethod('recordLatencyBreadcrumb', {
+        'event_name': eventName,
+        'metadata': _sanitizeMetadata({
+          ...fields,
+          'client_ts_ms': now.millisecondsSinceEpoch,
+          'client_ts_iso': now.toIso8601String(),
+        }),
+      });
+    } catch (e) {
+      debugPrint('GuardianMode: Error recording latency breadcrumb: $e');
+    }
+  }
+
+  Map<String, Object> _sanitizeMetadata(Map<String, Object?> fields) {
+    final sanitized = <String, Object>{};
+    fields.forEach((key, value) {
+      if (value == null) return;
+      if (value is String || value is num || value is bool) {
+        sanitized[key] = value;
+      } else if (value is Iterable) {
+        sanitized[key] = value.map((item) => item?.toString() ?? '').toList();
+      } else {
+        sanitized[key] = value.toString();
+      }
+    });
+    return sanitized;
   }
 
   /// Start timer to inject test audio clips

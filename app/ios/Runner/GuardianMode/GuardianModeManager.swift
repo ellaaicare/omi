@@ -130,7 +130,7 @@ class GuardianModeManager: NSObject, AVSpeechSynthesizerDelegate {
     /// This does not synthesize or route audio locally; it only interrupts the
     /// active Guardian poll timer so a backend-created wake ack can be consumed
     /// without waiting for the normal idle poll cadence.
-    func requestWakeAckPoll(reason: String, transcript: String?) {
+    func requestWakeAckPoll(reason: String, transcript: String?, clientRequestedAtMs: Int?) {
         queue.async { [weak self] in
             guard let self = self, self.isActive else {
                 NSLog("GuardianMode: Ignoring wake ack poll request because Guardian is inactive")
@@ -138,16 +138,40 @@ class GuardianModeManager: NSObject, AVSpeechSynthesizerDelegate {
             }
 
             let preview = transcript.map { String($0.prefix(80)) } ?? ""
+            var metadata: [String: Any] = [
+                "reason": reason,
+                "transcript_preview": preview,
+                "client_received_at_ms": Int(Date().timeIntervalSince1970 * 1000)
+            ]
+            if let clientRequestedAtMs = clientRequestedAtMs {
+                metadata["client_requested_at_ms"] = clientRequestedAtMs
+            }
             DebugEventBuffer.shared.add(
                 id: "wake-ack-poll-\(Int(Date().timeIntervalSince1970 * 1000))",
                 triggerType: "guardian_wake_ack_poll_request",
                 message: "Wake candidate requested immediate Guardian next-audio poll",
-                metadata: [
-                    "reason": reason,
-                    "transcript_preview": preview
-                ]
+                metadata: metadata
             )
             GuardianModePollingService.shared.requestWakeAckPollBurst(reason: reason)
+        }
+    }
+
+    func recordWakeLatencyBreadcrumb(eventName: String, metadata: [String: Any]) {
+        queue.async { [weak self] in
+            guard let self = self, self.isActive else { return }
+
+            let normalizedName = eventName
+                .lowercased()
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "-", with: "_")
+            var eventMetadata = metadata
+            eventMetadata["client_native_received_at_ms"] = Int(Date().timeIntervalSince1970 * 1000)
+            DebugEventBuffer.shared.add(
+                id: "wake-latency-\(normalizedName)-\(Int(Date().timeIntervalSince1970 * 1000))",
+                triggerType: "guardian_\(normalizedName)",
+                message: "Guardian wake latency breadcrumb: \(normalizedName)",
+                metadata: eventMetadata
+            )
         }
     }
 
@@ -239,7 +263,8 @@ class GuardianModeManager: NSObject, AVSpeechSynthesizerDelegate {
             "port_type": portType,
             "port_name": portName,
             "device_uid": deviceUID,
-            "duration_ms": durationMs
+            "duration_ms": durationMs,
+            "client_ts_ms": Int(Date().timeIntervalSince1970 * 1000)
         ]
         body["queue_item_id"] = queueItemId
         if let traceId = traceId {
