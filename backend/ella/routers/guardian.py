@@ -16,6 +16,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import time
 import uuid
 from email.mime.text import MIMEText
@@ -103,6 +104,20 @@ _ECHO_RISK = {
     "CarAudio": "high",
     "USBAudio": "low",
 }
+_ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
+_GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+_GUARDIAN_ECHO_MARKERS = (
+    "hi greg",
+    "heard my name",
+    "i heard my name",
+    "i'm here with you",
+    "im here with you",
+    "here with you",
+    "tell me what you need",
+    "just talking about names",
+    "just talking about me",
+    "i heard you. i am checking that now",
+)
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -512,13 +527,69 @@ def _queue_trace_id(row: dict[str, Any]) -> str:
     return _trace_id_from_metadata(_coerce_metadata_dict(row.get("metadata")), str(row.get("id") or ""))
 
 
+def _normalize_for_echo_match(text: str) -> str:
+    normalized = text.lower().replace("’", "'")
+    normalized = re.sub(r"[^a-z0-9' ]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _looks_like_guardian_echo_text(text: str) -> bool:
+    normalized = _normalize_for_echo_match(text)
+    if not normalized:
+        return False
+
+    marker_hits = sum(1 for marker in _GUARDIAN_ECHO_MARKERS if marker in normalized)
+    if marker_hits >= 2:
+        return True
+    if "hi greg" in normalized and "heard my name" in normalized:
+        return True
+    if "tell me what you need" in normalized and ("just talking about" in normalized or "here with you" in normalized):
+        return True
+    return False
+
+
+def _recent_risky_playback_event(uid: str) -> dict | None:
+    event = get_playback_event(uid)
+    if not event:
+        return None
+    if event.get("echo_risk") not in _ECHO_RISKY_OUTPUTS:
+        return None
+    recorded_at = event.get("recorded_at")
+    if isinstance(recorded_at, (int, float)) and time.time() - recorded_at > _GUARDIAN_ECHO_SUPPRESSION_SECONDS:
+        return None
+    return event
+
+
+def _enqueue_rejects_guardian_echo(uid: str, req: "EnqueueRequest") -> tuple[bool, Optional[str]]:
+    """Reject scanner wake fallback audio that is the app hearing its own Guardian response."""
+    metadata = _coerce_metadata_dict(req.metadata)
+    trigger = str(
+        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
+    ).lower()
+    if "wake_word" not in trigger:
+        return False, None
+
+    message = str(req.message or metadata.get("message") or "")
+    if not _looks_like_guardian_echo_text(message):
+        return False, None
+
+    if trigger.endswith("_fallback") or trigger == "wake_word_fallback":
+        return True, "guardian_playback_echo"
+    if _recent_risky_playback_event(uid):
+        return True, "guardian_playback_echo"
+    return False, None
+
+
 def _is_wake_word_row(row: dict[str, Any]) -> bool:
     metadata = _coerce_metadata_dict(row.get("metadata"))
     trigger = str(row.get("trigger_type") or metadata.get("trigger_type") or metadata.get("category") or "").lower()
-    return trigger == "wake_word"
+    return trigger == "wake_word" or trigger.startswith("wake_word_")
 
 
-def _select_same_trace_supersede_rows(pending_rows: list[dict[str, Any]]) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+def _select_same_trace_supersede_rows(
+    pending_rows: list[dict[str, Any]],
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
     """Pick one primary same-trace row to keep and return superseded siblings."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in pending_rows:
@@ -560,11 +631,7 @@ def _enqueue_allows_guardian_audio(mode: str, req: "EnqueueRequest") -> tuple[bo
 
     metadata = _coerce_metadata_dict(req.metadata)
     trigger = str(
-        req.trigger
-        or metadata.get("trigger_type")
-        or metadata.get("event_type")
-        or metadata.get("category")
-        or ""
+        req.trigger or metadata.get("trigger_type") or metadata.get("event_type") or metadata.get("category") or ""
     ).lower()
     severity = str(metadata.get("severity") or metadata.get("urgency") or req.priority or "").lower()
     message = str(req.message or metadata.get("message") or "").lower()
@@ -1063,6 +1130,34 @@ async def enqueue(
 
     # --- guardian_mode gate: reject inserts when guardian is OFF / suppressed ---
     if req.priority != "debug":
+        echo_rejected, echo_reason = _enqueue_rejects_guardian_echo(uid, req)
+        if echo_rejected:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(
+                f"[FLOW:GUARDIAN-ENQUEUE] uid={uid} REJECTED reason={echo_reason} "
+                f"trigger={req.trigger} trace={trace_id} latency={_elapsed}ms",
+                flush=True,
+            )
+            await _log_pipeline_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="queue_rejected",
+                status="rejected",
+                latency_ms=_elapsed,
+                metadata={
+                    "queue_item_id": item_id,
+                    "priority": req.priority,
+                    "trigger_type": req.trigger,
+                    "reason": echo_reason,
+                    "guardian_mode": normalized_mode,
+                },
+            )
+            return {
+                "ok": False,
+                "rejected": True,
+                "reason": echo_reason,
+            }
+
         allowed, reject_reason = _enqueue_allows_guardian_audio(guardian_mode, req)
         if not allowed:
             _elapsed = int((time.time() - _start) * 1000)

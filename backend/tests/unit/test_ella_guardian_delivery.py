@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
 
@@ -20,6 +19,23 @@ sys.modules.setdefault("ella", types.ModuleType("ella"))
 sys.modules.setdefault("ella.services", types.ModuleType("ella.services"))
 sys.modules["ella.services.escalation_policy"] = policy
 _POLICY_SPEC.loader.exec_module(policy)
+
+ella_app_settings_module = types.ModuleType("ella.services.app_settings")
+ella_app_settings_module.TTS_PROVIDERS = {"kokoro", "elevenlabs", "fish-audio", "fish-audio-s2"}
+ella_app_settings_module.build_effective_voice_settings = lambda _uid, voice: {
+    "effective_voice_settings": {
+        "voice_mode": voice.get("voice_mode", "elevenlabs") if isinstance(voice, dict) else "elevenlabs",
+        "one_shot_tts_provider": {
+            "fish-audio-s2": "fish-audio-s2",
+            "grok-voice": "kokoro",
+        }.get(voice.get("voice_mode") if isinstance(voice, dict) else None, "kokoro"),
+        "one_shot_tts_candidates": {
+            "fish-audio-s2": ["fish-audio-s2", "fish-audio", "kokoro", "elevenlabs"],
+            "grok-voice": ["kokoro", "elevenlabs"],
+        }.get(voice.get("voice_mode") if isinstance(voice, dict) else None, ["kokoro", "elevenlabs"]),
+    }
+}
+sys.modules["ella.services.app_settings"] = ella_app_settings_module
 
 sys.modules.setdefault("ella.routers", types.ModuleType("ella.routers"))
 resolve_module = types.ModuleType("ella.routers.resolve")
@@ -278,6 +294,40 @@ def test_synthesize_audio_falls_back_to_next_candidate(monkeypatch):
     assert attempted == ["fish-audio-s2", "fish-audio"]
     assert response.headers["x-guardian-tts-provider"] == "fish-audio"
     assert response.headers["x-guardian-fallback-used"] == "true"
+
+
+def test_enqueue_rejects_guardian_wake_fallback_echo_message():
+    rejected, reason = guardian._enqueue_rejects_guardian_echo(
+        "uid-1",
+        guardian.EnqueueRequest(
+            uid="uid-1",
+            url="https://example.test/audio.mp3",
+            trigger="wake_word_fallback",
+            message="I heard you. I am checking that now: Hi, Greg. I heard my name. I'm here with you.",
+        ),
+    )
+
+    assert rejected is True
+    assert reason == "guardian_playback_echo"
+
+
+def test_enqueue_does_not_reject_real_wake_word_question():
+    rejected, reason = guardian._enqueue_rejects_guardian_echo(
+        "uid-1",
+        guardian.EnqueueRequest(
+            uid="uid-1",
+            url="https://example.test/audio.mp3",
+            trigger="wake_word_fallback",
+            message="I heard you. I am checking that now: Hey Ella, where did I put my glasses?",
+        ),
+    )
+
+    assert rejected is False
+    assert reason is None
+
+
+def test_wake_word_row_matches_fallback_variants():
+    assert guardian._is_wake_word_row({"trigger_type": "wake_word_fallback", "metadata": {}})
 
 
 def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):
