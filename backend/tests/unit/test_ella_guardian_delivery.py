@@ -21,17 +21,17 @@ sys.modules["ella.services.escalation_policy"] = policy
 _POLICY_SPEC.loader.exec_module(policy)
 
 ella_app_settings_module = types.ModuleType("ella.services.app_settings")
-ella_app_settings_module.TTS_PROVIDERS = {"kokoro", "elevenlabs", "fish-audio", "fish-audio-s2"}
+ella_app_settings_module.TTS_PROVIDERS = {"kokoro", "elevenlabs", "fish-audio", "fish-audio-s2", "xai-tts"}
 ella_app_settings_module.build_effective_voice_settings = lambda _uid, voice: {
     "effective_voice_settings": {
         "voice_mode": voice.get("voice_mode", "elevenlabs") if isinstance(voice, dict) else "elevenlabs",
         "one_shot_tts_provider": {
             "fish-audio-s2": "fish-audio-s2",
-            "grok-voice": "kokoro",
+            "grok-voice": "xai-tts",
         }.get(voice.get("voice_mode") if isinstance(voice, dict) else None, "kokoro"),
         "one_shot_tts_candidates": {
             "fish-audio-s2": ["fish-audio-s2", "fish-audio", "kokoro", "elevenlabs"],
-            "grok-voice": ["kokoro", "elevenlabs"],
+            "grok-voice": ["xai-tts", "kokoro", "elevenlabs"],
         }.get(voice.get("voice_mode") if isinstance(voice, dict) else None, ["kokoro", "elevenlabs"]),
     }
 }
@@ -227,11 +227,11 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     assert response.body == b"mp3-bytes"
     url, kwargs = _FakeAsyncClient.posts[0]
     assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
-    assert kwargs["headers"]["X-TTS-Provider"] == "kokoro"
+    assert kwargs["headers"]["X-TTS-Provider"] == "xai-tts"
     assert kwargs["json"]["text"] == "Hello"
-    assert response.headers["x-guardian-tts-provider"] == "kokoro"
+    assert response.headers["x-guardian-tts-provider"] == "xai-tts"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
-    assert response.headers["x-guardian-tts-candidates"] == "kokoro,elevenlabs"
+    assert response.headers["x-guardian-tts-candidates"] == "xai-tts,kokoro,elevenlabs"
 
 
 def test_synthesize_audio_uses_matching_tts_provider(monkeypatch):

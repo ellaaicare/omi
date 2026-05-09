@@ -40,8 +40,8 @@ def test_effective_settings_maps_v2v_to_explicit_one_shot_fallback():
     effective = service.build_effective_voice_settings("uid-1", {"voice_mode": "grok-voice"})
 
     assert effective["voice_mode"] == "grok-voice"
-    assert effective["one_shot_tts_provider"] == "kokoro"
-    assert effective["effective_voice_settings"]["one_shot_tts_candidates"] == ["kokoro", "elevenlabs"]
+    assert effective["one_shot_tts_provider"] == "xai-tts"
+    assert effective["effective_voice_settings"]["one_shot_tts_candidates"] == ["xai-tts", "kokoro", "elevenlabs"]
     assert effective["effective_voice_settings"]["provider_type"] == "v2v"
     assert effective["effective_voice_settings"]["fallback_used"] is True
     assert "Guardian one-shots" in effective["effective_voice_settings"]["fallback_reason"]

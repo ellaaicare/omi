@@ -7,7 +7,7 @@ from typing import Any
 from google.cloud.firestore_v1.transforms import Sentinel
 
 
-TTS_PROVIDERS = {"elevenlabs", "fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro", "inworld"}
+TTS_PROVIDERS = {"elevenlabs", "fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro", "inworld", "xai-tts"}
 V2V_PROVIDERS = {"openclaw-direct", "grok-voice", "gemini-native-live", "openai-native-realtime"}
 VOICE_MODE_ALIASES = {
     "gemini-live": "gemini-native-live",
@@ -33,10 +33,11 @@ _ONE_SHOT_CANDIDATES_BY_VOICE_MODE = {
     "fish-audio-s2": ["fish-audio-s2", "fish-audio", "kokoro", "elevenlabs"],
     "kokoro": ["kokoro", "fish-audio-s2", "elevenlabs"],
     "inworld": ["inworld", "kokoro", "elevenlabs"],
+    "xai-tts": ["xai-tts", "kokoro", "elevenlabs"],
     # V2V modes keep conversation routing intact, but Guardian one-shots need
-    # explicit TTS routing until provider-native one-shot adapters are wired in.
+    # explicit TTS routing because queued Guardian playback is file-based.
     "openclaw-direct": [os.getenv("ELLA_OPENCLAW_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
-    "grok-voice": [os.getenv("ELLA_GROK_VOICE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
+    "grok-voice": [os.getenv("ELLA_GROK_VOICE_ONE_SHOT_TTS_PROVIDER", "xai-tts")],
     "gemini-native-live": [os.getenv("ELLA_GEMINI_LIVE_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
     "openai-native-realtime": [os.getenv("ELLA_OPENAI_REALTIME_ONE_SHOT_TTS_PROVIDER", _DEFAULT_ONE_SHOT_TTS_PROVIDER)],
 }

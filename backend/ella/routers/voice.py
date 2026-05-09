@@ -54,6 +54,10 @@ ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 SESSION_EXPIRY_HOURS = int(os.getenv("ELLA_SESSION_EXPIRY_HOURS", "1"))
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
+XAI_TTS_LANGUAGE = os.getenv("XAI_TTS_LANGUAGE", "en")
+XAI_TTS_OPTIMIZE_STREAMING_LATENCY = int(os.getenv("XAI_TTS_OPTIMIZE_STREAMING_LATENCY", "1"))
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -162,11 +166,14 @@ class VoiceConfigResponse(BaseModel):
     byte_order: str = "little_endian"
 
 
+DEFAULT_ELEVENLABS_VOICE_ID = "pFZP5JQG7iQjIQuC4Bku"
+
+
 class TtsRequest(BaseModel):
     """Request for text-to-speech synthesis."""
 
     text: str
-    voice_id: str = "pFZP5JQG7iQjIQuC4Bku"  # Lily voice
+    voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID  # Lily voice
 
 
 # ============================================================================
@@ -309,6 +316,13 @@ async def get_voice_providers():
             "type": "tts",
             "description": "Inworld TTS WebSocket, ~120-200ms, $5-10/1M chars",
             "available": bool(INWORLD_API_KEY),
+        },
+        {
+            "id": "xai-tts",
+            "name": "xAI TTS",
+            "type": "tts",
+            "description": "Grok/xAI one-shot TTS for queued Guardian playback",
+            "available": bool(XAI_API_KEY),
         },
         {
             "id": "grok-voice",
@@ -493,6 +507,7 @@ async def synthesize_speech(
       fish-audio-s1      — Fish Audio S1 (alias)
       fish-audio-s2      — Fish Audio S2 (alias)
       kokoro             — Kokoro-82M via local ella-tts server (Mac Mini :8930)
+      xai-tts            — xAI TTS REST API, useful for Grok-matched Guardian one-shots
       inworld            — Inworld TTS WebSocket (~120-200ms, $5-10/1M chars)
 
     V2V providers (grok-voice, gemini-live) return 422 directing iOS to use
@@ -545,6 +560,56 @@ async def synthesize_speech(
             print(f"[FLOW:VOICE-TTS] ERROR provider={provider} error={e} latency={_elapsed}ms", flush=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # --- xAI TTS (Grok one-shot audio, REST) ---
+    if provider == "xai-tts":
+        if not XAI_API_KEY:
+            print(f"[FLOW:VOICE-TTS] ERROR provider=xai-tts key_missing=true", flush=True)
+            raise HTTPException(status_code=500, detail="XAI_API_KEY not configured")
+        voice_id = request.voice_id if request.voice_id != DEFAULT_ELEVENLABS_VOICE_ID else XAI_TTS_VOICE_ID
+        print(f"[FLOW:VOICE-TTS] provider=xai-tts voice={voice_id} language={XAI_TTS_LANGUAGE} text_len={text_len}", flush=True)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.x.ai/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {XAI_API_KEY}",
+                        "Content-Type": "application/json",
+                        "Accept": "audio/mpeg",
+                    },
+                    json={
+                        "text": text,
+                        "voice_id": voice_id,
+                        "language": XAI_TTS_LANGUAGE,
+                        "codec": "mp3",
+                        "optimize_streaming_latency": XAI_TTS_OPTIMIZE_STREAMING_LATENCY,
+                        "text_normalization": True,
+                    },
+                    timeout=30.0,
+                )
+            _elapsed = int((time.time() - _start) * 1000)
+            if response.status_code != 200:
+                print(
+                    f"[FLOW:VOICE-TTS] ERROR provider=xai-tts status={response.status_code} "
+                    f"latency={_elapsed}ms body={response.text[:200]}",
+                    flush=True,
+                )
+                raise HTTPException(status_code=502, detail=f"xAI TTS error: {response.status_code}")
+            print(
+                f"[FLOW:VOICE-TTS] OK provider=xai-tts voice={voice_id} audio_bytes={len(response.content)} latency={_elapsed}ms",
+                flush=True,
+            )
+            return Response(content=response.content, media_type=response.headers.get("content-type", "audio/mpeg"))
+        except httpx.TimeoutException:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] TIMEOUT provider=xai-tts latency={_elapsed}ms", flush=True)
+            raise HTTPException(status_code=504, detail="xAI TTS timed out")
+        except HTTPException:
+            raise
+        except Exception as e:
+            _elapsed = int((time.time() - _start) * 1000)
+            print(f"[FLOW:VOICE-TTS] ERROR provider=xai-tts error={e} latency={_elapsed}ms", flush=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     # --- Inworld TTS (WebSocket, ~120-200ms) ---
     if provider == "inworld":
         if not INWORLD_API_KEY:
@@ -564,7 +629,7 @@ async def synthesize_speech(
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, grok-voice, gemini-live")
+        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, xai-tts, grok-voice, gemini-live")
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
@@ -629,8 +694,9 @@ async def voice_health():
         "service": "ella-voice",
         "voice_endpoint": ELLA_VOICE_ENDPOINT,
         "session_secret_configured": bool(ELLA_SESSION_SECRET),
-        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld"],
+        "tts_providers": ["elevenlabs", "fish-audio", "kokoro", "inworld", "xai-tts"],
         "tts_elevenlabs_configured": bool(ELEVENLABS_API_KEY),
+        "tts_xai_configured": bool(XAI_API_KEY),
         "tts_local_url": ELLA_TTS_URL,
         "v2v_providers": v2v_status,
     }
