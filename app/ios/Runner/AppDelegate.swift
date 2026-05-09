@@ -753,6 +753,14 @@ extension AppDelegate: WCSessionDelegate {
                 "poller": GuardianModePollingService.shared.statusSnapshot()
             ])
 
+        case "requestWakeAckPoll":
+            let args = call.arguments as? [String: Any]
+            GuardianModeManager.shared.requestWakeAckPoll(
+                reason: args?["reason"] as? String ?? "wake_candidate",
+                transcript: args?["transcript"] as? String
+            )
+            result(["status": "queued"])
+
         case "injectRemoteAudioClip":
             guard let args = call.arguments as? [String: Any],
                   let audioURLString = args["audioURL"] as? String,

@@ -21,6 +21,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -112,6 +113,7 @@ class CaptureProvider extends ChangeNotifier
 
   Timer? _recordingTimer;
   int _recordingDuration = 0; // in seconds
+  DateTime? _lastGuardianWakeAckPollAt;
 
   int _getRecordingDuration() => _recordingDuration;
 
@@ -162,6 +164,34 @@ class CaptureProvider extends ChangeNotifier
     final cachedIds = SharedPreferencesUtil().cachedPeople.map((p) => p.id).toSet();
     final segmentPersonIds = segments.map((s) => s.personId).whereType<String>().toSet();
     return segmentPersonIds.difference(cachedIds).isNotEmpty;
+  }
+
+  @visibleForTesting
+  static bool hasGuardianWakePhraseText(String text) {
+    final normalized = text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+    return RegExp(r'\b(hey|hi|hello|ok|okay)\s+ella\b').hasMatch(normalized);
+  }
+
+  bool _hasGuardianWakePhrase(List<TranscriptSegment> segments) =>
+      segments.any((segment) => hasGuardianWakePhraseText(segment.text));
+
+  String _guardianWakeTranscriptPreview(List<TranscriptSegment> segments) {
+    return segments.map((segment) => segment.text.trim()).where((text) => text.isNotEmpty).join(' ').trim();
+  }
+
+  void _maybeRequestGuardianWakeAckPoll(List<TranscriptSegment> newSegments) {
+    if (!PlatformService.isIOS || !_hasGuardianWakePhrase(newSegments)) return;
+
+    final now = DateTime.now();
+    final lastPollAt = _lastGuardianWakeAckPollAt;
+    if (lastPollAt != null && now.difference(lastPollAt) < const Duration(seconds: 6)) return;
+    _lastGuardianWakeAckPollAt = now;
+
+    final preview = _guardianWakeTranscriptPreview(newSegments);
+    DebugLogManager.logEvent('guardian_wake_candidate_poll_requested', {
+      'transcript_preview': preview.length > 120 ? preview.substring(0, 120) : preview,
+    });
+    unawaited(GuardianModeService().requestWakeAckPoll(reason: 'transcript_wake_candidate', transcript: preview));
   }
 
   CaptureProvider() {
@@ -1725,6 +1755,8 @@ class CaptureProvider extends ChangeNotifier
 
   void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
+
+    _maybeRequestGuardianWakeAckPoll(newSegments);
 
     if (segments.isEmpty && !_isLoadingInProgressConversation) {
       _isLoadingInProgressConversation = true;

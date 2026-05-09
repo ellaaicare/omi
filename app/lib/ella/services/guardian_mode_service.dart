@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 enum GuardianModeState {
@@ -79,6 +80,19 @@ class GuardianModeService {
     } catch (e) {
       print('GuardianMode: Error stopping: $e');
       _updateState(GuardianModeState.error);
+    }
+  }
+
+  /// Ask native iOS to interrupt the active Guardian poll timer after a likely
+  /// wake phrase. Native side still verifies Guardian is active.
+  Future<void> requestWakeAckPoll({String reason = 'wake_candidate', String? transcript}) async {
+    try {
+      await _channel.invokeMethod('requestWakeAckPoll', {
+        'reason': reason,
+        if (transcript != null) 'transcript': transcript,
+      });
+    } catch (e) {
+      debugPrint('GuardianMode: Error requesting wake ack poll: $e');
     }
   }
 

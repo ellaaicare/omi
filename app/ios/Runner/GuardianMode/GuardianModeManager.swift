@@ -126,6 +126,31 @@ class GuardianModeManager: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// Called when the app-side transcript stream sees a likely wake phrase.
+    /// This does not synthesize or route audio locally; it only interrupts the
+    /// active Guardian poll timer so a backend-created wake ack can be consumed
+    /// without waiting for the normal idle poll cadence.
+    func requestWakeAckPoll(reason: String, transcript: String?) {
+        queue.async { [weak self] in
+            guard let self = self, self.isActive else {
+                NSLog("GuardianMode: Ignoring wake ack poll request because Guardian is inactive")
+                return
+            }
+
+            let preview = transcript.map { String($0.prefix(80)) } ?? ""
+            DebugEventBuffer.shared.add(
+                id: "wake-ack-poll-\(Int(Date().timeIntervalSince1970 * 1000))",
+                triggerType: "guardian_wake_ack_poll_request",
+                message: "Wake candidate requested immediate Guardian next-audio poll",
+                metadata: [
+                    "reason": reason,
+                    "transcript_preview": preview
+                ]
+            )
+            GuardianModePollingService.shared.requestWakeAckPollBurst(reason: reason)
+        }
+    }
+
     // MARK: - Health Monitor
 
     /// Periodic check to detect queue stalls and recover
