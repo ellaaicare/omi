@@ -338,6 +338,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella MCP onboarding not available: {e}", flush=True)
 
+    # MCP OAuth discovery (RFC 8414 + RFC 9728 well-known endpoints)
+    try:
+        from ella.routers.mcp_well_known import router as mcp_well_known_router
+
+        app.include_router(mcp_well_known_router, tags=["MCP OAuth Discovery"])
+        print("  🌐 /.well-known/oauth-* - MCP OAuth discovery (RFC 8414/9728)", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ MCP OAuth discovery not available: {e}", flush=True)
+
     # Escalation policy resolver (classifier output -> deterministic delivery plan)
     try:
         from ella.routers.escalations import router as escalations_router
