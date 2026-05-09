@@ -3,8 +3,10 @@
 # Sends real-time transcript segments to n8n scanner for urgency detection.
 # Fire-and-forget with short timeout - doesn't block transcription flow.
 
+import hashlib
 import os
 import re
+import threading
 import time
 from typing import List, Optional
 
@@ -16,6 +18,16 @@ GUARDIAN_TRACE_LOG_URL = os.getenv(
     "ELLA_GUARDIAN_TRACE_LOG_URL",
     "http://127.0.0.1:8000/v1/ella/guardian/trace/log",
 )
+GUARDIAN_ENQUEUE_URL = os.getenv(
+    "ELLA_GUARDIAN_ENQUEUE_URL",
+    "http://127.0.0.1:8000/v1/ella/guardian/enqueue",
+)
+GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
+GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
+    "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
+    "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
+)
+GUARDIAN_WAKE_ACK_TIMEOUT_S = float(os.getenv("ELLA_GUARDIAN_WAKE_ACK_TIMEOUT_S", "2.0"))
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
@@ -356,6 +368,97 @@ def _log_trace_event(
         pass
 
 
+def _wake_turn_id(trace_id: str, text: str) -> str:
+    digest = hashlib.sha1(f"{trace_id}:{_normalize_text(text)}".encode("utf-8")).hexdigest()[:12]
+    return f"wake_{digest}"
+
+
+def _build_wake_ack_payload(uid: str, conversation_id: str, trace_id: str, scanner_segments: List[dict]) -> dict | None:
+    text = _combined_segment_text(scanner_segments)
+    if not contains_wake_phrase(text):
+        return None
+
+    wake_turn_id = _wake_turn_id(trace_id, text)
+    return {
+        "uid": uid,
+        "userID": uid,
+        "id": f"wake_ack_{trace_id}_{wake_turn_id}",
+        "url": GUARDIAN_WAKE_ACK_AUDIO_URL,
+        "priority": "normal",
+        "message": "wake_ack",
+        "trigger": "wake_word_ack",
+        "metadata": {
+            "trace_id": trace_id,
+            "parent_conversation_id": str(conversation_id),
+            "wake_turn_id": wake_turn_id,
+            "matched_pattern": "wake_phrase",
+            "ack_only": True,
+            "source": "omi_backend_fast_wake_ack",
+            "detected_at": time.time(),
+            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+        },
+    }
+
+
+def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_segments: List[dict]) -> None:
+    """Fire-and-forget audible wake acknowledgement before slower scanner work."""
+    payload = _build_wake_ack_payload(uid, conversation_id, trace_id, scanner_segments)
+    if payload is None:
+        return
+
+    wake_turn_id = str(payload["metadata"]["wake_turn_id"])
+
+    _log_trace_event(
+        trace_id=trace_id,
+        uid=uid,
+        stage="wake_detected",
+        status="success",
+        metadata={
+            "conversation_id": str(conversation_id),
+            "wake_turn_id": wake_turn_id,
+            "segments_preview": scanner_payload_preview(scanner_segments, limit=2),
+        },
+    )
+
+    def _post() -> None:
+        start = time.time()
+        try:
+            response = requests.post(
+                GUARDIAN_ENQUEUE_URL,
+                json=payload,
+                headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+                timeout=GUARDIAN_WAKE_ACK_TIMEOUT_S,
+            )
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="ack_enqueued",
+                status="success" if 200 <= response.status_code < 300 else "error",
+                latency_ms=int((time.time() - start) * 1000),
+                metadata={
+                    "wake_turn_id": wake_turn_id,
+                    "queue_item_id": payload["id"],
+                    "status_code": response.status_code,
+                    "response": response.text[:200],
+                },
+            )
+        except Exception as e:
+            _log_trace_event(
+                trace_id=trace_id,
+                uid=uid,
+                stage="ack_enqueued",
+                status="error",
+                latency_ms=int((time.time() - start) * 1000),
+                metadata={
+                    "wake_turn_id": wake_turn_id,
+                    "queue_item_id": payload["id"],
+                    "error": str(e)[:200],
+                },
+            )
+
+    threading.Thread(target=_post, name="guardian-wake-ack", daemon=True).start()
+
+
 def send_to_scanner(
     uid: str,
     conversation_id: str,
@@ -426,6 +529,8 @@ def send_to_scanner(
             flush=True,
         )
         return None
+
+    _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
         "uid": uid,
