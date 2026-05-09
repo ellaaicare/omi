@@ -222,10 +222,11 @@ def prepare_scanner_segments_for_dispatch(
     max_pending_window_s: float = WAKE_WORD_PENDING_WINDOW_S,
 ):
     """
-    Hold very short wake-word-only batches briefly and prepend them to the next batch.
+    Prepare transcript batches for scanner dispatch.
 
-    This preserves "Hey Ella" / "Ela" prefixes when diarization or STT flushes the
-    prefix separately from the actual question.
+    Short wake-word-only batches are dispatched immediately so a reconnect between
+    "Hey Ella" and the follow-up question cannot lose the wake event. Older
+    pending-prefix state is still honored for workers that already carry one.
     """
     now = now if now is not None else time.time()
     pending_wake_prefix_segments = list(pending_wake_prefix_segments or [])
@@ -248,11 +249,11 @@ def prepare_scanner_segments_for_dispatch(
 
     if is_short_wake_prefix_only(current_segments):
         return (
-            [],
             list(current_segments),
-            now,
+            [],
+            None,
             {
-                "action": "hold_wake_prefix",
+                "action": "direct_wake_prefix_dispatch",
                 "prepended_count": 0,
             },
         )

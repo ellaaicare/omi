@@ -151,6 +151,7 @@ async def _stream_handler(
 
     # Set Ella context for LLM proxy
     from utils.llm.clients import set_ella_context
+
     set_ella_context(uid=uid, task='transcription')
 
     # Helper to gate person_id based on client capability (backward compatibility)
@@ -1461,9 +1462,15 @@ async def _stream_handler(
 
             # DEBUG: Log received transcript segments
             if segments_to_process:
-                print(f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}")
+                print(
+                    f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}"
+                )
                 if len(segments_to_process) > 0:
-                    first_text = segments_to_process[0].get("text", "")[:80] if isinstance(segments_to_process[0], dict) else str(segments_to_process[0])[:80]
+                    first_text = (
+                        segments_to_process[0].get("text", "")[:80]
+                        if isinstance(segments_to_process[0], dict)
+                        else str(segments_to_process[0])[:80]
+                    )
                     print(f"[TRANSCRIPT-RECV] First segment: {first_text}")
 
             realtime_segment_buffers = []
@@ -1537,11 +1544,10 @@ async def _stream_handler(
                 _send_message_event(SegmentsDeletedEvent(segment_ids=removed_ids))
 
             if transcript_segments:
-                await websocket.send_json([segment.dict() for segment in updated_segments])
-
                 # ====== ELLA INTEGRATION: Send chunks to scanner ======
                 try:
                     from utils.ella import send_to_scanner
+
                     send_to_scanner(
                         uid=uid,
                         conversation_id=str(current_conversation_id),
@@ -1549,6 +1555,11 @@ async def _stream_handler(
                     )
                 except ImportError:
                     pass
+
+                try:
+                    await websocket.send_json([segment.dict() for segment in updated_segments])
+                except Exception as e:
+                    print(f"Error sending transcript segments to websocket: {e}", uid, session_id)
 
                 if transcript_send is not None and user_has_credits:
                     transcript_send([segment.dict() for segment in transcript_segments])
@@ -2130,6 +2141,7 @@ async def listen_handler(
             ensure_firestore_user_document,
             get_agent_cluster,
         )
+
         await ensure_firestore_user_document(uid)
         cluster = await get_agent_cluster(uid)
         if not cluster:
