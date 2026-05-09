@@ -837,6 +837,7 @@ def send_to_scanner(
     recent_segments: Optional[List[dict]] = None,
     scanner_window_text: Optional[str] = None,
     wake_prefix_recent: Optional[bool] = None,
+    latency_metadata: Optional[dict] = None,
 ) -> Optional[int]:
     """
     Send transcript segments to Ella scanner agent.
@@ -869,7 +870,11 @@ def send_to_scanner(
         {
             "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
             "text": canonicalize_wake_phrase(s.get("text", "")),
-            "stt_source": s.get("source"),  # edge_asr, deepgram, soniox
+            "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),  # edge_asr, deepgram, soniox
+            "is_user": s.get("is_user"),
+            "person_id": s.get("person_id"),
+            "speaker_id": s.get("speaker_id"),
+            "speech_profile_processed": s.get("speech_profile_processed"),
         }
         for s in segments
         if s.get("text")
@@ -944,12 +949,18 @@ def send_to_scanner(
         },
         "scanner_batch": batch_metadata,
     }
+    if latency_metadata:
+        payload["latency"] = latency_metadata
     if recent_segments is not None:
         payload["recent_segments"] = [
             {
                 "speaker": s.get("speaker") or f"SPEAKER_{s.get('speaker_id', 0)}",
                 "text": canonicalize_wake_phrase(s.get("text", "")),
-                "stt_source": s.get("source"),
+                "stt_source": s.get("stt_provider") or s.get("stt_source") or s.get("source"),
+                "is_user": s.get("is_user"),
+                "person_id": s.get("person_id"),
+                "speaker_id": s.get("speaker_id"),
+                "speech_profile_processed": s.get("speech_profile_processed"),
             }
             for s in recent_segments
             if s.get("text")
@@ -977,6 +988,7 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "scanner_status_code": resp.status_code,
                 "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
                 "rate_limit": rate_limit_status,
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
@@ -1006,6 +1018,7 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "timeout_s": timeout,
                 "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
@@ -1026,6 +1039,7 @@ def send_to_scanner(
                 "segment_count": len(scanner_segments),
                 "error": str(e)[:200],
                 "scanner_batch": batch_metadata,
+                "latency": latency_metadata or {},
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
