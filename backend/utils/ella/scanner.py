@@ -4,6 +4,7 @@
 # Fire-and-forget with short timeout - doesn't block transcription flow.
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -20,16 +21,19 @@ GUARDIAN_TRACE_LOG_URL = os.getenv(
     "ELLA_GUARDIAN_TRACE_LOG_URL",
     "http://127.0.0.1:8000/v1/ella/guardian/trace/log",
 )
-GUARDIAN_ENQUEUE_URL = os.getenv(
-    "ELLA_GUARDIAN_ENQUEUE_URL",
-    "http://127.0.0.1:8000/v1/ella/guardian/enqueue",
-)
+ELLA_POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
+ELLA_POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
+ELLA_POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
+ELLA_POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
+ELLA_POSTGRES_DATABASE = os.getenv("ELLA_POSTGRES_DATABASE", "ella_ai")
+GUARDIAN_ENQUEUE_URL = os.getenv("ELLA_GUARDIAN_ENQUEUE_URL", "http://127.0.0.1:8000/v1/ella/guardian/enqueue")
 GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
 GUARDIAN_WAKE_ACK_AUDIO_URL = os.getenv(
     "ELLA_GUARDIAN_WAKE_ACK_AUDIO_URL",
     "https://ella-ai-care.com/audio/system/wake_ack_pulse.mp3",
 )
 GUARDIAN_WAKE_ACK_TIMEOUT_S = float(os.getenv("ELLA_GUARDIAN_WAKE_ACK_TIMEOUT_S", "2.0"))
+GUARDIAN_WAKE_ACK_DIRECT_DB = os.getenv("ELLA_GUARDIAN_WAKE_ACK_DIRECT_DB", "true").lower() == "true"
 WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
@@ -688,25 +692,41 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
     def _post() -> None:
         start = time.time()
         try:
-            response = requests.post(
-                GUARDIAN_ENQUEUE_URL,
-                json=payload,
-                headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
-                timeout=GUARDIAN_WAKE_ACK_TIMEOUT_S,
-            )
-            _log_trace_event(
-                trace_id=trace_id,
-                uid=uid,
-                stage="ack_enqueued",
-                status="success" if 200 <= response.status_code < 300 else "error",
-                latency_ms=int((time.time() - start) * 1000),
-                metadata={
-                    "wake_turn_id": wake_turn_id,
-                    "queue_item_id": payload["id"],
-                    "status_code": response.status_code,
-                    "response": response.text[:200],
-                },
-            )
+            if GUARDIAN_WAKE_ACK_DIRECT_DB:
+                result = _insert_wake_ack_direct(uid, trace_id, payload)
+                _log_trace_event(
+                    trace_id=trace_id,
+                    uid=uid,
+                    stage="ack_enqueued",
+                    status=result.get("status", "success"),
+                    latency_ms=int((time.time() - start) * 1000),
+                    metadata={
+                        "wake_turn_id": wake_turn_id,
+                        "queue_item_id": payload["id"],
+                        **result,
+                    },
+                )
+            else:
+                response = requests.post(
+                    GUARDIAN_ENQUEUE_URL,
+                    json=payload,
+                    headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+                    timeout=GUARDIAN_WAKE_ACK_TIMEOUT_S,
+                )
+                _log_trace_event(
+                    trace_id=trace_id,
+                    uid=uid,
+                    stage="ack_enqueued",
+                    status="success" if 200 <= response.status_code < 300 else "error",
+                    latency_ms=int((time.time() - start) * 1000),
+                    metadata={
+                        "wake_turn_id": wake_turn_id,
+                        "queue_item_id": payload["id"],
+                        "method": "loopback_http",
+                        "status_code": response.status_code,
+                        "response": response.text[:200],
+                    },
+                )
         except Exception as e:
             _log_trace_event(
                 trace_id=trace_id,
@@ -722,6 +742,90 @@ def _enqueue_wake_ack(uid: str, conversation_id: str, trace_id: str, scanner_seg
             )
 
     threading.Thread(target=_post, name="guardian-wake-ack", daemon=True).start()
+
+
+def _insert_wake_ack_direct(uid: str, trace_id: str, payload: dict) -> dict:
+    """Insert wake ack without loopback HTTP so scanner timeouts cannot block the ring."""
+    try:
+        import psycopg2
+    except Exception as exc:
+        response = requests.post(
+            GUARDIAN_ENQUEUE_URL,
+            json=payload,
+            headers={"X-Guardian-Key": GUARDIAN_WEBHOOK_KEY},
+            timeout=max(GUARDIAN_WAKE_ACK_TIMEOUT_S, 12.0),
+        )
+        return {
+            "method": "loopback_http_fallback",
+            "status_code": response.status_code,
+            "fallback_reason": f"psycopg2_unavailable:{exc}",
+            "status": "success" if 200 <= response.status_code < 300 else "error",
+        }
+
+    metadata = dict(payload.get("metadata") or {})
+    metadata.setdefault("trace_id", trace_id)
+    metadata.setdefault("queue_item_id", payload["id"])
+
+    conn = psycopg2.connect(
+        host=ELLA_POSTGRES_HOST,
+        port=ELLA_POSTGRES_PORT,
+        user=ELLA_POSTGRES_USER,
+        password=ELLA_POSTGRES_PASSWORD,
+        dbname=ELLA_POSTGRES_DATABASE,
+    )
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER(%s)",
+                    (uid,),
+                )
+                row = cur.fetchone()
+                mode = str(row[0] if row and row[0] is not None else "").strip().lower()
+                if mode == "off":
+                    return {"method": "direct_db", "status": "skipped", "reason": "guardian_mode_off"}
+
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM guardian_queue
+                    WHERE uid = %s
+                      AND trigger_type = 'wake_word_ack'
+                      AND metadata->>'trace_id' = %s
+                      AND created_at > NOW() - INTERVAL '15 seconds'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (uid, trace_id),
+                )
+                duplicate = cur.fetchone()
+                if duplicate:
+                    return {
+                        "method": "direct_db",
+                        "status": "skipped",
+                        "deduped": True,
+                        "duplicate_queue_item_id": duplicate[0],
+                    }
+
+                cur.execute(
+                    """
+                    INSERT INTO guardian_queue (id, uid, url, priority, message, trigger_type, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (
+                        payload["id"],
+                        uid,
+                        payload["url"],
+                        payload.get("priority", "normal"),
+                        payload.get("message"),
+                        payload.get("trigger"),
+                        json.dumps(metadata),
+                    ),
+                )
+                return {"method": "direct_db", "status": "success", "inserted": cur.rowcount}
+    finally:
+        conn.close()
 
 
 def send_to_scanner(
