@@ -12,6 +12,7 @@ import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ella.services.mcp_identity import (
@@ -477,6 +478,69 @@ async def post_mcp_oauth_onboarding(request: MCPOAuthOnboardingRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# Dynamic Client Registration (RFC 7591)
+# MCP clients (Grok, ChatGPT, etc.) POST here to get a client_id before
+# starting the OAuth authorization code flow.
+# ---------------------------------------------------------------------------
+
+_registered_clients: dict[str, dict[str, Any]] = {}
+
+
+@router.post("/register")
+async def post_mcp_register(request: Request):
+    """RFC 7591 — Dynamic Client Registration.
+
+    Accepts client metadata and returns a client_id. This enables MCP
+    clients like Grok to auto-register without manual configuration.
+    """
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+
+    redirect_uris = body.get("redirect_uris") or []
+    if not redirect_uris or not isinstance(redirect_uris, list):
+        raise HTTPException(status_code=400, detail="redirect_uris is required")
+
+    # Validate redirect URIs: must be HTTPS or localhost
+    for uri in redirect_uris:
+        if not isinstance(uri, str):
+            raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+        parsed = urllib.parse.urlparse(uri)
+        if parsed.hostname not in {"localhost", "127.0.0.1"} and parsed.scheme != "https":
+            raise HTTPException(status_code=400, detail=f"redirect_uri must use HTTPS or localhost: {uri}")
+
+    grant_types = body.get("grant_types") or ["authorization_code"]
+    response_types = body.get("response_types") or ["code"]
+    token_endpoint_auth_method = body.get("token_endpoint_auth_method", "none")
+    client_name = body.get("client_name", "")
+    application_type = body.get("application_type", "web")
+
+    # Generate a stable client_id from redirect_uris so re-registration
+    # returns the same ID (idempotent).
+    uri_key = "|".join(sorted(redirect_uris))
+    client_id = "dcr-" + hashlib.sha256(uri_key.encode()).hexdigest()[:24]
+
+    registration = {
+        "client_id": client_id,
+        "redirect_uris": redirect_uris,
+        "grant_types": grant_types,
+        "response_types": response_types,
+        "token_endpoint_auth_method": token_endpoint_auth_method,
+        "client_name": client_name,
+        "application_type": application_type,
+    }
+    _registered_clients[client_id] = registration
+
+    return JSONResponse(
+        content=registration,
+        status_code=201,
+    )
+
+
 @router.get("/authorize")
 async def get_mcp_authorize(
     response_type: str,
@@ -492,8 +556,12 @@ async def get_mcp_authorize(
 ):
     if response_type != "code":
         raise HTTPException(status_code=400, detail="response_type must be code")
-    # Accept our static client_id OR any HTTPS URL (Client ID Metadata Document per MCP spec)
-    if client_id != _oauth_client_id() and not client_id.startswith("https://"):
+    # Accept: static client_id, DCR-issued client_id, or HTTPS URL (Client ID Metadata Document)
+    if (
+        client_id != _oauth_client_id()
+        and client_id not in _registered_clients
+        and not client_id.startswith("https://")
+    ):
         raise HTTPException(status_code=400, detail="Invalid client_id")
     if code_challenge_method and code_challenge_method != "S256":
         raise HTTPException(status_code=400, detail="code_challenge_method must be S256")
@@ -535,7 +603,12 @@ async def get_mcp_authorize(
 async def post_mcp_token(request: Request):
     data = await _parse_token_request(request)
     client_id = str(data.get("client_id") or "")
-    if client_id and client_id != _oauth_client_id() and not client_id.startswith("https://"):
+    if (
+        client_id
+        and client_id != _oauth_client_id()
+        and client_id not in _registered_clients
+        and not client_id.startswith("https://")
+    ):
         raise HTTPException(status_code=400, detail="Invalid client_id")
 
     ttl_seconds = _mcp_session_ttl_seconds(data.get("ttl_seconds") or data.get("expires_in"))
