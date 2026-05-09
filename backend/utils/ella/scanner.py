@@ -8,6 +8,8 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import List, Optional
 
 import requests
@@ -32,6 +34,11 @@ WAKE_WORD_PREFIX_MAX_WORDS = 4
 WAKE_WORD_PENDING_WINDOW_S = float(os.getenv("ELLA_WAKE_WORD_PENDING_WINDOW_S", "12.0"))
 SCANNER_CONTEXT_WINDOW_S = float(os.getenv("ELLA_SCANNER_CONTEXT_WINDOW_S", "12.0"))
 GUARDIAN_ECHO_SUPPRESSION_SECONDS = int(os.getenv("ELLA_GUARDIAN_ECHO_SUPPRESSION_SECONDS", "45"))
+SCANNER_AMBIENT_BATCHING_ENABLED = os.getenv("ELLA_SCANNER_AMBIENT_BATCHING_ENABLED", "true").lower() == "true"
+SCANNER_AMBIENT_BATCH_SECONDS = float(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_SECONDS", "10.0"))
+SCANNER_AMBIENT_BATCH_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_WORDS", "70"))
+SCANNER_AMBIENT_BATCH_MAX_WORDS = int(os.getenv("ELLA_SCANNER_AMBIENT_BATCH_MAX_WORDS", "180"))
+SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S = float(os.getenv("ELLA_SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S", "15.0"))
 _ECHO_RISKY_OUTPUTS = {"medium", "high", "very_high"}
 _GUARDIAN_ECHO_MARKERS = (
     "hi greg",
@@ -88,6 +95,24 @@ WAKE_WORD_QUESTION_STARTERS = (
     "were",
 )
 
+_EMERGENCY_PATTERN = re.compile(
+    r"\b("
+    r"911|emergency|urgent|ambulance|paramedic|"
+    r"help me|need help|call for help|"
+    r"can(?:not|'t|t) breathe|chest pain|heart attack|stroke|seizure|"
+    r"fell|fallen|falling|bleeding|choking|overdose|"
+    r"suicidal|kill myself|hurt myself|fire|break in|burglar"
+    r")\b",
+    re.IGNORECASE,
+)
+_DURATION_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>ms|s|m|h)")
+_SCANNER_BATCHES: dict[tuple[str, str, str], dict] = {}
+_SCANNER_RATE_LIMIT_UNTIL = {
+    "global": 0.0,
+    "users": {},
+}
+_SCANNER_STATE_LOCK = threading.Lock()
+
 
 def _trace_id_for(conversation_id: str) -> str:
     """Use the conversation id as the cross-service guardian trace id."""
@@ -99,6 +124,10 @@ def _trace_id_for(conversation_id: str) -> str:
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())).strip()
+
+
+def _word_count(text: str) -> int:
+    return len(_normalize_text(text).split())
 
 
 def _normalize_for_echo_match(text: str) -> str:
@@ -174,6 +203,18 @@ def contains_wake_phrase(text: str) -> bool:
     if len(tokens) >= 2 and tokens[0] == "al":
         return tokens[1] in WAKE_WORD_QUESTION_STARTERS
     return False
+
+
+def contains_emergency_phrase(text: str) -> bool:
+    return bool(_EMERGENCY_PATTERN.search(text or ""))
+
+
+def scanner_immediate_reason(text: str, *, wake_prefix_recent: Optional[bool] = None) -> Optional[str]:
+    if contains_wake_phrase(text) or wake_prefix_recent:
+        return "wake"
+    if contains_emergency_phrase(text):
+        return "emergency"
+    return None
 
 
 def canonicalize_wake_phrase(text: str) -> str:
@@ -299,6 +340,230 @@ def scanner_payload_preview(segments: List[dict], *, limit: int = 4) -> List[dic
             }
         )
     return preview
+
+
+def scanner_model_name() -> str:
+    return (
+        os.getenv("ELLA_SCANNER_GROQ_MODEL")
+        or os.getenv("GROQ_MODEL")
+        or os.getenv("OMI_GROQ_MODEL")
+        or os.getenv("SCANNER_MODEL")
+        or "unknown"
+    )
+
+
+def _scanner_batch_key(uid: str, conversation_id: str, device_type: str) -> tuple[str, str, str]:
+    return (str(uid), str(conversation_id), str(device_type or "omi"))
+
+
+def _new_ambient_batch(now: float) -> dict:
+    return {
+        "segments": [],
+        "started_at": now,
+        "last_at": now,
+        "word_count": 0,
+    }
+
+
+def _append_to_ambient_batch(batch: dict, segments: List[dict], now: float) -> None:
+    batch["segments"].extend(segments)
+    batch["last_at"] = now
+    batch["word_count"] += _word_count(_combined_segment_text(segments))
+
+
+def _ambient_flush_reason(batch: dict, now: float) -> Optional[str]:
+    elapsed_s = max(0.0, now - float(batch.get("started_at") or now))
+    if int(batch.get("word_count") or 0) >= SCANNER_AMBIENT_BATCH_WORDS:
+        return "word_threshold"
+    if elapsed_s >= SCANNER_AMBIENT_BATCH_SECONDS:
+        return "time_threshold"
+    return None
+
+
+def _duration_to_seconds(value: str) -> Optional[float]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+
+    # Groq reset headers are commonly duration strings such as "1m2.5s".
+    total = 0.0
+    matched = False
+    for match in _DURATION_RE.finditer(raw):
+        matched = True
+        amount = float(match.group("value"))
+        unit = match.group("unit")
+        if unit == "ms":
+            total += amount / 1000.0
+        elif unit == "s":
+            total += amount
+        elif unit == "m":
+            total += amount * 60.0
+        elif unit == "h":
+            total += amount * 3600.0
+    if matched:
+        return max(0.0, total)
+
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return None
+
+
+def rate_limit_status_from_response(resp) -> dict:
+    headers = {str(k).lower(): str(v) for k, v in getattr(resp, "headers", {}).items()}
+    retry_after_s = _duration_to_seconds(headers.get("retry-after", ""))
+    reset_requests_s = _duration_to_seconds(headers.get("x-ratelimit-reset-requests", ""))
+    reset_tokens_s = _duration_to_seconds(headers.get("x-ratelimit-reset-tokens", ""))
+    status_code = int(getattr(resp, "status_code", 0) or 0)
+    remaining_requests = headers.get("x-ratelimit-remaining-requests")
+    limited = status_code == 429 or headers.get("retry-after") is not None or remaining_requests == "0"
+    return {
+        "limited": limited,
+        "retry_after_s": retry_after_s,
+        "reset_requests_s": reset_requests_s,
+        "reset_tokens_s": reset_tokens_s,
+        "remaining_requests": remaining_requests,
+        "limit_requests": headers.get("x-ratelimit-limit-requests"),
+        "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
+        "limit_tokens": headers.get("x-ratelimit-limit-tokens"),
+    }
+
+
+def _record_scanner_backpressure(uid: str, status: dict, now: float) -> None:
+    if not status.get("limited"):
+        return
+    retry_after_s = (
+        status.get("retry_after_s")
+        or status.get("reset_requests_s")
+        or status.get("reset_tokens_s")
+        or SCANNER_RATE_LIMIT_DEFAULT_BACKOFF_S
+    )
+    until = now + max(0.0, float(retry_after_s))
+    with _SCANNER_STATE_LOCK:
+        _SCANNER_RATE_LIMIT_UNTIL["global"] = max(float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0), until)
+        users = _SCANNER_RATE_LIMIT_UNTIL.setdefault("users", {})
+        users[str(uid)] = max(float(users.get(str(uid)) or 0.0), until)
+
+
+def _scanner_backpressure_remaining_s(uid: str, now: float) -> float:
+    with _SCANNER_STATE_LOCK:
+        global_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0)
+        user_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("users", {}).get(str(uid)) or 0.0)
+    return max(0.0, max(global_until, user_until) - now)
+
+
+def reset_scanner_batch_state() -> None:
+    """Test helper for clearing in-memory ambient batching and backpressure state."""
+    with _SCANNER_STATE_LOCK:
+        _SCANNER_BATCHES.clear()
+        _SCANNER_RATE_LIMIT_UNTIL["global"] = 0.0
+        _SCANNER_RATE_LIMIT_UNTIL["users"] = {}
+
+
+def _apply_ambient_batching(
+    uid: str,
+    conversation_id: str,
+    scanner_segments: List[dict],
+    device_type: str,
+    trace_id: str,
+    *,
+    wake_prefix_recent: Optional[bool] = None,
+    now: Optional[float] = None,
+) -> tuple[Optional[List[dict]], dict]:
+    now = now if now is not None else time.time()
+    combined_text = _combined_segment_text(scanner_segments)
+    immediate_reason = scanner_immediate_reason(combined_text, wake_prefix_recent=wake_prefix_recent)
+    base_metadata = {
+        "batching_enabled": SCANNER_AMBIENT_BATCHING_ENABLED,
+        "model": scanner_model_name(),
+        "batch_target_seconds": SCANNER_AMBIENT_BATCH_SECONDS,
+        "batch_target_words": SCANNER_AMBIENT_BATCH_WORDS,
+        "immediate_reason": immediate_reason,
+    }
+
+    if not SCANNER_AMBIENT_BATCHING_ENABLED:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": "disabled",
+            "rate_limit_status": "not_checked",
+        }
+
+    if immediate_reason:
+        return scanner_segments, {
+            **base_metadata,
+            "batch_size": len(scanner_segments),
+            "batch_word_count": _word_count(combined_text),
+            "flush_reason": f"immediate_{immediate_reason}",
+            "rate_limit_status": "bypassed_for_immediate",
+        }
+
+    key = _scanner_batch_key(uid, conversation_id, device_type)
+    with _SCANNER_STATE_LOCK:
+        batch = _SCANNER_BATCHES.get(key)
+        if not batch:
+            batch = _new_ambient_batch(now)
+            _SCANNER_BATCHES[key] = batch
+        _append_to_ambient_batch(batch, scanner_segments, now)
+        flush_reason = _ambient_flush_reason(batch, now)
+        batch_word_count = int(batch.get("word_count") or 0)
+        batch_size = len(batch.get("segments") or [])
+        batch_started_at = float(batch.get("started_at") or now)
+
+        global_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("global") or 0.0)
+        user_until = float(_SCANNER_RATE_LIMIT_UNTIL.get("users", {}).get(str(uid)) or 0.0)
+        backpressure_remaining_s = max(0.0, max(global_until, user_until) - now)
+        if backpressure_remaining_s > 0:
+            if batch_word_count >= SCANNER_AMBIENT_BATCH_MAX_WORDS:
+                _SCANNER_BATCHES.pop(key, None)
+                return None, {
+                    **base_metadata,
+                    "batch_size": batch_size,
+                    "batch_word_count": batch_word_count,
+                    "flush_reason": "rate_limited_drop",
+                    "rate_limit_status": "active",
+                    "backpressure_remaining_s": round(backpressure_remaining_s, 3),
+                    "batch_age_s": round(now - batch_started_at, 3),
+                }
+            return None, {
+                **base_metadata,
+                "batch_size": batch_size,
+                "batch_word_count": batch_word_count,
+                "flush_reason": "rate_limited_defer",
+                "rate_limit_status": "active",
+                "backpressure_remaining_s": round(backpressure_remaining_s, 3),
+                "batch_age_s": round(now - batch_started_at, 3),
+            }
+
+        if not flush_reason:
+            return None, {
+                **base_metadata,
+                "batch_size": batch_size,
+                "batch_word_count": batch_word_count,
+                "flush_reason": "pending",
+                "rate_limit_status": "not_limited",
+                "batch_age_s": round(now - batch_started_at, 3),
+            }
+
+        dispatch_segments = list(batch.get("segments") or [])
+        _SCANNER_BATCHES.pop(key, None)
+
+    return dispatch_segments, {
+        **base_metadata,
+        "batch_size": len(dispatch_segments),
+        "batch_word_count": _word_count(_combined_segment_text(dispatch_segments)),
+        "flush_reason": flush_reason,
+        "rate_limit_status": "not_limited",
+        "batch_age_s": round(now - batch_started_at, 3),
+    }
 
 
 def build_scanner_context_window(
@@ -530,6 +795,35 @@ def send_to_scanner(
         )
         return None
 
+    scanner_segments, batch_metadata = _apply_ambient_batching(
+        uid,
+        str(conversation_id),
+        scanner_segments,
+        device_type,
+        trace_id,
+        wake_prefix_recent=wake_prefix_recent,
+    )
+    if not scanner_segments:
+        _log_trace_event(
+            trace_id=trace_id,
+            uid=uid,
+            stage="scanner_ambient_batch",
+            status="deferred" if batch_metadata.get("flush_reason") != "rate_limited_drop" else "dropped",
+            metadata={
+                "conversation_id": str(conversation_id),
+                "device_type": device_type,
+                **batch_metadata,
+            },
+        )
+        print(
+            f"📡 Scanner ambient batch trace={trace_id} "
+            f"status={batch_metadata.get('flush_reason')} "
+            f"size={batch_metadata.get('batch_size')} words={batch_metadata.get('batch_word_count')} "
+            f"rate_limit={batch_metadata.get('rate_limit_status')}",
+            flush=True,
+        )
+        return None
+
     _enqueue_wake_ack(uid, str(conversation_id), trace_id, scanner_segments)
 
     payload = {
@@ -544,6 +838,7 @@ def send_to_scanner(
             "source": "omi-backend",
             "contract": "ella-ai#600",
         },
+        "scanner_batch": batch_metadata,
     }
     if recent_segments is not None:
         payload["recent_segments"] = [
@@ -564,6 +859,8 @@ def send_to_scanner(
         start = time.time()
         resp = requests.post(ELLA_CONFIG.scanner_url, json=payload, timeout=timeout)
         latency_ms = int((time.time() - start) * 1000)
+        rate_limit_status = rate_limit_status_from_response(resp)
+        _record_scanner_backpressure(uid, rate_limit_status, time.time())
         _log_trace_event(
             trace_id=trace_id,
             uid=uid,
@@ -575,6 +872,8 @@ def send_to_scanner(
                 "device_type": device_type,
                 "segment_count": len(scanner_segments),
                 "scanner_status_code": resp.status_code,
+                "scanner_batch": batch_metadata,
+                "rate_limit": rate_limit_status,
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
@@ -582,6 +881,8 @@ def send_to_scanner(
         )
         print(
             f"📡 Scanner: trace={trace_id} {len(scanner_segments)} segments → {resp.status_code} "
+            f"batch={batch_metadata.get('flush_reason')} words={batch_metadata.get('batch_word_count')} "
+            f"rate_limited={rate_limit_status.get('limited')} "
             f"payload={scanner_payload_preview(scanner_segments)} "
             f"recent={scanner_payload_preview(payload.get('recent_segments', []))} "
             f"wake_prefix_recent={payload.get('wake_prefix_recent')}",
@@ -600,6 +901,7 @@ def send_to_scanner(
                 "device_type": device_type,
                 "segment_count": len(scanner_segments),
                 "timeout_s": timeout,
+                "scanner_batch": batch_metadata,
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
@@ -619,6 +921,7 @@ def send_to_scanner(
                 "device_type": device_type,
                 "segment_count": len(scanner_segments),
                 "error": str(e)[:200],
+                "scanner_batch": batch_metadata,
                 "segments_preview": scanner_payload_preview(scanner_segments),
                 "recent_segments_preview": scanner_payload_preview(payload.get("recent_segments", [])),
                 "wake_prefix_recent": payload.get("wake_prefix_recent"),
