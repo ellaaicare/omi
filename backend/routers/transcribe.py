@@ -103,6 +103,8 @@ router = APIRouter()
 
 
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
+STT_LATENCY_LOGS_ENABLED = os.getenv('ELLA_STT_LATENCY_LOGS_ENABLED', 'true').lower() == 'true'
+STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LIMIT', '25'))
 
 # Freemium: Send notification when credits threshold is reached
 FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
@@ -111,6 +113,34 @@ FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
 class CustomSttMode(str, Enum):
     disabled = "disabled"
     enabled = "enabled"
+
+
+def _utc_iso_from_ts(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _elapsed_ms(start: Optional[float], end: Optional[float] = None) -> Optional[int]:
+    if start is None:
+        return None
+    end = end if end is not None else time.time()
+    return int((end - start) * 1000)
+
+
+def _client_ts_to_ms(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    # Accept either seconds or milliseconds from clients.
+    if numeric < 10_000_000_000:
+        numeric *= 1000
+    return int(numeric)
+
+
+def _stt_service_value(service: Optional[STTService]) -> Optional[str]:
+    return service.value if isinstance(service, STTService) else service
 
 
 async def _stream_handler(
@@ -127,12 +157,109 @@ async def _stream_handler(
     custom_stt_mode: CustomSttMode = CustomSttMode.disabled,
     onboarding_mode: bool = False,
     speaker_auto_assign_enabled: bool = False,
+    socket_accepted_at: Optional[float] = None,
 ):
     """
     Core WebSocket streaming handler. Assumes websocket is already accepted and uid is validated.
     This function is called by both _listen (for app clients) and web_listen_handler (for web clients).
     """
     session_id = str(uuid.uuid4())
+    session_started_at = time.time()
+    socket_accepted_at = socket_accepted_at or session_started_at
+    requested_stt_service = stt_service
+    selected_stt_service: Optional[STTService] = None
+    selected_stt_language: Optional[str] = None
+    selected_stt_model: Optional[str] = None
+    current_conversation_id = None
+    first_audio_frame_at: Optional[float] = None
+    first_interim_result_at: Optional[float] = None
+    first_stt_result_at: Optional[float] = None
+    first_transcript_buffered_at: Optional[float] = None
+    first_transcript_dispatched_at: Optional[float] = None
+    stt_connect_started_at: Optional[float] = None
+    stt_connect_ready_at: Optional[float] = None
+    speech_profile_state: dict = {}
+    client_latency_events: List[dict] = []
+
+    def _latency_metadata() -> dict:
+        return {
+            "session_id": session_id,
+            "socket_accepted_at": _utc_iso_from_ts(socket_accepted_at),
+            "first_audio_frame_at": _utc_iso_from_ts(first_audio_frame_at) if first_audio_frame_at else None,
+            "selected_stt_provider": _stt_service_value(selected_stt_service),
+            "selected_stt_language": selected_stt_language,
+            "selected_stt_model": selected_stt_model,
+            "stt_connect_ready_at": _utc_iso_from_ts(stt_connect_ready_at) if stt_connect_ready_at else None,
+            "first_interim_result_at": _utc_iso_from_ts(first_interim_result_at) if first_interim_result_at else None,
+            "first_stt_result_at": _utc_iso_from_ts(first_stt_result_at) if first_stt_result_at else None,
+            "first_transcript_buffered_at": (
+                _utc_iso_from_ts(first_transcript_buffered_at) if first_transcript_buffered_at else None
+            ),
+            "first_transcript_dispatched_at": (
+                _utc_iso_from_ts(first_transcript_dispatched_at) if first_transcript_dispatched_at else None
+            ),
+            "speech_profile": speech_profile_state,
+            "client_latency_events": client_latency_events[-STT_LATENCY_CLIENT_EVENT_LIMIT:],
+        }
+
+    def _latency_log(event: str, **metadata) -> None:
+        if not STT_LATENCY_LOGS_ENABLED:
+            return
+        now = time.time()
+        payload = {
+            "event": event,
+            "uid": uid,
+            "session_id": session_id,
+            "conversation_id": str(current_conversation_id) if current_conversation_id else None,
+            "at": _utc_iso_from_ts(now),
+            "since_socket_accept_ms": _elapsed_ms(socket_accepted_at, now),
+            "since_first_audio_ms": _elapsed_ms(first_audio_frame_at, now),
+            "requested_stt_provider": _stt_service_value(requested_stt_service),
+            "selected_stt_provider": _stt_service_value(selected_stt_service),
+            "selected_stt_language": selected_stt_language,
+            "selected_stt_model": selected_stt_model,
+            "codec": codec,
+            "sample_rate": sample_rate,
+            "include_speech_profile": include_speech_profile,
+        }
+        payload.update({k: v for k, v in metadata.items() if v is not None})
+        print(f"[STT-LATENCY] {json.dumps(payload, default=str)[:4000]}", flush=True)
+
+    def _remember_client_latency_event(event: dict) -> None:
+        name = str(event.get("event") or event.get("name") or event.get("stage") or "client_event")
+        client_ts_ms = _client_ts_to_ms(
+            event.get("client_ts_ms")
+            or event.get("client_timestamp_ms")
+            or event.get("client_sent_at_ms")
+            or event.get("timestamp_ms")
+            or event.get("ts_ms")
+        )
+        received_at = time.time()
+        item = {
+            "event": name,
+            "client_ts_ms": client_ts_ms,
+            "received_at": _utc_iso_from_ts(received_at),
+            "sequence": event.get("sequence") or event.get("seq"),
+            "delta_client_to_backend_ms": int(time.time() * 1000) - client_ts_ms if client_ts_ms else None,
+        }
+        client_latency_events.append(item)
+        del client_latency_events[:-STT_LATENCY_CLIENT_EVENT_LIMIT]
+        _latency_log("client_timestamp_received", client_event=item)
+
+    def _stt_event_callback(event: dict) -> None:
+        nonlocal first_interim_result_at
+        result_type = event.get("result_type")
+        if result_type == "interim" and first_interim_result_at is None:
+            first_interim_result_at = time.time()
+            _latency_log(
+                "first_interim_result",
+                provider=event.get("provider"),
+                text=event.get("text"),
+                since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_interim_result_at),
+                since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_interim_result_at),
+            )
+
+    _latency_log("socket_accepted", source=source, custom_stt_mode=custom_stt_mode.value, onboarding=onboarding_mode)
     print(
         '_stream_handler',
         uid,
@@ -211,11 +338,22 @@ async def _stream_handler(
     # Convert 'auto' to 'multi' for consistency
     language = 'multi' if language == 'auto' else language
 
-    # Determine the best STT service
+    # Determine the best STT service. If the client explicitly requests a
+    # provider through /v4/listen?stt_service=..., honor that provider instead
+    # of silently falling back to server STT_SERVICE_MODELS order.
     stt_service, stt_language, stt_model = get_stt_service_for_language(
-        language, multi_lang_enabled=not single_language_mode
+        language, multi_lang_enabled=not single_language_mode, preferred_service=requested_stt_service
+    )
+    selected_stt_service = stt_service
+    selected_stt_language = stt_language
+    selected_stt_model = stt_model
+    _latency_log(
+        "stt_provider_selected",
+        selection_source="client_query" if requested_stt_service else "server_config",
+        single_language_mode=single_language_mode,
     )
     if not stt_service or not stt_language:
+        _latency_log("stt_provider_unsupported", requested_language=language)
         await websocket.close(code=1008, reason=f"The language is not supported, {language}")
         return
 
@@ -276,8 +414,6 @@ async def _stream_handler(
     last_usage_record_timestamp: Optional[float] = None
     words_transcribed_since_last_record: int = 0
     last_transcript_time: Optional[float] = None
-    current_conversation_id = None
-
     freemium_threshold_sent = False  # Track if we've sent the freemium threshold notification
 
     async def _record_usage_periodically():
@@ -686,6 +822,20 @@ async def _stream_handler(
 
     def stream_transcript(segments):
         nonlocal realtime_segment_buffers
+        nonlocal first_stt_result_at
+        if segments and first_stt_result_at is None:
+            first_stt_result_at = time.time()
+            _latency_log(
+                "first_final_result",
+                segment_count=len(segments),
+                first_text=(segments[0].get("text", "")[:80] if isinstance(segments[0], dict) else None),
+                provider=_stt_service_value(stt_service),
+                since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_stt_result_at),
+                since_stt_connect_start_ms=_elapsed_ms(stt_connect_started_at, first_stt_result_at),
+            )
+        for segment in segments or []:
+            if isinstance(segment, dict):
+                segment.setdefault("stt_provider", _stt_service_value(stt_service))
         realtime_segment_buffers.extend(segments)
 
     async def _process_stt():
@@ -695,9 +845,12 @@ async def _stream_handler(
         nonlocal speechmatics_socket
         nonlocal deepgram_socket
         nonlocal deepgram_profile_socket
+        nonlocal stt_connect_started_at
+        nonlocal stt_connect_ready_at
         try:
             if use_custom_stt:
                 speech_profile_complete.set()  # No speech profile needed
+                _latency_log("stt_custom_mode_ready")
                 print(f"Custom STT mode enabled - using suggested transcripts from app", uid, session_id)
                 return None
 
@@ -712,9 +865,34 @@ async def _stream_handler(
                 if has_speech_profile:
                     speech_profile_preseconds = SPEECH_PROFILE_FIXED_DURATION + SPEECH_PROFILE_PADDING_DURATION
 
+            speech_profile_state.clear()
+            speech_profile_state.update(
+                {
+                    "include_speech_profile": include_speech_profile,
+                    "has_speech_profile": has_speech_profile,
+                    "preseconds": speech_profile_preseconds,
+                    "fixed_duration": SPEECH_PROFILE_FIXED_DURATION,
+                    "padding_duration": SPEECH_PROFILE_PADDING_DURATION,
+                    "stabilize_delay": SPEECH_PROFILE_STABILIZE_DELAY,
+                    "speech_profile_processed_initial": speech_profile_complete.is_set(),
+                    "native_soniox_speaker_identification_enabled": False,
+                }
+            )
+            _latency_log("speech_profile_state", speech_profile=speech_profile_state)
+
             # If no speech profile, mark as complete immediately
             if not has_speech_profile:
                 speech_profile_complete.set()
+
+            stt_connect_started_at = time.time()
+            _latency_log(
+                "stt_connection_start",
+                provider=_stt_service_value(stt_service),
+                stt_language=stt_language,
+                stt_model=stt_model,
+                speech_profile_preseconds=speech_profile_preseconds,
+                interim_results_enabled=False,
+            )
 
             # DEEPGRAM
             if stt_service == STTService.deepgram:
@@ -726,6 +904,7 @@ async def _stream_handler(
                     preseconds=speech_profile_preseconds,
                     model=stt_model,
                     keywords=vocabulary[:100] if vocabulary else None,
+                    stt_event_callback=_stt_event_callback,
                 )
                 if has_speech_profile:
                     deepgram_profile_socket = await process_audio_dg(
@@ -735,6 +914,7 @@ async def _stream_handler(
                         1,
                         model=stt_model,
                         keywords=vocabulary[:100] if vocabulary else None,
+                        stt_event_callback=_stt_event_callback,
                     )
 
             # SONIOX
@@ -752,6 +932,7 @@ async def _stream_handler(
                     uid if include_speech_profile else None,
                     preseconds=speech_profile_preseconds,
                     language_hints=hints,
+                    stt_event_callback=_stt_event_callback,
                 )
 
                 # Create a second socket for initial speech profile if needed
@@ -762,6 +943,7 @@ async def _stream_handler(
                         stt_language,
                         uid if include_speech_profile else None,
                         language_hints=hints,
+                        stt_event_callback=_stt_event_callback,
                     )
 
             # SPEECHMATICS
@@ -770,12 +952,20 @@ async def _stream_handler(
                     stream_transcript, sample_rate, stt_language, preseconds=speech_profile_preseconds
                 )
 
+            stt_connect_ready_at = time.time()
+            _latency_log(
+                "stt_connection_ready",
+                connect_latency_ms=_elapsed_ms(stt_connect_started_at, stt_connect_ready_at),
+                provider=_stt_service_value(stt_service),
+            )
+
             # Return background task to load and send speech profile
             if has_speech_profile:
                 return _create_speech_profile_loader_task(lambda: websocket_active, sample_rate)
             return None
 
         except Exception as e:
+            _latency_log("stt_connection_error", error=str(e)[:300], provider=_stt_service_value(stt_service))
             print(f"Initial processing error: {e}", uid, session_id)
             websocket_close_code = 1011
             await websocket.close(code=websocket_close_code)
@@ -791,13 +981,26 @@ async def _stream_handler(
                     return
 
                 # Download file in background thread (not blocking main flow)
+                profile_load_started_at = time.time()
+                _latency_log("speech_profile_load_start")
                 file_path = await asyncio.to_thread(get_profile_audio_if_exists, uid)
 
                 if not file_path:
+                    _latency_log(
+                        "speech_profile_file_missing",
+                        load_latency_ms=_elapsed_ms(profile_load_started_at),
+                    )
                     print(f"Speech profile file not found for {uid}", session_id)
                     return
 
+                _latency_log(
+                    "speech_profile_file_loaded",
+                    load_latency_ms=_elapsed_ms(profile_load_started_at),
+                    provider=_stt_service_value(stt_service),
+                )
+
                 # Send to appropriate STT socket with fixed duration padding
+                profile_send_started_at = time.time()
                 if stt_service == STTService.deepgram and deepgram_socket:
 
                     async def deepgram_socket_send(data):
@@ -826,6 +1029,11 @@ async def _stream_handler(
                         sample_rate=audio_sample_rate,
                         target_duration=SPEECH_PROFILE_FIXED_DURATION,
                     )
+                _latency_log(
+                    "speech_profile_sent",
+                    send_latency_ms=_elapsed_ms(profile_send_started_at),
+                    provider=_stt_service_value(stt_service),
+                )
 
                 # Stabilization delay before switching to main socket
                 if is_active():
@@ -837,10 +1045,14 @@ async def _stream_handler(
                     await asyncio.sleep(SPEECH_PROFILE_STABILIZE_DELAY)
 
             except Exception as e:
+                _latency_log("speech_profile_error", error=str(e)[:300])
                 print(f"Error loading speech profile in background: {e}", uid, session_id)
             finally:
                 # Always signal completion so main socket routing can proceed
                 speech_profile_complete.set()
+                speech_profile_state["speech_profile_processed"] = True
+                speech_profile_state["completed_at"] = _utc_iso_from_ts(time.time())
+                _latency_log("speech_profile_complete", speech_profile=speech_profile_state)
                 print(f"Speech profile complete flag set", uid, session_id)
 
         return asyncio.create_task(_process_speech_profile())
@@ -1451,6 +1663,7 @@ async def _stream_handler(
     async def stream_transcript_process():
         nonlocal websocket_active, realtime_segment_buffers, realtime_photo_buffers, websocket
         nonlocal current_conversation_id, translation_enabled, speaker_to_person_map, suggested_segments, words_transcribed_since_last_record, last_transcript_time
+        nonlocal first_transcript_buffered_at, first_transcript_dispatched_at
 
         while websocket_active or len(realtime_segment_buffers) > 0 or len(realtime_photo_buffers) > 0:
             await asyncio.sleep(0.6)
@@ -1462,6 +1675,13 @@ async def _stream_handler(
 
             # DEBUG: Log received transcript segments
             if segments_to_process:
+                if first_transcript_buffered_at is None:
+                    first_transcript_buffered_at = time.time()
+                    _latency_log(
+                        "transcript_buffered",
+                        buffered_segment_count=len(segments_to_process),
+                        since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_buffered_at),
+                    )
                 print(
                     f"[TRANSCRIPT-RECV] Processing {len(segments_to_process)} buffered segments for uid={uid} session={session_id}  conv={current_conversation_id}"
                 )
@@ -1552,12 +1772,27 @@ async def _stream_handler(
                         uid=uid,
                         conversation_id=str(current_conversation_id),
                         segments=[s.dict() for s in transcript_segments],
+                        latency_metadata=_latency_metadata(),
                     )
+                    if first_transcript_dispatched_at is None:
+                        first_transcript_dispatched_at = time.time()
+                        _latency_log(
+                            "transcript_dispatched",
+                            dispatch_target="scanner",
+                            transcript_segment_count=len(transcript_segments),
+                            since_first_audio_ms=_elapsed_ms(first_audio_frame_at, first_transcript_dispatched_at),
+                            since_first_stt_result_ms=_elapsed_ms(first_stt_result_at, first_transcript_dispatched_at),
+                        )
                 except ImportError:
                     pass
 
                 try:
                     await websocket.send_json([segment.dict() for segment in updated_segments])
+                    _latency_log(
+                        "transcript_sent_to_client",
+                        transcript_segment_count=len(updated_segments),
+                        since_first_audio_ms=_elapsed_ms(first_audio_frame_at),
+                    )
                 except Exception as e:
                     print(f"Error sending transcript segments to websocket: {e}", uid, session_id)
 
@@ -1721,6 +1956,7 @@ async def _stream_handler(
         nonlocal websocket_active, websocket_close_code, last_audio_received_time, last_activity_time, current_conversation_id
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
+        nonlocal first_audio_frame_at
 
         timer_start = time.time()
         last_audio_received_time = timer_start
@@ -1809,6 +2045,13 @@ async def _stream_handler(
                     if first_audio_byte_timestamp is None:
                         first_audio_byte_timestamp = last_audio_received_time
                         last_usage_record_timestamp = first_audio_byte_timestamp
+                    if first_audio_frame_at is None:
+                        first_audio_frame_at = last_audio_received_time
+                        _latency_log(
+                            "first_audio_frame_received",
+                            encoded_bytes=len(data),
+                            since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_audio_frame_at),
+                        )
 
                     # Decode based on codec
                     if codec == 'opus' and sample_rate == 16000:
@@ -1860,7 +2103,9 @@ async def _stream_handler(
                 elif message.get("text") is not None:
                     try:
                         json_data = json.loads(message.get("text"))
-                        if json_data.get('type') == 'image_chunk':
+                        if json_data.get('type') in {'client_latency_event', 'latency_event', 'timing_event'}:
+                            _remember_client_latency_event(json_data)
+                        elif json_data.get('type') == 'image_chunk':
                             await handle_image_chunk(
                                 uid, json_data, image_chunks, _asend_message_event, realtime_photo_buffers
                             )
@@ -1879,6 +2124,11 @@ async def _stream_handler(
                                     if stt_provider:
                                         for seg in suggested_segments:
                                             seg['stt_provider'] = stt_provider
+                                    _latency_log(
+                                        "suggested_transcript_received",
+                                        stt_provider=stt_provider,
+                                        segment_count=len(suggested_segments),
+                                    )
                                     stream_transcript(suggested_segments)
                         elif json_data.get('type') == 'speaker_assigned':
                             segment_ids = json_data.get('segment_ids', [])
@@ -2092,6 +2342,12 @@ async def _listen(
     print("_listen", uid)
     try:
         await websocket.accept()
+        socket_accepted_at = time.time()
+        if STT_LATENCY_LOGS_ENABLED:
+            print(
+                f"[STT-LATENCY] {json.dumps({'event': 'listen_socket_accepted', 'uid': uid, 'at': _utc_iso_from_ts(socket_accepted_at), 'requested_stt_provider': _stt_service_value(stt_service), 'codec': codec, 'sample_rate': sample_rate, 'include_speech_profile': include_speech_profile}, default=str)}",
+                flush=True,
+            )
     except RuntimeError as e:
         print(f"_listen: accept error {e}", uid)
         return
@@ -2110,6 +2366,7 @@ async def _listen(
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
         speaker_auto_assign_enabled=speaker_auto_assign_enabled,
+        socket_accepted_at=socket_accepted_at,
     )
     print("_listen ended", uid)
 
@@ -2162,7 +2419,7 @@ async def listen_handler(
         codec,
         channels,
         include_speech_profile,
-        None,
+        stt_service,
         conversation_timeout=conversation_timeout,
         source=source,
         custom_stt_mode=custom_stt_mode,
@@ -2193,6 +2450,7 @@ async def web_listen_handler(
     print("web_listen_handler")
     try:
         await websocket.accept()
+        socket_accepted_at = time.time()
     except RuntimeError as e:
         print(f"web_listen_handler: accept error {e}")
         return
@@ -2243,5 +2501,6 @@ async def web_listen_handler(
         source=source,
         custom_stt_mode=custom_stt_mode,
         onboarding_mode=onboarding_mode,
+        socket_accepted_at=socket_accepted_at,
     )
     print("web_listen_handler ended", uid)

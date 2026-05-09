@@ -9,6 +9,7 @@ import websockets
 from deepgram import DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents
 from deepgram.clients.live.v1 import LiveOptions
 
+from utils.stt.provider_selection import select_stt_service_for_language
 from utils.stt.soniox_util import *
 
 headers = {"Authorization": f"Token {os.getenv('DEEPGRAM_API_KEY')}", "Content-Type": "audio/*"}
@@ -197,30 +198,22 @@ deepgram_nova3_languages = {
 stt_service_models = os.getenv('STT_SERVICE_MODELS', 'dg-nova-3').split(',')
 
 
-def get_stt_service_for_language(language: str, multi_lang_enabled: bool = True):
-    # Picking STT service and STT language by following the order
-    for m in stt_service_models:
-        # Soniox
-        if m == 'soniox-stt-rt':
-            if multi_lang_enabled and language in soniox_multi_languages:
-                return STTService.soniox, 'multi', 'stt-rt-preview'
-            if language in soniox_languages:
-                return STTService.soniox, language, 'stt-rt-preview'
-        # DeepGram Nova-3
-        elif m == 'dg-nova-3':
-            if multi_lang_enabled and language in deepgram_nova3_multi_languages:
-                return STTService.deepgram, 'multi', 'nova-3'
-            if language in deepgram_nova3_languages:
-                return STTService.deepgram, language, 'nova-3'
-        # DeepGram Nova-2
-        elif m == 'dg-nova-2':
-            if multi_lang_enabled and language in deepgram_nova2_multi_languages:
-                return STTService.deepgram, 'multi', 'nova-2-general'
-            if language in deepgram_nova2_languages:
-                return STTService.deepgram, language, 'nova-2-general'
-
-    # Fallback to deepgram nova-3
-    return STTService.deepgram, 'en', 'nova-3'
+def get_stt_service_for_language(
+    language: str, multi_lang_enabled: bool = True, preferred_service: Optional[STTService] = None
+):
+    return select_stt_service_for_language(
+        language,
+        multi_lang_enabled=multi_lang_enabled,
+        preferred_service=preferred_service,
+        configured_models=stt_service_models,
+        service_enum=STTService,
+        soniox_languages=soniox_languages,
+        soniox_multi_languages=soniox_multi_languages,
+        deepgram_nova3_languages=deepgram_nova3_languages,
+        deepgram_nova3_multi_languages=deepgram_nova3_multi_languages,
+        deepgram_nova2_languages=deepgram_nova2_languages,
+        deepgram_nova2_multi_languages=deepgram_nova2_multi_languages,
+    )
 
 
 async def send_initial_file_path(
@@ -311,6 +304,7 @@ async def process_audio_dg(
     preseconds: int = 0,
     model: str = 'nova-2-general',
     keywords: List[str] = [],
+    stt_event_callback: Optional[Callable] = None,
 ):
     print('process_audio_dg', language, sample_rate, channels, preseconds)
 
@@ -319,6 +313,17 @@ async def process_audio_dg(
         sentence = result.channel.alternatives[0].transcript
         # print(sentence)
         if len(sentence) == 0:
+            return
+        is_final = bool(getattr(result, "is_final", True))
+        if stt_event_callback:
+            stt_event_callback(
+                {
+                    "provider": "deepgram",
+                    "result_type": "final" if is_final else "interim",
+                    "text": sentence[:120],
+                }
+            )
+        if not is_final:
             return
         # print(sentence)
         segments = []
@@ -363,7 +368,9 @@ async def process_audio_dg(
         print(f"Error: {error}")
 
     print("Connecting to Deepgram")  # Log before connection attempt
-    return connect_to_deepgram_with_backoff(on_message, on_error, language, sample_rate, channels, model, keywords)
+    return connect_to_deepgram_with_backoff(
+        on_message, on_error, language, sample_rate, channels, model, keywords, stt_event_callback=stt_event_callback
+    )
 
 
 # Calculate backoff with jitter
@@ -381,12 +388,15 @@ def connect_to_deepgram_with_backoff(
     channels: int,
     model: str,
     keywords: List[str] = [],
+    stt_event_callback: Optional[Callable] = None,
     retries=3,
 ):
     print("connect_to_deepgram_with_backoff")
     for attempt in range(retries):
         try:
-            return connect_to_deepgram(on_message, on_error, language, sample_rate, channels, model, keywords)
+            return connect_to_deepgram(
+                on_message, on_error, language, sample_rate, channels, model, keywords, stt_event_callback
+            )
         except Exception as error:
             print(f'An error occurred: {error}')
             if attempt == retries - 1:  # Last attempt
@@ -408,7 +418,14 @@ def _dg_keywords_set(options: LiveOptions, keywords: List[str]):
 
 
 def connect_to_deepgram(
-    on_message, on_error, language: str, sample_rate: int, channels: int, model: str, keywords: List[str] = []
+    on_message,
+    on_error,
+    language: str,
+    sample_rate: int,
+    channels: int,
+    model: str,
+    keywords: List[str] = [],
+    stt_event_callback: Optional[Callable] = None,
 ):
     try:
         dg_connection = deepgram.listen.websocket.v("1")
@@ -444,7 +461,7 @@ def connect_to_deepgram(
             no_delay=True,
             endpointing=300,
             language=language,
-            interim_results=False,
+            interim_results=stt_event_callback is not None,
             smart_format=True,
             profanity_filter=False,
             diarize=True,
@@ -468,7 +485,13 @@ def connect_to_deepgram(
 
 
 async def process_audio_soniox(
-    stream_transcript, sample_rate: int, language: str, uid: str, preseconds: int = 0, language_hints: List[str] = []
+    stream_transcript,
+    sample_rate: int,
+    language: str,
+    uid: str,
+    preseconds: int = 0,
+    language_hints: List[str] = [],
+    stt_event_callback: Optional[Callable] = None,
 ):
     # Soniox supports diarization primarily for English
     api_key = os.getenv('SONIOX_API_KEY')
@@ -541,6 +564,14 @@ async def process_audio_soniox(
 
                         if not tokens:
                             if current_segment:
+                                if stt_event_callback:
+                                    stt_event_callback(
+                                        {
+                                            "provider": "soniox",
+                                            "result_type": "final",
+                                            "text": current_segment.get("text", "")[:120],
+                                        }
+                                    )
                                 stream_transcript([current_segment])
                                 current_segment = None
                                 current_segment_time = None
@@ -577,12 +608,28 @@ async def process_audio_soniox(
                             and (current_segment and current_segment['text'][-1] in punctuation_marks)
                         )
                         if (speaker_change_detected or time_threshold_exceed) and current_segment:
+                            if stt_event_callback:
+                                stt_event_callback(
+                                    {
+                                        "provider": "soniox",
+                                        "result_type": "final",
+                                        "text": current_segment.get("text", "")[:120],
+                                    }
+                                )
                             stream_transcript([current_segment])
                             current_segment = None
                             current_segment_time = None
 
                         # Combine all non-speaker tokens into text
                         content = ''.join(token_texts)
+                        if content and stt_event_callback:
+                            stt_event_callback(
+                                {
+                                    "provider": "soniox",
+                                    "result_type": "interim",
+                                    "text": content[:120],
+                                }
+                            )
 
                         # Get timing information
                         start_time = tokens[0]['start_ms'] / 1000.0

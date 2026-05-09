@@ -155,3 +155,39 @@ def test_rate_limit_status_parses_groq_duration_headers():
     assert status["reset_requests_s"] == 62.5
     assert status["remaining_requests"] == "0"
     assert status["limit_requests"] == "30"
+
+
+def test_scanner_payload_preserves_stt_identity_and_latency_metadata(monkeypatch):
+    posts = []
+
+    def fake_post(_url, json, timeout):
+        posts.append(json)
+        return _FakeResponse(200)
+
+    _disable_trace(monkeypatch)
+    monkeypatch.setattr(scanner.ELLA_CONFIG, "scanner_enabled", True)
+    monkeypatch.setattr(scanner.requests, "post", fake_post)
+
+    status = scanner.send_to_scanner(
+        "uid-1",
+        "conversation-identity",
+        [
+            {
+                "text": "Hey Ella, what did you hear?",
+                "speaker": "SPEAKER_0",
+                "speaker_id": 0,
+                "is_user": True,
+                "person_id": "person-1",
+                "speech_profile_processed": True,
+                "stt_provider": "soniox",
+            }
+        ],
+        latency_metadata={"first_audio_frame_at": "2026-05-09T18:00:00+00:00"},
+    )
+
+    assert status == 200
+    assert posts[0]["segments"][0]["stt_source"] == "soniox"
+    assert posts[0]["segments"][0]["is_user"] is True
+    assert posts[0]["segments"][0]["person_id"] == "person-1"
+    assert posts[0]["segments"][0]["speech_profile_processed"] is True
+    assert posts[0]["latency"]["first_audio_frame_at"] == "2026-05-09T18:00:00+00:00"
