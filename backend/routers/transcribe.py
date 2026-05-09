@@ -904,7 +904,7 @@ async def _stream_handler(
                     preseconds=speech_profile_preseconds,
                     model=stt_model,
                     keywords=vocabulary[:100] if vocabulary else None,
-                    stt_event_callback=_stt_event_callback,
+                    stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                 )
                 if has_speech_profile:
                     deepgram_profile_socket = await process_audio_dg(
@@ -914,7 +914,7 @@ async def _stream_handler(
                         1,
                         model=stt_model,
                         keywords=vocabulary[:100] if vocabulary else None,
-                        stt_event_callback=_stt_event_callback,
+                        stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                     )
 
             # SONIOX
@@ -932,7 +932,7 @@ async def _stream_handler(
                     uid if include_speech_profile else None,
                     preseconds=speech_profile_preseconds,
                     language_hints=hints,
-                    stt_event_callback=_stt_event_callback,
+                    stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                 )
 
                 # Create a second socket for initial speech profile if needed
@@ -943,7 +943,7 @@ async def _stream_handler(
                         stt_language,
                         uid if include_speech_profile else None,
                         language_hints=hints,
-                        stt_event_callback=_stt_event_callback,
+                        stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                     )
 
             # SPEECHMATICS
