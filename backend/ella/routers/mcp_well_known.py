@@ -96,6 +96,7 @@ async def get_oauth_authorization_server():
                 "proposals:read",
                 "proposals:write",
             ],
+            "registration_endpoint": f"{base}/v1/ella/mcp/register",
             "token_endpoint_auth_methods_supported": ["none"],
             "client_id_metadata_document_supported": True,
             "service_documentation": f"{base}/v1/ella/mcp/info",
