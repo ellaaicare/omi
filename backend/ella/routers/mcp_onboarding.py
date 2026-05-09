@@ -127,7 +127,9 @@ def _authenticate_connector_session(
         if token in tokens:
             return resolve_static_connector_session(_fingerprint(token), selected_profile_uid)
         if not tokens and "not configured" in str(session_error):
-            raise HTTPException(status_code=503, detail="MCP bearer authentication is not configured") from session_error
+            raise HTTPException(
+                status_code=503, detail="MCP bearer authentication is not configured"
+            ) from session_error
         raise HTTPException(status_code=401, detail="Invalid or expired MCP bearer token") from session_error
 
 
@@ -246,21 +248,47 @@ def _issue_oauth_token_response(resolution: MCPIdentityResolution, *, ttl_second
     }
 
 
-def _store_authorization_code(resolution: MCPIdentityResolution) -> str:
+def _store_authorization_code(
+    resolution: MCPIdentityResolution,
+    code_challenge: str = "",
+    code_challenge_method: str = "",
+) -> str:
     code = uuid.uuid4().hex
     _auth_codes[code] = {
         "resolution": resolution,
         "expires_at": time.time() + _oauth_code_ttl_seconds(),
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
     }
     return code
 
 
-def _consume_authorization_code(code: str) -> MCPIdentityResolution:
+def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
+    """Verify PKCE code_verifier against stored code_challenge."""
+    if method == "S256":
+        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+        import base64 as _b64
+
+        computed = _b64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+        return computed == code_challenge
+    if method == "plain":
+        return code_verifier == code_challenge
+    return False
+
+
+def _consume_authorization_code(code: str, code_verifier: str = "") -> MCPIdentityResolution:
     item = _auth_codes.pop(code, None)
     if not item:
         raise HTTPException(status_code=400, detail="Invalid authorization code")
     if time.time() > float(item.get("expires_at") or 0):
         raise HTTPException(status_code=400, detail="Expired authorization code")
+    stored_challenge = item.get("code_challenge") or ""
+    stored_method = item.get("code_challenge_method") or ""
+    if stored_challenge:
+        if not code_verifier:
+            raise HTTPException(status_code=400, detail="code_verifier is required (PKCE)")
+        if not _verify_pkce(code_verifier, stored_challenge, stored_method):
+            raise HTTPException(status_code=400, detail="Invalid code_verifier (PKCE)")
     return item["resolution"]
 
 
@@ -290,6 +318,8 @@ def _render_mcp_oauth_page(
     redirect_uri: str,
     state: str = "",
     scope: str = "",
+    code_challenge: str = "",
+    code_challenge_method: str = "",
 ) -> Response:
     if not _firebase_web_configured():
         return Response(
@@ -308,6 +338,8 @@ def _render_mcp_oauth_page(
         "redirectUri": redirect_uri,
         "state": state,
         "scope": scope,
+        "codeChallenge": code_challenge,
+        "codeChallengeMethod": code_challenge_method,
         "authorizeUrl": "/v1/ella/mcp/authorize",
         "onboardingUrl": "/v1/ella/mcp/onboarding/oauth",
         "firebaseConfig": _firebase_web_config(),
@@ -368,6 +400,8 @@ def _render_mcp_oauth_page(
       }});
       if (page.state) params.set("state", page.state);
       if (page.scope) params.set("scope", page.scope);
+      if (page.codeChallenge) params.set("code_challenge", page.codeChallenge);
+      if (page.codeChallengeMethod) params.set("code_challenge_method", page.codeChallengeMethod);
       if (selectedProfileUid) params.set("selected_profile_uid", selectedProfileUid);
       window.location.href = page.authorizeUrl + "?" + params.toString();
     }}
@@ -450,13 +484,19 @@ async def get_mcp_authorize(
     redirect_uri: str,
     state: Optional[str] = None,
     scope: Optional[str] = None,
+    code_challenge: Optional[str] = Query(None, description="PKCE code challenge (RFC 7636)."),
+    code_challenge_method: Optional[str] = Query(None, description="PKCE method, must be S256."),
+    resource: Optional[str] = Query(None, description="RFC 8707 resource indicator."),
     firebase_id_token: str = Query("", description="Verified Firebase ID token supplied by the auth handoff page."),
     selected_profile_uid: str = Query("", description="Selected Ella profile UID for multi-profile identities."),
 ):
     if response_type != "code":
         raise HTTPException(status_code=400, detail="response_type must be code")
-    if client_id != _oauth_client_id():
+    # Accept our static client_id OR any HTTPS URL (Client ID Metadata Document per MCP spec)
+    if client_id != _oauth_client_id() and not client_id.startswith("https://"):
         raise HTTPException(status_code=400, detail="Invalid client_id")
+    if code_challenge_method and code_challenge_method != "S256":
+        raise HTTPException(status_code=400, detail="code_challenge_method must be S256")
     if not firebase_id_token:
         return _render_mcp_oauth_page(
             response_type=response_type,
@@ -464,6 +504,8 @@ async def get_mcp_authorize(
             redirect_uri=redirect_uri,
             state=state or "",
             scope=scope or "",
+            code_challenge=code_challenge or "",
+            code_challenge_method=code_challenge_method or "",
         )
 
     resolution = resolve_oauth_connector_resolution(
@@ -481,7 +523,11 @@ async def get_mcp_authorize(
                 "state": state,
             },
         )
-    code = _store_authorization_code(resolution)
+    code = _store_authorization_code(
+        resolution,
+        code_challenge=code_challenge or "",
+        code_challenge_method=code_challenge_method or "S256" if code_challenge else "",
+    )
     return _redirect_with_params(redirect_uri, {"code": code, "state": state})
 
 
@@ -489,13 +535,14 @@ async def get_mcp_authorize(
 async def post_mcp_token(request: Request):
     data = await _parse_token_request(request)
     client_id = str(data.get("client_id") or "")
-    if client_id and client_id != _oauth_client_id():
+    if client_id and client_id != _oauth_client_id() and not client_id.startswith("https://"):
         raise HTTPException(status_code=400, detail="Invalid client_id")
 
     ttl_seconds = _mcp_session_ttl_seconds(data.get("ttl_seconds") or data.get("expires_in"))
     grant_type = str(data.get("grant_type") or "").strip()
     if grant_type in {"authorization_code", ""} and data.get("code"):
-        resolution = _consume_authorization_code(str(data.get("code") or ""))
+        code_verifier = str(data.get("code_verifier") or "").strip()
+        resolution = _consume_authorization_code(str(data.get("code") or ""), code_verifier=code_verifier)
         return _issue_oauth_token_response(resolution, ttl_seconds=ttl_seconds)
 
     if grant_type in {

@@ -140,10 +140,20 @@ def _fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
+_WWW_AUTHENTICATE = (
+    'Bearer resource_metadata="https://api.ella-ai-care.com/.well-known/oauth-protected-resource",'
+    ' scope="context:read memory:read profile:read startup:read timeline:read tools:read"'
+)
+
+
 def _authenticate(authorization: Optional[str]) -> str:
     token = _token_from_authorization(authorization)
     if not token:
-        raise HTTPException(status_code=401, detail="Invalid or missing Plato MCP bearer token")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing Plato MCP bearer token",
+            headers={"WWW-Authenticate": _WWW_AUTHENTICATE},
+        )
 
     tokens = _allowed_tokens()
     if token in tokens:
@@ -155,10 +165,24 @@ def _authenticate(authorization: Optional[str]) -> str:
     except ValueError as exc:
         if not tokens and "not configured" in str(exc):
             raise HTTPException(status_code=503, detail="Plato MCP token is not configured") from exc
-        raise HTTPException(status_code=401, detail="Invalid or missing Plato MCP bearer token") from exc
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing Plato MCP bearer token",
+            headers={"WWW-Authenticate": _WWW_AUTHENTICATE},
+        ) from exc
 
     if "tools:read" not in set(claims.get("scopes") or []):
-        raise HTTPException(status_code=403, detail="MCP bearer token is missing tools:read scope")
+        raise HTTPException(
+            status_code=403,
+            detail="MCP bearer token is missing tools:read scope",
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer error="insufficient_scope",'
+                    ' scope="tools:read",'
+                    ' resource_metadata="https://api.ella-ai-care.com/.well-known/oauth-protected-resource"'
+                )
+            },
+        )
     _check_rate_limit(token)
     return _fingerprint(token)
 

@@ -28,6 +28,18 @@ def _base_url() -> str:
     return _BASE_URL.rstrip("/")
 
 
+@router.get("/.well-known/oauth-protected-resource/v1/ella/plato/mcp")
+async def get_oauth_protected_resource_subpath():
+    """RFC 9728 — Path-specific Protected Resource Metadata.
+
+    MCP clients try the path-specific URI first (the MCP endpoint path
+    appended to /.well-known/oauth-protected-resource), then fall back
+    to the root. This endpoint ensures immediate discovery for clients
+    following the spec strictly.
+    """
+    return await get_oauth_protected_resource()
+
+
 @router.get("/.well-known/oauth-protected-resource")
 async def get_oauth_protected_resource():
     """RFC 9728 — OAuth 2.0 Protected Resource Metadata.
@@ -73,6 +85,7 @@ async def get_oauth_authorization_server():
             "grant_types_supported": [
                 "authorization_code",
             ],
+            "code_challenge_methods_supported": ["S256"],
             "scopes_supported": [
                 "context:read",
                 "memory:read",
@@ -84,6 +97,7 @@ async def get_oauth_authorization_server():
                 "proposals:write",
             ],
             "token_endpoint_auth_methods_supported": ["none"],
+            "client_id_metadata_document_supported": True,
             "service_documentation": f"{base}/v1/ella/mcp/info",
         },
         headers={"Cache-Control": "public, max-age=3600"},
