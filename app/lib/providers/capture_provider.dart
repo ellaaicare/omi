@@ -21,6 +21,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -112,6 +113,8 @@ class CaptureProvider extends ChangeNotifier
 
   Timer? _recordingTimer;
   int _recordingDuration = 0; // in seconds
+  DateTime? _lastGuardianWakeAckPollAt;
+  final Map<String, DateTime> _guardianLatencyBreadcrumbLastAt = {};
 
   int _getRecordingDuration() => _recordingDuration;
 
@@ -162,6 +165,88 @@ class CaptureProvider extends ChangeNotifier
     final cachedIds = SharedPreferencesUtil().cachedPeople.map((p) => p.id).toSet();
     final segmentPersonIds = segments.map((s) => s.personId).whereType<String>().toSet();
     return segmentPersonIds.difference(cachedIds).isNotEmpty;
+  }
+
+  @visibleForTesting
+  static bool hasGuardianWakePhraseText(String text) {
+    final normalized = text.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+    return RegExp(r'\b(hey|hi|hello|ok|okay)\s+ella\b').hasMatch(normalized);
+  }
+
+  bool _hasGuardianWakePhrase(List<TranscriptSegment> segments) =>
+      segments.any((segment) => hasGuardianWakePhraseText(segment.text));
+
+  String _guardianWakeTranscriptPreview(List<TranscriptSegment> segments) {
+    return segments.map((segment) => segment.text.trim()).where((text) => text.isNotEmpty).join(' ').trim();
+  }
+
+  void _maybeRequestGuardianWakeAckPoll(List<TranscriptSegment> newSegments) {
+    if (!PlatformService.isIOS || !_hasGuardianWakePhrase(newSegments)) return;
+
+    final now = DateTime.now();
+    final lastPollAt = _lastGuardianWakeAckPollAt;
+    if (lastPollAt != null && now.difference(lastPollAt) < const Duration(seconds: 6)) return;
+    _lastGuardianWakeAckPollAt = now;
+
+    final preview = _guardianWakeTranscriptPreview(newSegments);
+    DebugLogManager.logEvent('guardian_wake_candidate_poll_requested', {
+      'transcript_preview': preview.length > 120 ? preview.substring(0, 120) : preview,
+    });
+    _recordGuardianLatencyBreadcrumb('wake_candidate_detected', {
+      'segment_count': newSegments.length,
+      'transcript_preview': preview.length > 120 ? preview.substring(0, 120) : preview,
+    });
+    _recordGuardianLatencyBreadcrumb('next_audio_poll_requested', {
+      'reason': 'transcript_wake_candidate',
+    });
+    unawaited(GuardianModeService().requestWakeAckPoll(reason: 'transcript_wake_candidate', transcript: preview));
+  }
+
+  void _recordTranscriptReceiptBreadcrumb(List<TranscriptSegment> newSegments) {
+    if (!PlatformService.isIOS || newSegments.isEmpty) return;
+
+    final existingSegmentIds = segments.map((segment) => segment.id).toSet();
+    final hasExistingSegmentUpdate = newSegments.any((segment) => existingSegmentIds.contains(segment.id));
+    final hasNewSegment = newSegments.any((segment) => !existingSegmentIds.contains(segment.id));
+    final metadata = {
+      'segment_count': newSegments.length,
+      'segment_ids': newSegments.map((segment) => segment.id).take(5).toList(),
+      'text_lengths': newSegments.map((segment) => segment.text.length).take(5).toList(),
+      'speaker_ids': newSegments.map((segment) => segment.speakerId).take(5).toList(),
+      'speech_profile_processed': newSegments.map((segment) => segment.speechProfileProcessed).take(5).toList(),
+      'stt_providers': newSegments.map((segment) => segment.sttProvider ?? '').take(5).toList(),
+    };
+
+    if (hasExistingSegmentUpdate) {
+      _recordGuardianLatencyBreadcrumb('interim_transcript_received', metadata);
+    }
+    if (hasNewSegment) {
+      _recordGuardianLatencyBreadcrumb('final_transcript_received', metadata);
+    }
+  }
+
+  void _recordGuardianLatencyBreadcrumb(
+    String eventName,
+    Map<String, Object?> fields, {
+    Duration? throttle,
+  }) {
+    if (!PlatformService.isIOS) return;
+
+    if (throttle != null) {
+      final now = DateTime.now();
+      final lastAt = _guardianLatencyBreadcrumbLastAt[eventName];
+      if (lastAt != null && now.difference(lastAt) < throttle) return;
+      _guardianLatencyBreadcrumbLastAt[eventName] = now;
+    }
+
+    unawaited(GuardianModeService().recordLatencyBreadcrumb(eventName, {
+      ...fields,
+      'recording_state': recordingState.name,
+      'socket_connected': _socket?.state == SocketServiceState.connected,
+      'has_recording_device': _recordingDevice != null,
+      'recording_device_type': _recordingDevice?.type.name,
+      'recording_device_id': _recordingDevice?.id,
+    }));
   }
 
   CaptureProvider() {
@@ -666,6 +751,15 @@ class CaptureProvider extends ChangeNotifier
         _commandBytes.add(snapshot.sublist(3));
       }
 
+      _recordGuardianLatencyBreadcrumb(
+          'audio_frame_available',
+          {
+            'source': 'ble_device',
+            'bytes': snapshot.length,
+            'codec': codec.name,
+          },
+          throttle: const Duration(seconds: 2));
+
       // Local storage syncs
       var checkWalSupported =
           (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) &&
@@ -684,6 +778,14 @@ class CaptureProvider extends ChangeNotifier
             (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) ? 3 : 0;
         final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
         _socket?.send(trimmedValue);
+        _recordGuardianLatencyBreadcrumb(
+            'audio_chunk_sent_to_ws',
+            {
+              'source': 'ble_device',
+              'bytes': trimmedValue.length,
+              'codec': codec.name,
+            },
+            throttle: const Duration(seconds: 2));
 
         // Track bytes sent to websocket
         _wsSocketBytesSent += trimmedValue.length;
@@ -998,8 +1100,24 @@ class CaptureProvider extends ChangeNotifier
 
     // record
     await ServiceManager.instance().mic.start(onByteReceived: (bytes) {
+      _recordGuardianLatencyBreadcrumb(
+          'audio_frame_available',
+          {
+            'source': 'phone_mic',
+            'bytes': bytes.length,
+            'codec': BleAudioCodec.pcm16.name,
+          },
+          throttle: const Duration(seconds: 2));
       if (_socket?.state == SocketServiceState.connected) {
         _socket?.send(bytes);
+        _recordGuardianLatencyBreadcrumb(
+            'audio_chunk_sent_to_ws',
+            {
+              'source': 'phone_mic',
+              'bytes': bytes.length,
+              'codec': BleAudioCodec.pcm16.name,
+            },
+            throttle: const Duration(seconds: 2));
       }
     }, onRecording: () {
       updateRecordingState(RecordingState.record);
@@ -1726,6 +1844,12 @@ class CaptureProvider extends ChangeNotifier
   void _processNewSegmentReceived(List<TranscriptSegment> newSegments) async {
     if (newSegments.isEmpty) return;
 
+    _recordGuardianLatencyBreadcrumb('scanner_transcript_dispatch_start', {
+      'segment_count': newSegments.length,
+    });
+    _recordTranscriptReceiptBreadcrumb(newSegments);
+    _maybeRequestGuardianWakeAckPoll(newSegments);
+
     if (segments.isEmpty && !_isLoadingInProgressConversation) {
       _isLoadingInProgressConversation = true;
       if (!PlatformService.isDesktop) {
@@ -1752,6 +1876,10 @@ class CaptureProvider extends ChangeNotifier
     _segmentsPhotosVersion++; // Bump version so Selector rebuilds
     hasTranscripts = true;
     notifyListeners();
+    _recordGuardianLatencyBreadcrumb('scanner_transcript_dispatch_done', {
+      'segment_count': newSegments.length,
+      'remaining_new_segments': remainSegments.length,
+    });
   }
 
   void onConnectionStateChanged(bool isConnected) {

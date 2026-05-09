@@ -283,6 +283,18 @@ void main() {
     });
   });
 
+  group('Guardian wake phrase detection', () {
+    test('detects common wake phrases with punctuation', () {
+      expect(CaptureProvider.hasGuardianWakePhraseText('Hey, Ella.'), true);
+      expect(CaptureProvider.hasGuardianWakePhraseText('Okay Ella can you help?'), true);
+    });
+
+    test('does not trigger on unrelated mentions', () {
+      expect(CaptureProvider.hasGuardianWakePhraseText('I talked to Ella yesterday'), false);
+      expect(CaptureProvider.hasGuardianWakePhraseText('hello there'), false);
+    });
+  });
+
   group('SpeakerLabelSuggestionEvent', () {
     test('ignores event when personId is empty', () {
       final provider = CaptureProvider();

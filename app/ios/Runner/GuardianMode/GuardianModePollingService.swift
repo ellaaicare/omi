@@ -27,6 +27,8 @@ class GuardianModePollingService {
     private var isPollInFlight = false
     private var pollGeneration: UInt = 0
     private var lastScheduledDelay: TimeInterval = 0
+    private var lastImmediatePollRequestedAt: Date?
+    private let immediatePollThrottle: TimeInterval = 0.5
 
     struct PollResponse: Codable {
         let url: String?
@@ -155,6 +157,51 @@ class GuardianModePollingService {
         isPollInFlight = false
         consecutiveErrors = 0
         scheduleNextPollLocked(after: 0, reason: reason)
+    }
+
+    /// Wake acknowledgements are created immediately after the backend sees a
+    /// wake phrase, but the normal idle poll can still be several seconds away.
+    /// This interrupts the timer only while Guardian polling is active.
+    func requestWakeAckPollBurst(reason: String) {
+        let burstDelays: [TimeInterval] = [0.0, 1.0, 2.5]
+
+        for (index, delay) in burstDelays.enumerated() {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.requestImmediatePoll(reason: "\(reason)_burst_\(index)")
+            }
+        }
+    }
+
+    private func requestImmediatePoll(reason: String) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard isPolling else {
+            NSLog("GuardianPolling: Ignoring immediate poll reason=\(reason) because polling is inactive")
+            return
+        }
+
+        let now = Date()
+        if let lastRequested = lastImmediatePollRequestedAt,
+           now.timeIntervalSince(lastRequested) < immediatePollThrottle {
+            NSLog("GuardianPolling: Throttled immediate poll reason=\(reason)")
+            return
+        }
+        lastImmediatePollRequestedAt = now
+
+        let delay = isPollInFlight ? 0.35 : 0.0
+        DebugEventBuffer.shared.add(
+            id: "next-audio-poll-request-\(Int(now.timeIntervalSince1970 * 1000))",
+            triggerType: "guardian_next_audio_poll_requested",
+            message: "Immediate Guardian next-audio poll requested",
+            metadata: [
+                "reason": reason,
+                "scheduled_delay_ms": Int(delay * 1000),
+                "is_poll_in_flight": isPollInFlight,
+                "client_native_requested_at_ms": Int(now.timeIntervalSince1970 * 1000)
+            ]
+        )
+        scheduleNextPollLocked(after: delay, reason: reason)
     }
 
     func statusSnapshot() -> [String: Any] {

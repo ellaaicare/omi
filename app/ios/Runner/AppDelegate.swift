@@ -753,6 +753,31 @@ extension AppDelegate: WCSessionDelegate {
                 "poller": GuardianModePollingService.shared.statusSnapshot()
             ])
 
+        case "requestWakeAckPoll":
+            let args = call.arguments as? [String: Any]
+            GuardianModeManager.shared.requestWakeAckPoll(
+                reason: args?["reason"] as? String ?? "wake_candidate",
+                transcript: args?["transcript"] as? String,
+                clientRequestedAtMs: args?["client_requested_at_ms"] as? Int
+            )
+            result(["status": "queued"])
+
+        case "recordLatencyBreadcrumb":
+            guard let args = call.arguments as? [String: Any],
+                  let eventName = args["event_name"] as? String else {
+                result(FlutterError(
+                    code: "INVALID_ARGS",
+                    message: "Missing event_name parameter",
+                    details: nil
+                ))
+                return
+            }
+            GuardianModeManager.shared.recordWakeLatencyBreadcrumb(
+                eventName: eventName,
+                metadata: args["metadata"] as? [String: Any] ?? [:]
+            )
+            result(["status": "recorded"])
+
         case "injectRemoteAudioClip":
             guard let args = call.arguments as? [String: Any],
                   let audioURLString = args["audioURL"] as? String,
