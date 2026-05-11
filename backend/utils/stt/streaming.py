@@ -212,8 +212,8 @@ grok_multi_languages = {
     "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
 }
 
-# Supported values: grok-stt,soniox-stt-rt,dg-nova-3,dg-nova-2
-stt_service_models = os.getenv('STT_SERVICE_MODELS', 'grok-stt').split(',')
+# Supported values: soniox-stt-rt,dg-nova-3,dg-nova-2
+stt_service_models = os.getenv('STT_SERVICE_MODELS', 'dg-nova-3,dg-nova-2').split(',')
 
 
 def get_stt_service_for_language(

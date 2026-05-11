@@ -964,29 +964,19 @@ async def _stream_handler(
                         stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                     )
 
-            # GROK
+            # GROK (disabled - Whisper-based, hallucinates on ambient background noise)
             elif stt_service == STTService.grok:
-                try:
-                    grok_socket = await process_audio_grok(
-                        stream_transcript,
-                        sample_rate,
-                        stt_language,
-                        preseconds=speech_profile_preseconds,
-                        stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
-                    )
-                except ValueError as e:
-                    print(f"Grok STT unavailable ({e}), falling back to Deepgram")
-                    dg_fallback_model = 'nova-2-general'
-                    deepgram_socket = await process_audio_dg(
-                        stream_transcript,
-                        stt_language if stt_language != 'multi' else 'multi',
-                        sample_rate,
-                        1,
-                        preseconds=speech_profile_preseconds,
-                        model=dg_fallback_model,
-                        keywords=vocabulary[:100] if vocabulary else None,
-                        stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
-                    )
+                print("Grok STT selected but disabled for ambient use; routing to Deepgram nova-2")
+                deepgram_socket = await process_audio_dg(
+                    stream_transcript,
+                    stt_language if stt_language != 'multi' else 'multi',
+                    sample_rate,
+                    1,
+                    preseconds=speech_profile_preseconds,
+                    model='nova-2-general',
+                    keywords=vocabulary[:100] if vocabulary else None,
+                    stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                )
 
             # SPEECHMATICS
             elif stt_service == STTService.speechmatics:

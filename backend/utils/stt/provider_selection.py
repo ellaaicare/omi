@@ -65,4 +65,4 @@ def select_stt_service_for_language(
 
     if preferred_service is not None:
         return None, None, None
-    return service_enum.grok, "en", "grok-stt"
+    return service_enum.deepgram, "en", "nova-2-general"
