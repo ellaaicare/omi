@@ -57,6 +57,7 @@ HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642"
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
+HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "v2-20260511").strip()
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
@@ -552,7 +553,7 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
         yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
         return
 
-    session_key = f"ella:omi:{uid.lower()}:ios-chat"
+    session_key = f"ella:omi:{uid.lower()}:ios-chat:{HERMES_CHAT_SESSION_EPOCH}"
     text = []
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
