@@ -22,8 +22,9 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Header, Request
@@ -39,6 +40,7 @@ from utils.ella.canonical_context import (
     fetch_canonical_timeline,
     format_canonical_context,
 )
+from utils.ella.time_context import timezone_name
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,9 @@ HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
+CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
+CHAT_TEMPORAL_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_MAX_CHARS", "9000"))
+CHAT_USER_TIMEZONE = timezone_name(os.getenv("ELLA_USER_TIMEZONE", os.getenv("ELLA_PLATO_TIMEZONE", "")))
 CHAT_CONTEXT_CHANNELS = [
     channel.strip()
     for channel in os.getenv("ELLA_CHAT_CANONICAL_CHANNELS", ",".join(DEFAULT_CONTEXT_CHANNELS)).split(",")
@@ -91,13 +96,23 @@ def _resolve_debug_level(header_value: str = None) -> int:
     return ELLA_CONFIG.debug_level
 
 
-async def _fetch_chat_canonical_events(uid: str, *, limit: int, before: str = None) -> list[dict]:
+async def _fetch_chat_canonical_events(
+    uid: str,
+    *,
+    limit: int,
+    before: str = None,
+    channels: list[str] | None = None,
+    since: str = None,
+    user_timezone: str = None,
+) -> list[dict]:
     try:
         events = await fetch_canonical_timeline(
             uid,
             limit=limit,
-            channels=CHAT_CONTEXT_CHANNELS,
+            channels=channels or CHAT_CONTEXT_CHANNELS,
+            since=since,
             before=before,
+            user_timezone=user_timezone,
         )
         logger.info("[FLOW:CANONICAL-CONTEXT] uid=%s events=%s source=timeline", uid, len(events))
         return events
@@ -108,6 +123,89 @@ async def _fetch_chat_canonical_events(uid: str, *, limit: int, before: str = No
             e,
         )
         return []
+
+
+def _chat_temporal_window(user_message: str) -> tuple[str | None, datetime | None, datetime | None]:
+    """Detect user-local recall windows that shallow recent context often misses."""
+    text = user_message.lower()
+    temporal_terms = (
+        "this morning",
+        "morning",
+        "today",
+        "earlier",
+        "latest omi",
+        "last omi",
+        "omi conversation",
+        "necklace",
+        "captured",
+    )
+    if not any(term in text for term in temporal_terms):
+        return None, None, None
+    tz = ZoneInfo(CHAT_USER_TIMEZONE)
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    start_of_day = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
+    if "morning" in text:
+        return (
+            "same-day morning OMI context",
+            (start_of_day + timedelta(hours=5)).astimezone(timezone.utc),
+            (start_of_day + timedelta(hours=12)).astimezone(timezone.utc),
+        )
+    return "same-day OMI context", start_of_day.astimezone(timezone.utc), now_local.astimezone(timezone.utc)
+
+
+def _event_datetime(event: dict, key: str = "started_at") -> datetime | None:
+    raw = event.get(key) or event.get("created_at") or event.get("timestamp")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _filter_events_window(events: list[dict], since: datetime, until: datetime) -> list[dict]:
+    filtered = []
+    for event in events:
+        started = _event_datetime(event, "started_at")
+        ended = _event_datetime(event, "ended_at") or started
+        if started is None or ended is None:
+            continue
+        if ended >= since and started <= until:
+            filtered.append(event)
+    return filtered
+
+
+def _is_low_value_omi_event(event: dict) -> bool:
+    title = str(event.get("title") or "").lower()
+    text = str(event.get("text") or event.get("overview") or event.get("summary") or "").strip()
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    tags = metadata.get("ella_tags") if isinstance(metadata.get("ella_tags"), list) else []
+    if "low_signal" in tags:
+        return True
+    if "brief" in title or "fragment" in title or "utterance" in title:
+        return True
+    if len(text) <= 180:
+        return True
+    return False
+
+
+async def _fetch_temporal_chat_context(uid: str, user_message: str) -> tuple[str, list[dict]]:
+    label, since, until = _chat_temporal_window(user_message)
+    if not label or since is None or until is None:
+        return "", []
+    events = await _fetch_chat_canonical_events(
+        uid,
+        limit=CHAT_TEMPORAL_CONTEXT_LIMIT,
+        channels=["omi"],
+        since=(since - timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
+        user_timezone=CHAT_USER_TIMEZONE,
+    )
+    window_events = _filter_events_window(events, since, until)
+    meaningful_events = [event for event in window_events if not _is_low_value_omi_event(event)]
+    return label, meaningful_events or window_events
 
 
 async def _stream_level_1_ack(user_message: str):
@@ -311,6 +409,12 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
 
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
+    temporal_label, temporal_events = await _fetch_temporal_chat_context(uid, user_message)
+    temporal_context = format_canonical_context(
+        temporal_events,
+        max_chars=CHAT_TEMPORAL_CONTEXT_MAX_CHARS,
+        user_timezone=CHAT_USER_TIMEZONE,
+    )
     messages = []
     if canonical_context:
         messages.append(
@@ -328,6 +432,17 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         print(
             f"[FLOW:CHAT-L4] uid={uid} canonical_context=empty fallback=openclaw_session_history_migration",
             flush=True,
+        )
+    if temporal_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"Additional {temporal_label}. Use this when the user asks about today, this morning, "
+                    "or OMI/necklace captures; do not claim the window is empty if events are listed here.\n\n"
+                    f"{temporal_context}"
+                ),
+            }
         )
     messages.append({"role": "user", "content": user_message})
 
@@ -441,6 +556,12 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
     text = []
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
+    temporal_label, temporal_events = await _fetch_temporal_chat_context(uid, user_message)
+    temporal_context = format_canonical_context(
+        temporal_events,
+        max_chars=CHAT_TEMPORAL_CONTEXT_MAX_CHARS,
+        user_timezone=CHAT_USER_TIMEZONE,
+    )
     messages = []
     if canonical_context:
         messages.append(
@@ -459,9 +580,20 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
             f"[FLOW:CHAT-HERMES] uid={uid} canonical_context=empty fallback=hermes_session_history_migration",
             flush=True,
         )
+    if temporal_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"Additional {temporal_label}. Use this when the user asks about today, this morning, "
+                    "or OMI/necklace captures; do not claim the window is empty if events are listed here.\n\n"
+                    f"{temporal_context}"
+                ),
+            }
+        )
     messages.append({"role": "user", "content": user_message})
     print(
-        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} canonical_events={len(canonical_events)}",
+        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
         flush=True,
     )
 
@@ -784,12 +916,22 @@ async def ella_chat_history(
             return result
         elif response.status_code == 404:
             logger.warning(f"[FLOW:HISTORY] uid={uid} agent={agent_id} no_sessions latency={_elapsed}ms")
-            return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
+            return {
+                "messages": [],
+                "hasMore": False,
+                "source": "provision_openclaw_history_migration",
+                "fallback": True,
+            }
         else:
             logger.error(
                 f"[FLOW:HISTORY] uid={uid} agent={agent_id} status={response.status_code} latency={_elapsed}ms"
             )
-            return {"messages": [], "hasMore": False, "source": "provision_openclaw_history_migration", "fallback": True}
+            return {
+                "messages": [],
+                "hasMore": False,
+                "source": "provision_openclaw_history_migration",
+                "fallback": True,
+            }
 
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
