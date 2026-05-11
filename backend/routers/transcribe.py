@@ -952,27 +952,17 @@ async def _stream_handler(
                             stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
                         )
                 except ValueError as e:
-                    print(f"Soniox unavailable ({e}), falling back to Grok")
-                    try:
-                        grok_socket = await process_audio_grok(
-                            stream_transcript,
-                            sample_rate,
-                            stt_language,
-                            preseconds=speech_profile_preseconds,
-                            stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
-                        )
-                    except ValueError as grok_e:
-                        print(f"Grok STT unavailable ({grok_e}), falling back to Deepgram")
-                        deepgram_socket = await process_audio_dg(
-                            stream_transcript,
-                            stt_language,
-                            sample_rate,
-                            1,
-                            preseconds=speech_profile_preseconds,
-                            model='nova-2-general',
-                            keywords=vocabulary[:100] if vocabulary else None,
-                            stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
-                        )
+                    print(f"Soniox unavailable ({e}), falling back to Deepgram nova-3")
+                    deepgram_socket = await process_audio_dg(
+                        stream_transcript,
+                        stt_language,
+                        sample_rate,
+                        1,
+                        preseconds=speech_profile_preseconds,
+                        model='nova-3',
+                        keywords=vocabulary[:100] if vocabulary else None,
+                        stt_event_callback=_stt_event_callback if STT_LATENCY_LOGS_ENABLED else None,
+                    )
 
             # GROK
             elif stt_service == STTService.grok:
