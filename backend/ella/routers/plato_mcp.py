@@ -48,11 +48,39 @@ DEFAULT_HERMES_AGENT_ID = "hermes"
 DEFAULT_PROVISION_API_URL = "http://100.76.138.56:8200"
 
 MAX_CONTEXT_LIMIT = 50
+MAX_WINDOW_CONTEXT_LIMIT = 500
 MAX_SEARCH_RESULTS = 20
 MAX_PROMPT_CHARS = 4000
 MAX_CONSULT_CONTEXT_CHARS = 7000
 RATE_LIMIT_WINDOW_SECONDS = 60
 SALIENCE_RANKS = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+SEARCH_STOPWORDS = {
+    "about",
+    "after",
+    "before",
+    "capture",
+    "captured",
+    "conversation",
+    "conversations",
+    "did",
+    "earlier",
+    "evening",
+    "happen",
+    "happened",
+    "happens",
+    "latest",
+    "last",
+    "morning",
+    "necklace",
+    "omi",
+    "that",
+    "this",
+    "today",
+    "what",
+    "when",
+    "where",
+    "with",
+}
 COMPANION_PROPOSAL_TYPES = {
     "scanner_rule_change",
     "reminder_request",
@@ -256,6 +284,70 @@ def _parse_duration_seconds(value: Any, default_seconds: int = 30 * 60) -> int:
     raise ToolExecutionError(f"Invalid time_range: {value}", code=-32602)
 
 
+def _parse_local_date_window(arguments: dict[str, Any], tz_name: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Parse explicit local-date / part-of-day arguments into UTC bounds."""
+    local_date = str(arguments.get("local_date") or arguments.get("date") or "").strip()
+    if not local_date:
+        return None, None
+    try:
+        date_value = datetime.fromisoformat(local_date).date()
+    except ValueError as exc:
+        raise ToolExecutionError(f"Invalid local_date: {local_date}", code=-32602) from exc
+
+    tz = ZoneInfo(tz_name)
+    part = str(arguments.get("part_of_day") or arguments.get("day_part") or "day").strip().lower()
+    ranges = {
+        "day": (0, 24),
+        "today": (0, 24),
+        "morning": (5, 12),
+        "afternoon": (12, 17),
+        "evening": (17, 22),
+        "night": (22, 24),
+    }
+    if part in {"overnight", "early_morning"}:
+        start_hour, end_hour = 0, 5
+    elif part in ranges:
+        start_hour, end_hour = ranges[part]
+    else:
+        raise ToolExecutionError(f"Invalid part_of_day: {part}", code=-32602)
+    since_local = datetime(date_value.year, date_value.month, date_value.day, start_hour, tzinfo=tz)
+    until_local = (
+        datetime(date_value.year, date_value.month, date_value.day, 0, tzinfo=tz) + timedelta(days=1)
+        if end_hour == 24
+        else datetime(date_value.year, date_value.month, date_value.day, end_hour, tzinfo=tz)
+    )
+    return since_local.astimezone(timezone.utc), until_local.astimezone(timezone.utc)
+
+
+def _infer_query_time_window(query: str, tz_name: str) -> tuple[Optional[datetime], Optional[datetime], str]:
+    """Infer a broad local time window for natural-language temporal recall queries."""
+    text = query.lower()
+    tz = ZoneInfo(tz_name)
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    start_of_day = datetime(now_local.year, now_local.month, now_local.day, tzinfo=tz)
+    if "this morning" in text or re.search(r"\bmorning\b", text):
+        return (
+            (start_of_day + timedelta(hours=5)).astimezone(timezone.utc),
+            (start_of_day + timedelta(hours=12)).astimezone(timezone.utc),
+            "morning",
+        )
+    if "this afternoon" in text or re.search(r"\bafternoon\b", text):
+        return (
+            (start_of_day + timedelta(hours=12)).astimezone(timezone.utc),
+            (start_of_day + timedelta(hours=17)).astimezone(timezone.utc),
+            "afternoon",
+        )
+    if "this evening" in text or re.search(r"\bevening\b", text):
+        return (
+            (start_of_day + timedelta(hours=17)).astimezone(timezone.utc),
+            (start_of_day + timedelta(hours=22)).astimezone(timezone.utc),
+            "evening",
+        )
+    if re.search(r"\btoday\b", text) or "latest omi" in text or "omi conversation" in text:
+        return start_of_day.astimezone(timezone.utc), now_local.astimezone(timezone.utc), "today"
+    return None, None, ""
+
+
 def _event_datetime(item: dict[str, Any], *keys: str) -> Optional[datetime]:
     for key in keys:
         try:
@@ -310,6 +402,23 @@ def _is_low_salience_fragment(item: dict[str, Any]) -> bool:
     if len(text) <= 240:
         return True
     if isinstance(segment_count, int) and segment_count <= 2 and "brief" in title:
+        return True
+    return False
+
+
+def _is_temporal_low_value_fragment(item: dict[str, Any]) -> bool:
+    """More aggressive fragment filter for broad 'what happened this morning' recall."""
+    if _is_low_salience_fragment(item):
+        return True
+    title = str(item.get("title") or "").lower()
+    text = _compact_text(item.get("text") or item.get("overview") or item.get("summary") or "", 500)
+    metadata = item.get("metadata") or {}
+    tags = metadata.get("ella_tags") if isinstance(metadata, dict) else []
+    if isinstance(tags, list) and "low_signal" in tags:
+        return True
+    if "brief" in title or "fragment" in title or "utterance" in title:
+        return True
+    if len(text) <= 180:
         return True
     return False
 
@@ -467,7 +576,8 @@ def _fallback_recent_context(limit: int, channels: list[str], since: Optional[st
 
 
 async def _recent_context(arguments: dict[str, Any]) -> dict[str, Any]:
-    limit = _clamp_int(arguments.get("limit"), 10, 1, MAX_CONTEXT_LIMIT)
+    max_limit = MAX_WINDOW_CONTEXT_LIMIT if arguments.get("_allow_large_window") else MAX_CONTEXT_LIMIT
+    limit = _clamp_int(arguments.get("limit"), 10, 1, max_limit)
     raw_channels = arguments.get("channels") or []
     channels = (
         [str(item).strip() for item in raw_channels if str(item).strip()] if isinstance(raw_channels, list) else []
@@ -525,15 +635,27 @@ async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
     until = _parse_iso_datetime(arguments.get("until")) or datetime.now(timezone.utc)
     since = _parse_iso_datetime(arguments.get("since"))
     duration_seconds = None
-    if since is None:
+    local_since, local_until = _parse_local_date_window(arguments, tz_name)
+    if local_since is not None and local_until is not None:
+        since = local_since
+        until = local_until
+    elif since is None:
         duration_seconds = _parse_duration_seconds(arguments.get("time_range"), default_seconds=30 * 60)
         since = until - timedelta(seconds=duration_seconds)
-    limit = _clamp_int(arguments.get("limit"), MAX_CONTEXT_LIMIT, 1, MAX_CONTEXT_LIMIT)
+    limit = _clamp_int(arguments.get("limit"), MAX_CONTEXT_LIMIT, 1, MAX_WINDOW_CONTEXT_LIMIT)
 
-    # Pull a recent OMI window without relying on model-side filtering. We do
-    # not pass since here because a multi-minute conversation can start before
-    # the window but end inside it.
-    context = await _recent_context({"limit": limit, "channels": ["omi"]})
+    # Pull enough source rows for the requested local-time window instead of
+    # only the last few fragments. Include a small lookback buffer so a
+    # multi-minute conversation that began before the window can still overlap.
+    fetch_since = since - timedelta(hours=2)
+    context = await _recent_context(
+        {
+            "limit": max(limit, 200),
+            "channels": ["omi"],
+            "since": fetch_since.isoformat().replace("+00:00", "Z"),
+            "_allow_large_window": True,
+        }
+    )
     events = [
         annotate_event_time(dict(event), tz_name=tz_name)
         for event in context.get("events", [])
@@ -587,7 +709,9 @@ async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tokens(text: str) -> set[str]:
-    return {token for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", text.lower())}
+    return {
+        token for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", text.lower()) if token not in SEARCH_STOPWORDS
+    }
 
 
 def _score_item(query_tokens: set[str], item: dict[str, Any]) -> int:
@@ -618,25 +742,35 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
     if not query:
         raise ToolExecutionError("query is required", code=-32602)
     max_results = _clamp_int(arguments.get("max_results"), 5, 1, MAX_SEARCH_RESULTS)
+    tz_name = _plato_timezone()
+    inferred_since, inferred_until, inferred_label = _infer_query_time_window(query, tz_name)
+    since = arguments.get("since") or (
+        inferred_since.isoformat().replace("+00:00", "Z") if inferred_since is not None else None
+    )
     context = await _recent_context(
         {
-            "limit": max(max_results * 5, 25),
+            "limit": max(max_results * 12, 80) if inferred_since else max(max_results * 5, 25),
             "channels": arguments.get("channels") or [],
-            "since": arguments.get("since"),
+            "since": since,
+            "_allow_large_window": bool(inferred_since),
         }
     )
+    events = context.get("events", [])
+    if inferred_since is not None and inferred_until is not None:
+        events = [event for event in events if _event_overlaps_window(event, inferred_since, inferred_until)]
     query_tokens = _tokens(query)
-    ranked = [
-        (score, idx, item)
-        for idx, item in enumerate(context.get("events", []))
-        if (score := _score_item(query_tokens, item)) > 0
-    ]
+    ranked = [(score, idx, item) for idx, item in enumerate(events) if (score := _score_item(query_tokens, item)) > 0]
     ranked.sort(key=lambda row: (row[0], -row[1]), reverse=True)
+    results = [item for _score, _idx, item in ranked[:max_results]]
+    if inferred_since is not None and not results:
+        meaningful_events = [item for item in events if not _is_temporal_low_value_fragment(item)]
+        results = (meaningful_events or list(events))[-max_results:]
     return {
         "query": query,
         "source": context.get("source"),
+        "inferred_time_window": inferred_label or None,
         "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
-        "results": [item for _score, _idx, item in ranked[:max_results]],
+        "results": results,
     }
 
 
@@ -958,7 +1092,8 @@ MCP_TOOLS: list[dict[str, Any]] = [
         "name": "plato_omi_activity_window",
         "description": (
             "Return OMI/necklace conversations in a local-time activity window, split into meaningful moments "
-            "and low-salience fragments. Use this for questions like 'what happened in OMI in the last 30 minutes'."
+            "and low-salience fragments. Use this for questions like 'what happened in OMI in the last 30 minutes', "
+            "'what happened this morning', or 'what did OMI capture today'."
         ),
         "inputSchema": {
             "type": "object",
@@ -970,9 +1105,23 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 },
                 "since": {"type": "string", "description": "Optional ISO timestamp lower bound."},
                 "until": {"type": "string", "description": "Optional ISO timestamp upper bound; defaults to now."},
+                "local_date": {
+                    "type": "string",
+                    "description": "Optional YYYY-MM-DD in the user's local timezone for day/part-of-day windows.",
+                },
+                "part_of_day": {
+                    "type": "string",
+                    "enum": ["day", "morning", "afternoon", "evening", "night", "overnight"],
+                    "description": "Optional local day segment; requires local_date.",
+                },
                 "timezone": {"type": "string", "default": "America/Los_Angeles"},
                 "local_time_zone": {"type": "string", "description": "Alias accepted for timezone, e.g. PDT."},
-                "limit": {"type": "integer", "default": MAX_CONTEXT_LIMIT, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
+                "limit": {
+                    "type": "integer",
+                    "default": MAX_CONTEXT_LIMIT,
+                    "minimum": 1,
+                    "maximum": MAX_WINDOW_CONTEXT_LIMIT,
+                },
                 "include_fragments": {"type": "boolean", "default": True},
             },
         },

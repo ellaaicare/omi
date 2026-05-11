@@ -463,6 +463,67 @@ def test_plato_omi_activity_window_splits_meaningful_from_fragments(monkeypatch)
     assert result["low_salience_fragments"][0]["event_id"] == "brief-color"
 
 
+def test_plato_omi_activity_window_supports_local_morning_window(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    captured = {}
+
+    async def fake_recent_context(arguments):
+        captured.update(arguments)
+        return {
+            "uid": module._plato_uid(),
+            "source": "canonical_timeline",
+            "events": [
+                {
+                    "event_id": "morning-cafe",
+                    "channel": "omi",
+                    "title": "Cafe Visit - Ordering Food and Drinks",
+                    "text": "Ordered food and drinks during the cafe visit.",
+                    "started_at": "2026-05-11T17:49:30Z",
+                    "ended_at": "2026-05-11T18:05:00Z",
+                    "metadata": {"ella_signal": {"salience": "medium"}},
+                },
+                {
+                    "event_id": "noon-fragment",
+                    "channel": "omi",
+                    "title": "Caffeine Fragment",
+                    "text": "Caffeine.",
+                    "started_at": "2026-05-11T19:01:05Z",
+                    "ended_at": "2026-05-11T19:01:08Z",
+                    "metadata": {"ella_signal": {"salience": "low"}, "segment_count": 1},
+                },
+            ],
+        }
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_omi_activity_window",
+                "arguments": {
+                    "local_date": "2026-05-11",
+                    "part_of_day": "morning",
+                    "timezone": "America/Los_Angeles",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert captured["_allow_large_window"] is True
+    assert captured["limit"] == 200
+    assert captured["since"].startswith("2026-05-11T10:00:00Z")
+    assert result["counts"]["window_events"] == 1
+    assert result["meaningful_moments"][0]["event_id"] == "morning-cafe"
+    assert result["window"]["since_local"].startswith("2026-05-11T05:00:00")
+    assert result["window"]["until_local"].startswith("2026-05-11T12:00:00")
+
+
 def test_plato_recent_context_merges_omi_fallback_when_canonical_has_other_channels(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
@@ -558,6 +619,57 @@ def test_plato_search_memory_uses_merged_omi_fallback(monkeypatch):
     result = _tool_result(response)
     assert result["source"] == "canonical_timeline_with_omi_firestore_fallback"
     assert result["results"][0]["event_id"] == "cafe-1"
+
+
+def test_plato_search_memory_temporal_query_returns_morning_window_without_keyword_match(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def fake_recent_context(arguments):
+        assert arguments["_allow_large_window"] is True
+        assert arguments["since"]
+        return {
+            "uid": module._plato_uid(),
+            "source": "canonical_timeline",
+            "events": [
+                {
+                    "event_id": "morning-cafe",
+                    "channel": "omi",
+                    "title": "Cafe Visit - Ordering Food and Drinks",
+                    "text": "Ordered food and drinks during the cafe visit.",
+                    "started_at": "2026-05-11T17:49:30Z",
+                    "ended_at": "2026-05-11T18:05:00Z",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+    monkeypatch.setattr(
+        module,
+        "_infer_query_time_window",
+        lambda query, tz_name: (
+            module.datetime(2026, 5, 11, 12, 0, tzinfo=module.timezone.utc),
+            module.datetime(2026, 5, 11, 19, 0, tzinfo=module.timezone.utc),
+            "morning",
+        ),
+    )
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_search_memory",
+                "arguments": {"query": "what happened this morning", "max_results": 5, "channels": ["omi"]},
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["inferred_time_window"] == "morning"
+    assert result["results"][0]["event_id"] == "morning-cafe"
 
 
 def test_plato_search_memory_rejects_missing_query(monkeypatch):
