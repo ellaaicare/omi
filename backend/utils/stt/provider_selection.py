@@ -9,6 +9,8 @@ def models_for_preferred_stt_service(preferred_service, configured_models: list[
     preferred = service_value(preferred_service)
     if preferred is None:
         return configured_models
+    if preferred == "grok":
+        return ["grok-stt"]
     if preferred == "soniox":
         return ["soniox-stt-rt"]
     if preferred == "deepgram":
@@ -32,9 +34,18 @@ def select_stt_service_for_language(
     deepgram_nova3_multi_languages: set[str],
     deepgram_nova2_languages: set[str],
     deepgram_nova2_multi_languages: set[str],
+    grok_languages: set[str] = None,
+    grok_multi_languages: set[str] = None,
 ):
+    _grok_languages = grok_languages or set()
+    _grok_multi_languages = grok_multi_languages or set()
     for model in models_for_preferred_stt_service(preferred_service, configured_models):
-        if model == "soniox-stt-rt":
+        if model == "grok-stt":
+            if multi_lang_enabled and language in _grok_multi_languages:
+                return service_enum.grok, "multi", "grok-stt"
+            if language in _grok_languages:
+                return service_enum.grok, language, "grok-stt"
+        elif model == "soniox-stt-rt":
             if multi_lang_enabled and language in soniox_multi_languages:
                 return service_enum.soniox, "multi", "stt-rt-preview"
             if language in soniox_languages:
@@ -54,4 +65,4 @@ def select_stt_service_for_language(
 
     if preferred_service is not None:
         return None, None, None
-    return service_enum.deepgram, "en", "nova-3"
+    return service_enum.grok, "en", "grok-stt"

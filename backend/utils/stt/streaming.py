@@ -24,6 +24,7 @@ class STTService(str, Enum):
     deepgram = "deepgram"
     soniox = "soniox"
     speechmatics = "speechmatics"
+    grok = "grok"
 
     @staticmethod
     def get_model_name(value):
@@ -33,6 +34,8 @@ class STTService(str, Enum):
             return 'soniox_streaming'
         elif value == STTService.speechmatics:
             return 'speechmatics_streaming'
+        elif value == STTService.grok:
+            return 'grok_streaming'
 
 
 # Languages supported by Soniox
@@ -194,8 +197,23 @@ deepgram_nova3_languages = {
     "vi",
 }
 
-# Supported values: soniox-stt-rt,dg-nova-3,dg-nova-2
-stt_service_models = os.getenv('STT_SERVICE_MODELS', 'dg-nova-3').split(',')
+# Grok STT supports 25 languages (superset of nova-3 multi)
+grok_languages = {
+    "en", "en-US", "en-AU", "en-GB", "en-IN",
+    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
+    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
+    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+}
+grok_multi_languages = {
+    "multi",
+    "en", "en-US", "en-AU", "en-GB", "en-IN",
+    "es", "es-419", "fr", "fr-CA", "de", "it", "pt", "pt-BR", "pt-PT",
+    "ja", "ko", "zh", "ru", "ar", "hi", "nl", "pl", "sv", "tr",
+    "da", "fi", "no", "id", "ms", "th", "vi", "uk", "cs", "ro",
+}
+
+# Supported values: grok-stt,soniox-stt-rt,dg-nova-3,dg-nova-2
+stt_service_models = os.getenv('STT_SERVICE_MODELS', 'grok-stt').split(',')
 
 
 def get_stt_service_for_language(
@@ -213,6 +231,8 @@ def get_stt_service_for_language(
         deepgram_nova3_multi_languages=deepgram_nova3_multi_languages,
         deepgram_nova2_languages=deepgram_nova2_languages,
         deepgram_nova2_multi_languages=deepgram_nova2_multi_languages,
+        grok_languages=grok_languages,
+        grok_multi_languages=grok_multi_languages,
     )
 
 
@@ -484,6 +504,193 @@ def connect_to_deepgram(
         raise Exception(f'Could not open socket: {e}')
 
 
+async def process_audio_grok(
+    stream_transcript,
+    sample_rate: int,
+    language: str,
+    preseconds: int = 0,
+    stt_event_callback: Optional[Callable] = None,
+):
+    api_key = os.getenv('XAI_API_KEY')
+    if not api_key:
+        raise ValueError("XAI_API_KEY is not set")
+
+    # Grok supports pcm (linear16) and mulaw; use pcm for all sample rates
+    encoding = "pcm"
+    # Grok accepts 'multi' for multilingual detection
+    lang_param = language if language else "en"
+
+    uri = (
+        f"wss://api.x.ai/v1/stt"
+        f"?sample_rate={sample_rate}"
+        f"&encoding={encoding}"
+        f"&diarize=true"
+        f"&interim_results=true"
+        f"&language={lang_param}"
+    )
+
+    try:
+        extra_headers = {"Authorization": f"Bearer {api_key}"}
+        print("Connecting to Grok STT WebSocket...")
+        grok_socket = await websockets.connect(uri, extra_headers=extra_headers, ping_timeout=10, ping_interval=10)
+        print("Connected to Grok STT WebSocket.")
+
+        # Wait briefly for transcript.created to confirm the server is ready
+        try:
+            _first_raw = await asyncio.wait_for(grok_socket.recv(), timeout=3.0)
+            _first_msg = json.loads(_first_raw)
+            if _first_msg.get("type") == "error":
+                _err = _first_msg.get("message", "Unknown error")
+                await grok_socket.close()
+                raise ValueError(f"Grok STT error: {_err}")
+            print(f"Grok STT ready: {_first_msg.get('type', _first_msg)}")
+        except asyncio.TimeoutError:
+            pass  # No transcript.created in time, proceed anyway
+
+        current_segment = None
+        current_segment_time = None
+        current_speaker_id = None
+
+        async def on_message():
+            nonlocal current_segment, current_segment_time, current_speaker_id
+            print("[GROK] on_message task started")
+            # Track the end timestamp of the last word we have emitted.
+            # Initialised to preseconds so pre-roll audio is naturally skipped.
+            last_streamed_end = float(preseconds)
+
+            def build_segments(word_list):
+                segs = []
+                for word in word_list:
+                    w_text = word.get("text", "")
+                    w_start = float(word.get("start", 0.0))
+                    w_end = float(word.get("end", 0.0))
+                    w_speaker = int(word.get("speaker", 0))
+                    adjusted_start = max(0.0, w_start - preseconds)
+                    adjusted_end = max(0.0, w_end - preseconds)
+                    is_user = (w_speaker == 0 and preseconds > 0)
+                    if not segs:
+                        segs.append({
+                            "speaker": f"SPEAKER_{w_speaker}",
+                            "start": adjusted_start,
+                            "end": adjusted_end,
+                            "text": w_text,
+                            "is_user": is_user,
+                            "person_id": None,
+                        })
+                    elif segs[-1]["speaker"] == f"SPEAKER_{w_speaker}":
+                        segs[-1]["text"] += f" {w_text}"
+                        segs[-1]["end"] = adjusted_end
+                    else:
+                        segs.append({
+                            "speaker": f"SPEAKER_{w_speaker}",
+                            "start": adjusted_start,
+                            "end": adjusted_end,
+                            "text": w_text,
+                            "is_user": is_user,
+                            "person_id": None,
+                        })
+                return segs
+
+            try:
+                async for raw in grok_socket:
+                    if not isinstance(raw, str):
+                        continue
+                    msg = json.loads(raw)
+                    msg_type = msg.get("type", "")
+
+                    if msg_type == "error":
+                        print(f"[GROK] error: {msg}")
+                        break
+
+                    if msg_type not in ("transcript.partial", "transcript.done"):
+                        continue
+
+                    words = msg.get("words", [])
+                    top_text = msg.get("text", "")
+                    speech_final = msg.get("speech_final", False)
+                    is_final = msg.get("is_final", msg_type == "transcript.done")
+
+                    if not words and not top_text:
+                        continue
+
+                    if speech_final or is_final:
+                        # Flush: emit every word we have not yet emitted
+                        new_words = [
+                            w for w in words
+                            if float(w.get("start", 0.0)) >= preseconds
+                            and float(w.get("end", 0.0)) > last_streamed_end
+                        ]
+                    else:
+                        # Partial: only emit "stable" words — all except the last 3,
+                        # which Grok may still revise as the model continues.
+                        stable = words[:-3] if len(words) > 3 else []
+                        new_words = [
+                            w for w in stable
+                            if float(w.get("start", 0.0)) >= preseconds
+                            and float(w.get("end", 0.0)) > last_streamed_end
+                        ]
+
+                    if new_words:
+                        last_streamed_end = float(new_words[-1].get("end", last_streamed_end))
+                        segments = build_segments(new_words)
+                        if segments:
+                            print(f"[GROK] streaming {len(segments)} seg(s): {segments[0]['text'][:60]}")
+                            stream_transcript(segments)
+                            if stt_event_callback:
+                                stt_event_callback({
+                                    "provider": "grok",
+                                    "result_type": "final",
+                                    "text": " ".join(s["text"] for s in segments)[:120],
+                                })
+                    elif not words and top_text and (speech_final or is_final):
+                        # Fallback when server returns only top-level text (no word list)
+                        segments = [{
+                            "speaker": "SPEAKER_0",
+                            "start": 0.0,
+                            "end": 0.0,
+                            "text": top_text.strip(),
+                            "is_user": preseconds > 0,
+                            "person_id": None,
+                        }]
+                        print(f"[GROK] streaming text fallback: {top_text[:60]}")
+                        stream_transcript(segments)
+
+                    # After a speech_final the server starts a fresh utterance,
+                    # so reset our position tracker for the new segment.
+                    if speech_final:
+                        last_streamed_end = float(preseconds)
+
+            except Exception as e:
+                print(f"[GROK] on_message error: {e}")
+            finally:
+                # Close socket so receive_data proactive reconnect detects dead receiver.
+                # Server errors like "ASR stream timed out" leave WebSocket in OPEN state
+                # while on_message is gone; without close() receive_data never reconnects.
+                try:
+                    await grok_socket.close()
+                except Exception:
+                    pass
+            print("[GROK] on_message task ended")
+
+        _grok_send_count = [0]
+        _orig_send = grok_socket.send
+        async def _counted_send(data):
+            _grok_send_count[0] += 1
+            if _grok_send_count[0] % 50 == 1:
+                print(f"[GROK] sent chunk #{_grok_send_count[0]} ({len(data)} bytes)")
+            return await _orig_send(data)
+        grok_socket.send = _counted_send
+        asyncio.create_task(on_message())
+        return grok_socket
+
+    except websockets.exceptions.WebSocketException as e:
+        raise ValueError(f"Grok STT WebSocket error: {e}")
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        raise ValueError(f"Grok STT connection error: {e}")
+
+
 async def process_audio_soniox(
     stream_transcript,
     sample_rate: int,
@@ -534,6 +741,19 @@ async def process_audio_soniox(
         # Send the initial request
         await soniox_socket.send(json.dumps(request))
         print(f"Sent initial request: {request}")
+
+        # Quick check for immediate auth/balance errors from Soniox (0.3s timeout)
+        try:
+            _first_raw = await asyncio.wait_for(soniox_socket.recv(), timeout=0.3)
+            _first_msg = json.loads(_first_raw)
+            if 'error_code' in _first_msg:
+                _err_code = _first_msg.get('error_code', 0)
+                _err_msg = _first_msg.get('error_message', 'Unknown error')
+                await soniox_socket.close()
+                raise ValueError(f"Soniox error {_err_code}: {_err_msg}")
+            print(f"Soniox first message (not error): {_first_msg}")
+        except asyncio.TimeoutError:
+            pass  # Normal: Soniox is ready, waiting for audio
 
         # Variables to track current segment
         current_segment = None
