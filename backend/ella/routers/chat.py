@@ -57,7 +57,7 @@ HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642"
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
-HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "v2-20260511").strip()
+HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
@@ -76,6 +76,46 @@ ELLA_SYSTEM_PROMPT = (
     "Keep responses concise and easy to understand. "
     "If someone seems confused or distressed, respond with extra gentleness and reassurance."
 )
+
+
+def _hermes_chat_session_key(uid: str) -> str:
+    if HERMES_CHAT_SESSION_EPOCH:
+        epoch = HERMES_CHAT_SESSION_EPOCH
+    else:
+        epoch = datetime.now(timezone.utc).astimezone(ZoneInfo(CHAT_USER_TIMEZONE)).strftime("daily-%Y%m%d")
+    return f"ella:omi:{uid.lower()}:ios-chat:{epoch}"
+
+
+async def _hermes_nonstream_completion(messages: list[dict], session_key: str) -> str:
+    recovery_session = f"{session_key}:empty-recovery"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{HERMES_GATEWAY_URL}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {HERMES_GATEWAY_TOKEN}",
+                "Content-Type": "application/json",
+                "X-Hermes-Session-Id": recovery_session,
+            },
+            json={
+                "model": HERMES_MODEL,
+                "messages": messages,
+                "stream": False,
+            },
+        )
+    if response.status_code != 200:
+        body = response.text[:160]
+        print(
+            f"[FLOW:CHAT-HERMES] EMPTY_RECOVERY_ERROR status={response.status_code} body={body!r}",
+            flush=True,
+        )
+        return ""
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    delta = choices[0].get("delta") or {}
+    return str(message.get("content") or delta.get("content") or "").strip()
 
 
 class EllaChatRequest(BaseModel):
@@ -553,7 +593,7 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
         yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
         return
 
-    session_key = f"ella:omi:{uid.lower()}:ios-chat:{HERMES_CHAT_SESSION_EPOCH}"
+    session_key = _hermes_chat_session_key(uid)
     text = []
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
@@ -644,6 +684,21 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
                         yield f"data: {content.replace(chr(10), '__CRLF__')}\n\n"
 
         full_text = "".join(text).strip()
+        if not full_text:
+            recovery_text = await _hermes_nonstream_completion(messages, session_key)
+            if recovery_text:
+                text.append(recovery_text)
+                full_text = recovery_text
+                print(
+                    f"[FLOW:CHAT-HERMES] EMPTY_RECOVERY_OK uid={uid} session={session_key}",
+                    flush=True,
+                )
+                yield f"data: {recovery_text.replace(chr(10), '__CRLF__')}\n\n"
+            else:
+                print(
+                    f"[FLOW:CHAT-HERMES] EMPTY_RESPONSE uid={uid} session={session_key}",
+                    flush=True,
+                )
         if full_text:
             msg = {
                 "id": str(uuid4()),
