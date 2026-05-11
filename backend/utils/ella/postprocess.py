@@ -6,6 +6,7 @@
 
 import os
 import time
+import threading
 import requests
 from typing import Optional
 
@@ -101,29 +102,33 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
         else:
             print(f"[FLOW:POSTPROCESS] ERROR conversation-completed uid={uid} conv={conv_short} status={response.status_code} latency={_elapsed_completed}ms", flush=True)
 
-        # Also notify the user's OpenClaw agent via conversation-ready webhook
-        try:
-            _ready_start = time.time()
-            ready_payload = {
-                'event': 'conversation_ready',
-                'uid': uid,
-                'conversation_id': conversation.id,
-                'transcript': transcript_text,
-                'segment_count': segment_count,
-                'structured': structured,
-                'started_at': conversation.started_at.isoformat() if conversation.started_at else None,
-                'finished_at': conversation.finished_at.isoformat() if conversation.finished_at else None,
-            }
-            ready_resp = requests.post(
-                CONVERSATION_READY_WEBHOOK_URL,
-                json=ready_payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=15,  # increased for larger payload with transcript
-            )
-            _elapsed_ready = int((time.time() - _ready_start) * 1000)
-            print(f"[FLOW:POSTPROCESS] conversation-ready uid={uid} conv={conv_short} segments={segment_count} status={ready_resp.status_code} latency={_elapsed_ready}ms url={CONVERSATION_READY_WEBHOOK_URL}", flush=True)
-        except Exception as e:
-            print(f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={uid} conv={conv_short} error={e}", flush=True)
+        # Notify the user's OpenClaw agent via conversation-ready webhook (fire-and-forget)
+        ready_payload = {
+            'event': 'conversation_ready',
+            'uid': uid,
+            'conversation_id': conversation.id,
+            'transcript': transcript_text,
+            'segment_count': segment_count,
+            'structured': structured,
+            'started_at': conversation.started_at.isoformat() if conversation.started_at else None,
+            'finished_at': conversation.finished_at.isoformat() if conversation.finished_at else None,
+        }
+
+        def _fire_ready(_url, _payload, _uid, _conv_short, _segments):
+            try:
+                _t = time.time()
+                r = requests.post(_url, json=_payload, headers={'Content-Type': 'application/json'}, timeout=60)
+                _ms = int((time.time() - _t) * 1000)
+                print(f"[FLOW:POSTPROCESS] conversation-ready uid={_uid} conv={_conv_short} segments={_segments} status={r.status_code} latency={_ms}ms", flush=True)
+            except Exception as _e:
+                print(f"[FLOW:POSTPROCESS] ERROR conversation-ready uid={_uid} conv={_conv_short} error={_e}", flush=True)
+
+        threading.Thread(
+            target=_fire_ready,
+            args=(CONVERSATION_READY_WEBHOOK_URL, ready_payload, uid, conv_short, segment_count),
+            daemon=True,
+        ).start()
+        print(f"[FLOW:POSTPROCESS] conversation-ready fired async uid={uid} conv={conv_short} segments={segment_count}", flush=True)
 
     except requests.Timeout:
         _elapsed = int((time.time() - _start) * 1000)
