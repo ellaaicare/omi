@@ -802,7 +802,9 @@ async def process_audio_soniox(
                         speaker_change_detected = False
                         token_texts = []
 
-                        # First check if any token contains a speaker tag
+                        # First check if any token contains a speaker tag.
+                        # Only accumulate is_final=True text tokens — non-final tokens are
+                        # intermediate hypotheses and cause repetitive output if appended.
                         for token in tokens:
                             token_text = token['text']
                             if token_text.startswith('spk:'):
@@ -811,7 +813,7 @@ async def process_audio_soniox(
                                     current_speaker_id is not None and current_speaker_id != new_speaker_id
                                 )
                                 current_speaker_id = new_speaker_id
-                            else:
+                            elif token.get('is_final', True):
                                 token_texts.append(token_text)
 
                         # If no speaker tag found in this response, use the current speaker
@@ -840,8 +842,11 @@ async def process_audio_soniox(
                             current_segment = None
                             current_segment_time = None
 
-                        # Combine all non-speaker tokens into text
+                        # Combine all final non-speaker tokens into text.
+                        # If empty (all tokens were non-final hypotheses), skip this update.
                         content = ''.join(token_texts)
+                        if not content:
+                            continue
                         if content and stt_event_callback:
                             stt_event_callback(
                                 {
