@@ -106,6 +106,9 @@ router = APIRouter()
 PUSHER_ENABLED = bool(os.getenv('HOSTED_PUSHER_API_URL'))
 STT_LATENCY_LOGS_ENABLED = os.getenv('ELLA_STT_LATENCY_LOGS_ENABLED', 'true').lower() == 'true'
 STT_LATENCY_CLIENT_EVENT_LIMIT = int(os.getenv('ELLA_STT_LATENCY_CLIENT_EVENT_LIMIT', '25'))
+# Server-side STT override: when set, all sessions use this provider regardless of client request.
+# Useful when a provider hallucinates on ambient noise (e.g. soniox/grok for wearable use).
+STT_FORCE_SERVICE = os.getenv('STT_FORCE_SERVICE', '').strip().lower() or None
 
 # Freemium: Send notification when credits threshold is reached
 FREEMIUM_THRESHOLD_SECONDS = 180  # 3 minutes remaining - notify user
@@ -167,7 +170,14 @@ async def _stream_handler(
     session_id = str(uuid.uuid4())
     session_started_at = time.time()
     socket_accepted_at = socket_accepted_at or session_started_at
-    requested_stt_service = stt_service
+    if STT_FORCE_SERVICE:
+        try:
+            requested_stt_service = STTService(STT_FORCE_SERVICE)
+            print(f"[STT] Server override: forcing {STT_FORCE_SERVICE} (client requested {stt_service})")
+        except ValueError:
+            requested_stt_service = stt_service
+    else:
+        requested_stt_service = stt_service
     selected_stt_service: Optional[STTService] = None
     selected_stt_language: Optional[str] = None
     selected_stt_model: Optional[str] = None
