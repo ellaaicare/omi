@@ -67,6 +67,8 @@ from utils.app_integrations import trigger_external_integrations, trigger_realti
 from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import process_conversation, retrieve_in_progress_conversation
+from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
+from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
 from utils.other import endpoints as auth
 from utils.other.storage import get_profile_audio_if_exists, get_user_has_speech_profile
@@ -345,6 +347,23 @@ async def _stream_handler(
 
     # Always include "Omi" as predefined vocabulary
     vocabulary = list({"Omi"} | set(vocabulary))
+    scanner_keyterms = await get_scanner_keyterms(uid)
+    vocabulary = combine_deepgram_keyterms(vocabulary, scanner_keyterms)
+    scanner_keyterm_status = scanner_keyterm_cache_status(uid)
+    if scanner_keyterms:
+        _latency_log(
+            "scanner_keyterms_applied",
+            scanner_keyterms_count=len(scanner_keyterms),
+            scanner_keyterms_source=scanner_keyterm_status.get("source", "cache"),
+            scanner_keyterms_age_seconds=scanner_keyterm_status.get("age_seconds"),
+            deepgram_keyterms_count=len(vocabulary),
+        )
+    elif scanner_keyterm_status.get("error"):
+        _latency_log(
+            "scanner_keyterms_unavailable",
+            scanner_keyterms_error=scanner_keyterm_status.get("error"),
+            deepgram_keyterms_count=len(vocabulary),
+        )
 
     # Convert 'auto' to 'multi' for consistency
     language = 'multi' if language == 'auto' else language
