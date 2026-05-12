@@ -5,32 +5,39 @@ from utils.ella import scanner_keyterms
 
 
 SCANNER_TUNING = """
-@runtime: current-state [ACTIVE]
+## @runtime: current-state
+[ACTIVE]
 - guardian_mode: EMERGENCY_ONLY
 
-@wakeword: defaults [ACTIVE]
+## @wakeword: defaults
+[ACTIVE]
 - Hey Ella
 - Ella
 - "Hey Dina"
 
-@wakeword: personal-learned [ACTIVE]
-- where did I put my glasses
-- keys location lookup
+## @wakeword: personal-learned
+[ACTIVE]
+- where did I put my glasses → response_template: item_location_lookup[glasses]
+- keys location lookup | response_template: item_location_lookup[keys]
 
-@prefilter: media-baseline [ACTIVE]
+## @prefilter: media-baseline
+[ACTIVE]
 - suppress: podcast audio
 - ignore: "normal TV audio"
 
-@scanner: health-context [ACTIVE]
+## @scanner: health-context
+[ACTIVE]
 - medications: metformin, rescue inhaler
 - providers: Dr. Pu, Claudia
 - conditions: type 2 diabetes, hypertension
 
-@fastpath: old-temp-rule [ACTIVE]
+## @fastpath: old-temp-rule
+[ACTIVE]
 - expires: 2020-01-01
 - obsolete phrase
 
-@wakeword: inactive-test [INACTIVE]
+## @wakeword: inactive-test
+[INACTIVE]
 - Should Not Appear
 """
 

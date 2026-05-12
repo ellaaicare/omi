@@ -174,23 +174,28 @@ def _section_is_active(header_state: Optional[str], lines: list[str]) -> bool:
 
 def _split_sections(content: str) -> list[tuple[str, str, Optional[str], list[str]]]:
     sections: list[tuple[str, str, Optional[str], list[str]]] = []
-    current: Optional[tuple[str, str, Optional[str], list[str]]] = None
+    current: Optional[list] = None
     for line in content.splitlines():
-        match = _SECTION_RE.match(line)
+        header_line = re.sub(r"^\s*#+\s*", "", line)
+        match = _SECTION_RE.match(header_line)
         if match:
             if current:
-                sections.append(current)
-            current = (
+                sections.append((current[0], current[1], current[2], current[3]))
+            current = [
                 match.group("kind").strip().lower(),
                 match.group("name").strip().lower(),
                 match.group("state"),
                 [],
-            )
+            ]
             continue
         if current:
+            state_match = re.match(r"^\s*\[(?P<state>[A-Z_ -]+)\]\s*$", line)
+            if state_match and not current[3] and current[2] is None:
+                current[2] = state_match.group("state")
+                continue
             current[3].append(line)
     if current:
-        sections.append(current)
+        sections.append((current[0], current[1], current[2], current[3]))
     return sections
 
 
@@ -262,6 +267,7 @@ def _extract_line_terms(line: str, *, include_plain_bullets: bool) -> list[str]:
 
     terms = _extract_inline_terms(stripped)
     without_inline = _INLINE_TERM_RE.sub("", stripped)
+    without_inline = re.split(r"\s*(?:→|=>|\|)\s*", without_inline, maxsplit=1)[0]
     cleaned = _clean_candidate(without_inline)
     if not cleaned:
         return terms
