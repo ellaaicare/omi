@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 import database.conversations as conversations_db
 import database.memories as memories_db
+from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services import proposal_ingest
 from ella.services.mcp_identity import validate_mcp_session_token
 from ella.services.mcp_startup import build_startup_context
@@ -51,6 +52,7 @@ MAX_CONTEXT_LIMIT = 50
 MAX_WINDOW_CONTEXT_LIMIT = 500
 MAX_SEARCH_RESULTS = 20
 MAX_PROMPT_CHARS = 4000
+MAX_OBSERVATION_CHARS = 8000
 MAX_CONSULT_CONTEXT_CHARS = 7000
 RATE_LIMIT_WINDOW_SECONDS = 60
 SALIENCE_RANKS = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -88,6 +90,15 @@ COMPANION_PROPOSAL_TYPES = {
     "memory_note",
     "summary_correction",
 }
+OBSERVATION_CHANNELS = {
+    "companion_observation",
+    "grok_insight",
+    "grok_conversation",
+    "companion_idea",
+    "companion_note",
+    "companion_summary",
+}
+_canonical_store = PostgresCanonicalEventStore()
 
 _active_sessions: dict[str, "MCPSession"] = {}
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
@@ -170,7 +181,7 @@ def _fingerprint(token: str) -> str:
 
 _WWW_AUTHENTICATE = (
     'Bearer resource_metadata="https://api.ella-ai-care.com/.well-known/oauth-protected-resource",'
-    ' scope="context:read memory:read profile:read startup:read timeline:read tools:read"'
+    ' scope="context:read memory:read observations:write profile:read startup:read timeline:read tools:read"'
 )
 
 
@@ -867,11 +878,19 @@ def _proposal_write_enabled() -> bool:
 
 
 def _legacy_plato_onboarding() -> dict[str, Any]:
-    scopes = ["context:read", "memory:read", "profile:read", "startup:read", "timeline:read", "tools:read"]
+    scopes = [
+        "context:read",
+        "memory:read",
+        "profile:read",
+        "startup:read",
+        "timeline:read",
+        "tools:read",
+        "observations:write",
+    ]
     tools = [
         "companion_start_here",
         "companion_surface_prompt",
-        "companion_get_proposal_status",
+        "companion_submit_observation",
         "plato_recent_context",
         "plato_search_memory",
         "plato_latest_omi",
@@ -880,7 +899,7 @@ def _legacy_plato_onboarding() -> dict[str, Any]:
     ]
     if _proposal_write_enabled():
         scopes.extend(["proposals:read", "proposals:write"])
-        tools.append("companion_propose_change")
+        tools.extend(["companion_propose_change", "companion_get_proposal_status"])
     return {
         "state": "authenticated_mapped",
         "trace_id": str(uuid.uuid4()),
@@ -991,9 +1010,54 @@ async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]
         raise ToolExecutionError(str(exc), code=-32004) from exc
 
 
+async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = _compact_text(arguments.get("text"), MAX_OBSERVATION_CHARS)
+    if not text or len(text.strip()) < 10:
+        raise ToolExecutionError("text is required (minimum 10 characters)", code=-32602)
+    channel = str(arguments.get("channel") or "companion_observation").strip().lower()
+    channel = re.sub(r"[^a-z0-9_]", "_", channel)
+    if channel not in OBSERVATION_CHANNELS:
+        allowed = ", ".join(sorted(OBSERVATION_CHANNELS))
+        raise ToolExecutionError(f"channel must be one of: {allowed}", code=-32602)
+    title = _compact_text(arguments.get("title") or "", 240) or None
+    event_id = str(arguments.get("idempotency_key") or uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    event = CanonicalEventIn(
+        uid=_plato_uid(),
+        canonical_identity=_plato_canonical_identity(),
+        event_id=event_id,
+        channel=channel,
+        provider="mcp_companion",
+        role="companion",
+        text=text,
+        started_at=now,
+        ended_at=now,
+        privacy_scope="user_private",
+        scan_policy="none",
+        source_ref={"mcp_tool": "companion_submit_observation"},
+        metadata={"title": title} if title else {},
+    )
+    result = await _canonical_store.write_batch([event])
+    return {
+        "accepted": True,
+        "event_id": event_id,
+        "channel": channel,
+        "inserted": result.get("inserted", 0) > 0,
+        "note": "Observation recorded. Hermes will process it during the next Observer run.",
+    }
+
+
+_DEPRECATED_TOOLS = {"companion_propose_change", "companion_get_proposal_status"}
+
+
 def _visible_tools() -> list[dict[str, Any]]:
     allowed = set(_legacy_plato_onboarding()["session_claims"].get("allowed_tools") or [])
-    return [tool for tool in MCP_TOOLS if tool["name"] in allowed or tool["name"] == "plato_get_scanner_rules"]
+    return [
+        tool
+        for tool in MCP_TOOLS
+        if (tool["name"] in allowed or tool["name"] == "plato_get_scanner_rules")
+        and tool["name"] not in _DEPRECATED_TOOLS
+    ]
 
 
 MCP_TOOLS: list[dict[str, Any]] = [
@@ -1031,10 +1095,9 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "companion_propose_change",
         "description": (
+            "[DEPRECATED — use companion_submit_observation instead] "
             "Create an auditable proposal only; this never directly changes scanner rules, reminders, profile data, "
-            "memory, summaries, caregiver delivery, or other live state. Use for requested scanner, reminder, "
-            "profile, memory, or summary changes that need later approval/application. Trusted memory_note and "
-            "profile_update proposals may be applied later by the Observer safe applier."
+            "memory, summaries, caregiver delivery, or other live state."
         ),
         "inputSchema": {
             "type": "object",
@@ -1052,6 +1115,42 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "idempotency_key": {"type": "string"},
             },
             "required": ["proposal_type", "title", "description"],
+        },
+    },
+    {
+        "name": "companion_submit_observation",
+        "description": (
+            "Submit a free-form observation, idea, conversation summary, or insight. "
+            "Just write naturally — Hermes will process it internally using its own intelligence "
+            "to extract facts, update the user profile, create memories, or take other appropriate action. "
+            "No need to structure the data; just describe what you observed or learned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "Free-form text: a conversation summary, idea, insight, observation, "
+                        "or anything noteworthy about the user. Write naturally."
+                    ),
+                },
+                "channel": {
+                    "type": "string",
+                    "enum": sorted(OBSERVATION_CHANNELS),
+                    "default": "companion_observation",
+                    "description": "Category label for this observation.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional short title or subject line.",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional key to prevent duplicate submissions.",
+                },
+            },
+            "required": ["text"],
         },
     },
     {
@@ -1160,6 +1259,7 @@ _TOOL_HANDLERS = {
     "companion_surface_prompt": _companion_surface_prompt,
     "companion_get_proposal_status": _companion_get_proposal_status,
     "companion_propose_change": _companion_propose_change,
+    "companion_submit_observation": _companion_submit_observation,
     "plato_recent_context": _recent_context,
     "plato_search_memory": _search_memory,
     "plato_latest_omi": _latest_omi,
