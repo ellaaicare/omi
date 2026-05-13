@@ -1759,6 +1759,39 @@ def _canonical_event_timestamp(event: dict, user_timezone: str = "America/Los_An
         return str(raw)[:16]
 
 
+def _canonical_omi_quality_score(metadata: dict) -> int:
+    signal = metadata.get("ella_signal") if isinstance(metadata.get("ella_signal"), dict) else {}
+    tags = metadata.get("ella_tags") if isinstance(metadata.get("ella_tags"), list) else []
+    tags = {str(tag).lower() for tag in tags}
+
+    score = 0
+    salience = str(signal.get("salience") or "").lower()
+    if salience == "high":
+        score += 30
+    elif salience == "medium":
+        score += 18
+
+    noise = str(signal.get("noise_level") or "").lower()
+    if noise == "none":
+        score += 4
+    elif noise == "low":
+        score += 2
+    elif noise == "medium":
+        score -= 6
+    elif noise == "high":
+        score -= 14
+
+    if "low_signal" in tags:
+        score -= 12
+    if "background" in tags:
+        score -= 8
+    if "media" in tags:
+        score -= 4
+    if signal.get("contains_user_speech") is False:
+        score -= 10
+    return score
+
+
 async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_access: bool) -> list:
     """Search OMI canonical summary events via GET /v1/ella/timeline first."""
     results = []
@@ -1799,13 +1832,16 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
         score = _keyword_score(searchable, query_terms) if query_terms else 1
         if score <= 0:
             continue
+        rank_score = score
+        if window_start and not query_terms:
+            rank_score += _canonical_omi_quality_score(metadata)
 
         started_sort = started_sort or datetime.min
 
         content = text
         if not full_access:
             content = content[:300] + ("..." if len(content) > 300 else "")
-        matches.append((score, started_sort, event, title, content))
+        matches.append((rank_score, started_sort, event, title, content))
 
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
     for score, _started_sort, event, title, content in matches[:limit]:

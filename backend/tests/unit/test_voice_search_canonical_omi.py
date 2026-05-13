@@ -108,6 +108,43 @@ def test_voice_memory_fast_path_skips_temporal_or_omi_queries():
     assert module._should_use_voice_memory_fast_path("what was that restaurant name") is True
 
 
+def test_search_canonical_omi_events_prefers_salient_events_for_broad_time_window():
+    low_signal_late = {
+        **_cafe_event(),
+        "event_id": "omi:brief-late:summary",
+        "source_identity": "omi:brief-late",
+        "text": "Brief Okay\n\nA quick one-word exchange.",
+        "started_at": "2026-05-07T18:58:00+00:00",
+        "metadata": {
+            "ella_tags": ["omi", "low_signal"],
+            "ella_signal": {"salience": "low", "noise_level": "high", "contains_user_speech": True},
+            "structured": {"title": "Brief Okay"},
+        },
+    }
+    salient_early = {
+        **_cafe_event(),
+        "event_id": "omi:salient-early:summary",
+        "source_identity": "omi:salient-early",
+        "text": "Morning school support\n\nHelped Meisheng with school anxiety and decided to email the teacher.",
+        "started_at": "2026-05-07T16:20:00+00:00",
+        "metadata": {
+            "ella_tags": ["omi", "family", "health"],
+            "ella_signal": {"salience": "medium", "noise_level": "low", "contains_user_speech": True},
+            "structured": {"title": "Morning school support"},
+        },
+    }
+
+    async def fake_fetch(_uid, **_kwargs):
+        return [low_signal_late, salient_early]
+
+    module = _load_voice_omi_helpers(fake_fetch)
+    module._pacific_now = lambda: datetime(2026, 5, 7, 15, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+
+    results = asyncio.run(module._search_canonical_omi_events("uid-1", "what happened this morning", 5, True))
+
+    assert [item["title"] for item in results] == ["Morning school support", "Brief Okay"]
+
+
 def test_search_canonical_omi_events_returns_empty_when_no_useful_match():
     async def fake_fetch(_uid, **_kwargs):
         return [_cafe_event()]
