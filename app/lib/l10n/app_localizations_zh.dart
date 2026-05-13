@@ -3674,6 +3674,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get paused => '已暂停';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => '初始化中...';
 
   @override

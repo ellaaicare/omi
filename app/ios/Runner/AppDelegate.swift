@@ -1,5 +1,6 @@
 import UIKit
 import Flutter
+import CoreBluetooth
 import UserNotifications
 import app_links
 import WatchConnectivity
@@ -93,6 +94,13 @@ extension FlutterError: Error {}
               WatchRecorderHostAPISetup.setUp(binaryMessenger: controller.binaryMessenger, api: api)
           }
       }
+
+      // Native BLE module — register Pigeon APIs
+      let bleFlutterApi = BleFlutterApi(binaryMessenger: controller.binaryMessenger)
+      OmiBleManager.shared.setFlutterApi(bleFlutterApi)
+      let bleHostApi = BleHostApiImpl(bleManager: OmiBleManager.shared)
+      BleHostApiSetup.setUp(binaryMessenger: controller.binaryMessenger, api: bleHostApi)
+      NSLog("[OmiBle] BLE Pigeon APIs registered")
 
       // Retrieve the link from parameters
       if let url = AppLinks.shared.getLink(launchOptions: launchOptions) {
@@ -405,7 +413,15 @@ extension FlutterError: Error {}
       }
   }
 
+  override func applicationWillEnterForeground(_ application: UIApplication) {
+    super.applicationWillEnterForeground(application)
+    OmiBleManager.shared.reconnectStalePeripherals()
+  }
+
   override func applicationWillTerminate(_ application: UIApplication) {
+    // Disconnect BLE peripherals cleanly
+    OmiBleManager.shared.disconnectAllPeripherals()
+
     // Remove audio session observers
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.interruptionNotification, object: nil)
     NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)

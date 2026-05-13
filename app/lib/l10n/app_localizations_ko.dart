@@ -3679,6 +3679,9 @@ class AppLocalizationsKo extends AppLocalizations {
   String get paused => '일시중지됨';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => '초기화 중...';
 
   @override

@@ -4211,6 +4211,10 @@
   "@paused": {
     "description": "Recording status: paused"
   },
+  "recordingStalled": "Recording Stalled — no audio received",
+  "@recordingStalled": {
+    "description": "Warning shown when the recording watchdog detects no audio frames for 60+ seconds"
+  },
   "initializing": "Initializing...",
   "@initializing": {
     "description": "Recording status: initializing"

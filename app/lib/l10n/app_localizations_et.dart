@@ -3745,6 +3745,9 @@ class AppLocalizationsEt extends AppLocalizations {
   String get paused => 'Peatatud';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Algseadistamine...';
 
   @override

@@ -3756,6 +3756,9 @@ class AppLocalizationsMs extends AppLocalizations {
   String get paused => 'Dijeda';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Memulakan...';
 
   @override

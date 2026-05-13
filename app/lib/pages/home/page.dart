@@ -48,6 +48,7 @@ import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
 import 'package:omi/utils/enums.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -604,6 +605,49 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                     children: [
                       Column(
                         children: [
+                          // Recording Stalled banner — shown when watchdog detects no audio
+                          Consumer<CaptureProvider>(
+                            builder: (context, capture, _) {
+                              if (!capture.recordingWatchdogStale) return const SizedBox.shrink();
+                              return Material(
+                                color: const Color(0xFF3D2E00),
+                                child: InkWell(
+                                  onTap: () => capture.rearmRecordingFromStale(),
+                                  child: SafeArea(
+                                    bottom: false,
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.warning_amber_rounded, color: Color(0xFFFFB800), size: 20),
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Text(
+                                              context.l10n.recordingStalled,
+                                              style: const TextStyle(
+                                                  color: Color(0xFFFFB800), fontSize: 14, fontWeight: FontWeight.w500),
+                                            ),
+                                          ),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFFFB800),
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            child: const Text(
+                                              'Retry',
+                                              style: TextStyle(
+                                                  color: Color(0xFF3D2E00), fontSize: 12, fontWeight: FontWeight.w600),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                           Expanded(
                             child: IndexedStack(
                               index: context.watch<HomeProvider>().selectedIndex,

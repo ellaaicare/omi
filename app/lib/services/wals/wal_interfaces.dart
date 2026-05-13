@@ -54,6 +54,9 @@ abstract class IWalService {
   /// Returns the WalSyncs instance for managing sync operations.
   /// Returns dynamic to avoid circular imports - cast to WalSyncs at call site.
   dynamic getSyncs();
+
+  /// Recover any orphaned WAL files from previous sessions.
+  Future<void> recoverOrphanedWals();
 }
 
 enum WalServiceStatus {

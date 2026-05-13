@@ -163,6 +163,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
         captureProvider.recordingState == RecordingState.deviceRecord ||
         captureProvider.recordingState == RecordingState.initialising ||
         captureProvider.recordingState == RecordingState.pause ||
+        captureProvider.recordingState == RecordingState.stale ||
         captureProvider.isPaused ||
         _isPhoneMicPaused;
 
@@ -235,8 +236,11 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
     Widget? statusIndicator;
     var stateText = "";
 
-    // Always check pause state first with highest priority (both desktop and phone)
-    if (captureProvider.isPaused || _isPhoneMicPaused) {
+    // Stale state: watchdog detected no audio — highest priority after pause
+    if (captureProvider.recordingState == RecordingState.stale) {
+      stateText = context.l10n.recordingStalled;
+      statusIndicator = const StalledStatusIndicator();
+    } else if (captureProvider.isPaused || _isPhoneMicPaused) {
       stateText = context.l10n.paused;
       statusIndicator = const PausedStatusIndicator();
     } else if (!isHavingRecordingDevice && !isUsingPhoneMic) {
@@ -293,6 +297,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
   }
 
   Widget _buildUnifiedRecordingUI(CaptureProvider provider, Widget? header) {
+    bool isStalled = provider.recordingState == RecordingState.stale;
     bool isDeviceRecording = provider.havingRecordingDevice &&
         (provider.recordingState == RecordingState.deviceRecord || provider.recordingState == RecordingState.pause);
     bool isPhoneRecording = provider.recordingState == RecordingState.record ||
@@ -310,12 +315,16 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
 
     // Determine if this is an OmiGlass-type device (captures photos)
     bool hasPhotos = provider.photos.isNotEmpty;
-    String statusText = isPaused
-        ? (isDeviceRecording ? context.l10n.muted : context.l10n.paused)
-        : (hasPhotos ? 'Capturing' : context.l10n.listening);
+    String statusText = isStalled
+        ? context.l10n.recordingStalled
+        : isPaused
+            ? (isDeviceRecording ? context.l10n.muted : context.l10n.paused)
+            : (hasPhotos ? 'Capturing' : context.l10n.listening);
 
-    // When recording is active, show the unified UI design
-    if (isDeviceRecording || isPhoneRecording) {
+    // When recording is active (or stalled), show the unified UI design
+    if (isStalled || isDeviceRecording || isPhoneRecording) {
+      Color indicatorColor =
+          isStalled ? const Color(0xFFFFB800) : (isPaused ? const Color(0xFFFF9500) : const Color(0xFFFE5D50));
       Widget statusRow = Row(
         children: [
           // Left: Status tag
@@ -341,7 +350,7 @@ class _ConversationCaptureWidgetState extends State<ConversationCaptureWidget> {
                   width: 6,
                   height: 6,
                   decoration: BoxDecoration(
-                    color: isPaused ? const Color(0xFFFF9500) : const Color(0xFFFE5D50),
+                    color: indicatorColor,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -578,6 +587,42 @@ class _PausedStatusIndicatorState extends State<PausedStatusIndicator> with Sing
     return FadeTransition(
       opacity: _opacityAnim,
       child: const Icon(Icons.fiber_manual_record, color: Colors.orange, size: 16.0),
+    );
+  }
+}
+
+class StalledStatusIndicator extends StatefulWidget {
+  const StalledStatusIndicator({super.key});
+
+  @override
+  State<StalledStatusIndicator> createState() => _StalledStatusIndicatorState();
+}
+
+class _StalledStatusIndicatorState extends State<StalledStatusIndicator> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _opacityAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    )..repeat(reverse: true);
+    _opacityAnim = Tween<double>(begin: 1.0, end: 0.3).animate(_controller);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacityAnim,
+      child: const Icon(Icons.warning_amber_rounded, color: Color(0xFFFFB800), size: 16.0),
     );
   }
 }

@@ -7185,6 +7185,12 @@ abstract class AppLocalizations {
   /// **'Paused'**
   String get paused;
 
+  /// Warning shown when the recording watchdog detects no audio frames for 60+ seconds
+  ///
+  /// In en, this message translates to:
+  /// **'Recording Stalled — no audio received'**
+  String get recordingStalled;
+
   /// Recording status: initializing
   ///
   /// In en, this message translates to:

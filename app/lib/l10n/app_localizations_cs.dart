@@ -3741,6 +3741,9 @@ class AppLocalizationsCs extends AppLocalizations {
   String get paused => 'Pozastaveno';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'Inicializace...';
 
   @override

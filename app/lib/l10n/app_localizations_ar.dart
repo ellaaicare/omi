@@ -3714,6 +3714,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get paused => 'متوقف مؤقتاً';
 
   @override
+  String get recordingStalled => 'Recording Stalled — no audio received';
+
+  @override
   String get initializing => 'جارٍ التهيئة...';
 
   @override
