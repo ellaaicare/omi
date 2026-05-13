@@ -1191,7 +1191,11 @@ async def search_omi_conversations(request: Request):
             created = c.get("created_at")
             ts = ""
             if created:
-                if hasattr(created, "strftime"):
+                created_utc = _parse_event_datetime_utc(created)
+                if created_utc:
+                    created_local = created_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/Los_Angeles"))
+                    ts = created_local.strftime("%Y-%m-%d %I:%M %p %Z")
+                elif hasattr(created, "strftime"):
                     ts = created.strftime("%Y-%m-%d %I:%M %p")
                 else:
                     ts = str(created)[:16]
@@ -1349,7 +1353,9 @@ def _normalized_query_terms(query: str) -> list[str]:
         "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
         "memory", "memories", "after", "before", "else", "went", "go", "this",
         "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "today", "yesterday", "raw",
+        "summary", "summaries", "morning", "afternoon", "evening", "today",
+        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
+        "caught", "find", "pull", "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     filtered = [t for t in terms if len(t) > 2 and t not in stop]
@@ -1365,7 +1371,9 @@ def _significant_query_terms(query: str) -> list[str]:
         "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
         "memory", "memories", "after", "before", "else", "went", "go", "this",
         "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "today", "yesterday", "raw",
+        "summary", "summaries", "morning", "afternoon", "evening", "today",
+        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
+        "caught", "find", "pull", "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     return [t for t in terms if len(t) > 2 and t not in stop]
@@ -1391,6 +1399,58 @@ def _local_window_to_utc(start_local: datetime, end_local: datetime) -> tuple[da
         start_local.astimezone(timezone.utc).replace(tzinfo=None),
         end_local.astimezone(timezone.utc).replace(tzinfo=None),
     )
+
+
+def _parse_relative_time_window(query: str) -> tuple[Optional[datetime], Optional[datetime], str]:
+    """Parse common relative-time phrases into a naive UTC window."""
+    query_lower = query.lower().strip()
+    now_local = _pacific_now()
+    start_local = None
+    end_local = None
+    remaining = query_lower
+
+    if "this morning" in query_lower:
+        start_local = now_local.replace(hour=5, minute=0, second=0, microsecond=0)
+        end_local = min(now_local, now_local.replace(hour=12, minute=0, second=0, microsecond=0))
+        remaining = remaining.replace("this morning", " ")
+    elif "this afternoon" in query_lower:
+        start_local = now_local.replace(hour=12, minute=0, second=0, microsecond=0)
+        end_local = min(now_local, now_local.replace(hour=17, minute=0, second=0, microsecond=0))
+        remaining = remaining.replace("this afternoon", " ")
+    elif "this evening" in query_lower:
+        start_local = now_local.replace(hour=17, minute=0, second=0, microsecond=0)
+        end_local = now_local
+        remaining = remaining.replace("this evening", " ")
+    elif "yesterday" in query_lower:
+        day = now_local - timedelta(days=1)
+        start_local = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = day.replace(hour=23, minute=59, second=59, microsecond=999999)
+        remaining = remaining.replace("yesterday", " ")
+    elif "today" in query_lower:
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = now_local
+        remaining = remaining.replace("today", " ")
+
+    if not start_local or not end_local:
+        return None, None, query
+
+    start_utc, end_utc = _local_window_to_utc(start_local, end_local)
+    return start_utc, end_utc, " ".join(remaining.split())
+
+
+def _parse_event_datetime_utc(raw: object) -> Optional[datetime]:
+    if not raw:
+        return None
+    if isinstance(raw, datetime):
+        parsed = raw
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
@@ -1664,13 +1724,16 @@ def _canonical_event_title(event: dict) -> str:
     return str(event.get("title") or structured.get("title") or "OMI conversation")
 
 
-def _canonical_event_timestamp(event: dict) -> str:
+def _canonical_event_timestamp(event: dict, user_timezone: str = "America/Los_Angeles") -> str:
     raw = event.get("started_at") or event.get("created_at") or event.get("timestamp") or ""
     if not raw:
         return ""
     try:
         parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        return parsed.strftime("%Y-%m-%d %I:%M %p")
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        local = parsed.astimezone(ZoneInfo(user_timezone))
+        return local.strftime("%Y-%m-%d %I:%M %p %Z")
     except Exception:
         return str(raw)[:16]
 
@@ -1678,19 +1741,28 @@ def _canonical_event_timestamp(event: dict) -> str:
 async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_access: bool) -> list:
     """Search OMI canonical summary events via GET /v1/ella/timeline first."""
     results = []
+    window_start, window_end, query_without_time = _parse_relative_time_window(query)
+    timeline_limit = 300 if window_start and window_end else 120
     try:
-        events = await fetch_canonical_timeline(uid, limit=120, channels=["omi"])
+        events = await fetch_canonical_timeline(uid, limit=timeline_limit, channels=["omi"])
     except Exception as e:
         logger.warning(f"[FLOW:UNIFIED-SEARCH] Canonical OMI timeline fetch error: {e}")
         return results
 
-    query_terms = _expand_query_terms(_significant_query_terms(query))
+    query_terms = _expand_query_terms(_significant_query_terms(query_without_time if window_start else query))
     matches = []
     for event in events:
         title = _canonical_event_title(event)
         text = str(event.get("text") or "")
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
         structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
+        started_sort = _parse_event_datetime_utc(
+            event.get("started_at") or event.get("created_at") or event.get("timestamp")
+        )
+        if window_start and window_end:
+            if not started_sort or started_sort < window_start or started_sort > window_end:
+                continue
+
         searchable = " ".join(
             str(part or "")
             for part in (
@@ -1707,11 +1779,7 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
         if score <= 0:
             continue
 
-        started_raw = event.get("started_at") or ""
-        try:
-            started_sort = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
-        except Exception:
-            started_sort = datetime.min.replace(tzinfo=timezone.utc)
+        started_sort = started_sort or datetime.min
 
         content = text
         if not full_access:
@@ -1727,7 +1795,7 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
             "title": title,
             "content": content[:1400],
             "timestamp": _canonical_event_timestamp(event),
-            "score": score + 45,
+            "score": score + (55 if window_start else 45),
             "metadata": {
                 "provenance": "canonical_event",
                 "fallback": False,
@@ -1737,6 +1805,10 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
                 "provider": event.get("provider"),
                 "emoji": structured.get("emoji", ""),
                 "category": structured.get("category", ""),
+                "time_window_applied": bool(window_start and window_end),
+                "time_window_start_utc": window_start.isoformat() if window_start else "",
+                "time_window_end_utc": window_end.isoformat() if window_end else "",
+                "timestamp_timezone": "America/Los_Angeles",
             },
         })
     return results
@@ -1864,6 +1936,8 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
 
         if not date_parsed:
             keyword_terms = query_lower.split()
+        else:
+            keyword_terms = _expand_query_terms(_significant_query_terms(" ".join(keyword_terms)))
 
         # --- Firestore query ---
         if date_filter_start and date_filter_end:
@@ -1924,7 +1998,11 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             created = c.get("created_at")
             ts = ""
             if created:
-                if hasattr(created, "strftime"):
+                created_utc = _parse_event_datetime_utc(created)
+                if created_utc:
+                    created_local = created_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/Los_Angeles"))
+                    ts = created_local.strftime("%Y-%m-%d %I:%M %p %Z")
+                elif hasattr(created, "strftime"):
                     ts = created.strftime("%Y-%m-%d %I:%M %p")
                 else:
                     ts = str(created)[:16]
@@ -1953,6 +2031,7 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                     "emoji": structured.get("emoji", ""),
                     "category": structured.get("category", ""),
                     "has_transcript_detail": bool(transcript_text and full_access),
+                    "timestamp_timezone": "America/Los_Angeles",
                 },
             })
 
