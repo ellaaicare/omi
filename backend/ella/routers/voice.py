@@ -1453,6 +1453,27 @@ def _parse_event_datetime_utc(raw: object) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _should_use_voice_memory_fast_path(query: str) -> bool:
+    query_lower = query.lower()
+    window_start, _window_end, _remaining = _parse_relative_time_window(query)
+    if window_start:
+        return False
+    detail_terms = (
+        "omi",
+        "necklace",
+        "transcript",
+        "transcripts",
+        "conversation",
+        "conversations",
+        "this morning",
+        "this afternoon",
+        "this evening",
+        "today",
+        "yesterday",
+    )
+    return not any(term in query_lower for term in detail_terms)
+
+
 async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
     """Search the canonical cross-channel event ledger.
 
@@ -2313,7 +2334,7 @@ async def unified_search(request: Request):
     # Realtime voice needs a bounded fast path. If the compact Hermes memory
     # pack has a high-confidence answer, return it immediately and avoid
     # waiting on slower Firestore/workspace/Honcho fallback searches.
-    if agent_role == "voice" and not requested_sources:
+    if agent_role == "voice" and not requested_sources and _should_use_voice_memory_fast_path(query):
         fast_results = await _search_voice_memory_pack(uid, query, limit)
         if fast_results and fast_results[0].get("score", 0) >= 120:
             _elapsed = int((time.time() - _start) * 1000)

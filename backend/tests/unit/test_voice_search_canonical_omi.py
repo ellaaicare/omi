@@ -96,6 +96,18 @@ def test_search_canonical_omi_events_applies_this_morning_window():
     assert results[0]["metadata"]["time_window_applied"] is True
 
 
+def test_voice_memory_fast_path_skips_temporal_or_omi_queries():
+    async def fake_fetch(_uid, **_kwargs):
+        return []
+
+    module = _load_voice_omi_helpers(fake_fetch)
+    module._pacific_now = lambda: datetime(2026, 5, 7, 15, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+
+    assert module._should_use_voice_memory_fast_path("what happened this morning in my OMI conversations") is False
+    assert module._should_use_voice_memory_fast_path("find my latest OMI transcript") is False
+    assert module._should_use_voice_memory_fast_path("what was that restaurant name") is True
+
+
 def test_search_canonical_omi_events_returns_empty_when_no_useful_match():
     async def fake_fetch(_uid, **_kwargs):
         return [_cafe_event()]
