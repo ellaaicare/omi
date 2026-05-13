@@ -2384,7 +2384,10 @@ async def unified_search(request: Request):
     tasks = []
     task_source_names = []
 
-    if agent_role in {"voice", "user"} and (not requested_sources or "voice_memory" in requested_sources):
+    include_voice_memory = bool(requested_sources and "voice_memory" in requested_sources) or (
+        not requested_sources and _should_use_voice_memory_fast_path(query)
+    )
+    if agent_role in {"voice", "user"} and include_voice_memory:
         tasks.append(_search_voice_memory_pack(uid, query, limit))
         task_source_names.append("voice_memory")
 
