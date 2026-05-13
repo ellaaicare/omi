@@ -105,3 +105,15 @@ def test_search_canonical_omi_events_returns_empty_when_no_useful_match():
     results = asyncio.run(module._search_canonical_omi_events("uid-1", "dentist appointment", 5, True))
 
     assert results == []
+
+
+def test_voice_query_requires_fanout_for_explicit_omi_and_time_queries():
+    async def fake_fetch(_uid, **_kwargs):
+        return []
+
+    module = _load_voice_omi_helpers(fake_fetch)
+
+    assert module._voice_query_requires_source_fanout("latest OMI conversation") is True
+    assert module._voice_query_requires_source_fanout("what OMI conversations happened this morning") is True
+    assert module._voice_query_requires_source_fanout("what did I do today") is True
+    assert module._voice_query_requires_source_fanout("where did I put my glasses") is False
