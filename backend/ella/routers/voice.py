@@ -60,6 +60,7 @@ XAI_TTS_LANGUAGE = os.getenv("XAI_TTS_LANGUAGE", "en")
 XAI_TTS_OPTIMIZE_STREAMING_LATENCY = int(os.getenv("XAI_TTS_OPTIMIZE_STREAMING_LATENCY", "1"))
 INWORLD_API_KEY = os.getenv("INWORLD_API_KEY", "")
 ELLA_TTS_URL = os.getenv("ELLA_TTS_URL", "http://100.76.138.56:8930")
+ELLA_KOKORO_TTS_URL = os.getenv("ELLA_KOKORO_TTS_URL", "http://100.76.138.56:8931")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
@@ -534,12 +535,13 @@ async def synthesize_speech(
 
     # --- Local ella-tts proxy (Fish Audio or Kokoro) ---
     if provider in ("fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"):
-        print(f"[FLOW:VOICE-TTS] provider={provider} text_len={text_len} url={ELLA_TTS_URL}", flush=True)
+        local_tts_url = ELLA_KOKORO_TTS_URL if provider == "kokoro" else ELLA_TTS_URL
+        print(f"[FLOW:VOICE-TTS] provider={provider} text_len={text_len} url={local_tts_url}", flush=True)
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{ELLA_TTS_URL}/v1/audio/speech",
-                    json={"input": text, "voice": "nova", "response_format": "mp3"},
+                    f"{local_tts_url}/v1/audio/speech",
+                    json={"model": provider, "input": text, "voice": "nova", "response_format": "mp3"},
                     timeout=30.0,
                 )
             _elapsed = int((time.time() - _start) * 1000)
@@ -548,7 +550,7 @@ async def synthesize_speech(
                 raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
             audio_size = len(response.content)
             print(f"[FLOW:VOICE-TTS] OK provider={provider} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
-            return Response(content=response.content, media_type="audio/mpeg")
+            return Response(content=response.content, media_type=response.headers.get("content-type", "audio/mpeg"))
         except httpx.TimeoutException:
             _elapsed = int((time.time() - _start) * 1000)
             print(f"[FLOW:VOICE-TTS] TIMEOUT provider={provider} latency={_elapsed}ms", flush=True)
