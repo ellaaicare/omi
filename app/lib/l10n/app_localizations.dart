@@ -15896,6 +15896,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Guardian ON: Audio monitoring and care features active.'**
   String get ellaGuardianOnTooltip;
+
+  /// No description provided for @chatModelSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat Model'**
+  String get chatModelSettings;
+
+  /// No description provided for @chatModelSettingsSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Backend chat routing for Ella responses'**
+  String get chatModelSettingsSubtitle;
+
+  /// No description provided for @platform.
+  ///
+  /// In en, this message translates to:
+  /// **'Platform'**
+  String get platform;
+
+  /// No description provided for @agentConfigRefresh.
+  ///
+  /// In en, this message translates to:
+  /// **'Refresh'**
+  String get agentConfigRefresh;
+
+  /// No description provided for @agentConfigSaving.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving chat model...'**
+  String get agentConfigSaving;
+
+  /// No description provided for @agentConfigUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat model config is unavailable until the backend agent-config endpoint is live.'**
+  String get agentConfigUnavailable;
+
+  /// No description provided for @agentConfigUpdateFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not update chat model config. Try again after backend support is live.'**
+  String get agentConfigUpdateFailed;
+
+  /// No description provided for @notAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Not available'**
+  String get notAvailable;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
