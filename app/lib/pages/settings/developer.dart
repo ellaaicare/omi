@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -14,6 +15,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/services/agent_config_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
@@ -39,12 +41,54 @@ class DeveloperSettingsPage extends StatefulWidget {
 }
 
 class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
+  AgentConfig? _agentConfig;
+  bool _agentConfigLoading = false;
+  bool _agentConfigSaving = false;
+  String? _agentConfigError;
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       context.read<McpProvider>().fetchKeys();
+      unawaited(_loadAgentConfig());
     });
     super.initState();
+  }
+
+  Future<void> _loadAgentConfig() async {
+    if (_agentConfigLoading) return;
+    setState(() {
+      _agentConfigLoading = true;
+      _agentConfigError = null;
+    });
+
+    final config = await AgentConfigService.fetch();
+    if (!mounted) return;
+
+    setState(() {
+      _agentConfig = config;
+      _agentConfigLoading = false;
+      _agentConfigError = config == null ? context.l10n.agentConfigUnavailable : null;
+    });
+  }
+
+  Future<void> _updateAgentConfig({required String provider, required String model}) async {
+    final previous = _agentConfig;
+    if (previous == null || _agentConfigSaving) return;
+
+    setState(() {
+      _agentConfigSaving = true;
+      _agentConfigError = null;
+    });
+
+    final updated = await AgentConfigService.update(provider: provider, model: model, previous: previous);
+    if (!mounted) return;
+
+    setState(() {
+      _agentConfig = updated ?? previous;
+      _agentConfigSaving = false;
+      _agentConfigError = updated == null ? context.l10n.agentConfigUpdateFailed : null;
+    });
   }
 
   Widget _buildSectionContainer({required List<Widget> children}) {
@@ -90,6 +134,162 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildChatModelSection(BuildContext context) {
+    final config = _agentConfig;
+    final providers = config?.options.providers ?? const <String>[];
+    final selectedProvider = config != null && providers.contains(config.provider) ? config.provider : null;
+    final models = config == null ? const <String>[] : config.options.modelsForProvider(config.provider);
+    final selectedModel = config != null && models.contains(config.model) ? config.model : null;
+    final canEditProvider = config?.editable.provider == true && providers.isNotEmpty && !_agentConfigSaving;
+    final canEditModel = config?.editable.model == true && models.isNotEmpty && !_agentConfigSaving;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader(
+          context.l10n.chatModelSettings,
+          subtitle: context.l10n.chatModelSettingsSubtitle,
+          trailing: _agentConfigLoading
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                )
+              : TextButton(
+                  onPressed: _loadAgentConfig,
+                  child: Text(context.l10n.agentConfigRefresh),
+                ),
+        ),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1C1C1E),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Column(
+            children: [
+              _buildAgentConfigValueRow(
+                icon: FontAwesomeIcons.layerGroup,
+                label: context.l10n.platform,
+                child: _buildReadOnlyPill(config?.platform ?? context.l10n.notAvailable),
+              ),
+              const SizedBox(height: 14),
+              _buildAgentConfigValueRow(
+                icon: FontAwesomeIcons.plug,
+                label: context.l10n.provider,
+                child: DropdownButton<String>(
+                  value: selectedProvider,
+                  hint: Text(context.l10n.notAvailable),
+                  dropdownColor: const Color(0xFF2A2A2E),
+                  underline: const SizedBox.shrink(),
+                  isExpanded: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  items: providers.map((provider) => DropdownMenuItem(value: provider, child: Text(provider))).toList(),
+                  onChanged: canEditProvider
+                      ? (provider) {
+                          if (provider == null || config == null) return;
+                          final providerModels = config.options.modelsForProvider(provider);
+                          final model = providerModels.contains(config.model)
+                              ? config.model
+                              : providerModels.isNotEmpty
+                                  ? providerModels.first
+                                  : config.model;
+                          unawaited(_updateAgentConfig(provider: provider, model: model));
+                        }
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 14),
+              _buildAgentConfigValueRow(
+                icon: FontAwesomeIcons.microchip,
+                label: context.l10n.model,
+                child: DropdownButton<String>(
+                  value: selectedModel,
+                  hint: Text(context.l10n.notAvailable),
+                  dropdownColor: const Color(0xFF2A2A2E),
+                  underline: const SizedBox.shrink(),
+                  isExpanded: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                  items: models.map((model) => DropdownMenuItem(value: model, child: Text(model))).toList(),
+                  onChanged: canEditModel
+                      ? (model) {
+                          if (model == null || config == null) return;
+                          unawaited(_updateAgentConfig(provider: config.provider, model: model));
+                        }
+                      : null,
+                ),
+              ),
+              if (_agentConfigSaving) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(context.l10n.agentConfigSaving, style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+                  ],
+                ),
+              ],
+              if (_agentConfigError != null) ...[
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(_agentConfigError!, style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 12)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAgentConfigValueRow({
+    required IconData icon,
+    required String label,
+    required Widget child,
+  }) {
+    return Row(
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: const Color(0xFF2A2A2E),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Center(child: FaIcon(icon, color: Colors.grey.shade400, size: 16)),
+        ),
+        const SizedBox(width: 14),
+        SizedBox(
+          width: 82,
+          child: Text(label, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)),
+        ),
+        const SizedBox(width: 12),
+        Expanded(child: child),
+      ],
+    );
+  }
+
+  Widget _buildReadOnlyPill(String value) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2A2A2E),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        value,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: Colors.grey.shade300, fontSize: 14),
       ),
     );
   }
@@ -767,6 +967,10 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 32),
+
+                  // Chat Model Section
+                  _buildChatModelSection(context),
                   const SizedBox(height: 32),
 
                   // TTS Provider Section

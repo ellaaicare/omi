@@ -8517,4 +8517,29 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
+
+  @override
+  String get chatModelSettings => 'Chat Model';
+
+  @override
+  String get chatModelSettingsSubtitle => 'Backend chat routing for Ella responses';
+
+  @override
+  String get platform => 'Platform';
+
+  @override
+  String get agentConfigRefresh => 'Refresh';
+
+  @override
+  String get agentConfigSaving => 'Saving chat model...';
+
+  @override
+  String get agentConfigUnavailable =>
+      'Chat model config is unavailable until the backend agent-config endpoint is live.';
+
+  @override
+  String get agentConfigUpdateFailed => 'Could not update chat model config. Try again after backend support is live.';
+
+  @override
+  String get notAvailable => 'Not available';
 }
