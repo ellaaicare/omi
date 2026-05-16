@@ -10136,5 +10136,45 @@
   "ellaAlertChannelsEnabled": "Enabled",
   "ellaAlertChannelsDisabled": "Disabled",
   "ellaGuardianOffTooltip": "Guardian OFF: Audio and non-critical check-ins disabled. Emergency alerts to your contact remain active.",
-  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active."
+  "ellaGuardianOnTooltip": "Guardian ON: Audio monitoring and care features active.",
+  "guardianAlertsHistoryTitle": "Guardian Alerts",
+  "guardianAlertsHistorySubtitle": "Recent Guardian alerts and playback status",
+  "guardianAlertsLoadFailed": "Could not load Guardian alerts",
+  "guardianAlertsPullToRetry": "Pull down to retry.",
+  "guardianAlertsLocalFallback": "Backend Guardian history is unavailable. Showing local debug events from this device only.",
+  "guardianAlertsEmptyTitle": "No Guardian alerts yet",
+  "guardianAlertsEmptySubtitle": "Wake-word, support, test, and playback-failure alerts will appear here after they are recorded.",
+  "guardianAlertsTestTag": "Test",
+  "guardianAlertsEscalatedTag": "Escalated",
+  "guardianAlertsUnknown": "Unknown",
+  "guardianAlertsStatusFailed": "Failed",
+  "guardianAlertsStatusMissed": "Missed",
+  "guardianAlertsStatusPlayed": "Played",
+  "guardianAlertsStatusQueued": "Queued",
+  "guardianAlertsTimeUnavailable": "Time unavailable",
+  "guardianAlertsLocalDebugDetail": "Local debug fallback",
+  "guardianAlertsConversationDetail": "Conversation: {conversationId}",
+  "@guardianAlertsConversationDetail": {
+    "placeholders": {
+      "conversationId": {
+        "type": "String"
+      }
+    }
+  },
+  "guardianAlertsEscalationDetail": "Escalation: {status}",
+  "@guardianAlertsEscalationDetail": {
+    "placeholders": {
+      "status": {
+        "type": "String"
+      }
+    }
+  },
+  "guardianAlertsTraceDetail": "Trace: {traceId}",
+  "@guardianAlertsTraceDetail": {
+    "placeholders": {
+      "traceId": {
+        "type": "String"
+      }
+    }
+  }
 }

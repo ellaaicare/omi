@@ -16,6 +16,7 @@ import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/debug_event_log_page.dart';
+import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
@@ -256,6 +257,15 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               subtitle: context.l10n.ellaAlertChannelsSubtitle,
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const AlertChannelsPage()));
+              },
+            ),
+            const SizedBox(height: 8),
+            EllaSettingsRow(
+              icon: Icons.history,
+              title: context.l10n.guardianAlertsHistoryTitle,
+              subtitle: context.l10n.guardianAlertsHistorySubtitle,
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
               },
             ),
 

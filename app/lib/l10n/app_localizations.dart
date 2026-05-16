@@ -15896,6 +15896,120 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Guardian ON: Audio monitoring and care features active.'**
   String get ellaGuardianOnTooltip;
+
+  /// No description provided for @guardianAlertsHistoryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Guardian Alerts'**
+  String get guardianAlertsHistoryTitle;
+
+  /// No description provided for @guardianAlertsHistorySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Recent Guardian alerts and playback status'**
+  String get guardianAlertsHistorySubtitle;
+
+  /// No description provided for @guardianAlertsLoadFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not load Guardian alerts'**
+  String get guardianAlertsLoadFailed;
+
+  /// No description provided for @guardianAlertsPullToRetry.
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down to retry.'**
+  String get guardianAlertsPullToRetry;
+
+  /// No description provided for @guardianAlertsLocalFallback.
+  ///
+  /// In en, this message translates to:
+  /// **'Backend Guardian history is unavailable. Showing local debug events from this device only.'**
+  String get guardianAlertsLocalFallback;
+
+  /// No description provided for @guardianAlertsEmptyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'No Guardian alerts yet'**
+  String get guardianAlertsEmptyTitle;
+
+  /// No description provided for @guardianAlertsEmptySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Wake-word, support, test, and playback-failure alerts will appear here after they are recorded.'**
+  String get guardianAlertsEmptySubtitle;
+
+  /// No description provided for @guardianAlertsTestTag.
+  ///
+  /// In en, this message translates to:
+  /// **'Test'**
+  String get guardianAlertsTestTag;
+
+  /// No description provided for @guardianAlertsEscalatedTag.
+  ///
+  /// In en, this message translates to:
+  /// **'Escalated'**
+  String get guardianAlertsEscalatedTag;
+
+  /// No description provided for @guardianAlertsUnknown.
+  ///
+  /// In en, this message translates to:
+  /// **'Unknown'**
+  String get guardianAlertsUnknown;
+
+  /// No description provided for @guardianAlertsStatusFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed'**
+  String get guardianAlertsStatusFailed;
+
+  /// No description provided for @guardianAlertsStatusMissed.
+  ///
+  /// In en, this message translates to:
+  /// **'Missed'**
+  String get guardianAlertsStatusMissed;
+
+  /// No description provided for @guardianAlertsStatusPlayed.
+  ///
+  /// In en, this message translates to:
+  /// **'Played'**
+  String get guardianAlertsStatusPlayed;
+
+  /// No description provided for @guardianAlertsStatusQueued.
+  ///
+  /// In en, this message translates to:
+  /// **'Queued'**
+  String get guardianAlertsStatusQueued;
+
+  /// No description provided for @guardianAlertsTimeUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Time unavailable'**
+  String get guardianAlertsTimeUnavailable;
+
+  /// No description provided for @guardianAlertsLocalDebugDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Local debug fallback'**
+  String get guardianAlertsLocalDebugDetail;
+
+  /// No description provided for @guardianAlertsConversationDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation: {conversationId}'**
+  String guardianAlertsConversationDetail(String conversationId);
+
+  /// No description provided for @guardianAlertsEscalationDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Escalation: {status}'**
+  String guardianAlertsEscalationDetail(String status);
+
+  /// No description provided for @guardianAlertsTraceDetail.
+  ///
+  /// In en, this message translates to:
+  /// **'Trace: {traceId}'**
+  String guardianAlertsTraceDetail(String traceId);
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

@@ -8542,4 +8542,69 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get ellaGuardianOnTooltip => 'Guardian ON: Audio monitoring and care features active.';
+
+  @override
+  String get guardianAlertsHistoryTitle => 'Guardian Alerts';
+
+  @override
+  String get guardianAlertsHistorySubtitle => 'Recent Guardian alerts and playback status';
+
+  @override
+  String get guardianAlertsLoadFailed => 'Could not load Guardian alerts';
+
+  @override
+  String get guardianAlertsPullToRetry => 'Pull down to retry.';
+
+  @override
+  String get guardianAlertsLocalFallback =>
+      'Backend Guardian history is unavailable. Showing local debug events from this device only.';
+
+  @override
+  String get guardianAlertsEmptyTitle => 'No Guardian alerts yet';
+
+  @override
+  String get guardianAlertsEmptySubtitle =>
+      'Wake-word, support, test, and playback-failure alerts will appear here after they are recorded.';
+
+  @override
+  String get guardianAlertsTestTag => 'Test';
+
+  @override
+  String get guardianAlertsEscalatedTag => 'Escalated';
+
+  @override
+  String get guardianAlertsUnknown => 'Unknown';
+
+  @override
+  String get guardianAlertsStatusFailed => 'Failed';
+
+  @override
+  String get guardianAlertsStatusMissed => 'Missed';
+
+  @override
+  String get guardianAlertsStatusPlayed => 'Played';
+
+  @override
+  String get guardianAlertsStatusQueued => 'Queued';
+
+  @override
+  String get guardianAlertsTimeUnavailable => 'Time unavailable';
+
+  @override
+  String get guardianAlertsLocalDebugDetail => 'Local debug fallback';
+
+  @override
+  String guardianAlertsConversationDetail(String conversationId) {
+    return 'Conversation: $conversationId';
+  }
+
+  @override
+  String guardianAlertsEscalationDetail(String status) {
+    return 'Escalation: $status';
+  }
+
+  @override
+  String guardianAlertsTraceDetail(String traceId) {
+    return 'Trace: $traceId';
+  }
 }
