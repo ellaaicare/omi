@@ -19,13 +19,14 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime
 from email.mime.text import MIMEText
 import smtplib
 from typing import Any, Optional
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
@@ -45,8 +46,11 @@ from utils.ella.canonical_context import (
     canonical_events_to_chat_turns,
     fetch_canonical_timeline,
 )
+from utils.ella.time_context import build_time_context, local_time_fields
+from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
+alerts_router = APIRouter(prefix="/v1/ella", tags=["Guardian Mode"])
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -512,6 +516,301 @@ def _coerce_metadata_dict(metadata: Optional[dict]) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _coerce_json_list(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _string_from_metadata(metadata: dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _bool_from_metadata(metadata: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _normalize_alert_text(message: Any, metadata: dict[str, Any]) -> tuple[str, str]:
+    text = str(message or metadata.get("message") or metadata.get("text") or metadata.get("summary") or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    summary = str(metadata.get("summary") or metadata.get("title") or text).strip()
+    summary = re.sub(r"\s+", " ", summary)
+    if len(summary) > 180:
+        summary = f"{summary[:177].rstrip()}..."
+    return text, summary
+
+
+def _guardian_alert_tags(priority: Any, trigger_type: Any, metadata: dict[str, Any]) -> list[str]:
+    tags: set[str] = set()
+    trigger = str(trigger_type or "").lower()
+    source = str(metadata.get("source") or "").lower()
+    if _bool_from_metadata(metadata, "dry_run", "dryRun") or "dry" in trigger:
+        tags.add("dry_run")
+    if (
+        _bool_from_metadata(metadata, "test", "is_test", "debug")
+        or str(priority or "").lower() == "debug"
+        or "test" in trigger
+        or "debug" in trigger
+        or source == "guardian_debug_trigger"
+    ):
+        tags.add("test")
+    return sorted(tags)
+
+
+def _delivery_target_from_logs(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+    targets = {str(item.get("target") or "").lower() for item in deliveries}
+    channels = {str(item.get("channel") or "").lower() for item in deliveries}
+    if "caregiver" in targets:
+        return "caregiver"
+    if "user" in targets:
+        return "user"
+    if deliveries:
+        return ",".join(sorted(target for target in targets if target)) or "unknown"
+    return _string_from_metadata(metadata, "delivery_target", "target") or "user"
+
+
+def _delivery_escalation_status(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+    if not deliveries:
+        return _string_from_metadata(metadata, "escalation_status", "delivery_status") or "none"
+    statuses = [str(item.get("status") or "unknown").lower() for item in deliveries]
+    if any(status in {"dispatch_failed", "failed", "error"} for status in statuses):
+        return "failed"
+    if any(status in {"sent", "success", "delivered"} for status in statuses):
+        return "sent"
+    if any(status in {"pending", "sending"} for status in statuses):
+        return "pending"
+    return statuses[0] if statuses else "unknown"
+
+
+def _caregiver_escalation(deliveries: list[dict[str, Any]], metadata: dict[str, Any]) -> bool:
+    if _bool_from_metadata(metadata, "caregiver_escalation", "caregiverEscalation"):
+        return True
+    return any(str(item.get("target") or "").lower() == "caregiver" or item.get("caregiver_id") for item in deliveries)
+
+
+def _playback_status(
+    *,
+    queue_item_id: str,
+    consumed_at: Any,
+    events: list[dict[str, Any]],
+) -> str:
+    item_events = []
+    for event in events:
+        metadata = _coerce_metadata_dict(event.get("metadata"))
+        event_queue_id = metadata.get("queue_item_id")
+        superseded_ids = metadata.get("superseded_queue_item_ids")
+        if event_queue_id == queue_item_id or not event_queue_id:
+            item_events.append(event)
+        if isinstance(superseded_ids, list) and queue_item_id in {str(item) for item in superseded_ids}:
+            return "superseded"
+
+    stages = [str(event.get("stage") or "").lower() for event in item_events]
+    statuses = [str(event.get("status") or "").lower() for event in item_events]
+    playback_pairs = list(zip(stages, statuses))
+    if any("playback" in stage and status in {"error", "failed", "failure"} for stage, status in playback_pairs):
+        return "failed"
+    if any(stage == "ios_playback_failed" or stage.endswith("_playback_failed") for stage in stages):
+        return "failed"
+    if any(stage == "ios_playback_completed" or stage.endswith("_playback_completed") for stage in stages):
+        return "completed"
+    if any(stage == "ios_playback_started" or stage.endswith("_playback_started") for stage in stages):
+        return "playing"
+    if any(stage == "audio_consumed" for stage in stages) or consumed_at:
+        return "consumed"
+    return "queued"
+
+
+def _source_conversation_id(metadata: dict[str, Any], trace_id: str) -> Optional[str]:
+    value = _string_from_metadata(
+        metadata,
+        "source_conversation_id",
+        "sourceConversationId",
+        "conversation_id",
+        "conversationId",
+    )
+    if value:
+        return value
+    if trace_id and not str(trace_id).startswith("guardian_"):
+        return str(trace_id)
+    return None
+
+
+def _alert_time_fields(value: Any, timezone_name: str) -> dict[str, Any]:
+    fields = local_time_fields(value, tz_name=timezone_name)
+    return {
+        "utc": fields["utc"],
+        "local": fields["local"],
+        "local_date": fields["local_date"],
+        "local_time": fields["local_time"],
+        "timezone": fields["timezone"],
+        "relative_to_now": fields["relative_to_now"],
+    }
+
+
+def _normalize_guardian_alert_row(row: dict[str, Any], timezone_name: str) -> dict[str, Any]:
+    metadata = _coerce_metadata_dict(row.get("metadata"))
+    events = _coerce_json_list(row.get("events"))
+    deliveries = _coerce_json_list(row.get("deliveries"))
+    queue_item_id = str(row.get("id") or metadata.get("queue_item_id") or "")
+    trace_id = str(row.get("trace_id") or _trace_id_from_metadata(metadata, queue_item_id))
+    alert_text, summary = _normalize_alert_text(row.get("message"), metadata)
+    tags = _guardian_alert_tags(row.get("priority"), row.get("trigger_type"), metadata)
+
+    created_at = row.get("created_at")
+    consumed_at = row.get("consumed_at")
+    return {
+        "id": queue_item_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "alert_text": alert_text,
+        "summary": summary,
+        "trigger_type": str(row.get("trigger_type") or metadata.get("trigger_type") or metadata.get("category") or ""),
+        "priority": str(row.get("priority") or ""),
+        "delivery_target": _delivery_target_from_logs(deliveries, metadata),
+        "playback_status": _playback_status(queue_item_id=queue_item_id, consumed_at=consumed_at, events=events),
+        "source_conversation_id": _source_conversation_id(metadata, trace_id),
+        "caregiver_escalation": _caregiver_escalation(deliveries, metadata),
+        "escalation_status": _delivery_escalation_status(deliveries, metadata),
+        "dry_run": "dry_run" in tags,
+        "test": "test" in tags,
+        "tags": tags,
+        "created_at": created_at.isoformat() if isinstance(created_at, datetime) else created_at,
+        "consumed_at": consumed_at.isoformat() if isinstance(consumed_at, datetime) else consumed_at,
+        "created_time": _alert_time_fields(created_at, timezone_name),
+        "consumed_time": _alert_time_fields(consumed_at, timezone_name),
+        "url": row.get("url"),
+        "metadata": metadata,
+        "events": events,
+        "deliveries": deliveries,
+    }
+
+
+async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
+    safe_limit = max(1, min(limit, 200))
+    pool = await _get_pool()
+    timezone_row = await pool.fetchrow(
+        """
+        SELECT timezone
+        FROM users
+        WHERE LOWER(omi_uid) = LOWER($1)
+        """,
+        uid,
+    )
+    timezone_name = timezone_row["timezone"] if timezone_row and timezone_row["timezone"] else None
+
+    rows = await pool.fetch(
+        """
+        WITH queue_rows AS (
+            SELECT
+                id,
+                uid,
+                url,
+                priority,
+                message,
+                trigger_type,
+                metadata,
+                created_at,
+                consumed_at,
+                COALESCE(
+                    metadata->>'trace_id',
+                    metadata->>'traceId',
+                    metadata->>'conversation_id',
+                    metadata->>'conversationId',
+                    id
+                ) AS trace_id
+            FROM guardian_queue
+            WHERE LOWER(uid) = LOWER($1)
+            ORDER BY created_at DESC
+            LIMIT $2
+        ),
+        events_by_trace AS (
+            SELECT
+                trace_id,
+                jsonb_agg(
+                    jsonb_build_object(
+                        'created_at', created_at,
+                        'stage', stage,
+                        'status', status,
+                        'latency_ms', latency_ms,
+                        'metadata', metadata
+                    )
+                    ORDER BY created_at DESC
+                ) AS events
+            FROM guardian_pipeline_events
+            WHERE LOWER(uid) = LOWER($1)
+              AND trace_id IN (SELECT trace_id FROM queue_rows)
+            GROUP BY trace_id
+        ),
+        deliveries_by_trace AS (
+            SELECT
+                trace_id,
+                jsonb_agg(
+                    jsonb_build_object(
+                        'created_at', created_at,
+                        'updated_at', updated_at,
+                        'channel', channel,
+                        'target', target,
+                        'caregiver_id', caregiver_id,
+                        'status', status,
+                        'error_message', error_message
+                    )
+                    ORDER BY updated_at DESC
+                ) AS deliveries
+            FROM guardian_delivery_log
+            WHERE LOWER(uid) = LOWER($1)
+              AND trace_id IN (SELECT trace_id FROM queue_rows)
+            GROUP BY trace_id
+        )
+        SELECT
+            q.*,
+            COALESCE(e.events, '[]'::jsonb) AS events,
+            COALESCE(d.deliveries, '[]'::jsonb) AS deliveries
+        FROM queue_rows q
+        LEFT JOIN events_by_trace e ON e.trace_id = q.trace_id
+        LEFT JOIN deliveries_by_trace d ON d.trace_id = q.trace_id
+        ORDER BY q.created_at DESC
+        """,
+        uid,
+        safe_limit,
+    )
+
+    alerts = [_normalize_guardian_alert_row(dict(row), timezone_name or "") for row in rows]
+    return {
+        "ok": True,
+        "uid": uid,
+        "count": len(alerts),
+        "limit": safe_limit,
+        "time_context": build_time_context(timezone_name),
+        "alerts": alerts,
+    }
+
+
+@alerts_router.get("/guardian-alerts")
+async def guardian_alerts(
+    limit: int = Query(default=50, ge=1, le=200),
+    uid: str = Depends(auth.get_current_user_uid),
+) -> dict[str, Any]:
+    """Return newest-first Guardian alert history for the authenticated user."""
+    return await _guardian_alert_history(uid, limit)
 
 
 def _queue_priority_rank(priority: Optional[str]) -> int:

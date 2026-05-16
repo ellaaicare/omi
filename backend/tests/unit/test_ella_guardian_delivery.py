@@ -3,9 +3,11 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
@@ -102,6 +104,22 @@ class _FakeAsyncClient:
     async def post(self, url, **kwargs):
         self.posts.append((url, kwargs))
         return _FakeResponse()
+
+
+class _FakeAlertPool:
+    def __init__(self, rows, timezone_name="America/Los_Angeles"):
+        self.rows = rows
+        self.timezone_name = timezone_name
+        self.fetch_args = []
+        self.fetchrow_args = []
+
+    async def fetchrow(self, _query, *args):
+        self.fetchrow_args.append(args)
+        return {"timezone": self.timezone_name}
+
+    async def fetch(self, _query, *args):
+        self.fetch_args.append(args)
+        return self.rows
 
 
 def _user_row(identities=None, phone_number="+15550000001"):
@@ -375,3 +393,100 @@ def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):
             )
         )
     assert exc.value.status_code == 403
+
+
+def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch):
+    created = datetime(2026, 5, 15, 19, 38, tzinfo=timezone.utc)
+    consumed = datetime(2026, 5, 15, 19, 39, tzinfo=timezone.utc)
+    pool = _FakeAlertPool(
+        [
+            {
+                "id": "guardian_abc",
+                "uid": "uid-1",
+                "url": "https://ella-ai-care.com/audio/uid-1/abc.mp3",
+                "priority": "debug",
+                "message": "  Ella found your glasses near the kitchen table.  ",
+                "trigger_type": "wake_word_user_support",
+                "metadata": {
+                    "trace_id": "trace-1",
+                    "queue_item_id": "guardian_abc",
+                    "source_conversation_id": "omi-123",
+                    "dry_run": True,
+                },
+                "created_at": created,
+                "consumed_at": consumed,
+                "trace_id": "trace-1",
+                "events": [
+                    {
+                        "created_at": consumed.isoformat(),
+                        "stage": "ios_playback_failed",
+                        "status": "error",
+                        "latency_ms": 50,
+                        "metadata": {"queue_item_id": "guardian_abc", "error": "OSStatus -50"},
+                    }
+                ],
+                "deliveries": [
+                    {
+                        "channel": "imessage",
+                        "target": "caregiver",
+                        "caregiver_id": "caregiver-1",
+                        "status": "sent",
+                    }
+                ],
+            }
+        ]
+    )
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    result = asyncio.run(guardian._guardian_alert_history("uid-1", 50))
+
+    assert result["uid"] == "uid-1"
+    assert result["count"] == 1
+    alert = result["alerts"][0]
+    assert alert["queue_item_id"] == "guardian_abc"
+    assert alert["summary"] == "Ella found your glasses near the kitchen table."
+    assert alert["trigger_type"] == "wake_word_user_support"
+    assert alert["delivery_target"] == "caregiver"
+    assert alert["playback_status"] == "failed"
+    assert alert["source_conversation_id"] == "omi-123"
+    assert alert["caregiver_escalation"] is True
+    assert alert["escalation_status"] == "sent"
+    assert alert["dry_run"] is True
+    assert alert["test"] is True
+    assert alert["created_time"]["timezone"] == "America/Los_Angeles"
+    assert pool.fetch_args[0] == ("uid-1", 50)
+
+
+def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypatch):
+    pool = _FakeAlertPool(
+        [
+            {
+                "id": "guardian_auth",
+                "uid": "auth-uid",
+                "url": "",
+                "priority": "normal",
+                "message": "Wake response",
+                "trigger_type": "wake_word",
+                "metadata": {"trace_id": "trace-auth"},
+                "created_at": datetime(2026, 5, 15, 20, 0, tzinfo=timezone.utc),
+                "consumed_at": None,
+                "trace_id": "trace-auth",
+                "events": [],
+                "deliveries": [],
+            }
+        ]
+    )
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    app = FastAPI()
+    app.include_router(guardian.alerts_router)
+    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    client = TestClient(app)
+
+    response = client.get("/v1/ella/guardian-alerts?limit=50&uid=other-user")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["uid"] == "auth-uid"
+    assert body["alerts"][0]["queue_item_id"] == "guardian_auth"
+    assert pool.fetch_args[0] == ("auth-uid", 50)
