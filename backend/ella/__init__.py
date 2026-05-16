@@ -378,10 +378,13 @@ def _register_routers(app) -> None:
     # Guardian Mode (audio queue for iOS)
     if ELLA_GUARDIAN_ENABLED:
         try:
+            from ella.routers.guardian import alerts_router as guardian_alerts_router
             from ella.routers.guardian import router as guardian_router
 
             app.include_router(guardian_router, tags=["Guardian Mode"])
+            app.include_router(guardian_alerts_router, tags=["Guardian Mode"])
             print("  🌐 /v1/ella/guardian/* - Guardian Mode endpoints", flush=True)
+            print("  🌐 /v1/ella/guardian-alerts - Guardian alert history", flush=True)
         except ImportError as e:
             print(f"  ⚠️ Guardian Mode not available: {e}", flush=True)
 
