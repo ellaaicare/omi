@@ -857,11 +857,15 @@ async def _stream_handler(
         nonlocal first_stt_result_at
         if segments and first_stt_result_at is None:
             first_stt_result_at = time.time()
+            first_segment = segments[0] if isinstance(segments[0], dict) else {}
+            result_provider = (
+                first_segment.get("stt_provider") if isinstance(first_segment, dict) else None
+            ) or _stt_service_value(stt_service)
             _latency_log(
                 "first_final_result",
                 segment_count=len(segments),
-                first_text=(segments[0].get("text", "")[:80] if isinstance(segments[0], dict) else None),
-                provider=_stt_service_value(stt_service),
+                first_text=(first_segment.get("text", "")[:80] if isinstance(first_segment, dict) else None),
+                provider=result_provider,
                 since_stt_ready_ms=_elapsed_ms(stt_connect_ready_at, first_stt_result_at),
                 since_stt_connect_start_ms=_elapsed_ms(stt_connect_started_at, first_stt_result_at),
             )

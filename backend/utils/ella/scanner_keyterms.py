@@ -17,6 +17,8 @@ DEFAULT_TTL_SECONDS = 120.0
 DEFAULT_TIMEOUT_SECONDS = 1.5
 DEFAULT_MAX_TERMS = 100
 DEFAULT_MAX_TOKENS = 500
+DEFAULT_DEEPGRAM_MAX_TERMS = 50
+DEFAULT_DEEPGRAM_MAX_TOKENS = 250
 
 _cache: dict[str, "KeytermCacheEntry"] = {}
 _uid_agent_ids: dict[str, str] = {}
@@ -90,6 +92,14 @@ def _max_terms() -> int:
 
 def _max_tokens() -> int:
     return _env_int("ELLA_SCANNER_KEYTERMS_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+
+
+def _deepgram_max_terms() -> int:
+    return _env_int("ELLA_DEEPGRAM_KEYTERMS_MAX_TERMS", DEFAULT_DEEPGRAM_MAX_TERMS)
+
+
+def _deepgram_max_tokens() -> int:
+    return _env_int("ELLA_DEEPGRAM_KEYTERMS_MAX_TOKENS", DEFAULT_DEEPGRAM_MAX_TOKENS)
 
 
 def _enabled() -> bool:
@@ -338,8 +348,18 @@ def limit_keyterms(terms: list[str], *, max_terms: Optional[int] = None, max_tok
 
 
 def combine_deepgram_keyterms(vocabulary: list[str], scanner_terms: list[str]) -> list[str]:
-    """Merge scanner terms before generic user vocabulary within Deepgram limits."""
-    return limit_keyterms([*(scanner_terms or []), *(vocabulary or [])])
+    """Merge scanner terms before generic user vocabulary within safe Deepgram limits.
+
+    Deepgram documents a hard 500-token keyterm limit, but recommends keeping
+    requests focused on the most important 20-50 terms. Live websocket opens
+    can reject larger practical payloads with HTTP 400, so keep the provider
+    payload conservative while preserving the full scanner cache separately.
+    """
+    return limit_keyterms(
+        [*(scanner_terms or []), *(vocabulary or [])],
+        max_terms=_deepgram_max_terms(),
+        max_tokens=_deepgram_max_tokens(),
+    )
 
 
 async def _fetch_scanner_tuning(agent_id: str) -> str:
