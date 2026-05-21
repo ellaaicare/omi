@@ -72,8 +72,19 @@ def test_combine_deepgram_keyterms_gives_scanner_terms_priority():
     combined = scanner_keyterms.combine_deepgram_keyterms(vocabulary, scanner_terms)
 
     assert combined[:3] == ["Hey Ella", "metformin", "Dr. Pu"]
-    assert len(combined) == 100
+    assert len(combined) == scanner_keyterms.DEFAULT_DEEPGRAM_MAX_TERMS
     assert combined.count("Hey Ella") == 1
+
+
+def test_combine_deepgram_keyterms_uses_provider_specific_budget(monkeypatch):
+    monkeypatch.setenv("ELLA_DEEPGRAM_KEYTERMS_MAX_TERMS", "3")
+
+    combined = scanner_keyterms.combine_deepgram_keyterms(
+        ["generic"],
+        ["Hey Ella", "where did I put my glasses", "Dr. Pu", "metformin"],
+    )
+
+    assert combined == ["Hey Ella", "where did I put my glasses", "Dr. Pu"]
 
 
 def test_limit_keyterms_enforces_token_budget():
