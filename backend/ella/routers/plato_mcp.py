@@ -51,6 +51,7 @@ DEFAULT_PROVISION_API_URL = "http://100.76.138.56:8200"
 MAX_CONTEXT_LIMIT = 50
 MAX_WINDOW_CONTEXT_LIMIT = 500
 MAX_SEARCH_RESULTS = 20
+MAX_WORKSPACE_SEARCH_RESULTS = 10
 MAX_PROMPT_CHARS = 4000
 MAX_OBSERVATION_CHARS = 8000
 MAX_CONSULT_CONTEXT_CHARS = 7000
@@ -730,6 +731,56 @@ def _score_item(query_tokens: set[str], item: dict[str, Any]) -> int:
     return len(query_tokens & _tokens(haystack))
 
 
+def _workspace_search_result_to_event(result: dict[str, Any]) -> dict[str, Any]:
+    file_name = str(result.get("file") or "")
+    line = result.get("line")
+    event = {
+        "event_id": f"hermes-workspace:{file_name}:{line}",
+        "channel": "hermes_workspace",
+        "provider": "hermes-provision-search",
+        "role": "memory",
+        "started_at": result.get("started_at") or "",
+        "title": result.get("title") or "Hermes workspace match",
+        "text": _compact_text(result.get("excerpt"), 1800),
+        "source_ref": {
+            "source": "hermes_workspace",
+            "file": file_name,
+            "line": line,
+        },
+        "score": result.get("score"),
+        "matched_terms": result.get("matched_terms") or [],
+    }
+    return annotate_event_time(event, tz_name=_plato_timezone())
+
+
+async def _fetch_workspace_search(query: str, max_results: int) -> list[dict[str, Any]]:
+    provision_token = _env("ELLA_PROVISION_API_TOKEN")
+    if not provision_token:
+        logger.warning("plato_mcp workspace search skipped: ELLA_PROVISION_API_TOKEN is not configured")
+        return []
+    provision_url = _env("ELLA_PROVISION_API_URL", DEFAULT_PROVISION_API_URL).rstrip("/")
+    limit = max(1, min(max_results, MAX_WORKSPACE_SEARCH_RESULTS))
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"{provision_url}/workspace/{_plato_agent_id()}/search",
+                headers={"Authorization": f"Bearer {provision_token}"},
+                json={"query": query, "limit": limit, "excerpt_chars": 1400},
+            )
+        if response.status_code != 200:
+            logger.warning("plato_mcp workspace search HTTP %s: %s", response.status_code, response.text[:300])
+            return []
+        payload = response.json()
+        return [
+            _workspace_search_result_to_event(item)
+            for item in (payload.get("results") or [])
+            if isinstance(item, dict)
+        ]
+    except Exception as exc:
+        logger.warning("plato_mcp workspace search failed: %s", exc)
+        return []
+
+
 def _format_consult_context(context: dict[str, Any], limit: int) -> str:
     lines = [
         f"source={context.get('source') or 'unknown'}",
@@ -776,9 +827,17 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
     if inferred_since is not None and not results:
         meaningful_events = [item for item in events if not _is_temporal_low_value_fragment(item)]
         results = (meaningful_events or list(events))[-max_results:]
+    workspace_results = await _fetch_workspace_search(query, max_results)
+    if workspace_results:
+        seen = {_event_identity(item) for item in workspace_results}
+        results = (workspace_results + [item for item in results if _event_identity(item) not in seen])[:max_results]
     return {
         "query": query,
-        "source": context.get("source"),
+        "source": (
+            f"{context.get('source')}_with_hermes_workspace_search"
+            if workspace_results
+            else context.get("source")
+        ),
         "inferred_time_window": inferred_label or None,
         "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
         "results": results,
@@ -824,6 +883,13 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
     context_limit = _clamp_int(arguments.get("context_limit"), 15, 1, MAX_CONTEXT_LIMIT)
     context = await _recent_context({"limit": context_limit})
     context_block = _format_consult_context(context, context_limit)
+    workspace_results = await _fetch_workspace_search(prompt, min(5, context_limit))
+    if workspace_results:
+        workspace_context = _format_consult_context(
+            {"source": "hermes_workspace_search", "uid": _plato_uid(), "events": workspace_results},
+            len(workspace_results),
+        )
+        context_block = f"{context_block}\n\nDeep Hermes workspace search:\n{workspace_context}"
     token = _env("HERMES_API_SERVER_KEY", _env("API_SERVER_KEY", ""))
     if not token:
         raise ToolExecutionError("HERMES_API_SERVER_KEY is not configured", code=-32003)
@@ -868,8 +934,12 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "agent_id": agent_id,
         "session": session_key,
-        "context_source": context.get("source"),
-        "context_events": len(context.get("events") or []),
+        "context_source": (
+            f"{context.get('source')}_with_hermes_workspace_search"
+            if workspace_results
+            else context.get("source")
+        ),
+        "context_events": len(context.get("events") or []) + len(workspace_results),
     }
 
 

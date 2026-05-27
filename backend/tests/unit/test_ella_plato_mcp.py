@@ -621,6 +621,66 @@ def test_plato_search_memory_uses_merged_omi_fallback(monkeypatch):
     assert result["results"][0]["event_id"] == "cafe-1"
 
 
+def test_plato_search_memory_prefers_deep_hermes_workspace_matches(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def recent_meta_chat(arguments):
+        return {
+            "uid": module._plato_uid(),
+            "source": "canonical_timeline",
+            "events": [
+                {
+                    "event_id": "today-meta-chat",
+                    "channel": "imessage",
+                    "role": "assistant",
+                    "title": "Follow-Up on Meisheng 504 Plan Meeting",
+                    "text": "I do not have the full kickoff meeting transcript.",
+                    "started_at": "2026-05-27T20:33:47Z",
+                }
+            ],
+        }
+
+    async def workspace_search(query, max_results):
+        assert "504" in query
+        return [
+            {
+                "event_id": "hermes-workspace:TIMELINE.md:121",
+                "channel": "hermes_workspace",
+                "provider": "hermes-provision-search",
+                "role": "memory",
+                "title": "2026-04-24 15:00 — Initial 504 meeting for Meisheng",
+                "text": "The school team walked through the first Section 504 meeting with Plato, Meisheng, and staff.",
+                "source_ref": {"source": "hermes_workspace", "file": "TIMELINE.md", "line": 121},
+            }
+        ]
+
+    monkeypatch.setattr(module, "_recent_context", recent_meta_chat)
+    monkeypatch.setattr(module, "_fetch_workspace_search", workspace_search)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_search_memory",
+                "arguments": {
+                    "query": "Meisheng 504 plan administrators kickoff meeting last month",
+                    "max_results": 5,
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline_with_hermes_workspace_search"
+    assert result["results"][0]["channel"] == "hermes_workspace"
+    assert result["results"][0]["source_ref"]["file"] == "TIMELINE.md"
+    assert result["results"][1]["event_id"] == "today-meta-chat"
+
+
 def test_plato_search_memory_temporal_query_returns_morning_window_without_keyword_match(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
@@ -730,6 +790,7 @@ def test_plato_consult_includes_fresh_mcp_context(monkeypatch):
             return FakeResponse()
 
     monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+    monkeypatch.setattr(module, "_fetch_workspace_search", lambda prompt, max_results: asyncio.sleep(0, result=[]))
     monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
 
     result = asyncio.run(module._consult_plato({"prompt": "Did I order at a cafe today?", "mode": "normal"}))
@@ -740,6 +801,60 @@ def test_plato_consult_includes_fresh_mcp_context(monkeypatch):
     assert "Ordered a noah drink and a waffle" in user_message
     assert "freshest available evidence" in captured["json"]["messages"][0]["content"]
     assert result["context_source"] == "canonical_timeline_empty_omi_firestore_fallback"
+    assert result["context_events"] == 1
+
+
+def test_plato_consult_includes_deep_workspace_search(monkeypatch):
+    module = _load_module(monkeypatch)
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "hermes-test-token")
+    captured = {}
+
+    async def fake_recent_context(arguments):
+        return {"uid": "test-uid", "source": "canonical_timeline", "events": []}
+
+    async def workspace_search(prompt, max_results):
+        return [
+            {
+                "event_id": "hermes-workspace:TIMELINE.md:121",
+                "channel": "hermes_workspace",
+                "provider": "hermes-provision-search",
+                "role": "memory",
+                "title": "2026-04-24 15:00 — Initial 504 meeting for Meisheng",
+                "text": "The school team walked through the first Section 504 meeting with Plato, Meisheng, and staff.",
+                "source_ref": {"source": "hermes_workspace", "file": "TIMELINE.md", "line": 121},
+            }
+        ]
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "The 504 meeting is in the deep workspace context."}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            captured["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+    monkeypatch.setattr(module, "_fetch_workspace_search", workspace_search)
+    monkeypatch.setattr(module.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(module._consult_plato({"prompt": "What happened in Meisheng's 504 meeting?", "mode": "deep"}))
+
+    user_message = captured["json"]["messages"][1]["content"]
+    assert "Deep Hermes workspace search" in user_message
+    assert "Initial 504 meeting for Meisheng" in user_message
+    assert result["context_source"] == "canonical_timeline_with_hermes_workspace_search"
     assert result["context_events"] == 1
 
 
