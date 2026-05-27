@@ -11,8 +11,10 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
-/// Feature flag — set to false to disable direct chat and use proxy fallback.
-const bool _useDirectChat = true;
+/// Feature flag — direct gateway chat bypasses backend canonical writeback.
+/// Keep disabled so iOS chat routes through /v1/ella/chat/stream, hydrates from
+/// the shared canonical timeline, and writes ios_chat turns to /v1/ella/events.
+const bool _useDirectChat = false;
 
 /// Build Ella-specific debug headers for routing observability (Issue #216).
 /// Backend trace.py captures these to correlate client requests with server routing decisions.
@@ -69,7 +71,7 @@ class _ResolvedEndpoint {
 /// In-memory cache (fast path).
 _ResolvedEndpoint? _cachedEndpoint;
 
-/// Resolve the user's OpenClaw endpoint. Returns null on any failure.
+/// Resolve the user's active Ella endpoint. Returns null on any failure.
 Future<_ResolvedEndpoint?> _resolveEndpoint() async {
   final uid = SharedPreferencesUtil().uid;
   if (uid.isEmpty) return null;
@@ -133,7 +135,10 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
 
     // Cache it
     _cachedEndpoint = endpoint;
-    SharedPreferencesUtil().saveString('ellaResolvedEndpoint', jsonEncode(endpoint.toJson()));
+    SharedPreferencesUtil().saveString(
+      'ellaResolvedEndpoint',
+      jsonEncode(endpoint.toJson()),
+    );
 
     return endpoint;
   } catch (e) {
@@ -180,12 +185,16 @@ ServerMessageChunk? _parseOpenAiSseChunk(String line, String messageId) {
 Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
   final endpoint = await _resolveEndpoint();
   if (endpoint == null || endpoint.historyUrl.isEmpty) {
-    Logger.debug('[EllaChat] Cannot fetch history: no resolved endpoint or historyUrl');
+    Logger.debug(
+      '[EllaChat] Cannot fetch history: no resolved endpoint or historyUrl',
+    );
     return [];
   }
 
   try {
-    final url = '${Env.apiBaseUrl}${endpoint.historyUrl.replaceFirst(RegExp(r'^/'), '')}?limit=$limit';
+    final uid = SharedPreferencesUtil().uid;
+    final url =
+        '${Env.apiBaseUrl}${endpoint.historyUrl.replaceFirst(RegExp(r'^/'), '')}?uid=${Uri.encodeComponent(uid)}&limit=$limit';
     final response = await makeApiCall(
       url: url,
       headers: _ellaDebugHeaders(routeSource: 'chat-history'),
@@ -209,21 +218,25 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
       final ts = m['timestamp'] as String?;
       final id = m['id'] as String? ?? const Uuid().v4();
       if (content.isEmpty) continue;
-      if (content.startsWith('[SYSTEM:')) continue; // Filter scanner notifications from chat UI
+      if (content.startsWith('[SYSTEM:')) {
+        continue; // Filter scanner notifications from chat UI
+      }
 
-      result.add(ServerMessage(
-        id,
-        ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
-        content,
-        role == 'user' ? MessageSender.human : MessageSender.ai,
-        MessageType.text,
-        null,
-        false,
-        [],
-        [],
-        [],
-        askForNps: false,
-      ));
+      result.add(
+        ServerMessage(
+          id,
+          ts != null ? DateTime.parse(ts).toLocal() : DateTime.now(),
+          content,
+          role == 'user' ? MessageSender.human : MessageSender.ai,
+          MessageType.text,
+          null,
+          false,
+          [],
+          [],
+          [],
+          askForNps: false,
+        ),
+      );
     }
 
     // API returns newest first; reverse for chronological UI order
@@ -236,28 +249,38 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
   }
 }
 
-/// Main entry point: resolve then stream directly, or fall back to proxy.
+/// Main entry point for Ella chat streaming.
 ///
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
 Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
   // Feature flag — delegate to existing proxy path if disabled
   if (!_useDirectChat) {
-    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-flag-off'));
+    yield* sendEllaMessageStream(
+      text,
+      headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
+      clientMessageId: const Uuid().v4(),
+      clientSentAt: DateTime.now().toUtc(),
+    );
     return;
   }
 
-  // Attempt to resolve the user's agent endpoint
+  // Attempt to resolve the user's agent endpoint when direct mode is enabled.
   final endpoint = await _resolveEndpoint();
   if (endpoint == null) {
     Logger.debug('[EllaChat] Resolve unavailable, using proxy fallback');
-    yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-resolve-fail'));
+    yield* sendEllaMessageStream(
+      text,
+      headers: _ellaDebugHeaders(routeSource: 'proxy-resolve-fail'),
+      clientMessageId: const Uuid().v4(),
+      clientSentAt: DateTime.now().toUtc(),
+    );
     return;
   }
 
-  // Stream directly from OpenClaw gateway
-  final messageId = '1000';
-  final uid = SharedPreferencesUtil().uid;
+  // Legacy direct gateway path. Production keeps this disabled so canonical
+  // writeback remains centralized in the backend.
+  const messageId = '1000';
   final accumulatedText = StringBuffer();
 
   try {
@@ -294,7 +317,12 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
     // No text accumulated — invalidate cache and retry via proxy
     if (accumulatedText.isEmpty) {
       _invalidateResolveCache();
-      yield* sendEllaMessageStream(text, headers: _ellaDebugHeaders(routeSource: 'proxy-gateway-error'));
+      yield* sendEllaMessageStream(
+        text,
+        headers: _ellaDebugHeaders(routeSource: 'proxy-gateway-error'),
+        clientMessageId: const Uuid().v4(),
+        clientSentAt: DateTime.now().toUtc(),
+      );
       return;
     }
     // Partial text accumulated — fall through to synthesize done chunk below
@@ -316,8 +344,12 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       [],
       askForNps: false,
     );
-    yield ServerMessageChunk(messageId, jsonEncode(serverMessage.toJson()), MessageChunkType.done,
-        message: serverMessage);
+    yield ServerMessageChunk(
+      messageId,
+      jsonEncode(serverMessage.toJson()),
+      MessageChunkType.done,
+      message: serverMessage,
+    );
   } else {
     yield ServerMessageChunk.failedMessage();
   }

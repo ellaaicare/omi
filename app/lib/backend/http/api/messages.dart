@@ -60,29 +60,49 @@ Future<List<ServerMessage>> clearChatServer({String? appId}) async {
 
 ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   if (line.startsWith('think: ')) {
-    return ServerMessageChunk(messageId, line.substring(7).replaceAll("__CRLF__", "\n"), MessageChunkType.think);
+    return ServerMessageChunk(
+      messageId,
+      line.substring(7).replaceAll("__CRLF__", "\n"),
+      MessageChunkType.think,
+    );
   }
 
   if (line.startsWith('data: ')) {
-    return ServerMessageChunk(messageId, line.substring(6).replaceAll("__CRLF__", "\n"), MessageChunkType.data);
+    return ServerMessageChunk(
+      messageId,
+      line.substring(6).replaceAll("__CRLF__", "\n"),
+      MessageChunkType.data,
+    );
   }
 
   if (line.startsWith('done: ')) {
     var text = decodeBase64(line.substring(6));
-    return ServerMessageChunk(messageId, text, MessageChunkType.done,
-        message: ServerMessage.fromJson(json.decode(text)));
+    return ServerMessageChunk(
+      messageId,
+      text,
+      MessageChunkType.done,
+      message: ServerMessage.fromJson(json.decode(text)),
+    );
   }
 
   if (line.startsWith('message: ')) {
     var text = decodeBase64(line.substring(9));
-    return ServerMessageChunk(messageId, text, MessageChunkType.message,
-        message: ServerMessage.fromJson(json.decode(text)));
+    return ServerMessageChunk(
+      messageId,
+      text,
+      MessageChunkType.message,
+      message: ServerMessage.fromJson(json.decode(text)),
+    );
   }
 
   return null;
 }
 
-Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, List<String>? filesId}) async* {
+Stream<ServerMessageChunk> sendMessageStreamServer(
+  String text, {
+  String? appId,
+  List<String>? filesId,
+}) async* {
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
@@ -107,15 +127,28 @@ Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, 
 /// Send a chat message via the Ella endpoint (/v1/ella/chat/stream).
 /// Backend emits OMI-compatible format (data:/done:), so we reuse parseMessageChunk.
 /// SSE comment lines (starting with ':') are used as keep-alives and are skipped.
-Stream<ServerMessageChunk> sendEllaMessageStream(String text, {Map<String, String> headers = const {}}) async* {
+Stream<ServerMessageChunk> sendEllaMessageStream(
+  String text, {
+  Map<String, String> headers = const {},
+  String? clientMessageId,
+  DateTime? clientSentAt,
+}) async* {
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
   var uid = SharedPreferencesUtil().uid;
   var messageId = "1000";
+  final requestClientMessageId = clientMessageId ?? '';
+  final requestClientSentAt = clientSentAt?.toUtc().toIso8601String() ?? '';
 
   await for (var line in makeStreamingApiCall(
     url: url,
     headers: headers,
-    body: jsonEncode({'uid': uid, 'message': text, 'conversation_id': ''}),
+    body: jsonEncode({
+      'uid': uid,
+      'message': text,
+      'conversation_id': '',
+      'client_message_id': requestClientMessageId,
+      'client_sent_at': requestClientSentAt,
+    }),
   )) {
     // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
     if (line.startsWith(':')) continue;
@@ -146,7 +179,10 @@ Future<ServerMessage> getInitialAppMessage(String? appId) {
   });
 }
 
-Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files, {String? language}) async* {
+Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
+  List<File> files, {
+  String? language,
+}) async* {
   var messageId = "1000"; // Default new message
 
   await for (var line in makeMultipartStreamingApiCall(
@@ -164,24 +200,30 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files, {Strin
   }
 }
 
-Future<List<MessageFile>?> uploadFilesServer(List<File> files, {String? appId}) async {
+Future<List<MessageFile>?> uploadFilesServer(
+  List<File> files, {
+  String? appId,
+}) async {
   var url = '${Env.apiBaseUrl}v2/files?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/files';
   }
 
   try {
-    var response = await makeMultipartApiCall(
-      url: url,
-      files: files,
-    );
+    var response = await makeMultipartApiCall(url: url, files: files);
 
     if (response.statusCode == 200) {
-      Logger.debug('uploadFileServer response body: ${jsonDecode(response.body)}');
+      Logger.debug(
+        'uploadFileServer response body: ${jsonDecode(response.body)}',
+      );
       return MessageFile.fromJsonList(jsonDecode(response.body));
     } else {
-      Logger.debug('Failed to upload file. Status code: ${response.statusCode} ${response.body}');
-      throw Exception('Failed to upload file. Status code: ${response.statusCode}');
+      Logger.debug(
+        'Failed to upload file. Status code: ${response.statusCode} ${response.body}',
+      );
+      throw Exception(
+        'Failed to upload file. Status code: ${response.statusCode}',
+      );
     }
   } catch (e) {
     Logger.debug('An error occurred uploadFileServer: $e');
@@ -202,7 +244,10 @@ Future reportMessageServer(String messageId) async {
   }
 }
 
-Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async {
+Future<String> transcribeVoiceMessage(
+  File audioFile, {
+  String? language,
+}) async {
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v2/voice-message/transcribe',
@@ -214,7 +259,9 @@ Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async 
       final data = jsonDecode(response.body);
       return data['transcript'] ?? '';
     } else {
-      Logger.debug('Failed to transcribe voice message: ${response.statusCode} ${response.body}');
+      Logger.debug(
+        'Failed to transcribe voice message: ${response.statusCode} ${response.body}',
+      );
       throw Exception('Failed to transcribe voice message');
     }
   } catch (e) {

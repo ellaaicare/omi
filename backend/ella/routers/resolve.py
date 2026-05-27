@@ -1,8 +1,9 @@
 """
-Ella Resolve Router - User identity to OpenClaw agent resolution.
+Ella Resolve Router - User identity to active Ella agent resolution.
 
 Resolves any user identifier (Firebase UID, email, phone) to the correct
-OpenClaw agent routing info (agentId, sessionKey, gatewayUrl, token).
+Hermes or legacy OpenClaw agent routing info (agentId, sessionKey, gatewayUrl,
+token).
 
 Endpoints:
 - GET  /v1/ella/resolve?uid={firebase_uid}
@@ -10,9 +11,11 @@ Endpoints:
 - GET  /v1/ella/resolve?phone={phone}
 
 Used by:
-- iOS Flutter app (Pattern C: resolve + direct SSE)
+- iOS Flutter app for history/config discovery. Production chat should use
+  /v1/ella/chat/stream so the backend can hydrate from and write to the
+  canonical timeline.
 - E2E Flow Debugger
-- Any client that needs to discover the correct agent before calling OpenClaw
+- Any client that needs to discover the active agent runtime
 """
 
 import json
@@ -60,7 +63,7 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 async def resolve_user_routing(uid: str) -> Optional[dict]:
-    """Resolve a Firebase UID to OpenClaw routing info.
+    """Resolve a Firebase UID to active agent routing info.
 
     Shared helper used by both /resolve endpoint and chat.py dynamic routing.
     Returns None if user not found.
@@ -90,7 +93,11 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "caregiverAgentId": agents.get("caregiverAgentId"),
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
-            "sessionKey": f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}" if row["omi_uid"] and agents.get("userAgentId") else None,
+            "sessionKey": (
+                f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}"
+                if row["omi_uid"] and agents.get("userAgentId")
+                else None
+            ),
             "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
@@ -106,7 +113,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             routing.update(
                 {
                     "agentId": HERMES_AGENT_ID,
-                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:ios-chat",
+                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:canonical",
                     "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "token": HERMES_GATEWAY_TOKEN,
@@ -139,7 +146,7 @@ async def resolve_endpoint(
     email: Optional[str] = Query(None, description="User email"),
     phone: Optional[str] = Query(None, description="User phone (E.164)"),
 ):
-    """Resolve a user identifier to OpenClaw agent routing info.
+    """Resolve a user identifier to active agent routing info.
 
     Accepts one of: uid, email, phone. Returns the user's agent cluster
     routing information including agentId, sessionKey, gatewayUrl, and token.
@@ -208,7 +215,11 @@ async def resolve_endpoint(
             "caregiverAgentId": agents.get("caregiverAgentId"),
             "scannerAgentId": agents.get("scannerAgentId"),
             "summarizerAgentId": agents.get("summarizerAgentId"),
-            "sessionKey": f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}" if row["omi_uid"] and agents.get("userAgentId") else None,
+            "sessionKey": (
+                f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}"
+                if row["omi_uid"] and agents.get("userAgentId")
+                else None
+            ),
             "gatewayUrl": PUBLIC_GATEWAY_URL,
             "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
             "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
@@ -222,7 +233,7 @@ async def resolve_endpoint(
             routing.update(
                 {
                     "agentId": HERMES_AGENT_ID,
-                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:ios-chat",
+                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:canonical",
                     "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
                     "token": HERMES_GATEWAY_TOKEN,
@@ -263,6 +274,7 @@ async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Option
     params = f"limit={limit}"
     if session_key:
         from urllib.parse import quote
+
         params += f"&session_key={quote(session_key)}"
     url = f"{provision_base}/chat/history/{agent_id}?{params}"
 
@@ -271,9 +283,11 @@ async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Option
             resp = await client.get(url, headers={"x-api-key": PROVISION_API_KEY})
             if resp.status_code != 200:
                 from fastapi.responses import JSONResponse
+
                 return JSONResponse(status_code=resp.status_code, content={"error": "upstream_error"})
             return resp.json()
     except Exception as e:
         logger.error(f"Chat history proxy error: {e}")
         from fastapi.responses import JSONResponse
+
         return JSONResponse(status_code=502, content={"error": "provision_unreachable"})
