@@ -47,3 +47,48 @@ def test_temporal_chat_context_filters_morning_omi_fragments(monkeypatch):
 
     assert label == "same-day morning OMI context"
     assert [event["event_id"] for event in events] == ["cafe"]
+
+
+def test_ios_chat_event_uses_stable_turn_identity():
+    started_at = datetime(2026, 5, 27, 18, 30, tzinfo=timezone.utc)
+
+    event = chat._ios_chat_event(
+        uid="uid-1",
+        turn_id="client-123",
+        role="user",
+        text="Remember the demo banana is on the blue shelf.",
+        session_key="ella:omi:uid-1:canonical",
+        started_at=started_at,
+        client_info={"type": "ios-app"},
+    )
+    normalized = event.normalized()
+
+    assert event.channel == "ios_chat"
+    assert event.provider == "omi-ios-chat"
+    assert event.role == "user"
+    assert event.scan_policy == "immediate"
+    assert event.event_id == "ios_chat:uid-1:client-123:user"
+    assert normalized["source_identity"] == "ios_chat:uid-1:client-123"
+    assert event.session_id == "ella:omi:uid-1:canonical"
+
+
+def test_ios_chat_assistant_event_disables_scan_policy():
+    started_at = datetime(2026, 5, 27, 18, 31, tzinfo=timezone.utc)
+
+    event = chat._ios_chat_event(
+        uid="uid-1",
+        turn_id="client-123",
+        role="assistant",
+        text="I will remember that.",
+        session_key="ella:omi:uid-1:canonical",
+        started_at=started_at,
+    )
+
+    assert event.scan_policy == "none"
+    assert event.event_id == "ios_chat:uid-1:client-123:assistant"
+
+
+def test_hermes_session_defaults_to_canonical(monkeypatch):
+    monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
+
+    assert chat._hermes_chat_session_key("ABC123") == "ella:omi:abc123:canonical"

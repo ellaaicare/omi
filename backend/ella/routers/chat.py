@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -32,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ella.config import ELLA_CONFIG
+from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
 from utils.ella.canonical_context import (
@@ -58,6 +60,7 @@ HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_
 HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
 HERMES_CHAT_SESSION_EPOCH = os.getenv("ELLA_CHAT_HERMES_SESSION_EPOCH", "").strip()
+HERMES_CHAT_SESSION_SCOPE = os.getenv("ELLA_CHAT_HERMES_SESSION_SCOPE", "canonical").strip().lower()
 CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
@@ -68,6 +71,7 @@ CHAT_CONTEXT_CHANNELS = [
     for channel in os.getenv("ELLA_CHAT_CANONICAL_CHANNELS", ",".join(DEFAULT_CONTEXT_CHANNELS)).split(",")
     if channel.strip()
 ]
+_canonical_event_store = PostgresCanonicalEventStore()
 
 ELLA_SYSTEM_PROMPT = (
     "You are Ella, a warm and caring AI companion for elderly users. "
@@ -79,6 +83,8 @@ ELLA_SYSTEM_PROMPT = (
 
 
 def _hermes_chat_session_key(uid: str) -> str:
+    if HERMES_CHAT_SESSION_SCOPE in {"canonical", "shared", "cross_channel", "cross-channel"}:
+        return f"ella:omi:{uid.lower()}:canonical"
     if HERMES_CHAT_SESSION_EPOCH:
         epoch = HERMES_CHAT_SESSION_EPOCH
     else:
@@ -122,6 +128,90 @@ class EllaChatRequest(BaseModel):
     uid: str
     message: str
     conversation_id: str = ""
+    client_message_id: str = ""
+    client_sent_at: str = ""
+
+
+def _parse_client_sent_at(value: str = "") -> datetime:
+    if value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _canonical_turn_id(uid: str, request: EllaChatRequest, started_at: datetime) -> str:
+    if request.client_message_id:
+        return request.client_message_id
+    if request.conversation_id:
+        return request.conversation_id
+    digest = hashlib.sha256(f"{uid}|{request.message}|{started_at.isoformat()}".encode("utf-8")).hexdigest()[:16]
+    return f"server-{digest}"
+
+
+def _ios_chat_event(
+    *,
+    uid: str,
+    turn_id: str,
+    role: str,
+    text: str,
+    session_key: str,
+    started_at: datetime,
+    ended_at: datetime = None,
+    client_info: dict = None,
+) -> CanonicalEventIn:
+    source_identity = f"ios_chat:{uid}:{turn_id}"
+    return CanonicalEventIn(
+        uid=uid,
+        canonical_identity=uid,
+        event_id=f"{source_identity}:{role}",
+        session_id=session_key,
+        channel="ios_chat",
+        provider="omi-ios-chat",
+        role=role,
+        text=text,
+        started_at=started_at,
+        ended_at=ended_at,
+        privacy_scope="user_private",
+        scan_policy="immediate" if role == "user" else "none",
+        source_ref={
+            "source_identity": source_identity,
+            "client_message_id": turn_id,
+            "message_id": f"{turn_id}:{role}",
+            "source": "ios_chat",
+        },
+        metadata={
+            "adapter": "ios-chat",
+            "client": client_info or {},
+            "session_strategy": HERMES_CHAT_SESSION_SCOPE,
+            "hermes_session_key": session_key,
+        },
+    )
+
+
+async def _write_ios_chat_canonical_event(event: CanonicalEventIn) -> None:
+    try:
+        result = await _canonical_event_store.write_batch([event])
+        logger.info(
+            "[FLOW:CHAT-CANONICAL-WRITE] uid=%s role=%s event_id=%s inserted=%s duplicates=%s",
+            event.uid,
+            event.role,
+            event.event_id,
+            result.get("inserted"),
+            result.get("duplicates"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:CHAT-CANONICAL-WRITE] uid=%s role=%s event_id=%s error=%s",
+            event.uid,
+            event.role,
+            event.event_id,
+            exc,
+        )
 
 
 def _resolve_debug_level(header_value: str = None) -> int:
@@ -582,7 +672,14 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         yield f"data: Error: {str(e)}\n\n"
 
 
-async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = None):
+async def _stream_hermes_chat(
+    user_message: str,
+    uid: str,
+    client_info: dict = None,
+    *,
+    turn_id: str = "",
+    client_sent_at: datetime = None,
+):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
     import time as _time
 
@@ -594,6 +691,8 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
         return
 
     session_key = _hermes_chat_session_key(uid)
+    user_started_at = client_sent_at or datetime.now(timezone.utc)
+    turn_id = turn_id or f"server-{uuid4()}"
     text = []
     canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
@@ -632,9 +731,20 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
                 ),
             }
         )
+    await _write_ios_chat_canonical_event(
+        _ios_chat_event(
+            uid=uid,
+            turn_id=turn_id,
+            role="user",
+            text=user_message,
+            session_key=session_key,
+            started_at=user_started_at,
+            client_info=client_info,
+        )
+    )
     messages.append({"role": "user", "content": user_message})
     print(
-        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
+        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} session_strategy={HERMES_CHAT_SESSION_SCOPE} turn_id={turn_id} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
         flush=True,
     )
 
@@ -700,6 +810,19 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
                     flush=True,
                 )
         if full_text:
+            assistant_started_at = datetime.now(timezone.utc)
+            await _write_ios_chat_canonical_event(
+                _ios_chat_event(
+                    uid=uid,
+                    turn_id=turn_id,
+                    role="assistant",
+                    text=full_text,
+                    session_key=session_key,
+                    started_at=assistant_started_at,
+                    ended_at=assistant_started_at,
+                    client_info=client_info,
+                )
+            )
             msg = {
                 "id": str(uuid4()),
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -715,7 +838,10 @@ async def _stream_hermes_chat(user_message: str, uid: str, client_info: dict = N
             yield f"done: {base64.b64encode(json.dumps(msg).encode()).decode()}\n\n"
 
         _elapsed = int((_time.time() - _start) * 1000)
-        print(f"[FLOW:CHAT-HERMES] OK uid={uid} chars={len(full_text)} latency={_elapsed}ms", flush=True)
+        print(
+            f"[FLOW:CHAT-HERMES] OK uid={uid} turn_id={turn_id} chars={len(full_text)} latency={_elapsed}ms",
+            flush=True,
+        )
 
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
@@ -773,6 +899,9 @@ async def ella_chat_stream(
     trace.uid = request.uid
     trace.debug_level = debug_level
     trace.notes.append(f"message_length={len(request.message)}")
+    client_sent_at = _parse_client_sent_at(request.client_sent_at)
+    turn_id = _canonical_turn_id(request.uid, request, client_sent_at)
+    trace.notes.append(f"canonical_turn_id={turn_id}")
     # Capture all X-Ella-* headers for debugging
     trace.client_headers = {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")}
 
@@ -792,6 +921,8 @@ async def ella_chat_stream(
                     "route": x_ella_route or "",
                     "headers": trace.client_headers,
                 },
+                turn_id=turn_id,
+                client_sent_at=client_sent_at,
             ),
             media_type="text/event-stream",
         )
