@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 import contextvars
+import re
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -23,6 +24,158 @@ try:
 except ImportError:
     # Fallback if import fails
     agent_config_context = contextvars.ContextVar('agent_config', default=None)
+
+
+_SEARCH_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "to",
+    "in",
+    "on",
+    "of",
+    "for",
+    "with",
+    "what",
+    "where",
+    "when",
+    "who",
+    "why",
+    "how",
+    "did",
+    "do",
+    "does",
+    "i",
+    "me",
+    "my",
+    "you",
+    "tell",
+    "check",
+    "latest",
+    "recent",
+    "memory",
+    "memories",
+    "omi",
+    "conversation",
+    "conversations",
+    "transcript",
+    "transcripts",
+    "summary",
+    "summaries",
+    "happened",
+    "happen",
+    "find",
+    "pull",
+    "about",
+}
+
+
+def _keyword_score(text: str, terms: list[str]) -> int:
+    text_lower = text.lower()
+    score = 0
+    for term in terms:
+        term = (term or "").strip().lower()
+        if not term:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text_lower):
+            score += 1
+    return score
+
+
+def _normalized_query_terms(query: str) -> list[str]:
+    terms = [term.strip(".,?!:;()[]{}\"'’‘“”").lower() for term in str(query or "").split()]
+    filtered = [term for term in terms if len(term) > 2 and term not in _SEARCH_STOPWORDS]
+    return filtered or [term for term in terms if len(term) > 2]
+
+
+def _significant_query_terms(query: str) -> list[str]:
+    terms = [term.strip(".,?!:;()[]{}\"'’‘“”").lower() for term in str(query or "").split()]
+    return [term for term in terms if len(term) > 2 and term not in _SEARCH_STOPWORDS]
+
+
+def _expand_query_terms(terms: list[str]) -> list[str]:
+    expanded = list(terms)
+    aliases = {
+        "meisheng": ["mei", "sheng", "may", "shing"],
+        "meishengs": ["mei", "sheng", "may", "shing"],
+    }
+    for term in terms:
+        expanded.extend(aliases.get(term, []))
+    return list(dict.fromkeys(expanded))
+
+
+def _conversation_search_blob(conv_data: dict, *, include_transcript: bool = True) -> str:
+    structured = conv_data.get("structured") or {}
+    fields = [
+        structured.get("title", ""),
+        structured.get("overview", ""),
+        structured.get("category", ""),
+        structured.get("emoji", ""),
+    ]
+    created = conv_data.get("created_at")
+    if created and hasattr(created, "strftime"):
+        fields.append(created.strftime("%B %d %Y %b %A %I:%M %p"))
+    elif created:
+        fields.append(str(created))
+
+    if include_transcript:
+        transcript_parts = []
+        for segment in conv_data.get("transcript_segments") or []:
+            if isinstance(segment, dict):
+                transcript_parts.append(str(segment.get("text") or segment.get("transcript") or ""))
+            else:
+                transcript_parts.append(str(getattr(segment, "text", "") or getattr(segment, "transcript", "")))
+        fields.append(" ".join(part for part in transcript_parts if part))
+
+    return " ".join(str(field or "") for field in fields).lower()
+
+
+def _rank_exact_conversation_ids(
+    conversations_data: list[dict],
+    query: str,
+    limit: int,
+    *,
+    allow_date_only: bool = False,
+) -> list[str]:
+    significant_terms = _significant_query_terms(query)
+    query_terms = _expand_query_terms(significant_terms or ([] if allow_date_only else _normalized_query_terms(query)))
+    query_phrase = " ".join(str(query or "").lower().split())
+    ranked = []
+
+    for conv_data in conversations_data:
+        conversation_id = conv_data.get("id")
+        if not conversation_id:
+            continue
+        searchable = _conversation_search_blob(conv_data, include_transcript=True)
+        score = _keyword_score(searchable, query_terms) if query_terms else (1 if allow_date_only else 0)
+        if query_phrase and query_phrase in searchable:
+            score += max(2, len(query_terms))
+        if score <= 0:
+            continue
+        created = conv_data.get("created_at")
+        if isinstance(created, datetime):
+            created_sort = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+        else:
+            created_sort = datetime.min.replace(tzinfo=timezone.utc)
+        ranked.append((score, created_sort, str(conversation_id)))
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [conversation_id for _score, _created, conversation_id in ranked[:limit]]
+
+
+def _merge_ranked_ids(primary: list[str], secondary: list[str], limit: int) -> list[str]:
+    merged = []
+    seen = set()
+    for conversation_id in list(primary or []) + list(secondary or []):
+        if not conversation_id or conversation_id in seen:
+            continue
+        seen.add(conversation_id)
+        merged.append(conversation_id)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 @tool
@@ -350,27 +503,31 @@ def search_conversations_tool(
         max_transcript_segments = min(max_transcript_segments, 1000)
         print(f"📊 max_transcript_segments capped at: {max_transcript_segments}")
 
-    # Parse dates to timestamps if provided
+    # Parse dates for Firestore exact/date retrieval and Pinecone metadata filters.
+    # Firestore is the source of truth for exact/date lookups; Pinecone is a
+    # semantic helper and may lag if vector coverage is incomplete.
+    start_dt = None
+    end_dt = None
     starts_at = None
     ends_at = None
 
     if start_date:
         try:
-            dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-            if dt.tzinfo is None:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            if start_dt.tzinfo is None:
                 return f"Error: start_date must include timezone in user's timezone format YYYY-MM-DDTHH:MM:SS+HH:MM (e.g., '2024-01-19T15:00:00-08:00'): {start_date}"
-            print(f"📅 Parsed start_date '{start_date}' as {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            starts_at = int(dt.timestamp())
+            print(f"📅 Parsed start_date '{start_date}' as {start_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            starts_at = int(start_dt.timestamp())
         except ValueError as e:
             return f"Error: Invalid start_date format. Expected YYYY-MM-DDTHH:MM:SS+HH:MM in user's timezone: {start_date} - {str(e)}"
 
     if end_date:
         try:
-            dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-            if dt.tzinfo is None:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            if end_dt.tzinfo is None:
                 return f"Error: end_date must include timezone in user's timezone format YYYY-MM-DDTHH:MM:SS+HH:MM (e.g., '2024-01-19T23:59:59-08:00'): {end_date}"
-            print(f"📅 Parsed end_date '{end_date}' as {dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            ends_at = int(dt.timestamp())
+            print(f"📅 Parsed end_date '{end_date}' as {end_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            ends_at = int(end_dt.timestamp())
         except ValueError as e:
             return f"Error: Invalid end_date format. Expected YYYY-MM-DDTHH:MM:SS+HH:MM in user's timezone: {end_date} - {str(e)}"
 
@@ -378,18 +535,46 @@ def search_conversations_tool(
     limit = min(limit, 20)
 
     try:
-        # Perform vector search
-        conversation_ids = vector_db.query_vectors(query=query, uid=uid, starts_at=starts_at, ends_at=ends_at, k=limit)
+        # First-class exact/date retrieval from Firestore. This catches newly
+        # indexed conversations even when Pinecone vectors have not been
+        # backfilled yet.
+        exact_candidates = conversations_db.get_conversations_without_photos(
+            uid,
+            limit=max(50, limit * 10),
+            offset=0,
+            start_date=start_dt,
+            end_date=end_dt,
+            include_discarded=False,
+        )
+        exact_ids = _rank_exact_conversation_ids(
+            exact_candidates, query, limit, allow_date_only=bool(start_dt or end_dt)
+        )
+        print(f"📊 search_conversations_tool - exact/date Firestore results: {len(exact_ids)}")
 
-        print(f"📊 search_conversations_tool - found {len(conversation_ids)} results for query: '{query}'")
+        # Semantic vector search is still useful for fuzzy concepts, but it is
+        # not the only retrieval path.
+        vector_ids = []
+        try:
+            vector_ids = vector_db.query_vectors(query=query, uid=uid, starts_at=starts_at, ends_at=ends_at, k=limit)
+        except Exception as vector_error:
+            print(
+                f"⚠️ search_conversations_tool - vector helper failed, using Firestore exact/date results: {vector_error}"
+            )
+
+        conversation_ids = _merge_ranked_ids(exact_ids, vector_ids, limit)
+
+        print(
+            f"📊 search_conversations_tool - merged results exact={len(exact_ids)} "
+            f"vector={len(vector_ids)} total={len(conversation_ids)} for query: '{query}'"
+        )
 
         if not conversation_ids:
             date_info = ""
-            if starts_at and ends_at:
+            if start_dt and end_dt:
                 date_info = f" in the specified date range"
-            elif starts_at:
+            elif start_dt:
                 date_info = f" after the specified start date"
-            elif ends_at:
+            elif end_dt:
                 date_info = f" before the specified end date"
 
             msg = f"No conversations found matching the concept '{query}'{date_info}. The user may not have discussed this topic yet, or it may not be in their recorded conversation history."
@@ -458,7 +643,7 @@ def search_conversations_tool(
         )
 
         # Return formatted string
-        result = f"Found {len(conversations)} conversations semantically matching '{query}':\n\n"
+        result = f"Found {len(conversations)} conversations matching '{query}' via exact/date and semantic search:\n\n"
         result += Conversation.conversations_to_string(
             conversations, use_transcript=include_transcript, include_timestamps=include_timestamps, people=people
         )
