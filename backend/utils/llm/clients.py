@@ -73,8 +73,9 @@ _apply_ella_llm_patch()
 
 # ====== RUNTIME FALLBACK PROVIDER CHAIN ======
 # Each LLM call automatically cascades through providers on failure (402, 429, 5xx, timeout).
-# Default priority is OpenAI → Ollama Cloud → Groq → Gemini. Production can override with
-# OMI_LLM_PROVIDER_ORDER, e.g. "gemini,groq,openai" when OpenAI/Ollama quota is exhausted.
+# Default priority avoids direct OpenAI chat/completions spend. Direct OpenAI LLM calls require
+# OMI_ALLOW_DIRECT_OPENAI_LLM=true even if OPENAI_API_KEY is present or the provider order includes
+# "openai". Embeddings are handled separately below.
 #
 # Uses LangChain's .with_fallbacks() — on any exception from primary, tries next provider.
 # All exported llm_* variables are RunnableWithFallbacks (or plain ChatOpenAI if only 1 provider).
@@ -90,6 +91,12 @@ _ella_base_url = os.getenv('ELLA_LLM_BASE_URL')
 _ella_api_key = os.getenv('ELLA_LLM_API_KEY', 'ella-internal')
 _ella_model = os.getenv('ELLA_LLM_MODEL', 'ella-enhanced')
 _ella_proxy_enabled = os.getenv('ELLA_LLM_PROXY_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on')
+_direct_openai_llm_enabled = os.getenv('OMI_ALLOW_DIRECT_OPENAI_LLM', 'false').lower() in (
+    '1',
+    'true',
+    'yes',
+    'on',
+)
 
 # Ollama Cloud endpoint (direct to ollama.com — local proxy had auth issues)
 _ollama_cloud_base_url = "https://ollama.com/v1"
@@ -103,7 +110,7 @@ _groq_model = os.getenv('OMI_GROQ_MODEL', 'llama-3.1-8b-instant')
 _gemini_model = os.getenv('OMI_GEMINI_MODEL', 'gemini-2.5-flash')
 _provider_order = [
     provider.strip()
-    for provider in os.getenv('OMI_LLM_PROVIDER_ORDER', 'openai,ollama_cloud,groq,gemini').split(',')
+    for provider in os.getenv('OMI_LLM_PROVIDER_ORDER', 'gemini,groq,ollama_cloud').split(',')
     if provider.strip()
 ]
 
@@ -163,7 +170,7 @@ def _provider_instance(
     if provider == 'ella_proxy':
         return _make_ella_proxy(**kwargs) if (_ella_proxy_enabled and _ella_base_url) else None
     if provider == 'openai':
-        return _make_openai(model=openai_model, **kwargs) if _openai_api_key else None
+        return _make_openai(model=openai_model, **kwargs) if (_direct_openai_llm_enabled and _openai_api_key) else None
     if provider == 'ollama_cloud':
         return _make_ollama_cloud(model=ollama_model, **kwargs) if _ollama_api_key else None
     if provider == 'groq':
