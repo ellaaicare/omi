@@ -48,6 +48,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
     conversation_updates = []
     proposals = []
 
+    monkeypatch.setattr(corrections, "N8N_CORRECTION_FALLBACK_ENABLED", True)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
     monkeypatch.setattr(
         corrections.conversations_db,
@@ -173,6 +174,7 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
     events = []
     conversation_updates = []
 
+    monkeypatch.setattr(corrections, "N8N_CORRECTION_FALLBACK_ENABLED", True)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
     monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda conversation: {})
     monkeypatch.setattr(
@@ -214,6 +216,57 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
     assert events[-1]["status"] == "error"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
     assert conversation_updates[-1]["correction_state"]["status"] == "queue_failed"
+    assert conversation_updates[-1]["correction_state"]["pending"] is False
+
+
+def test_submit_correction_skips_n8n_fallback_by_default_when_direct_apply_fails(monkeypatch):
+    audits = []
+    events = []
+    conversation_updates = []
+
+    monkeypatch.setattr(corrections, "N8N_CORRECTION_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
+    monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda conversation: {})
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audits.append(payload),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_append_correction_event",
+        lambda uid, conversation_id, correction_id, event: events.append(event),
+    )
+    monkeypatch.setattr(corrections, "_create_summary_correction_proposal", lambda **kwargs: "proposal-123")
+
+    async def failing_generate(**kwargs):
+        raise RuntimeError("model unavailable")
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("OpenClaw-era n8n correction fallback must stay disabled")
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", failing_generate)
+    monkeypatch.setattr(corrections, "_submit_correction_to_n8n", fail_if_called)
+
+    result = asyncio.run(
+        corrections.submit_conversation_correction(
+            "conv-123",
+            corrections.ConversationCorrectionRequest(correction_text="Please correct the summary."),
+            uid="user-123",
+        )
+    )
+
+    assert result.status == "direct_apply_failed"
+    assert result.queued is False
+    assert audits[-1]["status"] == "direct_apply_failed"
+    assert events[-1]["stage"] == "direct_apply_failed"
+    assert events[-1]["n8n_fallback_enabled"] is False
+    assert conversation_updates[-1]["correction_state"]["status"] == "direct_apply_failed"
     assert conversation_updates[-1]["correction_state"]["pending"] is False
 
 

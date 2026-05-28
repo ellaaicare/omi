@@ -37,6 +37,12 @@ DIRECT_CORRECTION_API_URL = os.getenv("ELLA_CORRECTION_API_URL", "https://api.x.
 DIRECT_CORRECTION_MODEL = os.getenv("ELLA_CORRECTION_MODEL", "grok-4.3")
 DIRECT_CORRECTION_INTERNAL_BASE_URL = os.getenv("ELLA_INTERNAL_BASE_URL", "http://127.0.0.1:8000")
 DIRECT_CORRECTION_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_TIMEOUT_SECONDS", "45"))
+N8N_CORRECTION_FALLBACK_ENABLED = os.getenv("ELLA_CORRECTION_N8N_FALLBACK_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -626,9 +632,10 @@ async def _submit_conversation_correction(
             )
         except Exception as exc:
             logger.exception(
-                "Direct conversation correction apply failed; falling back to n8n",
+                "Direct conversation correction apply failed",
                 extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
             )
+            failed_at = _now_iso()
             _append_correction_event(
                 uid,
                 conversation_id,
@@ -636,11 +643,94 @@ async def _submit_conversation_correction(
                 {
                     "stage": "direct_apply_failed",
                     "status": "error",
-                    "at": _now_iso(),
+                    "at": failed_at,
                     "trace_id": trace_id,
                     "error": str(exc),
+                    "n8n_fallback_enabled": N8N_CORRECTION_FALLBACK_ENABLED,
                 },
             )
+            if not N8N_CORRECTION_FALLBACK_ENABLED:
+                _persist_correction_audit(
+                    uid,
+                    conversation_id,
+                    correction_id,
+                    {
+                        "status": "direct_apply_failed",
+                        "updated_at": failed_at,
+                        "direct_apply_error": str(exc),
+                    },
+                )
+                _update_conversation_correction_state(
+                    uid,
+                    conversation_id,
+                    {
+                        "correction_state": {
+                            "status": "direct_apply_failed",
+                            "pending": False,
+                            "correction_id": correction_id,
+                            "trace_id": trace_id,
+                            "submitted_at": submitted_at,
+                            "updated_at": failed_at,
+                            "error": str(exc),
+                        }
+                    },
+                )
+                return ConversationCorrectionResponse(
+                    correction_id=correction_id,
+                    conversation_id=conversation_id,
+                    trace_id=trace_id,
+                    status="direct_apply_failed",
+                    queued=False,
+                    proposal_id=proposal_id,
+                )
+
+    if not N8N_CORRECTION_FALLBACK_ENABLED:
+        skipped_at = _now_iso()
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "status": "direct_apply_disabled",
+                "updated_at": skipped_at,
+                "queue_error": "n8n correction fallback disabled",
+            },
+        )
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "fallback_skipped",
+                "status": "skipped",
+                "at": skipped_at,
+                "trace_id": trace_id,
+                "reason": "n8n correction fallback disabled",
+            },
+        )
+        _update_conversation_correction_state(
+            uid,
+            conversation_id,
+            {
+                "correction_state": {
+                    "status": "direct_apply_disabled",
+                    "pending": False,
+                    "correction_id": correction_id,
+                    "trace_id": trace_id,
+                    "submitted_at": submitted_at,
+                    "updated_at": skipped_at,
+                    "error": "n8n correction fallback disabled",
+                }
+            },
+        )
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="direct_apply_disabled",
+            queued=False,
+            proposal_id=proposal_id,
+        )
 
     try:
         queue_result = await _submit_correction_to_n8n(
