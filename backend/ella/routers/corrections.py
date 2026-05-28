@@ -6,7 +6,10 @@ of the upstream OMI conversation router so future upstream syncs do not have to
 carry this custom app contract as a core patch.
 """
 
+import json
 import logging
+import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -24,6 +27,17 @@ from utils.other import endpoints as auth
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["conversation-corrections"])
+
+DIRECT_CORRECTION_APPLY_ENABLED = os.getenv("ELLA_CORRECTION_DIRECT_APPLY", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+DIRECT_CORRECTION_API_URL = os.getenv("ELLA_CORRECTION_API_URL", "https://api.x.ai/v1/chat/completions")
+DIRECT_CORRECTION_MODEL = os.getenv("ELLA_CORRECTION_MODEL", "grok-4.3")
+DIRECT_CORRECTION_INTERNAL_BASE_URL = os.getenv("ELLA_INTERNAL_BASE_URL", "http://127.0.0.1:8000")
+DIRECT_CORRECTION_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_TIMEOUT_SECONDS", "45"))
+JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class SummaryContext(BaseModel):
@@ -107,6 +121,194 @@ def _correction_category(text: str, summary_context: SummaryContext) -> str:
     if any(word in haystack for word in ("topic", "about", "missed", "forgot")):
         return "topic"
     return "other"
+
+
+def _compact_text(value: str, limit: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n[truncated]"
+
+
+def _extract_json_object(content: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        match = JSON_OBJECT_RE.search(content)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("Correction model response was not a JSON object")
+    return parsed
+
+
+def _correction_api_key() -> str:
+    return os.getenv("ELLA_CORRECTION_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("HERMES_API_KEY") or ""
+
+
+def _build_direct_correction_prompt(
+    *,
+    request: ConversationCorrectionRequest,
+    structured: dict[str, Any],
+    transcript: str,
+    segment_count: int,
+) -> str:
+    return f"""You are Ella, Plato's warm companion summary correction writer.
+
+Rewrite the OMI conversation summary using the user's correction. This is an app-visible summary, not a clinical note.
+
+Rules:
+- Return JSON only.
+- overview must start with "[Ella] ".
+- Keep the overview warm, specific, and useful for Plato to reread later.
+- Use the correction as authoritative when it resolves identity, topic, title, or media attribution.
+- Preserve useful details from the transcript and current summary when they do not conflict with the correction.
+- Do not invent unsupported details.
+- title must be short and contain no markdown.
+- category should be one of: personal, family, education, health, technology, work, business, finance, legal, media, music, news, travel, other.
+- Include ella_tags and ella_signal for downstream ranking.
+
+User correction:
+{request.correction_text}
+
+Correction source: {request.source}
+Correction category: {_correction_category(request.correction_text, request.summary_context)}
+Segment count: {segment_count}
+
+Current structured summary:
+{json.dumps(structured, ensure_ascii=False, indent=2)}
+
+iOS summary context:
+{request.summary_context.model_dump_json(indent=2)}
+
+Transcript:
+{_compact_text(transcript, 22000)}
+
+Return exactly:
+{{
+  "title": "short title",
+  "overview": "[Ella] corrected warm summary",
+  "emoji": "one emoji",
+  "category": "category",
+  "ella_tags": ["omi"],
+  "ella_signal": {{
+    "salience": "low|medium|high",
+    "memory_promotion": "none|candidate|promoted",
+    "noise_level": "none|low|medium|high",
+    "contains_media": false,
+    "contains_user_speech": true,
+    "guardian_relevant": false
+  }}
+}}
+"""
+
+
+def _normalize_direct_summary(result: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    title = str(result.get("title") or fallback.get("title") or "Corrected Conversation").strip()
+    overview = str(result.get("overview") or fallback.get("overview") or "").strip()
+    if not overview:
+        raise ValueError("Correction model response missing overview")
+    if not overview.startswith("[Ella] "):
+        overview = "[Ella] " + overview.removeprefix("[Ella]").strip()
+
+    emoji = str(result.get("emoji") or fallback.get("emoji") or "🪽").strip()[:4] or "🪽"
+    category = str(result.get("category") or fallback.get("category") or "other").strip().lower()
+    tags = result.get("ella_tags")
+    if not isinstance(tags, list):
+        tags = ["omi"]
+    tags = [str(tag).strip().lower() for tag in tags if str(tag or "").strip()]
+    if "omi" not in tags:
+        tags.insert(0, "omi")
+    if "correction" not in tags:
+        tags.append("correction")
+
+    signal = result.get("ella_signal")
+    if not isinstance(signal, dict):
+        signal = {}
+
+    return {
+        "title": title,
+        "overview": overview,
+        "emoji": emoji,
+        "category": category,
+        "ella_tags": tags[:12],
+        "ella_signal": {
+            "salience": str(signal.get("salience") or "medium"),
+            "memory_promotion": str(signal.get("memory_promotion") or "none"),
+            "noise_level": str(signal.get("noise_level") or "low"),
+            "contains_media": bool(signal.get("contains_media", False)),
+            "contains_user_speech": bool(signal.get("contains_user_speech", True)),
+            "guardian_relevant": bool(signal.get("guardian_relevant", False)),
+        },
+    }
+
+
+async def _generate_corrected_summary(
+    *,
+    request: ConversationCorrectionRequest,
+    structured: dict[str, Any],
+    transcript: str,
+    segment_count: int,
+) -> dict[str, Any]:
+    api_key = _correction_api_key()
+    if not api_key:
+        raise RuntimeError("No correction model API key configured")
+
+    prompt = _build_direct_correction_prompt(
+        request=request,
+        structured=structured,
+        transcript=transcript,
+        segment_count=segment_count,
+    )
+    async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            DIRECT_CORRECTION_API_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": DIRECT_CORRECTION_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 800,
+            },
+        )
+    response.raise_for_status()
+    body = response.json()
+    content = body["choices"][0]["message"]["content"]
+    return _normalize_direct_summary(_extract_json_object(content), structured)
+
+
+async def _apply_corrected_summary(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    active_summary_version_id: Optional[str],
+    corrected: dict[str, Any],
+) -> dict[str, Any]:
+    url = (
+        f"{DIRECT_CORRECTION_INTERNAL_BASE_URL.rstrip('/')}"
+        f"/v1/ella/conversation/{conversation_id}/summary?uid={uid}"
+    )
+    payload = {
+        "title": corrected["title"],
+        "overview": corrected["overview"],
+        "emoji": corrected["emoji"],
+        "category": corrected["category"],
+        "summary_source": "observer",
+        "summary_kind": "corrected_enriched",
+        "correction_id": correction_id,
+        "based_on_version_id": active_summary_version_id,
+        "set_active": True,
+        "trace_id": trace_id,
+        "ella_tags": corrected.get("ella_tags") or ["omi", "correction"],
+        "ella_signal": corrected.get("ella_signal") or {},
+    }
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.patch(url, json=payload)
+    response.raise_for_status()
+    return response.json()
 
 
 def _audit_ref(uid: str, conversation_id: str, correction_id: str):
@@ -373,6 +575,72 @@ async def _submit_conversation_correction(
             correction_id,
             {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id, "error": str(exc)},
         )
+
+    if DIRECT_CORRECTION_APPLY_ENABLED:
+        try:
+            corrected_summary = await _generate_corrected_summary(
+                request=request,
+                structured=structured,
+                transcript=transcript,
+                segment_count=segment_count,
+            )
+            apply_result = await _apply_corrected_summary(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
+                active_summary_version_id=submitted_state.get("active_summary_version_id"),
+                corrected=corrected_summary,
+            )
+            applied_at = _now_iso()
+            _persist_correction_audit(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "status": "applied",
+                    "updated_at": applied_at,
+                    "direct_apply_result": apply_result,
+                    "direct_apply_summary": corrected_summary,
+                },
+            )
+            _append_correction_event(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "stage": "direct_apply_succeeded",
+                    "status": "ok",
+                    "at": applied_at,
+                    "trace_id": trace_id,
+                    "apply_result": apply_result,
+                },
+            )
+            return ConversationCorrectionResponse(
+                correction_id=correction_id,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                status="applied",
+                queued=False,
+                proposal_id=proposal_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Direct conversation correction apply failed; falling back to n8n",
+                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+            )
+            _append_correction_event(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "stage": "direct_apply_failed",
+                    "status": "error",
+                    "at": _now_iso(),
+                    "trace_id": trace_id,
+                    "error": str(exc),
+                },
+            )
 
     try:
         queue_result = await _submit_correction_to_n8n(

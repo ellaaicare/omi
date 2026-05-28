@@ -217,6 +217,80 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
     assert conversation_updates[-1]["correction_state"]["pending"] is False
 
 
+def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch):
+    audits = []
+    events = []
+    conversation_updates = []
+    submitted = {}
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "bootstrap_summary_versioning_update",
+        lambda conversation: {"summary_versions": [{"id": "legacy-v1"}], "active_summary_version_id": "legacy-v1"},
+    )
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audits.append(payload),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_append_correction_event",
+        lambda uid, conversation_id, correction_id, event: events.append(event),
+    )
+    monkeypatch.setattr(corrections, "_create_summary_correction_proposal", lambda **kwargs: "proposal-123")
+
+    async def fake_generate(**kwargs):
+        return {
+            "title": "TV Audio, Not Memory Concern",
+            "overview": "[Ella] This was background TV audio, not a real memory concern.",
+            "emoji": "📺",
+            "category": "other",
+            "ella_tags": ["omi", "correction", "media"],
+            "ella_signal": {"salience": "low", "noise_level": "medium", "contains_media": True},
+        }
+
+    async def fake_apply(**kwargs):
+        submitted.update(kwargs)
+        return {"status": "ok", "active_summary_version_id": "corrected-v1"}
+
+    async def fake_submit_to_n8n(**kwargs):
+        raise AssertionError("n8n should not run when direct correction apply succeeds")
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply)
+    monkeypatch.setattr(corrections, "_submit_correction_to_n8n", fake_submit_to_n8n)
+
+    result = asyncio.run(
+        corrections.submit_conversation_correction(
+            "conv-123",
+            corrections.ConversationCorrectionRequest(
+                correction_text="This was background TV audio, not a real memory concern.",
+                source="ios",
+            ),
+            uid="user-123",
+        )
+    )
+
+    assert result.status == "applied"
+    assert result.queued is False
+    assert result.proposal_id == "proposal-123"
+    assert submitted["uid"] == "user-123"
+    assert submitted["conversation_id"] == "conv-123"
+    assert submitted["active_summary_version_id"] == "legacy-v1"
+    assert submitted["corrected"]["overview"].startswith("[Ella] ")
+    assert audits[-1]["status"] == "applied"
+    assert audits[-1]["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
+    assert events[-1]["stage"] == "direct_apply_succeeded"
+    assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+
+
 def test_router_uses_custom_ella_namespace_only():
     paths = {route.path for route in corrections.router.routes}
 
