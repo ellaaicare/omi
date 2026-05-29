@@ -357,6 +357,159 @@ def test_submit_correction_accepts_text_alias():
     assert request.correction_text == "Please fix the doctor name."
 
 
+def test_build_correction_prompt_guides_identity_reprocessing():
+    prompt = corrections._build_direct_correction_prompt(
+        request=corrections.ConversationCorrectionRequest(
+            correction_text="the team in this Trang script is Mei Xin a.k.a. Rain",
+            source="ios",
+        ),
+        structured={
+            "title": "Teen avoids meeting",
+            "overview": "[Ella] Speaker 5 discussed a teen avoiding an in-person meeting.",
+            "emoji": "🏫",
+            "category": "education",
+        },
+        transcript="Speaker 5: She wants to email the teacher instead of meeting in person.",
+        segment_count=1,
+    )
+
+    assert "Do not append or splice the correction text verbatim" in prompt
+    assert '"Trang script" likely means "transcript"' in prompt
+    assert '"team" may mean "teen"' in prompt
+    assert "propagate that identity through all relevant references" in prompt
+    assert "Avoid raw speaker labels such as \"Speaker 5\"" in prompt
+
+
+def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(corrections, "CORRECTION_PROVIDER", "hermes-api")
+    monkeypatch.setattr(corrections, "HERMES_CORRECTION_API_URL", "https://hermes.test/v1/chat/completions")
+    monkeypatch.setattr(corrections, "HERMES_CORRECTION_MODEL", "profile-model")
+    monkeypatch.setenv("ELLA_CORRECTION_HERMES_API_KEY", "hermes-secret")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"title":"Mei Xin Emails Teacher",'
+                                '"overview":"[Ella] Mei Xin, also called Rain, preferred emailing her teacher instead of an in-person meeting.",'
+                                '"emoji":"🏫","category":"education"}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            calls.append({"url": url, "headers": headers, "json": json, "timeout": self.timeout})
+            return FakeResponse()
+
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        corrections._generate_corrected_summary(
+            uid="user/123",
+            conversation_id="conv 123",
+            correction_id="corr 123",
+            trace_id="trace-123",
+            request=corrections.ConversationCorrectionRequest(
+                correction_text="the team in this Trang script is Mei Xin a.k.a. Rain",
+                source="ios",
+            ),
+            structured={"title": "Teen meeting", "overview": "[Ella] Speaker 5 talked about the teen."},
+            transcript="Speaker 5: She wants to email Miss Boyd.",
+            segment_count=1,
+        )
+    )
+
+    assert result["title"] == "Mei Xin Emails Teacher"
+    assert "Mei Xin" in result["overview"]
+    assert result["ella_tags"] == ["omi", "correction"]
+    assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer hermes-secret"
+    assert calls[0]["headers"]["X-Hermes-Session-Id"] == "correction:user-123:conv-123:corr-123"
+    assert calls[0]["headers"]["X-Trace-Id"] == "trace-123"
+    assert calls[0]["json"]["model"] == "profile-model"
+    assert "Speaker 5" in calls[0]["json"]["messages"][0]["content"]
+
+
+def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(corrections, "CORRECTION_PROVIDER", "legacy")
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_API_URL", "https://legacy.test/v1/chat/completions")
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_MODEL", "grok-4.3")
+    monkeypatch.setenv("ELLA_CORRECTION_API_KEY", "legacy-secret")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"title":"Corrected","overview":"[Ella] Corrected summary.",'
+                                '"emoji":"🪽","category":"other"}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            calls.append({"url": url, "headers": headers, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(corrections.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        corrections._generate_corrected_summary(
+            uid="user-123",
+            conversation_id="conv-123",
+            correction_id="corr-123",
+            trace_id="trace-123",
+            request=corrections.ConversationCorrectionRequest(correction_text="Fix this."),
+            structured={"title": "Old", "overview": "[Ella] Old."},
+            transcript="Speaker: transcript",
+            segment_count=1,
+        )
+    )
+
+    assert result["title"] == "Corrected"
+    assert calls[0]["url"] == "https://legacy.test/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer legacy-secret"
+
+
 def test_create_summary_correction_proposal_uses_proposal_only_policy(monkeypatch):
     captured = {}
 
