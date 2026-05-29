@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-
 ELLA_PREFIX = "[Ella] "
 MIN_OVERVIEW_CHARS = 40
 
@@ -20,8 +19,9 @@ _RAW_SCANNER_CATEGORY_RE = re.compile(
     re.IGNORECASE,
 )
 _INTERNAL_JARGON_RE = re.compile(
-    r"\b(?:qmd|write-?back|routing|model[_ -]?runner|tool\s+(?:call|error|trace)|"
-    r"metadata/conversations|scanner[_ -]?logs?|observer[_ -]?logs?|openclaw\s+workspace|mcp|n8n)\b",
+    r"\b(?:qmd|write-?back|(?:internal|agent|model|tool|n8n|openclaw)\s+routing|"
+    r"model[_ -]?runner|tool\s+(?:call|error|trace)|"
+    r"metadata/conversations|scanner[_ -]?logs?|observer[_ -]?logs?|openclaw\s+workspace|n8n)\b",
     re.IGNORECASE,
 )
 _WHITESPACE_RE = re.compile(r"\s+")
