@@ -101,6 +101,7 @@ def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
                     "app_summary": "The app summary was too clinical.",
                 },
             ),
+            background_tasks=None,
             uid="user-123",
         )
     )
@@ -142,6 +143,7 @@ def test_submit_correction_uses_authenticated_uid_for_ownership(monkeypatch):
             corrections.submit_conversation_correction(
                 "conv-123",
                 corrections.ConversationCorrectionRequest(correction_text="Wrong person."),
+                background_tasks=None,
                 uid="authenticated-user",
             )
         )
@@ -162,6 +164,7 @@ def test_submit_correction_rejects_locked_conversation(monkeypatch):
             corrections.submit_conversation_correction(
                 "conv-locked",
                 corrections.ConversationCorrectionRequest(correction_text="Please fix this."),
+                background_tasks=None,
                 uid="user-123",
             )
         )
@@ -203,6 +206,7 @@ def test_submit_correction_persists_n8n_failure_trace_and_still_returns_202(monk
         corrections.submit_conversation_correction(
             "conv-123",
             corrections.ConversationCorrectionRequest(correction_text="Please correct the summary."),
+            background_tasks=None,
             uid="user-123",
         )
     )
@@ -257,6 +261,7 @@ def test_submit_correction_skips_n8n_fallback_by_default_when_direct_apply_fails
         corrections.submit_conversation_correction(
             "conv-123",
             corrections.ConversationCorrectionRequest(correction_text="Please correct the summary."),
+            background_tasks=None,
             uid="user-123",
         )
     )
@@ -327,6 +332,7 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
                 correction_text="This was background TV audio, not a real memory concern.",
                 source="ios",
             ),
+            background_tasks=None,
             uid="user-123",
         )
     )
@@ -342,6 +348,100 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
     assert audits[-1]["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
     assert events[-1]["stage"] == "direct_apply_succeeded"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+
+
+def test_submit_correction_queues_background_direct_apply_without_waiting(monkeypatch):
+    audits = []
+    events = []
+    conversation_updates = []
+    proposals = []
+    generated = []
+
+    class FakeBackgroundTasks:
+        def __init__(self):
+            self.tasks = []
+
+        def add_task(self, func, *args, **kwargs):
+            self.tasks.append((func, args, kwargs))
+
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_APPLY_ENABLED", True)
+    monkeypatch.setattr(corrections, "DIRECT_CORRECTION_BACKGROUND_ENABLED", True)
+    monkeypatch.setattr(corrections, "N8N_CORRECTION_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "bootstrap_summary_versioning_update",
+        lambda conversation: {"summary_versions": [{"id": "legacy-v1"}], "active_summary_version_id": "legacy-v1"},
+    )
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update_data: conversation_updates.append(update_data),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audits.append(payload),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_append_correction_event",
+        lambda uid, conversation_id, correction_id, event: events.append(event),
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_create_summary_correction_proposal",
+        lambda **kwargs: proposals.append(kwargs) or "proposal-123",
+    )
+
+    async def fake_generate(**kwargs):
+        generated.append(kwargs)
+        return {
+            "title": "Corrected",
+            "overview": "[Ella] Corrected in background.",
+            "emoji": "🪽",
+            "category": "other",
+            "ella_tags": ["omi", "correction"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply(**kwargs):
+        return {"status": "ok", "active_summary_version_id": "corrected-v1"}
+
+    monkeypatch.setattr(corrections, "_generate_corrected_summary", fake_generate)
+    monkeypatch.setattr(corrections, "_apply_corrected_summary", fake_apply)
+
+    background_tasks = FakeBackgroundTasks()
+    result = asyncio.run(
+        corrections.submit_conversation_correction(
+            "conv-123",
+            corrections.ConversationCorrectionRequest(
+                correction_text="This was Mei Xin speaking.",
+                source="ios",
+            ),
+            background_tasks=background_tasks,
+            uid="user-123",
+        )
+    )
+
+    assert result.status == "queued"
+    assert result.queued is True
+    assert result.proposal_id == "proposal-123"
+    assert len(background_tasks.tasks) == 1
+    assert generated == []
+    assert audits[-1]["status"] == "queued"
+    assert audits[-1]["queue_result"] == {"mode": "background_direct_apply"}
+    assert events[-1]["stage"] == "direct_apply_queued"
+    assert conversation_updates[-1]["correction_state"]["status"] == "queued"
+
+    func, args, kwargs = background_tasks.tasks[0]
+    assert func is corrections._run_direct_correction_apply
+    asyncio.run(func(*args, **kwargs))
+
+    assert generated[0]["uid"] == "user-123"
+    assert generated[0]["conversation_id"] == "conv-123"
+    assert audits[-1]["status"] == "applied"
+    assert events[-1]["stage"] == "direct_apply_succeeded"
 
 
 def test_router_uses_custom_ella_namespace_only():
