@@ -148,6 +148,33 @@ def test_update_conversation_summary_rejects_internal_debug_jargon(monkeypatch):
     callbacks.conversations_db.update_conversation.assert_not_called()
 
 
+def test_update_conversation_summary_allows_user_facing_mcp_api_topic(monkeypatch):
+    captured = {}
+
+    def fake_update(uid, conversation_id, update_data):
+        captured["update_data"] = update_data
+
+    monkeypatch.setattr(callbacks.conversations_db, "update_conversation", fake_update)
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conv-123",
+            callbacks.ConversationSummaryUpdate(
+                overview=(
+                    "[Ella] You and Greg discussed using an MCP connector and direct QuickBooks API access "
+                    "to make accounting work faster than the browser-based workflow."
+                ),
+                category="technology",
+            ),
+            uid="user-123",
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert captured["update_data"]["structured.overview"].startswith("[Ella] ")
+    assert captured["update_data"]["structured.category"] == "technology"
+
+
 def test_update_conversation_summary_rejects_invalid_category():
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(
@@ -313,6 +340,7 @@ def test_update_conversation_summary_persists_internal_assessment_when_available
         "update_conversation",
         lambda uid, conversation_id, update_data: captured.setdefault("update_data", update_data),
     )
+
     async def fake_fetch_internal_assessment(uid, conversation_id):
         return {
             "media_likelihood": 0.92,
