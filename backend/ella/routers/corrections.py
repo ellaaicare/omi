@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 import database.conversations as conversations_db
@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["conversation-corrections"])
 
 DIRECT_CORRECTION_APPLY_ENABLED = os.getenv("ELLA_CORRECTION_DIRECT_APPLY", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+DIRECT_CORRECTION_BACKGROUND_ENABLED = os.getenv("ELLA_CORRECTION_BACKGROUND_APPLY", "true").lower() not in {
     "0",
     "false",
     "no",
@@ -541,9 +546,131 @@ async def _submit_correction_to_n8n(
     }
 
 
+async def _run_direct_correction_apply(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    structured: dict[str, Any],
+    transcript: str,
+    segment_count: int,
+    submitted_at: str,
+    active_summary_version_id: Optional[str],
+    proposal_id: Optional[str],
+) -> ConversationCorrectionResponse:
+    try:
+        corrected_summary = await _generate_corrected_summary(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            request=request,
+            structured=structured,
+            transcript=transcript,
+            segment_count=segment_count,
+        )
+        apply_result = await _apply_corrected_summary(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            active_summary_version_id=active_summary_version_id,
+            corrected=corrected_summary,
+        )
+        applied_at = _now_iso()
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "status": "applied",
+                "updated_at": applied_at,
+                "direct_apply_result": apply_result,
+                "direct_apply_summary": corrected_summary,
+            },
+        )
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "direct_apply_succeeded",
+                "status": "ok",
+                "at": applied_at,
+                "trace_id": trace_id,
+                "apply_result": apply_result,
+            },
+        )
+        return ConversationCorrectionResponse(
+            correction_id=correction_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            status="applied",
+            queued=False,
+            proposal_id=proposal_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Direct conversation correction apply failed",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        failed_at = _now_iso()
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "direct_apply_failed",
+                "status": "error",
+                "at": failed_at,
+                "trace_id": trace_id,
+                "error": str(exc),
+                "n8n_fallback_enabled": N8N_CORRECTION_FALLBACK_ENABLED,
+            },
+        )
+        if not N8N_CORRECTION_FALLBACK_ENABLED:
+            _persist_correction_audit(
+                uid,
+                conversation_id,
+                correction_id,
+                {
+                    "status": "direct_apply_failed",
+                    "updated_at": failed_at,
+                    "direct_apply_error": str(exc),
+                },
+            )
+            _update_conversation_correction_state(
+                uid,
+                conversation_id,
+                {
+                    "correction_state": {
+                        "status": "direct_apply_failed",
+                        "pending": False,
+                        "correction_id": correction_id,
+                        "trace_id": trace_id,
+                        "submitted_at": submitted_at,
+                        "updated_at": failed_at,
+                        "error": str(exc),
+                    }
+                },
+            )
+            return ConversationCorrectionResponse(
+                correction_id=correction_id,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                status="direct_apply_failed",
+                queued=False,
+                proposal_id=proposal_id,
+            )
+        raise
+
+
 async def _submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
+    background_tasks: Optional[BackgroundTasks] = None,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
     conversation = conversations_db.get_conversation(uid, conversation_id)
@@ -648,35 +775,38 @@ async def _submit_conversation_correction(
         )
 
     if DIRECT_CORRECTION_APPLY_ENABLED:
-        try:
-            corrected_summary = await _generate_corrected_summary(
-                uid=uid,
-                conversation_id=conversation_id,
-                correction_id=correction_id,
-                trace_id=trace_id,
-                request=request,
-                structured=structured,
-                transcript=transcript,
-                segment_count=segment_count,
-            )
-            apply_result = await _apply_corrected_summary(
-                uid=uid,
-                conversation_id=conversation_id,
-                correction_id=correction_id,
-                trace_id=trace_id,
-                active_summary_version_id=submitted_state.get("active_summary_version_id"),
-                corrected=corrected_summary,
-            )
-            applied_at = _now_iso()
+        direct_apply_kwargs = {
+            "uid": uid,
+            "conversation_id": conversation_id,
+            "correction_id": correction_id,
+            "trace_id": trace_id,
+            "request": request,
+            "structured": structured,
+            "transcript": transcript,
+            "segment_count": segment_count,
+            "submitted_at": submitted_at,
+            "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+            "proposal_id": proposal_id,
+        }
+        if DIRECT_CORRECTION_BACKGROUND_ENABLED and background_tasks is not None:
+            queued_at = _now_iso()
+            queued_state = {
+                "correction_id": correction_id,
+                "status": "queued",
+                "pending": True,
+                "source": request.source,
+                "submitted_at": submitted_at,
+                "updated_at": queued_at,
+                "active_summary_version_id": submitted_state.get("active_summary_version_id"),
+            }
             _persist_correction_audit(
                 uid,
                 conversation_id,
                 correction_id,
                 {
-                    "status": "applied",
-                    "updated_at": applied_at,
-                    "direct_apply_result": apply_result,
-                    "direct_apply_summary": corrected_summary,
+                    "status": "queued",
+                    "updated_at": queued_at,
+                    "queue_result": {"mode": "background_direct_apply"},
                 },
             )
             _append_correction_event(
@@ -684,66 +814,27 @@ async def _submit_conversation_correction(
                 conversation_id,
                 correction_id,
                 {
-                    "stage": "direct_apply_succeeded",
+                    "stage": "direct_apply_queued",
                     "status": "ok",
-                    "at": applied_at,
+                    "at": queued_at,
                     "trace_id": trace_id,
-                    "apply_result": apply_result,
+                    "queue_result": {"mode": "background_direct_apply"},
                 },
             )
+            _update_conversation_correction_state(uid, conversation_id, {"correction_state": queued_state})
+            background_tasks.add_task(_run_direct_correction_apply, **direct_apply_kwargs)
             return ConversationCorrectionResponse(
                 correction_id=correction_id,
                 conversation_id=conversation_id,
                 trace_id=trace_id,
-                status="applied",
-                queued=False,
+                status="queued",
+                queued=True,
                 proposal_id=proposal_id,
             )
+        try:
+            return await _run_direct_correction_apply(**direct_apply_kwargs)
         except Exception as exc:
-            logger.exception(
-                "Direct conversation correction apply failed",
-                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
-            )
-            failed_at = _now_iso()
-            _append_correction_event(
-                uid,
-                conversation_id,
-                correction_id,
-                {
-                    "stage": "direct_apply_failed",
-                    "status": "error",
-                    "at": failed_at,
-                    "trace_id": trace_id,
-                    "error": str(exc),
-                    "n8n_fallback_enabled": N8N_CORRECTION_FALLBACK_ENABLED,
-                },
-            )
             if not N8N_CORRECTION_FALLBACK_ENABLED:
-                _persist_correction_audit(
-                    uid,
-                    conversation_id,
-                    correction_id,
-                    {
-                        "status": "direct_apply_failed",
-                        "updated_at": failed_at,
-                        "direct_apply_error": str(exc),
-                    },
-                )
-                _update_conversation_correction_state(
-                    uid,
-                    conversation_id,
-                    {
-                        "correction_state": {
-                            "status": "direct_apply_failed",
-                            "pending": False,
-                            "correction_id": correction_id,
-                            "trace_id": trace_id,
-                            "submitted_at": submitted_at,
-                            "updated_at": failed_at,
-                            "error": str(exc),
-                        }
-                    },
-                )
                 return ConversationCorrectionResponse(
                     correction_id=correction_id,
                     conversation_id=conversation_id,
@@ -901,9 +992,10 @@ async def _submit_conversation_correction(
 async def submit_conversation_correction_ella(
     conversation_id: str,
     request: ConversationCorrectionRequest,
+    background_tasks: BackgroundTasks,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
-    return await _submit_conversation_correction(conversation_id, request, uid)
+    return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
 
 
 @router.post(
@@ -914,6 +1006,7 @@ async def submit_conversation_correction_ella(
 async def submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
+    background_tasks: BackgroundTasks,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
-    return await _submit_conversation_correction(conversation_id, request, uid)
+    return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
