@@ -33,6 +33,15 @@ DIRECT_CORRECTION_APPLY_ENABLED = os.getenv("ELLA_CORRECTION_DIRECT_APPLY", "tru
     "false",
     "no",
 }
+CORRECTION_PROVIDER = os.getenv("ELLA_CORRECTION_PROVIDER", "hermes-api").strip().lower() or "hermes-api"
+HERMES_CORRECTION_API_URL = os.getenv(
+    "ELLA_CORRECTION_HERMES_CHAT_URL",
+    os.getenv("HERMES_CHAT_COMPLETIONS_URL", "http://100.76.138.56:8642/v1/chat/completions"),
+)
+HERMES_CORRECTION_MODEL = os.getenv(
+    "ELLA_CORRECTION_HERMES_MODEL",
+    os.getenv("HERMES_CORRECTION_MODEL", "ella-plato-hermes-eval"),
+)
 DIRECT_CORRECTION_API_URL = os.getenv("ELLA_CORRECTION_API_URL", "https://api.x.ai/v1/chat/completions")
 DIRECT_CORRECTION_MODEL = os.getenv("ELLA_CORRECTION_MODEL", "grok-4.3")
 DIRECT_CORRECTION_INTERNAL_BASE_URL = os.getenv("ELLA_INTERNAL_BASE_URL", "http://127.0.0.1:8000")
@@ -149,8 +158,29 @@ def _extract_json_object(content: str) -> dict[str, Any]:
     return parsed
 
 
-def _correction_api_key() -> str:
+def _legacy_correction_api_key() -> str:
     return os.getenv("ELLA_CORRECTION_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("HERMES_API_KEY") or ""
+
+
+def _hermes_correction_api_key() -> str:
+    return (
+        os.getenv("ELLA_CORRECTION_HERMES_API_KEY") or os.getenv("API_SERVER_KEY") or os.getenv("HERMES_API_KEY") or ""
+    )
+
+
+def _safe_session_component(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value).strip("-")[:160] or "unknown"
+
+
+def _correction_session_id(uid: str, conversation_id: str, correction_id: str) -> str:
+    return ":".join(
+        [
+            "correction",
+            _safe_session_component(uid),
+            _safe_session_component(conversation_id),
+            _safe_session_component(correction_id),
+        ]
+    )
 
 
 def _build_direct_correction_prompt(
@@ -169,6 +199,11 @@ Rules:
 - overview must start with "[Ella] ".
 - Keep the overview warm, specific, and useful for Plato to reread later.
 - Use the correction as authoritative when it resolves identity, topic, title, or media attribution.
+- Re-read the entire transcript and current summary, then produce one coherent corrected summary. Do not append or splice the correction text verbatim.
+- Correction text may contain dictation errors, rough phrasing, homophones, or ASR artifacts. Infer the intended correction only when strongly supported by the transcript, current summary, or durable companion context. For example, in a transcript context, "Trang script" likely means "transcript"; when discussing a young person, "team" may mean "teen".
+- When the correction resolves a person's identity, propagate that identity through all relevant references in the title and overview. Do not leave stale generic labels such as "the teen" where the resolved name should be used.
+- Avoid raw speaker labels such as "Speaker 5" in user-facing summaries when a name, role, or natural description can be inferred. If a speaker is still unknown, describe the action without the raw label.
+- Use durable companion context when available to identify Plato/Greg and close family members, but preserve uncertainty instead of inventing.
 - Preserve useful details from the transcript and current summary when they do not conflict with the correction.
 - Do not invent unsupported details.
 - title must be short and contain no markdown.
@@ -252,21 +287,51 @@ def _normalize_direct_summary(result: dict[str, Any], fallback: dict[str, Any]) 
 
 async def _generate_corrected_summary(
     *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
     request: ConversationCorrectionRequest,
     structured: dict[str, Any],
     transcript: str,
     segment_count: int,
 ) -> dict[str, Any]:
-    api_key = _correction_api_key()
-    if not api_key:
-        raise RuntimeError("No correction model API key configured")
-
     prompt = _build_direct_correction_prompt(
         request=request,
         structured=structured,
         transcript=transcript,
         segment_count=segment_count,
     )
+    provider = CORRECTION_PROVIDER
+    if provider == "hermes-api":
+        api_key = _hermes_correction_api_key()
+        if not api_key:
+            raise RuntimeError("No Hermes correction API key configured")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Hermes-Session-Id": _correction_session_id(uid, conversation_id, correction_id),
+            "X-Trace-Id": trace_id,
+        }
+        async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                HERMES_CORRECTION_API_URL,
+                headers=headers,
+                json={
+                    "model": HERMES_CORRECTION_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 900,
+                },
+            )
+        response.raise_for_status()
+        body = response.json()
+        content = body["choices"][0]["message"]["content"]
+        return _normalize_direct_summary(_extract_json_object(content), structured)
+
+    api_key = _legacy_correction_api_key()
+    if not api_key:
+        raise RuntimeError("No legacy correction model API key configured")
     async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:
         response = await client.post(
             DIRECT_CORRECTION_API_URL,
@@ -585,6 +650,10 @@ async def _submit_conversation_correction(
     if DIRECT_CORRECTION_APPLY_ENABLED:
         try:
             corrected_summary = await _generate_corrected_summary(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                trace_id=trace_id,
                 request=request,
                 structured=structured,
                 transcript=transcript,
