@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field
 
 from database._client import db
 from ella.services import proposal_ingest
+from ella.services.correction_honcho_contract import (
+    HONCHO_FACT_PROPOSALS_ENABLED,
+    build_honcho_fact_candidate,
+    create_honcho_fact_candidate_proposal,
+)
 
 PROPAGATION_TOOL_NAME = "omi_correction_propagation_propose"
 STOPWORDS = {
@@ -81,6 +86,8 @@ class CorrectionPropagationRun(BaseModel):
     latency_ms: int = 0
     candidate_count: int = 0
     proposal_count: int = 0
+    honcho_fact_candidate_count: int = 0
+    honcho_fact_proposal_count: int = 0
     skipped_count: int = 0
     auto_applied_count: int = 0
     decisions: list[CorrectionPropagationDecision] = Field(default_factory=list)
@@ -350,6 +357,8 @@ def run_correction_propagation(
     source_terms = _terms(correction_text, _summary_text(source_conversation), _transcript_text(source_conversation))
     decisions: list[CorrectionPropagationDecision] = []
     proposal_count = 0
+    honcho_fact_candidate_count = 0
+    honcho_fact_proposal_count = 0
 
     for candidate in candidates:
         candidate_id = _conversation_id(candidate)
@@ -403,6 +412,18 @@ def run_correction_propagation(
             overlap_terms=overlap,
         )
         idempotency_key = f"omi-correction-propagation:{uid}:{correction_id}:{candidate_id}:{_stable_hash(payload)}"
+        fact_candidate = build_honcho_fact_candidate(
+            uid=uid,
+            source_conversation=source_conversation,
+            related_conversation=candidate,
+            correction_id=correction_id,
+            trace_id=trace_id,
+            correction_text=correction_text,
+            correction_type=correction_type,
+            confidence=confidence,
+        )
+        if fact_candidate is not None:
+            honcho_fact_candidate_count += 1
         if dry_run:
             decisions.append(
                 CorrectionPropagationDecision(
@@ -416,6 +437,20 @@ def run_correction_propagation(
                     rollback_ref=_source_ref(candidate),
                 )
             )
+            if fact_candidate is not None and HONCHO_FACT_PROPOSALS_ENABLED:
+                decisions.append(
+                    CorrectionPropagationDecision(
+                        conversation_id=candidate_id,
+                        action="would_create_honcho_fact_proposal",
+                        reason="high_confidence_correction_fact_candidate",
+                        confidence=confidence,
+                        overlap_terms=overlap,
+                        idempotency_key=fact_candidate.idempotency_key,
+                        active_summary_version_id=_active_summary_version(candidate),
+                        rollback_ref=_source_ref(candidate),
+                    )
+                )
+                honcho_fact_proposal_count += 1
             proposal_count += 1
             continue
 
@@ -443,6 +478,32 @@ def run_correction_propagation(
                 )
             )
             proposal_count += 1
+            if fact_candidate is not None:
+                fact_result = create_honcho_fact_candidate_proposal(fact_candidate, create_proposal=create_proposal)
+                fact_proposal = fact_result.get("proposal") or {}
+                fact_proposal_id = str(fact_proposal.get("proposal_id") or "")
+                if fact_result.get("skipped"):
+                    action = "honcho_fact_proposal_skipped"
+                    reason = str(fact_result.get("reason") or "honcho_fact_proposal_skipped")
+                else:
+                    action = (
+                        "created_honcho_fact_proposal" if fact_result.get("created") else "deduped_honcho_fact_proposal"
+                    )
+                    reason = "high_confidence_correction_fact_candidate"
+                    honcho_fact_proposal_count += 1
+                decisions.append(
+                    CorrectionPropagationDecision(
+                        conversation_id=candidate_id,
+                        action=action,
+                        reason=reason,
+                        confidence=confidence,
+                        overlap_terms=overlap,
+                        idempotency_key=fact_candidate.idempotency_key,
+                        proposal_id=fact_proposal_id,
+                        active_summary_version_id=_active_summary_version(candidate),
+                        rollback_ref=_source_ref(candidate),
+                    )
+                )
         except Exception as exc:
             decisions.append(
                 CorrectionPropagationDecision(
@@ -475,6 +536,8 @@ def run_correction_propagation(
         latency_ms=int((time.monotonic() - monotonic_start) * 1000),
         candidate_count=len(candidates),
         proposal_count=proposal_count,
+        honcho_fact_candidate_count=honcho_fact_candidate_count,
+        honcho_fact_proposal_count=honcho_fact_proposal_count,
         skipped_count=skipped_count,
         auto_applied_count=0,
         decisions=decisions,
@@ -487,6 +550,11 @@ def run_correction_propagation(
             },
             "durable_owner": "honcho/hermes",
             "write_policy": "proposal_only",
+            "honcho_fact_contract": {
+                "enabled": HONCHO_FACT_PROPOSALS_ENABLED,
+                "proposal_type": "memory_note",
+                "write_default": "disabled",
+            },
         },
     )
 
