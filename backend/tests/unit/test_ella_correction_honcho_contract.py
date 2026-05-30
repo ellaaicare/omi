@@ -113,13 +113,8 @@ def test_write_honcho_fact_candidate_rechecks_active_summary_version(monkeypatch
     assert decision.reason == "stale_active_summary_version"
 
 
-def test_write_honcho_fact_candidate_uses_hermes_session_key(monkeypatch):
-    candidate = _candidate(active_summary_version_id="v1")
+def _fake_client_factory(response):
     calls = []
-
-    class FakeResponse:
-        status_code = 200
-        text = "{}"
 
     class FakeClient:
         def __init__(self, **kwargs):
@@ -133,7 +128,26 @@ def test_write_honcho_fact_candidate_uses_hermes_session_key(monkeypatch):
 
         async def post(self, url, **kwargs):
             calls.append({"url": url, **kwargs})
-            return FakeResponse()
+            return response
+
+    return FakeClient, calls
+
+
+class FakeResponse:
+    def __init__(self, *, status_code=200, content='{"status":"written","memory_id":"mem-123"}', text=None):
+        self.status_code = status_code
+        self._content = content
+        self.text = text if text is not None else content
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+def test_write_honcho_fact_candidate_uses_hermes_session_key_and_requires_confirmation(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, calls = _fake_client_factory(
+        FakeResponse(content='{"status":"written","memory_id":"honcho-memory-123","reason":"stored"}')
+    )
 
     monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
     decision = asyncio.run(
@@ -143,12 +157,104 @@ def test_write_honcho_fact_candidate_uses_hermes_session_key(monkeypatch):
             token="hermes-token",
             gateway_url="https://hermes.test",
             model="test-model",
-            http_client_factory=FakeClient,
+            http_client_factory=fake_client,
         )
     )
 
     assert decision.action == "written"
+    assert decision.reason == "hermes_honcho_write_confirmed"
+    assert decision.response_ref["memory_id"] == "honcho-memory-123"
     assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
     assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
     assert calls[0]["headers"]["X-Idempotency-Key"] == candidate.idempotency_key
     assert calls[0]["json"]["model"] == "test-model"
+
+
+def test_write_honcho_fact_candidate_treats_chatty_200_as_uncertain(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, _ = _fake_client_factory(FakeResponse(content="Okay, I saved it."))
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            token="hermes-token",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "uncertain"
+    assert decision.reason == "malformed_confirmation_json"
+
+
+def test_write_honcho_fact_candidate_treats_malformed_json_as_uncertain(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, _ = _fake_client_factory(FakeResponse(content='{"status":"written",'))
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            token="hermes-token",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "uncertain"
+    assert decision.reason == "malformed_confirmation_json"
+
+
+def test_write_honcho_fact_candidate_requires_durable_ref(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, _ = _fake_client_factory(FakeResponse(content='{"status":"written","reason":"ok"}'))
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            token="hermes-token",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "uncertain"
+    assert decision.reason == "missing_durable_ref"
+
+
+def test_write_honcho_fact_candidate_treats_refusal_as_uncertain(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, _ = _fake_client_factory(FakeResponse(content='{"status":"refused","reason":"policy"}'))
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            token="hermes-token",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "uncertain"
+    assert decision.reason == "honcho_write_refused"
+
+
+def test_write_honcho_fact_candidate_http_error_remains_error(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, _ = _fake_client_factory(FakeResponse(status_code=502, content='{"error":"bad gateway"}'))
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            token="hermes-token",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "error"
+    assert decision.reason == "hermes_http_502"

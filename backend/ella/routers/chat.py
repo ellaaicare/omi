@@ -36,6 +36,7 @@ from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
+from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from utils.ella.canonical_context import (
     DEFAULT_CONTEXT_CHANNELS,
     canonical_events_to_server_messages,
@@ -82,18 +83,14 @@ ELLA_SYSTEM_PROMPT = (
 )
 
 
-def _safe_session_component(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value).strip("-")[:160] or "unknown"
-
-
 def _hermes_chat_memory_key(uid: str) -> str:
     """Stable Hermes/Honcho long-term memory scope for this authenticated user."""
 
-    return f"ella:omi:{_safe_session_component(uid.lower())}:canonical"
+    return canonical_omi_session_key(uid)
 
 
 def _hermes_chat_session_key(uid: str) -> str:
-    safe_uid = _safe_session_component(uid.lower())
+    safe_uid = safe_session_component(uid.lower())
     if HERMES_CHAT_SESSION_SCOPE in {"canonical", "shared", "cross_channel", "cross-channel"}:
         return _hermes_chat_memory_key(uid)
     if HERMES_CHAT_SESSION_EPOCH:
