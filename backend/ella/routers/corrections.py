@@ -188,6 +188,12 @@ def _correction_session_id(uid: str, conversation_id: str, correction_id: str) -
     )
 
 
+def _correction_session_key(uid: str) -> str:
+    """Stable Hermes long-term memory scope for correction/enrichment calls."""
+
+    return f"ella:omi:{_safe_session_component(uid.lower())}:canonical"
+
+
 def _build_direct_correction_prompt(
     *,
     request: ConversationCorrectionRequest,
@@ -316,6 +322,7 @@ async def _generate_corrected_summary(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "X-Hermes-Session-Id": _correction_session_id(uid, conversation_id, correction_id),
+            "X-Hermes-Session-Key": _correction_session_key(uid),
             "X-Trace-Id": trace_id,
         }
         async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:

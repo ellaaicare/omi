@@ -545,9 +545,29 @@ def test_generate_corrected_summary_uses_hermes_api_with_scoped_session(monkeypa
     assert calls[0]["url"] == "https://hermes.test/v1/chat/completions"
     assert calls[0]["headers"]["Authorization"] == "Bearer hermes-secret"
     assert calls[0]["headers"]["X-Hermes-Session-Id"] == "correction:user-123:conv-123:corr-123"
+    assert calls[0]["headers"]["X-Hermes-Session-Key"] == "ella:omi:user-123:canonical"
     assert calls[0]["headers"]["X-Trace-Id"] == "trace-123"
     assert calls[0]["json"]["model"] == "profile-model"
     assert "Speaker 5" in calls[0]["json"]["messages"][0]["content"]
+
+
+def test_correction_session_key_is_stable_per_user():
+    assert corrections._correction_session_key("User/123") == "ella:omi:user-123:canonical"
+    assert corrections._correction_session_key("User/123") == corrections._correction_session_key("user/123")
+    assert corrections._correction_session_key("Other User") == "ella:omi:other-user:canonical"
+    assert corrections._correction_session_key("User/123") != corrections._correction_session_key("Other User")
+
+
+def test_correction_session_key_matches_chat_memory_scope(monkeypatch):
+    from ella.routers import chat
+
+    monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
+    assert corrections._correction_session_key("abc123") == chat._hermes_chat_session_key("abc123")
+    assert corrections._correction_session_key("abc123") == chat._hermes_chat_memory_key("abc123")
+
+    monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "daily")
+    assert chat._hermes_chat_session_key("abc123").startswith("ella:omi:abc123:ios-chat:")
+    assert corrections._correction_session_key("abc123") == chat._hermes_chat_memory_key("abc123")
 
 
 def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
