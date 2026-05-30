@@ -95,8 +95,11 @@ def test_correction_propagation_creates_idempotent_same_user_candidate_proposal(
 
     assert run1.run_id == "omi-correction-propagation:user-123:conv-source:corr-123"
     assert run1.proposal_count == 1
+    assert run1.honcho_fact_candidate_count == 1
+    assert run1.honcho_fact_proposal_count == 1
     assert run1.auto_applied_count == 0
     assert [d.action for d in run1.decisions].count("created_proposal") == 1
+    assert [d.action for d in run1.decisions].count("created_honcho_fact_proposal") == 1
     assert any(d.reason == "cross_user_candidate" for d in run1.decisions)
     assert any(d.conversation_id == "conv-unrelated" and d.action == "skip" for d in run1.decisions)
     created = next(d for d in run1.decisions if d.action == "created_proposal")
@@ -104,7 +107,8 @@ def test_correction_propagation_creates_idempotent_same_user_candidate_proposal(
     assert "teacher" in created.overlap_terms
     assert run2.proposal_count == 1
     assert any(d.action == "deduped_proposal" for d in run2.decisions)
-    assert len(seen) == 1
+    assert any(d.action == "deduped_honcho_fact_proposal" for d in run2.decisions)
+    assert len(seen) == 2
 
 
 def test_correction_propagation_skips_active_version_incompatible_candidate():
