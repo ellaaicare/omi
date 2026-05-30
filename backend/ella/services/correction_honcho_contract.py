@@ -19,6 +19,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ella.services import proposal_ingest
+from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 
 HONCHO_FACT_TOOL_NAME = "omi_correction_honcho_fact_propose"
 HONCHO_FACT_WRITE_TOOL_NAME = "omi_correction_honcho_fact_write"
@@ -39,6 +40,7 @@ HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
 HERMES_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_HONCHO_FACT_TIMEOUT_SECONDS", "20"))
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'_-]{2,}", re.I)
+JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 PERSON_MARKERS = re.compile(
     r"(?i)(?:is|was|named|called|a\\.k\\.a\\.|aka|person is|speaker is)\\s+([A-Z][A-Za-z0-9 .'-]{1,80})"
 )
@@ -96,12 +98,8 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()[:20]
 
 
-def _safe_session_component(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value).strip("-")[:160] or "unknown"
-
-
 def honcho_session_key(uid: str) -> str:
-    return f"ella:omi:{_safe_session_component(uid.lower())}:canonical"
+    return canonical_omi_session_key(uid)
 
 
 def _conversation_id(conversation: dict[str, Any]) -> str:
@@ -303,6 +301,91 @@ def _write_prompt(candidate: HonchoFactCandidate) -> str:
     )
 
 
+def _chat_completion_content(body: dict[str, Any]) -> str:
+    choices = body.get("choices") if isinstance(body.get("choices"), list) else []
+    if not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    return str((message or {}).get("content") or "")
+
+
+def _extract_json_object(content: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        match = JSON_OBJECT_RE.search(content)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _confirmation_from_response(response: Any) -> tuple[str, str, dict[str, Any]]:
+    try:
+        body = response.json()
+    except Exception as exc:
+        return (
+            "uncertain",
+            "malformed_hermes_response",
+            {"error": str(exc)[:240], "body": getattr(response, "text", "")[:500]},
+        )
+    if not isinstance(body, dict):
+        return "uncertain", "malformed_hermes_response", {"body_type": type(body).__name__}
+
+    content = _chat_completion_content(body)
+    parsed = _extract_json_object(content)
+    if parsed is None:
+        return "uncertain", "malformed_confirmation_json", {"content": content[:500]}
+
+    status_value = str(parsed.get("status") or parsed.get("action") or "").strip().lower()
+    durable_ref = (
+        parsed.get("memory_id")
+        or parsed.get("fact_id")
+        or parsed.get("durable_ref")
+        or parsed.get("durable_id")
+        or parsed.get("id")
+    )
+    refused = status_value in {"refused", "rejected", "declined", "denied"} or bool(parsed.get("refusal"))
+    if refused:
+        return (
+            "uncertain",
+            "honcho_write_refused",
+            {"status": status_value, "reason": str(parsed.get("reason") or "")[:500], "confirmation": parsed},
+        )
+    if status_value in {"error", "failed", "failure"}:
+        return (
+            "error",
+            "honcho_write_failed",
+            {"status": status_value, "reason": str(parsed.get("reason") or "")[:500], "confirmation": parsed},
+        )
+    if status_value in {"written", "persisted", "applied", "saved", "success", "ok"} and durable_ref:
+        memory_id = str(parsed.get("memory_id") or durable_ref)
+        return (
+            "written",
+            "hermes_honcho_write_confirmed",
+            {
+                "status": status_value,
+                "memory_id": memory_id,
+                "durable_ref": str(durable_ref),
+                "confirmation": parsed,
+            },
+        )
+    if not durable_ref:
+        return (
+            "uncertain",
+            "missing_durable_ref",
+            {"status": status_value, "reason": str(parsed.get("reason") or "")[:500], "confirmation": parsed},
+        )
+    return (
+        "uncertain",
+        "unconfirmed_honcho_write_status",
+        {"status": status_value, "durable_ref": str(durable_ref), "confirmation": parsed},
+    )
+
+
 async def write_honcho_fact_candidate(
     candidate: HonchoFactCandidate,
     *,
@@ -361,10 +444,10 @@ async def write_honcho_fact_candidate(
             session_key=candidate.session_key,
         )
 
-    url = (gateway_url or HERMES_GATEWAY_URL).rstrip()
+    url = (gateway_url or HERMES_GATEWAY_URL).rstrip("/")
     started = time.monotonic()
     session_id = (
-        f"honcho-fact:{_safe_session_component(candidate.uid)}:{candidate.correction_id}:{candidate.fingerprint}"
+        f"honcho-fact:{safe_session_component(candidate.uid)}:{candidate.correction_id}:{candidate.fingerprint}"
     )
     try:
         async with http_client_factory(timeout=HERMES_TIMEOUT_SECONDS) as client:
@@ -410,9 +493,11 @@ async def write_honcho_fact_candidate(
                 latency_ms=latency_ms,
                 response_ref={"body": getattr(response, "text", "")[:500]},
             )
+        action, reason, response_ref = _confirmation_from_response(response)
+        response_ref = {"transport": "hermes_chat_completions", "at": _now_iso(), **response_ref}
         return HonchoFactWriteDecision(
-            action="written",
-            reason="hermes_honcho_write_accepted",
+            action=action,
+            reason=reason,
             uid=candidate.uid,
             correction_id=candidate.correction_id,
             fingerprint=candidate.fingerprint,
@@ -421,7 +506,7 @@ async def write_honcho_fact_candidate(
             session_key=candidate.session_key,
             status_code=response.status_code,
             latency_ms=latency_ms,
-            response_ref={"transport": "hermes_chat_completions", "at": _now_iso()},
+            response_ref=response_ref,
         )
     except Exception as exc:
         return HonchoFactWriteDecision(

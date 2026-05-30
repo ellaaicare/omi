@@ -23,6 +23,7 @@ from database._client import db
 from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
+from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
 from ella.services import proposal_ingest
 from utils.other import endpoints as auth
 
@@ -195,17 +196,13 @@ def _hermes_correction_api_key() -> str:
     )
 
 
-def _safe_session_component(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value).strip("-")[:160] or "unknown"
-
-
 def _correction_session_id(uid: str, conversation_id: str, correction_id: str) -> str:
     return ":".join(
         [
             "correction",
-            _safe_session_component(uid),
-            _safe_session_component(conversation_id),
-            _safe_session_component(correction_id),
+            safe_session_component(uid),
+            safe_session_component(conversation_id),
+            safe_session_component(correction_id),
         ]
     )
 
@@ -213,7 +210,7 @@ def _correction_session_id(uid: str, conversation_id: str, correction_id: str) -
 def _correction_session_key(uid: str) -> str:
     """Stable Hermes long-term memory scope for correction/enrichment calls."""
 
-    return f"ella:omi:{_safe_session_component(uid.lower())}:canonical"
+    return canonical_omi_session_key(uid)
 
 
 def _build_direct_correction_prompt(
