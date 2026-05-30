@@ -38,9 +38,20 @@ HONCHO_FACT_MIN_CONFIDENCE = float(os.getenv("ELLA_CORRECTION_HONCHO_FACT_MIN_CO
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_URL", "http://100.76.138.56:8642").rstrip("/")
 HERMES_MODEL = os.getenv("HERMES_MODEL", "plato-eval")
 HERMES_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_HONCHO_FACT_TIMEOUT_SECONDS", "20"))
+HONCHO_FACT_WRITE_TRANSPORT = os.getenv("ELLA_CORRECTION_HONCHO_FACT_WRITE_TRANSPORT", "hermes").strip().lower()
+HONCHO_BASE_URL = (
+    os.getenv("ELLA_CORRECTION_HONCHO_BASE_URL") or os.getenv("HONCHO_BASE_URL") or "http://127.0.0.1:8320"
+).rstrip("/")
+HONCHO_API_KEY = os.getenv("ELLA_CORRECTION_HONCHO_API_KEY") or os.getenv("HONCHO_API_KEY") or ""
+HONCHO_WORKSPACE = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE") or os.getenv("HONCHO_WORKSPACE") or ""
+HONCHO_WORKSPACE_PREFIX = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE_PREFIX", "ella-correction-facts")
+HONCHO_OBSERVER_PEER_ID = (
+    os.getenv("ELLA_CORRECTION_HONCHO_OBSERVER_PEER_ID") or os.getenv("HONCHO_OBSERVER_PEER_ID") or ""
+)
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'_-]{2,}", re.I)
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+HONCHO_RESOURCE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 PERSON_MARKERS = re.compile(
     r"(?i)(?:is|was|named|called|a\\.k\\.a\\.|aka|person is|speaker is)\\s+([A-Z][A-Za-z0-9 .'-]{1,80})"
 )
@@ -100,6 +111,28 @@ def _stable_hash(value: Any) -> str:
 
 def honcho_session_key(uid: str) -> str:
     return canonical_omi_session_key(uid)
+
+
+def _honcho_resource_id(value: str, *, prefix: str = "", max_len: int = 100) -> str:
+    raw = f"{prefix}{value}".strip()
+    sanitized = HONCHO_RESOURCE_RE.sub("-", raw).strip("-")
+    if not sanitized:
+        sanitized = "unknown"
+    if len(sanitized) <= max_len and sanitized == raw:
+        return sanitized
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
+    room = max_len - len(digest) - 1
+    return f"{sanitized[:room].rstrip('-')}-{digest}"
+
+
+def _honcho_workspace_id(candidate: HonchoFactCandidate, explicit_workspace: str | None = None) -> str:
+    if explicit_workspace:
+        return _honcho_resource_id(explicit_workspace)
+    if HONCHO_WORKSPACE:
+        return _honcho_resource_id(HONCHO_WORKSPACE)
+    uid_hash = hashlib.sha256(candidate.uid.encode("utf-8")).hexdigest()[:12]
+    uid_component = _honcho_resource_id(candidate.uid, max_len=48)
+    return _honcho_resource_id(f"{HONCHO_WORKSPACE_PREFIX}-{uid_component}-{uid_hash}")
 
 
 def _conversation_id(conversation: dict[str, Any]) -> str:
@@ -386,6 +419,303 @@ def _confirmation_from_response(response: Any) -> tuple[str, str, dict[str, Any]
     )
 
 
+def _honcho_headers(api_key: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _honcho_success_ref(body: Any) -> dict[str, Any] | None:
+    if not isinstance(body, list) or not body or not isinstance(body[0], dict):
+        return None
+    first = body[0]
+    durable_ref = first.get("id") or first.get("memory_id") or first.get("durable_ref")
+    if not durable_ref:
+        return None
+    return {
+        "memory_id": str(durable_ref),
+        "durable_ref": str(durable_ref),
+        "honcho_conclusion": {
+            key: first.get(key)
+            for key in ("id", "observer_id", "observer", "observed_id", "observed", "session_id", "session_name")
+            if first.get(key) is not None
+        },
+    }
+
+
+def _honcho_existing_ref(body: Any, *, fact_text: str, session_id: str) -> dict[str, Any] | None:
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        return None
+    for item in body["items"]:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("content") or "").strip() != fact_text.strip():
+            continue
+        item_session_id = str(item.get("session_id") or item.get("session_name") or "")
+        if item_session_id and item_session_id != session_id:
+            continue
+        durable_ref = item.get("id") or item.get("memory_id") or item.get("durable_ref")
+        if durable_ref:
+            return {
+                "memory_id": str(durable_ref),
+                "durable_ref": str(durable_ref),
+                "honcho_conclusion": {
+                    key: item.get(key)
+                    for key in (
+                        "id",
+                        "observer_id",
+                        "observer",
+                        "observed_id",
+                        "observed",
+                        "session_id",
+                        "session_name",
+                    )
+                    if item.get(key) is not None
+                },
+            }
+    return None
+
+
+async def _write_honcho_fact_candidate_via_native_honcho(
+    candidate: HonchoFactCandidate,
+    *,
+    honcho_base_url: str | None = None,
+    honcho_api_key: str | None = None,
+    honcho_workspace: str | None = None,
+    honcho_observer_peer_id: str | None = None,
+    http_client_factory: Callable[..., Any] = httpx.AsyncClient,
+) -> HonchoFactWriteDecision:
+    api_key = honcho_api_key if honcho_api_key is not None else HONCHO_API_KEY
+    workspace = _honcho_workspace_id(candidate, honcho_workspace)
+    observer_peer_id = _honcho_resource_id(
+        honcho_observer_peer_id or HONCHO_OBSERVER_PEER_ID or "ella-correction-observer"
+    )
+    observed_peer_id = _honcho_resource_id(candidate.uid, prefix="omi-uid-")
+    session_id = _honcho_resource_id(candidate.session_key)
+    base_url = (honcho_base_url or HONCHO_BASE_URL).rstrip("/")
+    started = time.monotonic()
+
+    try:
+        async with http_client_factory(timeout=HERMES_TIMEOUT_SECONDS) as client:
+            headers = _honcho_headers(api_key)
+            setup_calls = [
+                (
+                    f"{base_url}/v3/workspaces",
+                    {"id": workspace, "metadata": {"source": "omi_correction_observer"}},
+                ),
+                (
+                    f"{base_url}/v3/workspaces/{workspace}/peers",
+                    {"id": observer_peer_id, "metadata": {"role": "observer", "source": "omi_correction_observer"}},
+                ),
+                (
+                    f"{base_url}/v3/workspaces/{workspace}/peers",
+                    {"id": observed_peer_id, "metadata": {"profile_uid": candidate.uid, "source": "omi_correction"}},
+                ),
+                (
+                    f"{base_url}/v3/workspaces/{workspace}/sessions",
+                    {
+                        "id": session_id,
+                        "metadata": {
+                            "profile_uid": candidate.uid,
+                            "source": "omi_correction_observer",
+                            "session_key": candidate.session_key,
+                        },
+                        "peers": {
+                            observer_peer_id: {"observe_me": True, "observe_others": True},
+                            observed_peer_id: {"observe_me": True, "observe_others": True},
+                        },
+                    },
+                ),
+            ]
+            for setup_url, payload in setup_calls:
+                response = await client.post(setup_url, headers=headers, json=payload)
+                if response.status_code >= 400:
+                    return HonchoFactWriteDecision(
+                        action="error",
+                        reason=f"honcho_setup_http_{response.status_code}",
+                        uid=candidate.uid,
+                        correction_id=candidate.correction_id,
+                        fingerprint=candidate.fingerprint,
+                        idempotency_key=candidate.idempotency_key,
+                        confidence=candidate.confidence,
+                        session_key=candidate.session_key,
+                        status_code=response.status_code,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        response_ref={
+                            "transport": "honcho_conclusions",
+                            "workspace": workspace,
+                            "body": getattr(response, "text", "")[:500],
+                        },
+                    )
+
+            idempotency_response = await client.post(
+                f"{base_url}/v3/workspaces/{workspace}/conclusions/list",
+                headers=headers,
+                json={"filters": {"observer_id": observer_peer_id, "observed_id": observed_peer_id}},
+            )
+            if idempotency_response.status_code >= 400:
+                return HonchoFactWriteDecision(
+                    action="error",
+                    reason=f"honcho_idempotency_http_{idempotency_response.status_code}",
+                    uid=candidate.uid,
+                    correction_id=candidate.correction_id,
+                    fingerprint=candidate.fingerprint,
+                    idempotency_key=candidate.idempotency_key,
+                    confidence=candidate.confidence,
+                    session_key=candidate.session_key,
+                    status_code=idempotency_response.status_code,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    response_ref={
+                        "transport": "honcho_conclusions",
+                        "workspace": workspace,
+                        "body": getattr(idempotency_response, "text", "")[:500],
+                    },
+                )
+            try:
+                existing_body = idempotency_response.json()
+            except Exception as exc:
+                return HonchoFactWriteDecision(
+                    action="uncertain",
+                    reason="malformed_honcho_idempotency_response",
+                    uid=candidate.uid,
+                    correction_id=candidate.correction_id,
+                    fingerprint=candidate.fingerprint,
+                    idempotency_key=candidate.idempotency_key,
+                    confidence=candidate.confidence,
+                    session_key=candidate.session_key,
+                    status_code=idempotency_response.status_code,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    response_ref={"transport": "honcho_conclusions", "workspace": workspace, "error": str(exc)[:240]},
+                )
+            existing_ref = _honcho_existing_ref(existing_body, fact_text=candidate.fact_text, session_id=session_id)
+            if existing_ref:
+                return HonchoFactWriteDecision(
+                    action="written",
+                    reason="honcho_conclusion_already_exists",
+                    uid=candidate.uid,
+                    correction_id=candidate.correction_id,
+                    fingerprint=candidate.fingerprint,
+                    idempotency_key=candidate.idempotency_key,
+                    confidence=candidate.confidence,
+                    session_key=candidate.session_key,
+                    status_code=idempotency_response.status_code,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    response_ref={
+                        "transport": "honcho_conclusions",
+                        "workspace": workspace,
+                        "observer_peer_id": observer_peer_id,
+                        "observed_peer_id": observed_peer_id,
+                        "session_id": session_id,
+                        "idempotency": "backend_exact_match",
+                        "at": _now_iso(),
+                        **existing_ref,
+                    },
+                )
+
+            response = await client.post(
+                f"{base_url}/v3/workspaces/{workspace}/conclusions",
+                headers={**headers, "X-Idempotency-Key": candidate.idempotency_key, "X-Trace-Id": candidate.trace_id},
+                json={
+                    "conclusions": [
+                        {
+                            "observer_id": observer_peer_id,
+                            "observed_id": observed_peer_id,
+                            "content": candidate.fact_text,
+                            "session_id": session_id,
+                        }
+                    ]
+                },
+            )
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if response.status_code >= 400:
+            return HonchoFactWriteDecision(
+                action="error",
+                reason=f"honcho_http_{response.status_code}",
+                uid=candidate.uid,
+                correction_id=candidate.correction_id,
+                fingerprint=candidate.fingerprint,
+                idempotency_key=candidate.idempotency_key,
+                confidence=candidate.confidence,
+                session_key=candidate.session_key,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                response_ref={
+                    "transport": "honcho_conclusions",
+                    "workspace": workspace,
+                    "body": getattr(response, "text", "")[:500],
+                },
+            )
+
+        try:
+            body = response.json()
+        except Exception as exc:
+            return HonchoFactWriteDecision(
+                action="uncertain",
+                reason="malformed_honcho_response",
+                uid=candidate.uid,
+                correction_id=candidate.correction_id,
+                fingerprint=candidate.fingerprint,
+                idempotency_key=candidate.idempotency_key,
+                confidence=candidate.confidence,
+                session_key=candidate.session_key,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                response_ref={"transport": "honcho_conclusions", "workspace": workspace, "error": str(exc)[:240]},
+            )
+
+        success_ref = _honcho_success_ref(body)
+        if not success_ref:
+            return HonchoFactWriteDecision(
+                action="uncertain",
+                reason="missing_honcho_durable_ref",
+                uid=candidate.uid,
+                correction_id=candidate.correction_id,
+                fingerprint=candidate.fingerprint,
+                idempotency_key=candidate.idempotency_key,
+                confidence=candidate.confidence,
+                session_key=candidate.session_key,
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                response_ref={"transport": "honcho_conclusions", "workspace": workspace, "body": body},
+            )
+
+        return HonchoFactWriteDecision(
+            action="written",
+            reason="honcho_conclusion_written",
+            uid=candidate.uid,
+            correction_id=candidate.correction_id,
+            fingerprint=candidate.fingerprint,
+            idempotency_key=candidate.idempotency_key,
+            confidence=candidate.confidence,
+            session_key=candidate.session_key,
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+            response_ref={
+                "transport": "honcho_conclusions",
+                "workspace": workspace,
+                "observer_peer_id": observer_peer_id,
+                "observed_peer_id": observed_peer_id,
+                "session_id": session_id,
+                "at": _now_iso(),
+                **success_ref,
+            },
+        )
+    except Exception as exc:
+        return HonchoFactWriteDecision(
+            action="error",
+            reason=type(exc).__name__,
+            uid=candidate.uid,
+            correction_id=candidate.correction_id,
+            fingerprint=candidate.fingerprint,
+            idempotency_key=candidate.idempotency_key,
+            confidence=candidate.confidence,
+            session_key=candidate.session_key,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            response_ref={"transport": "honcho_conclusions", "error": str(exc)[:500]},
+        )
+
+
 async def write_honcho_fact_candidate(
     candidate: HonchoFactCandidate,
     *,
@@ -393,6 +723,11 @@ async def write_honcho_fact_candidate(
     token: str | None = None,
     gateway_url: str | None = None,
     model: str | None = None,
+    transport: str | None = None,
+    honcho_base_url: str | None = None,
+    honcho_api_key: str | None = None,
+    honcho_workspace: str | None = None,
+    honcho_observer_peer_id: str | None = None,
     http_client_factory: Callable[..., Any] = httpx.AsyncClient,
 ) -> HonchoFactWriteDecision:
     if not HONCHO_FACT_WRITE_ENABLED:
@@ -423,6 +758,28 @@ async def write_honcho_fact_candidate(
         return HonchoFactWriteDecision(
             action="skip",
             reason="stale_active_summary_version",
+            uid=candidate.uid,
+            correction_id=candidate.correction_id,
+            fingerprint=candidate.fingerprint,
+            idempotency_key=candidate.idempotency_key,
+            confidence=candidate.confidence,
+            session_key=candidate.session_key,
+        )
+
+    selected_transport = (transport or HONCHO_FACT_WRITE_TRANSPORT or "hermes").strip().lower()
+    if selected_transport in {"honcho", "honcho_conclusions", "native_honcho"}:
+        return await _write_honcho_fact_candidate_via_native_honcho(
+            candidate,
+            honcho_base_url=honcho_base_url,
+            honcho_api_key=honcho_api_key,
+            honcho_workspace=honcho_workspace,
+            honcho_observer_peer_id=honcho_observer_peer_id,
+            http_client_factory=http_client_factory,
+        )
+    if selected_transport not in {"hermes", "hermes_chat", "hermes_chat_completions"}:
+        return HonchoFactWriteDecision(
+            action="skip",
+            reason=f"unsupported_transport:{selected_transport}",
             uid=candidate.uid,
             correction_id=candidate.correction_id,
             fingerprint=candidate.fingerprint,
