@@ -446,8 +446,8 @@ def test_submit_correction_queues_background_direct_apply_without_waiting(monkey
     assert events[-1]["stage"] == "direct_apply_queued"
     assert conversation_updates[-1]["correction_state"]["status"] == "queued"
 
-    propagation_func, _, _ = background_tasks.tasks[0]
-    assert propagation_func is corrections._run_correction_propagation_for_submission
+    observer_func, _, _ = background_tasks.tasks[0]
+    assert observer_func is corrections._run_correction_observer_work
 
     func, args, kwargs = background_tasks.tasks[1]
     assert func is corrections._run_direct_correction_apply
@@ -459,7 +459,7 @@ def test_submit_correction_queues_background_direct_apply_without_waiting(monkey
     assert events[-1]["stage"] == "direct_apply_succeeded"
 
 
-def test_submit_correction_emits_canonical_event_and_queues_observer_propagation(monkeypatch):
+def test_submit_correction_queues_observer_work_without_blocking_on_canonical_event(monkeypatch):
     emitted = {}
     events = []
     conversation_updates = []
@@ -476,6 +476,8 @@ def test_submit_correction_emits_canonical_event_and_queues_observer_propagation
 
     monkeypatch.setattr(corrections, "DIRECT_CORRECTION_APPLY_ENABLED", False)
     monkeypatch.setattr(corrections, "N8N_CORRECTION_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(corrections, "CORRECTION_PROPAGATION_ENABLED", True)
+    monkeypatch.setattr(corrections, "CORRECTION_OBSERVER_WORK_ENABLED", True)
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: _conversation())
     monkeypatch.setattr(corrections.conversations_db, "bootstrap_summary_versioning_update", lambda conversation: {})
     monkeypatch.setattr(
@@ -499,18 +501,26 @@ def test_submit_correction_emits_canonical_event_and_queues_observer_propagation
     )
 
     assert result.status == "direct_apply_disabled"
+    assert emitted == {}
+    assert len(background_tasks.tasks) == 1
+    func, args, kwargs = background_tasks.tasks[0]
+    assert func is corrections._run_correction_observer_work
+    assert kwargs["uid"] == "user-123"
+    assert kwargs["conversation_id"] == "conv-123"
+    assert kwargs["correction_id"] == result.correction_id
+    assert any(event["stage"] == "observer_work_queued" for event in events)
+
+    asyncio.run(func(*args, **kwargs))
+
     assert emitted["uid"] == "user-123"
     assert emitted["conversation_id"] == "conv-123"
     assert emitted["correction_id"] == result.correction_id
     assert emitted["proposal_id"] == "proposal-123"
     assert emitted["request"].correction_text == "Actually this was background TV audio."
-    assert len(background_tasks.tasks) == 1
-    func, args, kwargs = background_tasks.tasks[0]
-    assert func is corrections._run_correction_propagation_for_submission
-    assert kwargs["uid"] == "user-123"
-    assert kwargs["conversation_id"] == "conv-123"
-    assert kwargs["correction_id"] == result.correction_id
-    assert any(event["stage"] == "propagation_run_queued" for event in events)
+
+
+def test_correction_propagation_feature_flag_defaults_off():
+    assert corrections.CORRECTION_PROPAGATION_ENABLED is False
 
 
 def test_router_uses_custom_ella_namespace_only():

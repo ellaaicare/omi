@@ -64,7 +64,16 @@ CORRECTION_CANONICAL_EVENT_ENABLED = os.getenv("ELLA_CORRECTION_CANONICAL_EVENT_
     "false",
     "no",
 }
-CORRECTION_PROPAGATION_ENABLED = os.getenv("ELLA_CORRECTION_PROPAGATION_ENABLED", "true").lower() not in {
+CORRECTION_PROPAGATION_ENABLED = os.getenv("ELLA_CORRECTION_PROPAGATION_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CORRECTION_OBSERVER_WORK_ENABLED = CORRECTION_CANONICAL_EVENT_ENABLED or CORRECTION_PROPAGATION_ENABLED
+CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND = os.getenv(
+    "ELLA_CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND", "true"
+).lower() not in {
     "0",
     "false",
     "no",
@@ -613,9 +622,8 @@ async def _run_correction_propagation_for_submission(
         )
 
 
-async def _queue_correction_observer_work(
+async def _run_correction_observer_work(
     *,
-    background_tasks: Optional[BackgroundTasks],
     uid: str,
     conversation_id: str,
     correction_id: str,
@@ -638,24 +646,52 @@ async def _queue_correction_observer_work(
         active_summary_version_id=active_summary_version_id,
         proposal_id=proposal_id,
     )
-    if not CORRECTION_PROPAGATION_ENABLED:
+    await _run_correction_propagation_for_submission(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        trace_id=trace_id,
+        request=request,
+        source_conversation=source_conversation,
+    )
+
+
+async def _queue_correction_observer_work(
+    *,
+    background_tasks: Optional[BackgroundTasks],
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    source_conversation: dict[str, Any],
+    structured: dict[str, Any],
+    submitted_at: str,
+    active_summary_version_id: Optional[str],
+    proposal_id: Optional[str],
+) -> None:
+    if not CORRECTION_OBSERVER_WORK_ENABLED:
         return
-    propagation_kwargs = {
+    observer_kwargs = {
         "uid": uid,
         "conversation_id": conversation_id,
         "correction_id": correction_id,
         "trace_id": trace_id,
         "request": request,
         "source_conversation": source_conversation,
+        "structured": structured,
+        "submitted_at": submitted_at,
+        "active_summary_version_id": active_summary_version_id,
+        "proposal_id": proposal_id,
     }
     if background_tasks is not None:
-        background_tasks.add_task(_run_correction_propagation_for_submission, **propagation_kwargs)
+        background_tasks.add_task(_run_correction_observer_work, **observer_kwargs)
         _append_correction_event(
             uid,
             conversation_id,
             correction_id,
             {
-                "stage": "propagation_run_queued",
+                "stage": "observer_work_queued",
                 "status": "ok",
                 "at": _now_iso(),
                 "trace_id": trace_id,
@@ -663,7 +699,8 @@ async def _queue_correction_observer_work(
             },
         )
         return
-    await _run_correction_propagation_for_submission(**propagation_kwargs)
+    if CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND:
+        await _run_correction_observer_work(**observer_kwargs)
 
 
 def _summary_correction_claims(*, uid: str, trace_id: str) -> dict[str, Any]:
