@@ -92,3 +92,13 @@ def test_hermes_session_defaults_to_canonical(monkeypatch):
     monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
 
     assert chat._hermes_chat_session_key("ABC123") == "ella:omi:abc123:canonical"
+    assert chat._hermes_chat_session_key("User/123") == "ella:omi:user-123:canonical"
+    assert chat._hermes_chat_memory_key("User/123") == "ella:omi:user-123:canonical"
+
+
+def test_hermes_chat_headers_include_stable_session_key():
+    headers = chat._hermes_chat_headers("ella:omi:abc123:ios-chat:daily-20260530", "ella:omi:abc123:canonical")
+
+    assert headers["X-Hermes-Session-Id"] == "ella:omi:abc123:ios-chat:daily-20260530"
+    assert headers["X-Hermes-Session-Key"] == "ella:omi:abc123:canonical"
+    assert headers["Content-Type"] == "application/json"

@@ -82,26 +82,44 @@ ELLA_SYSTEM_PROMPT = (
 )
 
 
+def _safe_session_component(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value).strip("-")[:160] or "unknown"
+
+
+def _hermes_chat_memory_key(uid: str) -> str:
+    """Stable Hermes/Honcho long-term memory scope for this authenticated user."""
+
+    return f"ella:omi:{_safe_session_component(uid.lower())}:canonical"
+
+
 def _hermes_chat_session_key(uid: str) -> str:
+    safe_uid = _safe_session_component(uid.lower())
     if HERMES_CHAT_SESSION_SCOPE in {"canonical", "shared", "cross_channel", "cross-channel"}:
-        return f"ella:omi:{uid.lower()}:canonical"
+        return _hermes_chat_memory_key(uid)
     if HERMES_CHAT_SESSION_EPOCH:
         epoch = HERMES_CHAT_SESSION_EPOCH
     else:
         epoch = datetime.now(timezone.utc).astimezone(ZoneInfo(CHAT_USER_TIMEZONE)).strftime("daily-%Y%m%d")
-    return f"ella:omi:{uid.lower()}:ios-chat:{epoch}"
+    return f"ella:omi:{safe_uid}:ios-chat:{epoch}"
 
 
-async def _hermes_nonstream_completion(messages: list[dict], session_key: str) -> str:
+def _hermes_chat_headers(session_id: str, session_key: str | None = None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {HERMES_GATEWAY_TOKEN}",
+        "Content-Type": "application/json",
+        "X-Hermes-Session-Id": session_id,
+    }
+    if session_key:
+        headers["X-Hermes-Session-Key"] = session_key
+    return headers
+
+
+async def _hermes_nonstream_completion(messages: list[dict], session_key: str, memory_key: str | None = None) -> str:
     recovery_session = f"{session_key}:empty-recovery"
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             f"{HERMES_GATEWAY_URL}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {HERMES_GATEWAY_TOKEN}",
-                "Content-Type": "application/json",
-                "X-Hermes-Session-Id": recovery_session,
-            },
+            headers=_hermes_chat_headers(recovery_session, memory_key or session_key),
             json={
                 "model": HERMES_MODEL,
                 "messages": messages,
@@ -743,8 +761,9 @@ async def _stream_hermes_chat(
         )
     )
     messages.append({"role": "user", "content": user_message})
+    memory_key = _hermes_chat_memory_key(uid)
     print(
-        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} session_strategy={HERMES_CHAT_SESSION_SCOPE} turn_id={turn_id} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
+        f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} memory_key={memory_key} session_strategy={HERMES_CHAT_SESSION_SCOPE} turn_id={turn_id} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
         flush=True,
     )
 
@@ -753,11 +772,7 @@ async def _stream_hermes_chat(
             async with client.stream(
                 "POST",
                 f"{HERMES_GATEWAY_URL}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {HERMES_GATEWAY_TOKEN}",
-                    "Content-Type": "application/json",
-                    "X-Hermes-Session-Id": session_key,
-                },
+                headers=_hermes_chat_headers(session_key, memory_key),
                 json={
                     "model": HERMES_MODEL,
                     "messages": messages,
@@ -795,7 +810,7 @@ async def _stream_hermes_chat(
 
         full_text = "".join(text).strip()
         if not full_text:
-            recovery_text = await _hermes_nonstream_completion(messages, session_key)
+            recovery_text = await _hermes_nonstream_completion(messages, session_key, memory_key)
             if recovery_text:
                 text.append(recovery_text)
                 full_text = recovery_text
