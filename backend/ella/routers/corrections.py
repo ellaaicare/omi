@@ -21,6 +21,8 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator
 import database.conversations as conversations_db
 from database._client import db
 from ella.config import ELLA_CONFIG
+from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
+from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
 from ella.services import proposal_ingest
 from utils.other import endpoints as auth
 
@@ -57,7 +59,18 @@ N8N_CORRECTION_FALLBACK_ENABLED = os.getenv("ELLA_CORRECTION_N8N_FALLBACK_ENABLE
     "yes",
     "on",
 }
+CORRECTION_CANONICAL_EVENT_ENABLED = os.getenv("ELLA_CORRECTION_CANONICAL_EVENT_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+CORRECTION_PROPAGATION_ENABLED = os.getenv("ELLA_CORRECTION_PROPAGATION_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+_canonical_event_store = PostgresCanonicalEventStore()
 
 
 class SummaryContext(BaseModel):
@@ -435,6 +448,224 @@ def _append_correction_event(
     ref.set({"events": events, "updated_at": event.get("at") or _now_iso()}, merge=True)
 
 
+async def _emit_canonical_correction_event(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    structured: dict[str, Any],
+    submitted_at: str,
+    active_summary_version_id: Optional[str],
+    proposal_id: Optional[str],
+) -> None:
+    if not CORRECTION_CANONICAL_EVENT_ENABLED:
+        return
+    event = CanonicalEventIn(
+        uid=uid,
+        canonical_identity=uid,
+        event_id=f"omi_correction:{uid}:{conversation_id}:{correction_id}:summary_correction_submitted",
+        session_id=f"omi:{uid}:{conversation_id}",
+        channel="omi_correction",
+        provider="omi-backend",
+        role="user",
+        text=request.correction_text,
+        started_at=submitted_at,
+        privacy_scope="user_private",
+        scan_policy="none",
+        source_ref={
+            "source_identity": f"omi_correction:{uid}:{conversation_id}:{correction_id}",
+            "conversation_id": conversation_id,
+            "correction_id": correction_id,
+            "trace_id": trace_id,
+        },
+        metadata={
+            "event_type": "summary_correction_submitted",
+            "source": request.source,
+            "correction_type": _correction_category(request.correction_text, request.summary_context),
+            "summary_context": request.summary_context.model_dump(),
+            "before": {
+                "active_summary_version_id": active_summary_version_id,
+                "current_summary": structured,
+            },
+            "after": {
+                "correction_text": request.correction_text,
+                "proposal_id": proposal_id,
+                "write_policy": "proposal_then_observer",
+            },
+            "local_timestamps": {
+                "submitted_at": submitted_at,
+            },
+            "durable_owner": "honcho/hermes",
+        },
+    )
+    try:
+        result = await _canonical_event_store.write_batch([event])
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "canonical_event_emitted",
+                "status": "ok",
+                "at": _now_iso(),
+                "trace_id": trace_id,
+                "event_id": event.event_id,
+                "write_result": result,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to emit canonical correction event",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id, "error": str(exc)},
+        )
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "canonical_event_failed",
+                "status": "error",
+                "at": _now_iso(),
+                "trace_id": trace_id,
+                "error": str(exc),
+            },
+        )
+
+
+def _persist_correction_propagation_run(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    run_payload: dict[str, Any],
+) -> None:
+    _audit_ref(uid, conversation_id, correction_id).collection("propagation_runs").document(run_payload["run_id"]).set(
+        run_payload, merge=True
+    )
+
+
+async def _run_correction_propagation_for_submission(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    source_conversation: dict[str, Any],
+) -> None:
+    if not CORRECTION_PROPAGATION_ENABLED:
+        return
+    try:
+        run = run_correction_propagation(
+            uid=uid,
+            source_conversation={**source_conversation, "id": conversation_id},
+            correction_id=correction_id,
+            trace_id=trace_id,
+            correction_text=request.correction_text,
+            correction_type=_correction_category(request.correction_text, request.summary_context),
+        )
+        payload = propagation_run_to_dict(run)
+        _persist_correction_propagation_run(uid, conversation_id, correction_id, payload)
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "propagation_run_completed",
+                "status": run.status,
+                "at": _now_iso(),
+                "trace_id": trace_id,
+                "run_id": run.run_id,
+                "candidate_count": run.candidate_count,
+                "proposal_count": run.proposal_count,
+                "skipped_count": run.skipped_count,
+            },
+        )
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "propagation_run_id": run.run_id,
+                "propagation_status": run.status,
+                "propagation_candidate_count": run.candidate_count,
+                "propagation_proposal_count": run.proposal_count,
+                "updated_at": _now_iso(),
+            },
+        )
+    except Exception as exc:
+        logger.exception(
+            "Correction propagation run failed",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "propagation_run_failed",
+                "status": "error",
+                "at": _now_iso(),
+                "trace_id": trace_id,
+                "error": str(exc),
+            },
+        )
+
+
+async def _queue_correction_observer_work(
+    *,
+    background_tasks: Optional[BackgroundTasks],
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    request: ConversationCorrectionRequest,
+    source_conversation: dict[str, Any],
+    structured: dict[str, Any],
+    submitted_at: str,
+    active_summary_version_id: Optional[str],
+    proposal_id: Optional[str],
+) -> None:
+    await _emit_canonical_correction_event(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        trace_id=trace_id,
+        request=request,
+        structured=structured,
+        submitted_at=submitted_at,
+        active_summary_version_id=active_summary_version_id,
+        proposal_id=proposal_id,
+    )
+    if not CORRECTION_PROPAGATION_ENABLED:
+        return
+    propagation_kwargs = {
+        "uid": uid,
+        "conversation_id": conversation_id,
+        "correction_id": correction_id,
+        "trace_id": trace_id,
+        "request": request,
+        "source_conversation": source_conversation,
+    }
+    if background_tasks is not None:
+        background_tasks.add_task(_run_correction_propagation_for_submission, **propagation_kwargs)
+        _append_correction_event(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "stage": "propagation_run_queued",
+                "status": "ok",
+                "at": _now_iso(),
+                "trace_id": trace_id,
+                "queue_result": {"mode": "background_correction_observer"},
+            },
+        )
+        return
+    await _run_correction_propagation_for_submission(**propagation_kwargs)
+
+
 def _summary_correction_claims(*, uid: str, trace_id: str) -> dict[str, Any]:
     return {
         "sub": f"omi-user:{uid}",
@@ -780,6 +1011,20 @@ async def _submit_conversation_correction(
             correction_id,
             {"stage": "proposal_failed", "status": "error", "at": _now_iso(), "trace_id": trace_id, "error": str(exc)},
         )
+
+    await _queue_correction_observer_work(
+        background_tasks=background_tasks,
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        trace_id=trace_id,
+        request=request,
+        source_conversation=conversation,
+        structured=structured,
+        submitted_at=submitted_at,
+        active_summary_version_id=submitted_state.get("active_summary_version_id"),
+        proposal_id=proposal_id,
+    )
 
     if DIRECT_CORRECTION_APPLY_ENABLED:
         direct_apply_kwargs = {
