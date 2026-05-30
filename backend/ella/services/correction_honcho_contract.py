@@ -48,6 +48,13 @@ HONCHO_WORKSPACE_PREFIX = os.getenv("ELLA_CORRECTION_HONCHO_WORKSPACE_PREFIX", "
 HONCHO_OBSERVER_PEER_ID = (
     os.getenv("ELLA_CORRECTION_HONCHO_OBSERVER_PEER_ID") or os.getenv("HONCHO_OBSERVER_PEER_ID") or ""
 )
+HONCHO_OBSERVED_PEER_ID = (
+    os.getenv("ELLA_CORRECTION_HONCHO_OBSERVED_PEER_ID") or os.getenv("HONCHO_OBSERVED_PEER_ID") or ""
+)
+HONCHO_PROFILE_MAP_JSON = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_JSON", "")
+HONCHO_PROFILE_MAP_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_PATH", "")
+HONCHO_PROFILE_CONFIG_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_CONFIG_PATH", "")
+HONCHO_PROFILE_UID = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_UID", "")
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'_-]{2,}", re.I)
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -133,6 +140,140 @@ def _honcho_workspace_id(candidate: HonchoFactCandidate, explicit_workspace: str
     uid_hash = hashlib.sha256(candidate.uid.encode("utf-8")).hexdigest()[:12]
     uid_component = _honcho_resource_id(candidate.uid, max_len=48)
     return _honcho_resource_id(f"{HONCHO_WORKSPACE_PREFIX}-{uid_component}-{uid_hash}")
+
+
+def _safe_json_loads(value: str) -> Any:
+    if not str(value or "").strip():
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _safe_json_file(path: str) -> Any:
+    if not str(path or "").strip():
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
+    if not isinstance(entry, dict):
+        return None
+    hosts = entry.get("hosts") if isinstance(entry.get("hosts"), dict) else {}
+    host_entry = hosts.get(f"hermes.{HERMES_MODEL}") if isinstance(hosts.get(f"hermes.{HERMES_MODEL}"), dict) else {}
+    if host_entry:
+        entry = {**entry, **host_entry}
+    workspace = str(entry.get("workspace") or entry.get("honcho_workspace") or "").strip()
+    observed_peer_id = str(
+        entry.get("observed_peer_id")
+        or entry.get("observedPeerId")
+        or entry.get("peerName")
+        or entry.get("peer_name")
+        or ""
+    ).strip()
+    if not workspace or not observed_peer_id:
+        return None
+    observer_peer_id = str(
+        entry.get("observer_peer_id")
+        or entry.get("observerPeerId")
+        or entry.get("aiPeer")
+        or entry.get("ai_peer")
+        or ""
+    ).strip()
+    return {
+        "workspace": _honcho_resource_id(workspace),
+        "observed_peer_id": _honcho_resource_id(observed_peer_id),
+        "observer_peer_id": _honcho_resource_id(observer_peer_id) if observer_peer_id else "",
+        "source": str(entry.get("source") or "profile_mapping"),
+    }
+
+
+def _target_from_profile_map(uid: str) -> dict[str, str] | None:
+    uid_norm = str(uid or "").strip().lower()
+    candidates = []
+    inline = _safe_json_loads(HONCHO_PROFILE_MAP_JSON)
+    if inline is not None:
+        candidates.append(inline)
+    file_data = _safe_json_file(HONCHO_PROFILE_MAP_PATH)
+    if file_data is not None:
+        candidates.append(file_data)
+
+    for data in candidates:
+        if isinstance(data, dict):
+            for key in (uid, uid_norm):
+                if key in data:
+                    target = _profile_target_from_entry(data[key])
+                    if target:
+                        return {**target, "source": "profile_map"}
+            profiles = data.get("profiles") or data.get("users")
+            if isinstance(profiles, list):
+                data = profiles
+        if isinstance(data, list):
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                entry_uid = str(entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or "").lower()
+                if entry_uid != uid_norm:
+                    continue
+                target = _profile_target_from_entry(entry)
+                if target:
+                    return {**target, "source": "profile_map"}
+    return None
+
+
+def _target_from_profile_config(candidate: HonchoFactCandidate) -> dict[str, str] | None:
+    if HONCHO_PROFILE_UID and HONCHO_PROFILE_UID.lower() != candidate.uid.lower():
+        return None
+    data = _safe_json_file(HONCHO_PROFILE_CONFIG_PATH)
+    target = _profile_target_from_entry(data)
+    if target:
+        return {**target, "source": "profile_config"}
+    return None
+
+
+def _resolve_native_honcho_target(
+    candidate: HonchoFactCandidate,
+    *,
+    honcho_workspace: str | None = None,
+    honcho_observer_peer_id: str | None = None,
+    honcho_observed_peer_id: str | None = None,
+) -> tuple[dict[str, str] | None, str]:
+    explicit_workspace = honcho_workspace if honcho_workspace is not None else HONCHO_WORKSPACE
+    explicit_observed = honcho_observed_peer_id if honcho_observed_peer_id is not None else HONCHO_OBSERVED_PEER_ID
+    explicit_observer = honcho_observer_peer_id if honcho_observer_peer_id is not None else HONCHO_OBSERVER_PEER_ID
+
+    if explicit_workspace:
+        return (
+            {
+                "workspace": _honcho_workspace_id(candidate, explicit_workspace),
+                "observer_peer_id": _honcho_resource_id(explicit_observer or "ella-correction-observer"),
+                "observed_peer_id": _honcho_resource_id(
+                    explicit_observed or candidate.uid, prefix="" if explicit_observed else "omi-uid-"
+                ),
+                "source": "explicit_override",
+            },
+            "",
+        )
+
+    target = _target_from_profile_map(candidate.uid) or _target_from_profile_config(candidate)
+    if target:
+        observer_peer_id = explicit_observer or target.get("observer_peer_id") or "ella-correction-observer"
+        return (
+            {
+                "workspace": target["workspace"],
+                "observer_peer_id": _honcho_resource_id(observer_peer_id),
+                "observed_peer_id": target["observed_peer_id"],
+                "source": target.get("source") or "companion_profile",
+            },
+            "",
+        )
+
+    return None, "missing_companion_honcho_target"
 
 
 def _conversation_id(conversation: dict[str, Any]) -> str:
@@ -484,14 +625,31 @@ async def _write_honcho_fact_candidate_via_native_honcho(
     honcho_api_key: str | None = None,
     honcho_workspace: str | None = None,
     honcho_observer_peer_id: str | None = None,
+    honcho_observed_peer_id: str | None = None,
     http_client_factory: Callable[..., Any] = httpx.AsyncClient,
 ) -> HonchoFactWriteDecision:
     api_key = honcho_api_key if honcho_api_key is not None else HONCHO_API_KEY
-    workspace = _honcho_workspace_id(candidate, honcho_workspace)
-    observer_peer_id = _honcho_resource_id(
-        honcho_observer_peer_id or HONCHO_OBSERVER_PEER_ID or "ella-correction-observer"
+    target, target_error = _resolve_native_honcho_target(
+        candidate,
+        honcho_workspace=honcho_workspace,
+        honcho_observer_peer_id=honcho_observer_peer_id,
+        honcho_observed_peer_id=honcho_observed_peer_id,
     )
-    observed_peer_id = _honcho_resource_id(candidate.uid, prefix="omi-uid-")
+    if target is None:
+        return HonchoFactWriteDecision(
+            action="skip",
+            reason=target_error,
+            uid=candidate.uid,
+            correction_id=candidate.correction_id,
+            fingerprint=candidate.fingerprint,
+            idempotency_key=candidate.idempotency_key,
+            confidence=candidate.confidence,
+            session_key=candidate.session_key,
+            response_ref={"transport": "honcho_conclusions"},
+        )
+    workspace = target["workspace"]
+    observer_peer_id = target["observer_peer_id"]
+    observed_peer_id = target["observed_peer_id"]
     session_id = _honcho_resource_id(candidate.session_key)
     base_url = (honcho_base_url or HONCHO_BASE_URL).rstrip("/")
     started = time.monotonic()
@@ -545,6 +703,7 @@ async def _write_honcho_fact_candidate_via_native_honcho(
                         response_ref={
                             "transport": "honcho_conclusions",
                             "workspace": workspace,
+                            "target_source": target.get("source"),
                             "body": getattr(response, "text", "")[:500],
                         },
                     )
@@ -569,6 +728,7 @@ async def _write_honcho_fact_candidate_via_native_honcho(
                     response_ref={
                         "transport": "honcho_conclusions",
                         "workspace": workspace,
+                        "target_source": target.get("source"),
                         "body": getattr(idempotency_response, "text", "")[:500],
                     },
                 )
@@ -604,6 +764,7 @@ async def _write_honcho_fact_candidate_via_native_honcho(
                     response_ref={
                         "transport": "honcho_conclusions",
                         "workspace": workspace,
+                        "target_source": target.get("source"),
                         "observer_peer_id": observer_peer_id,
                         "observed_peer_id": observed_peer_id,
                         "session_id": session_id,
@@ -643,6 +804,7 @@ async def _write_honcho_fact_candidate_via_native_honcho(
                 response_ref={
                     "transport": "honcho_conclusions",
                     "workspace": workspace,
+                    "target_source": target.get("source"),
                     "body": getattr(response, "text", "")[:500],
                 },
             )
@@ -694,6 +856,7 @@ async def _write_honcho_fact_candidate_via_native_honcho(
             response_ref={
                 "transport": "honcho_conclusions",
                 "workspace": workspace,
+                "target_source": target.get("source"),
                 "observer_peer_id": observer_peer_id,
                 "observed_peer_id": observed_peer_id,
                 "session_id": session_id,
@@ -728,6 +891,7 @@ async def write_honcho_fact_candidate(
     honcho_api_key: str | None = None,
     honcho_workspace: str | None = None,
     honcho_observer_peer_id: str | None = None,
+    honcho_observed_peer_id: str | None = None,
     http_client_factory: Callable[..., Any] = httpx.AsyncClient,
 ) -> HonchoFactWriteDecision:
     if not HONCHO_FACT_WRITE_ENABLED:
@@ -774,6 +938,7 @@ async def write_honcho_fact_candidate(
             honcho_api_key=honcho_api_key,
             honcho_workspace=honcho_workspace,
             honcho_observer_peer_id=honcho_observer_peer_id,
+            honcho_observed_peer_id=honcho_observed_peer_id,
             http_client_factory=http_client_factory,
         )
     if selected_transport not in {"hermes", "hermes_chat", "hermes_chat_completions"}:
