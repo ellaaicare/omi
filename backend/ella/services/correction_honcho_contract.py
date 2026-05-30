@@ -14,6 +14,8 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import httpx
 from pydantic import BaseModel, Field
@@ -53,12 +55,16 @@ HONCHO_OBSERVED_PEER_ID = (
 )
 HONCHO_PROFILE_MAP_JSON = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_JSON", "")
 HONCHO_PROFILE_MAP_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_PATH", "")
+HONCHO_PROFILE_MAP_URL = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_URL", "")
+HONCHO_PROFILE_MAP_URL_TOKEN = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_TOKEN", "")
+HONCHO_PROFILE_MAP_URL_TTL_SECONDS = float(os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_MAP_URL_TTL_SECONDS", "30"))
 HONCHO_PROFILE_CONFIG_PATH = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_CONFIG_PATH", "")
 HONCHO_PROFILE_UID = os.getenv("ELLA_CORRECTION_HONCHO_PROFILE_UID", "")
 
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9'_-]{2,}", re.I)
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 HONCHO_RESOURCE_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+_PROFILE_MAP_URL_CACHE: dict[str, Any] = {"url": "", "fetched_at": 0.0, "data": None}
 PERSON_MARKERS = re.compile(
     r"(?i)(?:is|was|named|called|a\\.k\\.a\\.|aka|person is|speaker is)\\s+([A-Z][A-Za-z0-9 .'-]{1,80})"
 )
@@ -161,6 +167,30 @@ def _safe_json_file(path: str) -> Any:
         return None
 
 
+def _safe_json_url(url: str) -> Any:
+    if not str(url or "").strip():
+        return None
+    now = time.monotonic()
+    if (
+        _PROFILE_MAP_URL_CACHE.get("url") == url
+        and _PROFILE_MAP_URL_CACHE.get("data") is not None
+        and now - float(_PROFILE_MAP_URL_CACHE.get("fetched_at") or 0) < HONCHO_PROFILE_MAP_URL_TTL_SECONDS
+    ):
+        return _PROFILE_MAP_URL_CACHE["data"]
+    headers = {"Accept": "application/json"}
+    if HONCHO_PROFILE_MAP_URL_TOKEN:
+        headers["Authorization"] = f"Bearer {HONCHO_PROFILE_MAP_URL_TOKEN}"
+    try:
+        with urlopen(Request(url, headers=headers), timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+        data = data["entries"]
+    _PROFILE_MAP_URL_CACHE.update({"url": url, "fetched_at": now, "data": data})
+    return data
+
+
 def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
     if not isinstance(entry, dict):
         return None
@@ -199,6 +229,9 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
     inline = _safe_json_loads(HONCHO_PROFILE_MAP_JSON)
     if inline is not None:
         candidates.append(inline)
+    url_data = _safe_json_url(HONCHO_PROFILE_MAP_URL)
+    if url_data is not None:
+        candidates.append(url_data)
     file_data = _safe_json_file(HONCHO_PROFILE_MAP_PATH)
     if file_data is not None:
         candidates.append(file_data)
