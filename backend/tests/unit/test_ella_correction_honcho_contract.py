@@ -431,6 +431,7 @@ def test_write_honcho_fact_candidate_native_honcho_fails_closed_without_companio
     monkeypatch.setattr(contract, "HONCHO_OBSERVED_PEER_ID", "")
     monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_JSON", "")
     monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
     monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", "")
     decision = asyncio.run(
         contract.write_honcho_fact_candidate(
@@ -494,6 +495,70 @@ def test_write_honcho_fact_candidate_native_honcho_profile_map_targets_companion
     assert calls[1]["url"] == "http://honcho.test/v3/workspaces/ella-plato-canonical/peers"
     assert calls[2]["json"]["id"] == "plato"
     assert calls[4]["json"]["filters"] == {"observer_id": "ella", "observed_id": "plato"}
+
+
+def test_write_honcho_fact_candidate_native_honcho_profile_map_url_targets_companion_scope(monkeypatch):
+    candidate = _candidate(active_summary_version_id="v1")
+    fake_client, calls = _fake_sequence_client_factory(
+        [
+            FakeJsonResponse(body={"id": "workspace"}),
+            FakeJsonResponse(body={"id": "observer"}),
+            FakeJsonResponse(body={"id": "observed"}),
+            FakeJsonResponse(body={"id": "session"}),
+            FakeJsonResponse(body={"items": []}),
+            FakeJsonResponse(
+                status_code=201,
+                body=[
+                    {
+                        "id": "conclusion-url",
+                        "observer_id": "ella-FirebaseUID-A",
+                        "observed_id": "user-FirebaseUID-A",
+                        "session_id": "ella-omi-user-123-canonical",
+                    }
+                ],
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(contract, "HONCHO_FACT_WRITE_ENABLED", True)
+    monkeypatch.setattr(contract, "HONCHO_WORKSPACE", "")
+    monkeypatch.setattr(contract, "HONCHO_OBSERVED_PEER_ID", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_JSON", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(
+        contract, "HONCHO_PROFILE_MAP_URL", "http://provision.test/honcho/profile-map?includeEntries=true"
+    )
+    monkeypatch.setattr(
+        contract,
+        "_safe_json_url",
+        lambda url: {
+            "user-123": {
+                "workspace": "ella-omi-firebaseuid-a-canonical",
+                "observed_peer_id": "user-FirebaseUID-A",
+                "observer_peer_id": "ella-FirebaseUID-A",
+            }
+        },
+    )
+
+    decision = asyncio.run(
+        contract.write_honcho_fact_candidate(
+            candidate,
+            current_conversation=_conversation("related", uid="user-123", version="v1"),
+            transport="honcho",
+            honcho_base_url="http://honcho.test",
+            http_client_factory=fake_client,
+        )
+    )
+
+    assert decision.action == "written"
+    assert decision.response_ref["workspace"] == "ella-omi-firebaseuid-a-canonical"
+    assert decision.response_ref["observer_peer_id"] == "ella-FirebaseUID-A"
+    assert decision.response_ref["observed_peer_id"] == "user-FirebaseUID-A"
+    assert decision.response_ref["target_source"] == "profile_map"
+    assert calls[4]["json"]["filters"] == {
+        "observer_id": "ella-FirebaseUID-A",
+        "observed_id": "user-FirebaseUID-A",
+    }
 
 
 def test_write_honcho_fact_candidate_native_honcho_profile_config_prefers_host_ai_peer(monkeypatch, tmp_path):
