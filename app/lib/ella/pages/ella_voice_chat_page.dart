@@ -13,7 +13,6 @@ import 'package:speech_to_text/speech_to_text.dart';
 
 import 'package:uuid/uuid.dart';
 
-import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
@@ -37,8 +36,7 @@ class EllaVoiceChatPage extends StatefulWidget {
   State<EllaVoiceChatPage> createState() => _EllaVoiceChatPageState();
 }
 
-class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
-    with AutomaticKeepAliveClientMixin {
+class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKeepAliveClientMixin {
   VoiceOrbState _orbState = VoiceOrbState.idle;
   double _audioLevel = 0.0;
   String _statusText = 'Tap to Pause';
@@ -53,7 +51,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
   StreamSubscription? _playerSub;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
-  bool _didPauseCaptureRecording = false;
   String _currentWords = '';
 
   /// Guard against concurrent _startListening() calls
@@ -94,8 +91,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
   );
 
   /// Check if current TTS provider is a V2V provider.
-  static bool _isV2VProvider(String provider) =>
-      provider == 'grok-voice' || provider == 'gemini-live';
+  static bool _isV2VProvider(String provider) => provider == 'grok-voice' || provider == 'gemini-live';
 
   @override
   bool get wantKeepAlive => true;
@@ -105,8 +101,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
     super.initState();
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed &&
-          _orbState == VoiceOrbState.speaking) {
+      if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
         // Immediately transition out of speaking to prevent duplicate triggers
         _orbState = VoiceOrbState.idle;
         if (_voiceModeActive) {
@@ -159,8 +154,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
     _speechAvailable = await _speech.initialize(
       onError: (error) {
         debugPrint('[VoiceChat] Speech error: ${error.errorMsg}');
-        if (error.errorMsg == 'error_no_match' &&
-            _orbState == VoiceOrbState.listening) {
+        if (error.errorMsg == 'error_no_match' && _orbState == VoiceOrbState.listening) {
           if (_currentWords.isNotEmpty) {
             _processTranscript(_currentWords);
           } else if (_voiceModeActive) {
@@ -385,7 +379,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
       if (captureProvider.recordingState == RecordingState.record) {
         debugPrint('[VoiceChat] Pausing capture recording to free mic');
         await captureProvider.stopStreamRecording();
-        _didPauseCaptureRecording = true;
       }
     }
 
@@ -481,7 +474,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
       if (captureProvider.recordingState == RecordingState.record) {
         debugPrint('[VoiceChat] Pausing capture recording for V2V');
         await captureProvider.stopStreamRecording();
-        _didPauseCaptureRecording = true;
       }
     }
 
@@ -563,9 +555,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
         break;
       case 'audio_done':
         // Inject into chat history once per turn (using final transcript)
-        if (!_v2vTurnInjected &&
-            _lastUserText.isNotEmpty &&
-            _lastEllaText.isNotEmpty) {
+        if (!_v2vTurnInjected && _lastUserText.isNotEmpty && _lastEllaText.isNotEmpty) {
           _injectVoiceMessages(_lastUserText, _lastEllaText);
           _v2vTurnInjected = true;
         }
@@ -671,8 +661,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
       await for (var chunk in sendEllaChatStream(transcript)) {
         if (chunk.type == MessageChunkType.data) {
           replyBuffer.write(chunk.text);
-        } else if (chunk.type == MessageChunkType.done &&
-            chunk.message != null) {
+        } else if (chunk.type == MessageChunkType.done && chunk.message != null) {
           if (chunk.message!.text.isNotEmpty) {
             replyBuffer.clear();
             replyBuffer.write(chunk.message!.text);
@@ -769,14 +758,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
     await session.configure(
       AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-        avAudioSessionCategoryOptions:
-            AVAudioSessionCategoryOptions.defaultToSpeaker |
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
             AVAudioSessionCategoryOptions.allowBluetooth |
             AVAudioSessionCategoryOptions.allowBluetoothA2dp |
             AVAudioSessionCategoryOptions.allowAirPlay,
         avAudioSessionMode: AVAudioSessionMode.defaultMode,
-        avAudioSessionRouteSharingPolicy:
-            AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
         avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
       ),
     );
@@ -786,10 +773,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage>
 
   /// Strip emojis from text so TTS doesn't read them aloud.
   String _stripEmojis(String text) {
-    return text
-        .replaceAll(_emojiRegex, '')
-        .replaceAll(RegExp(r'  +'), ' ')
-        .trim();
+    return text.replaceAll(_emojiRegex, '').replaceAll(RegExp(r'  +'), ' ').trim();
   }
 
   /// Inject voice exchange into MessageProvider so Chat tab shows it.
