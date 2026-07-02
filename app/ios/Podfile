@@ -91,6 +91,57 @@ post_install do |installer|
     end
   end
 
+  # flutter_soloud 3.5.0 declares device-only codec archives as vendored
+  # libraries, so CocoaPods injects them into the Runner aggregate linker flags
+  # even for simulator builds. The package also ships simulator archives; keep
+  # the aggregate flags SDK-specific so screenshot/debug simulator builds link
+  # simulator archives while device/TestFlight builds keep the device archives.
+  soloud_codec_library_pairs = {
+    'flac_iOS-device' => 'flac_iOS-simulator',
+    'ogg_iOS-device' => 'ogg_iOS-simulator',
+    'opus_iOS-device' => 'opus_iOS-simulator',
+    'vorbis_iOS-device' => 'vorbis_iOS-simulator',
+    'vorbisfile_iOS-device' => 'vorbisfile_iOS-simulator',
+  }
+
+  Dir.glob(File.join(installer.sandbox.root.to_s, 'Target Support Files', 'Pods-Runner', 'Pods-Runner*.xcconfig')).each do |xcconfig_path|
+    contents = File.read(xcconfig_path)
+    next unless soloud_codec_library_pairs.keys.any? { |library_name| contents.include?(library_name) }
+
+    lines = contents.lines.reject do |line|
+      line.start_with?('OTHER_LDFLAGS[sdk=iphoneos*] =') ||
+        line.start_with?('OTHER_LDFLAGS[sdk=iphonesimulator*] =')
+    end
+    updated_lines = []
+
+    lines.each do |line|
+      unless line.start_with?('OTHER_LDFLAGS =')
+        updated_lines << line
+        next
+      end
+
+      base_flags = line.dup
+      soloud_codec_library_pairs.each do |device_library, simulator_library|
+        base_flags = base_flags
+          .gsub(" -l\"#{device_library}\"", '')
+          .gsub(" -l#{device_library}", '')
+      end
+
+      base_flag_values = base_flags.sub('OTHER_LDFLAGS =', '').strip
+      device_archives = soloud_codec_library_pairs.keys.map { |library_name| "-l\"#{library_name}\"" }.join(' ')
+      simulator_archives = soloud_codec_library_pairs.values.map { |library_name| "-l\"#{library_name}\"" }.join(' ')
+      device_flags = "#{base_flag_values} #{device_archives}".strip
+      simulator_flags = "#{base_flag_values} #{simulator_archives}".strip
+
+      updated_lines << base_flags
+      updated_lines << "OTHER_LDFLAGS[sdk=iphoneos*] = #{device_flags}\n"
+      updated_lines << "OTHER_LDFLAGS[sdk=iphonesimulator*] = #{simulator_flags}\n"
+    end
+
+    updated_contents = updated_lines.join
+    File.write(xcconfig_path, updated_contents) unless updated_contents == contents
+  end
+
 #   ################  Awesome Notifications pod modification 1 ###################
 #   awesome_pod_file = File.expand_path(File.join('plugins', 'awesome_notifications', 'ios', 'Scripts', 'AwesomePodFile'), '.symlinks')
 #   require awesome_pod_file
