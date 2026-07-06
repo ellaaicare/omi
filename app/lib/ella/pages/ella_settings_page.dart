@@ -156,7 +156,9 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
-    final deviceName = context.watch<DeviceProvider>().connectedDevice?.name ?? 'Not connected';
+    final deviceProvider = context.watch<DeviceProvider>();
+    final deviceName =
+        deviceProvider.presentationConnectedDevice?.name ?? deviceProvider.connectedDevice?.name ?? 'Not connected';
     final userProvider = context.watch<UserProvider>();
 
     return Scaffold(

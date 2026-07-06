@@ -19,6 +19,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/main.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -27,6 +28,8 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/file.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+
+bool get _isEllaApp => true;
 
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
@@ -389,12 +392,19 @@ class MessageProvider extends ChangeNotifier {
 
   Future refreshMessages({bool dropdownSelected = false}) async {
     setLoadingMessages(true);
+    if (SharedPreferencesUtil().demoMode) {
+      messages = DemoFixtures.chatMessages();
+      setHasCachedMessages(true);
+      setLoadingMessages(false);
+      notifyListeners();
+      return;
+    }
     if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
       setHasCachedMessages(true);
     }
 
     // Ella mode: use local cache first, fall back to server history API.
-    const isEllaApp = true; // TODO: replace with flavor check
+    final isEllaApp = _isEllaApp; // TODO: replace with flavor check
     if (isEllaApp) {
       final cached = SharedPreferencesUtil().cachedMessages;
       if (cached.isNotEmpty) {
@@ -601,6 +611,13 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future sendMessageStreamToServer(String text) async {
+    if (SharedPreferencesUtil().demoMode) {
+      messages = DemoFixtures.chatMessages();
+      setSendingMessage(false);
+      setShowTypingIndicator(false);
+      notifyListeners();
+      return;
+    }
     aiStreamProgress = 0.0;
     setShowTypingIndicator(true);
     var currentAppId = appProvider?.selectedChatAppId;
@@ -644,7 +661,7 @@ class MessageProvider extends ChangeNotifier {
 
     try {
       // Ella uses its own simple chat endpoint; OMI uses the graph chat
-      const isEllaApp = true; // TODO: replace with flavor check
+      final isEllaApp = _isEllaApp; // TODO: replace with flavor check
       var stream =
           isEllaApp ? sendEllaChatStream(text) : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
       await for (var chunk in stream) {

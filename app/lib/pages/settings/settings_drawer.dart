@@ -2,7 +2,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
 import 'package:omi/pages/persona/persona_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
@@ -398,7 +397,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
               ),
               Consumer<DeviceProvider>(
                 builder: (context, deviceProvider, child) {
-                  if (!deviceProvider.isConnected) {
+                  if (!deviceProvider.presentationIsConnected) {
                     return const SizedBox.shrink();
                   }
                   return Column(

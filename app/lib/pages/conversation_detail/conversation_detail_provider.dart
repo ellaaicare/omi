@@ -14,6 +14,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -225,11 +226,19 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       print('titleFocusNode focus changed');
       if (!titleFocusNode!.hasFocus) {
         conversation.structured.title = titleController!.text;
-        updateConversationTitle(conversation.id, titleController!.text);
+        if (!SharedPreferencesUtil().demoMode) {
+          updateConversationTitle(conversation.id, titleController!.text);
+        }
       }
     });
 
     canDisplaySeconds = TranscriptSegment.canDisplaySeconds(conversation.transcriptSegments);
+
+    if (SharedPreferencesUtil().demoMode) {
+      hasAudioRecording = false;
+      notifyListeners();
+      return;
+    }
 
     loadPreferredSummarizationApp();
 
@@ -493,6 +502,15 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   Future<void> refreshConversation() async {
+    if (SharedPreferencesUtil().demoMode) {
+      final fixture = DemoFixtures.conversationById(conversation.id);
+      if (fixture != null) {
+        _cachedConversation = fixture;
+        conversationProvider?.updateConversation(fixture);
+        notifyListeners();
+      }
+      return;
+    }
     try {
       final updatedConversation = await getConversationById(conversation.id);
       if (_isDisposed) return;

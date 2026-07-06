@@ -26,7 +26,8 @@ class BatteryInfoWidget extends StatelessWidget {
         // Use Selector to only rebuild when battery level, connected device, or connecting state changes
         // This reduces battery drain by avoiding unnecessary rebuilds during other provider updates
         return Selector<DeviceProvider, (int, BtDevice?, bool)>(
-          selector: (_, provider) => (provider.batteryLevel, provider.connectedDevice, provider.isConnecting),
+          selector: (_, provider) =>
+              (provider.presentationBatteryLevel, provider.presentationConnectedDevice, provider.isConnecting),
           builder: (context, data, child) {
             final (batteryLevel, connectedDevice, isConnecting) = data;
             if (connectedDevice != null) {

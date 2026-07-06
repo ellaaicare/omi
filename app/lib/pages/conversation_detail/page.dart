@@ -11,6 +11,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:tuple/tuple.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -39,8 +40,6 @@ import 'widgets/internal_assessment_debug_sheet.dart';
 import 'widgets/name_speaker_sheet.dart';
 import 'widgets/share_to_contacts_sheet.dart';
 import 'package:omi/ella/ella_theme.dart';
-
-// import 'package:omi/backend/preferences.dart';
 
 // import 'share.dart';
 // import 'package:omi/pages/settings/developer.dart';
@@ -190,11 +189,14 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
 
       final provider = Provider.of<ConversationDetailProvider>(context, listen: false);
       final conversationProvider = Provider.of<ConversationProvider>(context, listen: false);
+      final demoMode = SharedPreferencesUtil().demoMode;
 
       // Ensure the provider has the conversation data from the widget parameter
       provider.setCachedConversation(widget.conversation);
       // Fire-and-forget refresh so enriched [Ella] titles are always shown (#508)
-      provider.refreshConversation();
+      if (!demoMode) {
+        provider.refreshConversation();
+      }
 
       conversationProvider.groupConversationsByDate();
 
@@ -209,7 +211,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       }
 
       await provider.initConversation();
-      if (provider.conversation.appResults.isEmpty) {
+      if (!demoMode && provider.conversation.appResults.isEmpty) {
         final date = provider.selectedDate;
         final idx = conversationProvider.getConversationIndexById(provider.conversation.id, date);
         if (idx != -1) {
@@ -219,7 +221,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       }
 
       // Check if this is the first conversation and show app review prompt
-      if (await _appReviewService.isFirstConversation()) {
+      if (!demoMode && await _appReviewService.isFirstConversation()) {
         if (mounted) {
           await _appReviewService.showReviewPromptIfNeeded(context, isProcessingFirstConversation: true);
         }
@@ -752,7 +754,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                                       });
                                       return;
                                     }
-                                    String content = 'https://ella-ai-care.com/conversations/${provider.conversation.id}';
+                                    String content =
+                                        'https://ella-ai-care.com/conversations/${provider.conversation.id}';
                                     // Track share event
                                     MixpanelManager().conversationShared(
                                       conversation: provider.conversation,
