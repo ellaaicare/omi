@@ -1330,8 +1330,8 @@ class _SummaryTabState extends State<SummaryTab> with AutomaticKeepAliveClientMi
 
   void _maybeShowInternalAssessment(BuildContext context) {
     final conversation = context.read<ConversationDetailProvider>().conversation;
-    if (!DebugInternalAssessmentSheet.isSupported(
-      conversation,
+    if (!shouldShowInternalAssessmentDebugUi(
+      conversation: conversation,
       isDebugMode: kDebugMode,
       isIOS: PlatformService.isIOS,
     )) {
