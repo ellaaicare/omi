@@ -69,7 +69,7 @@ class SharedPreferencesUtil {
   }
 
   BtDevice get btDevice {
-    final String device = getString('btDevice') ?? '';
+    final String device = getString('btDevice');
     if (device.isEmpty) return BtDevice(id: '', name: '', type: DeviceType.omi, rssi: 0);
     return BtDevice.fromJson(jsonDecode(device));
   }
@@ -180,6 +180,10 @@ class SharedPreferencesUtil {
   set dailyReflectionEnabled(bool value) => saveBool('dailyReflectionEnabled', value);
 
   bool get dailyReflectionEnabled => getBool('dailyReflectionEnabled', defaultValue: true);
+
+  set demoMode(bool value) => saveBool('demoMode', value);
+
+  bool get demoMode => getBool('demoMode', defaultValue: false);
 
   // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
   set notificationFrequency(int value) => saveInt('notificationFrequency', value);

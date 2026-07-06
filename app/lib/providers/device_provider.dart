@@ -41,6 +41,23 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
   bool _havingNewFirmware = false;
   bool get havingNewFirmware => _havingNewFirmware && pairedDevice != null && isConnected;
 
+  BtDevice? get presentationConnectedDevice => SharedPreferencesUtil().demoMode ? _demoDevice : connectedDevice;
+
+  BtDevice? get presentationPairedDevice => SharedPreferencesUtil().demoMode ? _demoDevice : pairedDevice;
+
+  bool get presentationIsConnected => SharedPreferencesUtil().demoMode ? true : isConnected;
+
+  int get presentationBatteryLevel => SharedPreferencesUtil().demoMode ? 96 : batteryLevel;
+
+  static final BtDevice _demoDevice = BtDevice(
+    name: 'Ella',
+    id: 'demo-device',
+    type: DeviceType.omi,
+    rssi: 0,
+    modelNumber: 'Demo',
+    firmwareRevision: 'Demo',
+  );
+
   // Track firmware update state to prevent showing dialog during updates
   bool _isFirmwareUpdateInProgress = false;
   bool get isFirmwareUpdateInProgress => _isFirmwareUpdateInProgress;
@@ -580,8 +597,6 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
           _disconnectDebouncer.run(onDeviceDisconnected);
         }
         break;
-      default:
-        Logger.debug("Device connection state is not supported $state");
     }
   }
 

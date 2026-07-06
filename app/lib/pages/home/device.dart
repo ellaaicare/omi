@@ -178,6 +178,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   }
 
   Widget _buildBatterySection(DeviceProvider provider) {
+    final batteryLevel = provider.presentationBatteryLevel;
     return Container(
       decoration: BoxDecoration(
         color: EllaColors.bgSecondary,
@@ -193,8 +194,8 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               child: Padding(
                 padding: const EdgeInsets.only(left: 2, top: 1),
                 child: FaIcon(
-                  _getBatteryIcon(provider.batteryLevel),
-                  color: _getBatteryColor(provider.batteryLevel),
+                  _getBatteryIcon(batteryLevel),
+                  color: _getBatteryColor(batteryLevel),
                   size: 20,
                 ),
               ),
@@ -217,7 +218,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                 borderRadius: BorderRadius.circular(100),
               ),
               child: Text(
-                '${provider.batteryLevel}%',
+                '$batteryLevel%',
                 style: const TextStyle(
                   color: EllaColors.textPrimary,
                   fontSize: 13,
@@ -232,6 +233,10 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   }
 
   Widget _buildActionsSection(DeviceProvider provider) {
+    if (SharedPreferencesUtil().demoMode) {
+      return const SizedBox.shrink();
+    }
+
     final syncProvider = context.watch<SyncProvider>();
     final pendingSeconds = syncProvider.missingWalsInSeconds;
 
@@ -253,14 +258,15 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                     : null,
             onTap: provider.connectedDevice != null
                 ? () {
+                    final connectedDevice = provider.connectedDevice!;
                     // Route to OmiGlass OTA page for openglass devices
-                    final deviceName = provider.connectedDevice?.name?.toLowerCase() ?? '';
-                    final isOpenGlass = provider.connectedDevice?.type == DeviceType.openglass ||
+                    final deviceName = connectedDevice.name.toLowerCase();
+                    final isOpenGlass = connectedDevice.type == DeviceType.openglass ||
                         deviceName.contains('openglass') ||
                         deviceName.contains('omiglass') ||
                         deviceName.contains('glass');
-                    debugPrint('ProductUpdate: connectedDevice type: ${provider.connectedDevice?.type}');
-                    debugPrint('ProductUpdate: connectedDevice name: "${provider.connectedDevice?.name}"');
+                    debugPrint('ProductUpdate: connectedDevice type: ${connectedDevice.type}');
+                    debugPrint('ProductUpdate: connectedDevice name: "${connectedDevice.name}"');
                     debugPrint('ProductUpdate: deviceName lowercase: "$deviceName"');
                     debugPrint('ProductUpdate: isOpenGlass: $isOpenGlass');
                     if (isOpenGlass) {
@@ -468,13 +474,14 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   }
 
   Widget _buildDeviceInfoSection(DeviceProvider provider) {
-    final deviceName = provider.pairedDevice?.name ?? context.l10n.unknownDevice;
-    final modelNumber = provider.pairedDevice?.modelNumber ?? context.l10n.unknown;
-    final manufacturer = provider.pairedDevice?.manufacturerName ?? context.l10n.unknown;
-    final firmware = provider.pairedDevice?.firmwareRevision ?? context.l10n.unknown;
-    final deviceId = provider.pairedDevice?.id ?? context.l10n.unknown;
-    final serialNumber = provider.pairedDevice?.serialNumber ??
-        provider.pairedDevice?.id.replaceAll(':', '').replaceAll('-', '').toUpperCase() ??
+    final pairedDevice = provider.presentationPairedDevice;
+    final deviceName = pairedDevice?.name ?? context.l10n.unknownDevice;
+    final modelNumber = pairedDevice?.modelNumber ?? context.l10n.unknown;
+    final manufacturer = pairedDevice?.manufacturerName ?? context.l10n.unknown;
+    final firmware = pairedDevice?.firmwareRevision ?? context.l10n.unknown;
+    final deviceId = pairedDevice?.id ?? context.l10n.unknown;
+    final serialNumber = pairedDevice?.serialNumber ??
+        pairedDevice?.id.replaceAll(':', '').replaceAll('-', '').toUpperCase() ??
         context.l10n.unknown;
 
     String truncateValue(String value) {
@@ -546,6 +553,11 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
   @override
   Widget build(BuildContext context) {
     return Consumer2<DeviceProvider, CaptureProvider>(builder: (context, provider, captureProvider, child) {
+      final connectedDevice = provider.presentationConnectedDevice;
+      final pairedDevice = provider.presentationPairedDevice;
+      final isConnected = provider.presentationIsConnected;
+      final batteryLevel = provider.presentationBatteryLevel;
+
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,
         appBar: AppBar(
@@ -565,7 +577,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               Column(
                 children: [
                   Text(
-                    provider.pairedDevice?.name ?? context.l10n.unknownDevice,
+                    pairedDevice?.name ?? context.l10n.unknownDevice,
                     style: const TextStyle(
                       color: EllaColors.textPrimary,
                       fontSize: 32,
@@ -577,9 +589,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: provider.connectedDevice != null
-                          ? Colors.green.withValues(alpha: 0.2)
-                          : Colors.grey.withValues(alpha: 0.2),
+                      color: isConnected ? Colors.green.withValues(alpha: 0.2) : Colors.grey.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Row(
@@ -589,15 +599,15 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
                           width: 6,
                           height: 6,
                           decoration: BoxDecoration(
-                            color: provider.connectedDevice != null ? Colors.green : Colors.grey,
+                            color: isConnected ? Colors.green : Colors.grey,
                             shape: BoxShape.circle,
                           ),
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          provider.connectedDevice != null ? context.l10n.connected : context.l10n.offline,
+                          isConnected ? context.l10n.connected : context.l10n.offline,
                           style: TextStyle(
-                            color: provider.connectedDevice != null ? Colors.green : Colors.grey,
+                            color: isConnected ? Colors.green : Colors.grey,
                             fontSize: 14,
                             fontWeight: FontWeight.w500,
                           ),
@@ -609,17 +619,17 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               ),
               const SizedBox(height: 32),
               DeviceAnimationWidget(
-                deviceType: provider.connectedDevice?.type,
-                modelNumber: provider.connectedDevice?.modelNumber,
-                isConnected: provider.connectedDevice != null,
-                deviceName: provider.connectedDevice?.name ?? provider.pairedDevice?.name,
-                animatedBackground: provider.connectedDevice != null,
+                deviceType: connectedDevice?.type,
+                modelNumber: connectedDevice?.modelNumber,
+                isConnected: isConnected,
+                deviceName: connectedDevice?.name ?? pairedDevice?.name,
+                animatedBackground: isConnected,
               ),
 
               const SizedBox(height: 24),
 
               // Battery Level Section
-              if (provider.connectedDevice != null && provider.batteryLevel > 0) ...[
+              if (isConnected && batteryLevel > 0) ...[
                 _buildBatterySection(provider),
                 const SizedBox(height: 16),
               ],
@@ -632,7 +642,7 @@ class _ConnectedDeviceState extends State<ConnectedDevice> {
               _buildDeviceInfoSection(provider),
 
               // Streaming Metrics Section - Bottom
-              if (provider.connectedDevice != null && captureProvider.havingRecordingDevice) ...[
+              if (isConnected && captureProvider.havingRecordingDevice) ...[
                 const SizedBox(height: 32),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,

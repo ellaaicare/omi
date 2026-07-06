@@ -34,6 +34,7 @@ class DeveloperModeProvider extends BaseProvider {
   bool autoCreateSpeakersEnabled = false;
   bool showGoalTrackerEnabled = true; // Default to true
   bool dailyReflectionEnabled = true;
+  bool demoMode = false;
 
   void onConversationEventsToggled(bool value) {
     conversationEventsToggled = value;
@@ -106,6 +107,7 @@ class DeveloperModeProvider extends BaseProvider {
     autoCreateSpeakersEnabled = SharedPreferencesUtil().autoCreateSpeakersEnabled;
     showGoalTrackerEnabled = SharedPreferencesUtil().showGoalTrackerEnabled;
     dailyReflectionEnabled = SharedPreferencesUtil().dailyReflectionEnabled;
+    demoMode = SharedPreferencesUtil().demoMode;
     conversationEventsToggled = SharedPreferencesUtil().conversationEventsToggled;
     transcriptsToggled = SharedPreferencesUtil().transcriptsToggled;
     audioBytesToggled = SharedPreferencesUtil().audioBytesToggled;
@@ -211,6 +213,7 @@ class DeveloperModeProvider extends BaseProvider {
     prefs.transcriptionDiagnosticEnabled = transcriptionDiagnosticEnabled;
     prefs.autoCreateSpeakersEnabled = autoCreateSpeakersEnabled;
     prefs.showGoalTrackerEnabled = showGoalTrackerEnabled;
+    prefs.demoMode = demoMode;
 
     MixpanelManager().settingsSaved(
       hasWebhookConversationCreated: conversationEventsToggled,
@@ -260,6 +263,12 @@ class DeveloperModeProvider extends BaseProvider {
       DailyReflectionNotification.cancelNotification();
     }
 
+    notifyListeners();
+  }
+
+  void onDemoModeChanged(bool value) {
+    demoMode = value;
+    SharedPreferencesUtil().demoMode = value;
     notifyListeners();
   }
 }

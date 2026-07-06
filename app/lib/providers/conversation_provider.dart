@@ -7,6 +7,7 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/services/app_review_service.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
@@ -94,6 +95,13 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future updateSearchedConvoDetails(String id, DateTime date, int idx) async {
+    if (SharedPreferencesUtil().demoMode) {
+      final convo = DemoFixtures.conversationById(id);
+      if (convo != null) {
+        updateSpecificGroupedConvo(convo, date, idx);
+      }
+      return;
+    }
     var convo = await getConversationById(id);
     if (convo != null) {
       updateSpecificGroupedConvo(convo, date, idx);
@@ -107,6 +115,23 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future<void> searchConversations(String query, {bool showShimmer = false}) async {
+    if (SharedPreferencesUtil().demoMode) {
+      previousQuery = query;
+      currentSearchPage = 0;
+      totalSearchPages = 0;
+      searchedConversations = query.isEmpty
+          ? []
+          : DemoFixtures.conversations()
+              .where((conversation) => conversation.structured.title.toLowerCase().contains(query.toLowerCase()))
+              .toList();
+      if (query.isEmpty) {
+        groupConversationsByDate();
+      } else {
+        groupSearchConvosByDate();
+      }
+      return;
+    }
+
     if (query.isEmpty) {
       previousQuery = "";
       currentSearchPage = 0;
@@ -263,6 +288,11 @@ class ConversationProvider extends ChangeNotifier {
 
   /// Check if user has any daily summaries
   Future<void> checkHasDailySummaries() async {
+    if (SharedPreferencesUtil().demoMode) {
+      hasDailySummaries = true;
+      notifyListeners();
+      return;
+    }
     final summaries = await getDailySummaries(limit: 1, offset: 0);
     hasDailySummaries = summaries.isNotEmpty;
     notifyListeners();
@@ -320,6 +350,10 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future _fetchNewConversations() async {
+    if (SharedPreferencesUtil().demoMode) {
+      await fetchConversations();
+      return;
+    }
     setLoadingConversations(true);
     List<ServerConversation> newConversations = await _getConversationsFromServer();
     setLoadingConversations(false);
@@ -363,7 +397,8 @@ class ConversationProvider extends ChangeNotifier {
     searchedConversations = [];
 
     setLoadingConversations(true);
-    conversations = await _getConversationsFromServer();
+    conversations =
+        SharedPreferencesUtil().demoMode ? DemoFixtures.conversations() : await _getConversationsFromServer();
     setLoadingConversations(false);
 
     // processing convos
@@ -542,6 +577,7 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future getMoreConversationsFromServer() async {
+    if (SharedPreferencesUtil().demoMode) return;
     if (conversations.length % 50 != 0) return;
     if (isLoadingConversations) return;
     setLoadingConversations(true);

@@ -769,6 +769,23 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                   ),
                   const SizedBox(height: 32),
 
+                  _buildSectionHeader('Demo'),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1C1C1E),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: _buildExperimentalItem(
+                      title: 'Demo Mode',
+                      description: 'Use curated local content for screenshots',
+                      icon: FontAwesomeIcons.images,
+                      value: provider.demoMode,
+                      onChanged: provider.onDemoModeChanged,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+
                   // TTS Provider Section
                   _buildSectionHeader('Voice (TTS)', subtitle: 'Text-to-speech engine for Ella voice responses'),
                   Container(

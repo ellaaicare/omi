@@ -8,6 +8,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/backend/schema/geolocation.dart';
 import 'package:omi/backend/schema/person.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/subscription.dart';
 import 'package:omi/models/user_usage.dart';
@@ -565,6 +566,10 @@ Future<bool> setDailySummarySettings({bool? enabled, int? hour}) async {
 // Daily Summaries API
 
 Future<List<DailySummary>> getDailySummaries({int limit = 30, int offset = 0}) async {
+  if (SharedPreferencesUtil().demoMode) {
+    return offset == 0 ? DemoFixtures.dailySummaries() : [];
+  }
+
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/daily-summaries?limit=$limit&offset=$offset',
     headers: {},
@@ -584,6 +589,10 @@ Future<List<DailySummary>> getDailySummaries({int limit = 30, int offset = 0}) a
 }
 
 Future<DailySummary?> getDailySummary(String summaryId) async {
+  if (SharedPreferencesUtil().demoMode) {
+    return DemoFixtures.dailySummary();
+  }
+
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/daily-summaries/$summaryId',
     headers: {},

@@ -7,6 +7,7 @@ import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -183,6 +184,10 @@ ServerMessageChunk? _parseOpenAiSseChunk(String line, String messageId) {
 /// Fetch chat history from the VPS proxy endpoint.
 /// Returns messages in chronological order (oldest first), or empty list on failure.
 Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
+  if (SharedPreferencesUtil().demoMode) {
+    return DemoFixtures.chatMessages();
+  }
+
   final endpoint = await _resolveEndpoint();
   if (endpoint == null || endpoint.historyUrl.isEmpty) {
     Logger.debug(
@@ -254,6 +259,12 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
 Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
+  if (SharedPreferencesUtil().demoMode) {
+    final message = DemoFixtures.chatMessages().last;
+    yield ServerMessageChunk(message.id, message.text, MessageChunkType.done, message: message);
+    return;
+  }
+
   // Feature flag — delegate to existing proxy path if disabled
   if (!_useDirectChat) {
     yield* sendEllaMessageStream(
