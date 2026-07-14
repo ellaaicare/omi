@@ -51,19 +51,23 @@ def get_proposal_by_idempotency_key(profile_uid: str, idempotency_key: str) -> O
 def list_proposals(profile_uid: str, status: str = "", limit: int = 20) -> list[Proposal]:
     if not profile_uid:
         return []
+    result_limit = max(1, min(int(limit), 500 if status else 100))
     query = _collection(profile_uid)
     if status:
         query = query.where(filter=FieldFilter("status", "==", status))
-        docs = query.limit(100).stream()
+        # Firestore applies limit before client-side sorting. Do not pre-limit
+        # filtered proposal scans, or recent Observer/MCP proposals can be
+        # hidden behind older submitted documents and never auto-applied.
+        docs = query.stream()
     else:
         docs = (
             query.order_by("created_at", direction=firestore.Query.DESCENDING)
-            .limit(max(1, min(int(limit), 100)))
+            .limit(result_limit)
             .stream()
         )
     proposals = [proposal for doc in docs if (proposal := proposal_from_dict(doc.to_dict() or {})) is not None]
     proposals.sort(key=lambda proposal: proposal.created_at, reverse=True)
-    return proposals[: max(1, min(int(limit), 100))]
+    return proposals[:result_limit]
 
 
 def update_proposal_status(
