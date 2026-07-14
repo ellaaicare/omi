@@ -366,6 +366,60 @@ def test_companion_submit_observation_creates_memory_proposal(monkeypatch):
     assert proposal["payload"]["evidence"][0]["event_id"] == "MCP-WRITE-PROBE-4417"
 
 
+def test_companion_submit_observation_rejects_read_only_session_token(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    captured = {"write_called": False, "proposal_called": False}
+
+    class FakeCanonicalStore:
+        async def write_batch(self, events):
+            captured["write_called"] = True
+            return {"ok": True, "inserted": len(events), "duplicates": 0}
+
+    def fake_validate(token):
+        assert token == "read-only-session-token"
+        return {
+            "profile_uid": module._plato_uid(),
+            "role": "self",
+            "scopes": ["tools:read", "startup:read", "timeline:read", "memory:read"],
+            "allowed_tools": ["companion_start_here", "plato_search_memory", "companion_submit_observation"],
+            "grant_id": "read-only-grant",
+            "external_provider": "grok",
+        }
+
+    def fake_create(**kwargs):
+        captured["proposal_called"] = True
+        return {}
+
+    monkeypatch.setattr(module, "validate_mcp_session_token", fake_validate)
+    monkeypatch.setattr(module, "_canonical_store", FakeCanonicalStore())
+    monkeypatch.setattr(module.proposal_ingest, "create_proposal", fake_create)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer read-only-session-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_submit_observation",
+                "arguments": {
+                    "channel": "grok_conversation",
+                    "title": "Read-only probe",
+                    "text": "This read-only MCP session must not write a durable memory proposal.",
+                    "idempotency_key": "READ-ONLY-MCP-WRITE-PROBE",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["error"]["code"] == -32003
+    assert "observations:write" in payload["error"]["message"]
+    assert captured["write_called"] is False
+    assert captured["proposal_called"] is False
+
+
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)

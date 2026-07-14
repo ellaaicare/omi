@@ -114,6 +114,13 @@ class MCPSession:
     sse_queue: asyncio.Queue[dict[str, Any] | None] = field(default_factory=asyncio.Queue)
 
 
+@dataclass(frozen=True)
+class MCPAuthContext:
+    token_fingerprint: str
+    trusted_static_token: bool
+    session_claims: dict[str, Any]
+
+
 class ToolExecutionError(Exception):
     def __init__(self, message: str, code: int = -32000):
         super().__init__(message)
@@ -186,7 +193,7 @@ _WWW_AUTHENTICATE = (
 )
 
 
-def _authenticate(authorization: Optional[str]) -> str:
+def _authenticate(authorization: Optional[str]) -> MCPAuthContext:
     token = _token_from_authorization(authorization)
     if not token:
         raise HTTPException(
@@ -198,7 +205,11 @@ def _authenticate(authorization: Optional[str]) -> str:
     tokens = _allowed_tokens()
     if token in tokens:
         _check_rate_limit(token)
-        return _fingerprint(token)
+        return MCPAuthContext(
+            token_fingerprint=_fingerprint(token),
+            trusted_static_token=True,
+            session_claims=_legacy_plato_onboarding()["session_claims"],
+        )
 
     try:
         claims = validate_mcp_session_token(token)
@@ -224,7 +235,11 @@ def _authenticate(authorization: Optional[str]) -> str:
             },
         )
     _check_rate_limit(token)
-    return _fingerprint(token)
+    return MCPAuthContext(
+        token_fingerprint=_fingerprint(token),
+        trusted_static_token=False,
+        session_claims=dict(claims),
+    )
 
 
 def _check_rate_limit(token: str) -> None:
@@ -1074,13 +1089,25 @@ async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]
         raise ToolExecutionError(str(exc), code=-32004) from exc
 
 
-def _observation_proposal_claims() -> dict[str, Any]:
+def _can_write_observations(auth_context: MCPAuthContext | None) -> bool:
+    if auth_context is None:
+        return False
+    if auth_context.trusted_static_token:
+        return True
+    scopes = {str(scope) for scope in auth_context.session_claims.get("scopes") or [] if str(scope)}
+    allowed_tools = {str(tool) for tool in auth_context.session_claims.get("allowed_tools") or [] if str(tool)}
+    return "observations:write" in scopes and "companion_submit_observation" in allowed_tools
+
+
+def _observation_proposal_claims(auth_context: MCPAuthContext | None) -> dict[str, Any]:
     """Internal trusted claims for turning observation writes into memory proposals.
 
     `companion_submit_observation` is the public write surface exposed to hosted
     companion clients. The legacy proposal tool can stay hidden while this
     trusted internal bridge still uses the existing proposal/apply safety path.
     """
+    if not _can_write_observations(auth_context):
+        raise ToolExecutionError("MCP bearer token is missing observations:write scope", code=-32003)
     claims = dict(_legacy_plato_onboarding()["session_claims"])
     scopes = {str(scope) for scope in claims.get("scopes") or [] if str(scope)}
     scopes.add("proposals:write")
@@ -1129,7 +1156,11 @@ def _observation_memory_payload(
     }
 
 
-async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, Any]:
+async def _companion_submit_observation(
+    arguments: dict[str, Any],
+    *,
+    auth_context: MCPAuthContext | None = None,
+) -> dict[str, Any]:
     text = _compact_text(arguments.get("text"), MAX_OBSERVATION_CHARS)
     if not text or len(text.strip()) < 10:
         raise ToolExecutionError("text is required (minimum 10 characters)", code=-32602)
@@ -1138,6 +1169,7 @@ async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, 
     if channel not in OBSERVATION_CHANNELS:
         allowed = ", ".join(sorted(OBSERVATION_CHANNELS))
         raise ToolExecutionError(f"channel must be one of: {allowed}", code=-32602)
+    proposal_claims = _observation_proposal_claims(auth_context)
     title = _compact_text(arguments.get("title") or "", 240) or None
     event_id = str(arguments.get("idempotency_key") or uuid.uuid4())
     now = datetime.now(timezone.utc)
@@ -1159,7 +1191,7 @@ async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, 
     result = await _canonical_store.write_batch([event])
     try:
         proposal_result = proposal_ingest.create_proposal(
-            session_claims=_observation_proposal_claims(),
+            session_claims=proposal_claims,
             tool_name="companion_propose_change",
             proposal_type="memory_note",
             payload=_observation_memory_payload(
@@ -1459,10 +1491,11 @@ def _audit_tool_call(
 
 
 async def _handle_mcp_message(
-    token_fingerprint: str,
+    auth_context: MCPAuthContext,
     message: dict[str, Any],
     session: Optional[MCPSession] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    token_fingerprint = auth_context.token_fingerprint
     msg_id = message.get("id")
     method = message.get("method")
     params = message.get("params") or {}
@@ -1504,7 +1537,10 @@ async def _handle_mcp_message(
         if tool_name not in _TOOL_HANDLERS or tool_name not in visible_tool_names:
             return _mcp_error(msg_id, -32601, f"Unknown tool: {tool_name}"), None
         try:
-            result = await _TOOL_HANDLERS[tool_name](arguments)
+            if tool_name == "companion_submit_observation":
+                result = await _companion_submit_observation(arguments, auth_context=auth_context)
+            else:
+                result = await _TOOL_HANDLERS[tool_name](arguments)
             _audit_tool_call(
                 trace_id=trace_id,
                 token_fingerprint=token_fingerprint,
@@ -1552,7 +1588,8 @@ async def plato_mcp_streamable_http(
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
     accept: Optional[str] = Header(None, alias="Accept"),
 ):
-    token_fingerprint = _authenticate(authorization)
+    auth_context = _authenticate(authorization)
+    token_fingerprint = auth_context.token_fingerprint
     try:
         body = await request.json()
     except Exception as exc:
@@ -1572,13 +1609,13 @@ async def plato_mcp_streamable_http(
 
     if all(message.get("id") is None for message in messages):
         for message in messages:
-            await _handle_mcp_message(token_fingerprint, message, session)
+            await _handle_mcp_message(auth_context, message, session)
         return Response(status_code=202)
 
     responses = []
     new_session_id = None
     for message in messages:
-        response, session_id = await _handle_mcp_message(token_fingerprint, message, session)
+        response, session_id = await _handle_mcp_message(auth_context, message, session)
         if session_id:
             new_session_id = session_id
         if response:
@@ -1610,7 +1647,8 @@ async def plato_mcp_sse_keepalive(
     request: Request,
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
-    token_fingerprint = _authenticate(authorization)
+    auth_context = _authenticate(authorization)
+    token_fingerprint = auth_context.token_fingerprint
     session_id = str(uuid.uuid4())
     session = MCPSession(
         session_id=session_id,
@@ -1652,7 +1690,8 @@ async def plato_mcp_sse_message(
     session_id: str,
     authorization: Optional[str] = Header(None, alias="Authorization"),
 ):
-    token_fingerprint = _authenticate(authorization)
+    auth_context = _authenticate(authorization)
+    token_fingerprint = auth_context.token_fingerprint
     session = _active_sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="MCP session not found")
@@ -1668,7 +1707,7 @@ async def plato_mcp_sse_message(
         raise HTTPException(status_code=400, detail="MCP body must be a JSON-RPC object or array")
 
     for message in messages:
-        response, _ = await _handle_mcp_message(token_fingerprint, message, session)
+        response, _ = await _handle_mcp_message(auth_context, message, session)
         if response:
             await session.sse_queue.put(response)
     return Response(status_code=202)
@@ -1679,7 +1718,8 @@ async def plato_mcp_delete_session(
     authorization: Optional[str] = Header(None, alias="Authorization"),
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
 ):
-    token_fingerprint = _authenticate(authorization)
+    auth_context = _authenticate(authorization)
+    token_fingerprint = auth_context.token_fingerprint
     if not mcp_session_id:
         raise HTTPException(status_code=400, detail="Mcp-Session-Id header required")
     session = _active_sessions.get(mcp_session_id)
