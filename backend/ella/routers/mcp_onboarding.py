@@ -557,9 +557,11 @@ async def post_mcp_register(request: Request):
     # cache DCR state aggressively; returning the same id after a deleted
     # connector can leave the client stuck on stale auth metadata.
     client_id = f"dcr-{uuid.uuid4().hex[:24]}"
+    client_secret = f"dcr-secret-{uuid.uuid4().hex}"
 
     registration = {
         "client_id": client_id,
+        "client_secret": client_secret,
         "client_id_issued_at": int(time.time()),
         "client_secret_expires_at": 0,
         "redirect_uris": redirect_uris,
