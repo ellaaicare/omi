@@ -110,6 +110,32 @@ def test_mcp_onboarding_without_default_profile_returns_invite_state(monkeypatch
     assert "session_claims" not in payload
 
 
+def test_dynamic_client_registration_issues_fresh_client_ids(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    body = {
+        "redirect_uris": ["https://grok.com/connectors-oauth-exchange-code/"],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "client_name": "Grok",
+    }
+
+    first = client.post("/v1/ella/mcp/register", json=body)
+    second = client.post("/v1/ella/mcp/register", json=body)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    first_payload = first.json()
+    second_payload = second.json()
+    assert first_payload["client_id"].startswith("dcr-")
+    assert second_payload["client_id"].startswith("dcr-")
+    assert first_payload["client_id"] != second_payload["client_id"]
+    assert first_payload["client_id_issued_at"] > 0
+    assert first_payload["client_secret_expires_at"] == 0
+    assert first_payload["token_endpoint_auth_method"] == "none"
+
+
 def test_oauth_onboarding_maps_verified_google_identity_to_grant(monkeypatch):
     module = _load_module(monkeypatch)
     _install_firebase_stub(monkeypatch)
@@ -284,7 +310,9 @@ def test_oauth_token_exchange_selected_profile_issues_scoped_session(monkeypatch
     assert claims["role"] == "caregiver"
     assert claims["grant_id"] == "grant-mom-1"
 
-    session_response = client.get("/v1/ella/mcp/onboarding", headers={"Authorization": f"Bearer {payload['access_token']}"})
+    session_response = client.get(
+        "/v1/ella/mcp/onboarding", headers={"Authorization": f"Bearer {payload['access_token']}"}
+    )
     assert session_response.status_code == 200
     assert session_response.json()["session_claims"]["profile_uid"] == "mom-1"
 
