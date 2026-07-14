@@ -41,6 +41,15 @@ READ_ONLY_SCOPES = {
     "tools:read",
 }
 
+OBSERVATION_WRITE_SCOPES = {
+    # Narrow write scope for companion clients to submit observations into the
+    # audited proposal/Observer pipeline. Proposal and direct mutation scopes
+    # remain filtered out below.
+    "observations:write",
+}
+
+PROFILE_GRANT_SCOPES = READ_ONLY_SCOPES | OBSERVATION_WRITE_SCOPES
+
 PROPOSAL_SCOPES = {
     "proposals:read",
     "proposals:write",
@@ -72,11 +81,11 @@ def _normalized_role(role: Any) -> str:
     return ROLE_SELF
 
 
-def _read_only_scopes(scopes: Iterable[Any], role: str) -> list[str]:
+def _profile_grant_scopes(scopes: Iterable[Any], role: str) -> list[str]:
     requested = [_clean_string(scope) for scope in scopes if _clean_string(scope)]
     if not requested:
         requested = DEFAULT_ROLE_SCOPES.get(role, DEFAULT_ROLE_SCOPES[ROLE_SELF])
-    return sorted(scope for scope in set(requested) if scope in READ_ONLY_SCOPES)
+    return sorted(scope for scope in set(requested) if scope in PROFILE_GRANT_SCOPES)
 
 
 @dataclass(frozen=True)
@@ -140,7 +149,7 @@ class MCPProfileGrant:
             role=role,
             profile_label=_clean_string(data.get("profile_label") or data.get("display_name") or data.get("label")),
             status=_clean_string(data.get("status") or "active").lower(),
-            scopes=_read_only_scopes(scopes, role),
+            scopes=_profile_grant_scopes(scopes, role),
             allowed_tools=sorted({_clean_string(tool) for tool in allowed_tools if _clean_string(tool)}),
             metadata=dict(data.get("metadata") or {}),
         )
@@ -251,8 +260,9 @@ def grant_to_firestore_data(
 ) -> dict[str, Any]:
     """Build the durable grant record stored in `mcp_identity_grants`.
 
-    Proposal/write scopes are intentionally filtered out by `MCPProfileGrant`.
-    A later writeback PR must explicitly add role-scoped proposal permissions.
+    Proposal/direct mutation scopes are intentionally filtered out by
+    `MCPProfileGrant`. `observations:write` is the only narrow write scope
+    currently allowed; it feeds the audited proposal/Observer pipeline.
     """
     normalized_role = _normalized_role(role)
     grant = MCPProfileGrant.from_mapping(
@@ -426,7 +436,9 @@ def mcp_session_secret() -> str:
     return os.getenv("ELLA_MCP_SESSION_SECRET") or os.getenv("ELLA_SESSION_SECRET", "")
 
 
-def issue_mcp_session_token(resolution: MCPIdentityResolution, *, ttl_seconds: int = 3600) -> tuple[str, dict[str, Any]]:
+def issue_mcp_session_token(
+    resolution: MCPIdentityResolution, *, ttl_seconds: int = 3600
+) -> tuple[str, dict[str, Any]]:
     secret = mcp_session_secret()
     if not secret:
         raise RuntimeError("ELLA_MCP_SESSION_SECRET or ELLA_SESSION_SECRET must be configured")

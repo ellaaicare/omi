@@ -56,8 +56,8 @@ def test_resolve_authenticated_unknown_identity_needs_invite():
     assert resolution.available_grants == []
 
 
-def test_single_grant_maps_and_builds_read_only_claims():
-    grant = _grant(scopes=["context:read", "startup:read", "memory:write", "delete:memory"])
+def test_single_grant_maps_and_builds_limited_claims():
+    grant = _grant(scopes=["context:read", "startup:read", "observations:write", "memory:write", "delete:memory"])
     resolution = resolve_mcp_identity(_identity(), grants=[grant], trace_id="trace-1")
 
     assert resolution.state == STATE_AUTHENTICATED_MAPPED
@@ -68,7 +68,7 @@ def test_single_grant_maps_and_builds_read_only_claims():
     assert claims["profile_uid"] == "user-1"
     assert claims["role"] == "self"
     assert claims["trace_id"] == "trace-1"
-    assert claims["scopes"] == ["context:read", "startup:read"]
+    assert claims["scopes"] == ["context:read", "observations:write", "startup:read"]
     assert "memory:write" not in claims["scopes"]
     assert "delete:memory" not in claims["scopes"]
 
@@ -118,12 +118,12 @@ def test_cannot_build_claims_for_unmapped_identity():
         build_session_claims(resolution)
 
 
-def test_grant_to_firestore_data_filters_write_scopes():
+def test_grant_to_firestore_data_allows_observation_write_but_filters_proposal_scopes():
     data = grant_to_firestore_data(
         identity=_identity(),
         profile_uid="user-1",
         role="self",
-        scopes=["context:read", "proposals:write", "rules:propose"],
+        scopes=["context:read", "observations:write", "proposals:write", "rules:propose"],
         allowed_tools=["companion_start_here", "companion_submit_note"],
         profile_label="Test User",
         created_by="unit-test",
@@ -133,8 +133,9 @@ def test_grant_to_firestore_data_filters_write_scopes():
     assert data["email_norm"] == "person@example.com"
     assert data["profile_uid"] == "user-1"
     assert data["role"] == "self"
-    assert data["scopes"] == ["context:read"]
+    assert data["scopes"] == ["context:read", "observations:write"]
     assert "proposals:write" not in data["scopes"]
+    assert "rules:propose" not in data["scopes"]
     assert data["allowed_tools"] == ["companion_start_here", "companion_submit_note"]
     assert data["created_by"] == "unit-test"
 
@@ -172,12 +173,12 @@ def test_provision_identity_grant_writes_durable_record(monkeypatch):
         identity=_identity(),
         profile_uid="user-1",
         role="self",
-        scopes=["startup:read", "proposals:write"],
+        scopes=["startup:read", "observations:write", "proposals:write"],
         allowed_tools=["companion_start_here"],
     )
 
     assert grant.profile_uid == "user-1"
-    assert grant.scopes == ["startup:read"]
+    assert grant.scopes == ["observations:write", "startup:read"]
     assert len(writes) == 1
     write = next(iter(writes.values()))
     assert write["merge"] is True
