@@ -553,13 +553,15 @@ async def post_mcp_register(request: Request):
     client_name = body.get("client_name", "")
     application_type = body.get("application_type", "web")
 
-    # Generate a stable client_id from redirect_uris so re-registration
-    # returns the same ID (idempotent).
-    uri_key = "|".join(sorted(redirect_uris))
-    client_id = "dcr-" + hashlib.sha256(uri_key.encode()).hexdigest()[:24]
+    # Issue a fresh client id for each registration. Some hosted MCP clients
+    # cache DCR state aggressively; returning the same id after a deleted
+    # connector can leave the client stuck on stale auth metadata.
+    client_id = f"dcr-{uuid.uuid4().hex[:24]}"
 
     registration = {
         "client_id": client_id,
+        "client_id_issued_at": int(time.time()),
+        "client_secret_expires_at": 0,
         "redirect_uris": redirect_uris,
         "grant_types": grant_types,
         "response_types": response_types,
