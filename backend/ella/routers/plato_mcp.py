@@ -772,9 +772,7 @@ async def _fetch_workspace_search(query: str, max_results: int) -> list[dict[str
             return []
         payload = response.json()
         return [
-            _workspace_search_result_to_event(item)
-            for item in (payload.get("results") or [])
-            if isinstance(item, dict)
+            _workspace_search_result_to_event(item) for item in (payload.get("results") or []) if isinstance(item, dict)
         ]
     except Exception as exc:
         logger.warning("plato_mcp workspace search failed: %s", exc)
@@ -834,9 +832,7 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "query": query,
         "source": (
-            f"{context.get('source')}_with_hermes_workspace_search"
-            if workspace_results
-            else context.get("source")
+            f"{context.get('source')}_with_hermes_workspace_search" if workspace_results else context.get("source")
         ),
         "inferred_time_window": inferred_label or None,
         "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
@@ -935,9 +931,7 @@ async def _consult_plato(arguments: dict[str, Any]) -> dict[str, Any]:
         "agent_id": agent_id,
         "session": session_key,
         "context_source": (
-            f"{context.get('source')}_with_hermes_workspace_search"
-            if workspace_results
-            else context.get("source")
+            f"{context.get('source')}_with_hermes_workspace_search" if workspace_results else context.get("source")
         ),
         "context_events": len(context.get("events") or []) + len(workspace_results),
     }
@@ -1080,6 +1074,61 @@ async def _companion_propose_change(arguments: dict[str, Any]) -> dict[str, Any]
         raise ToolExecutionError(str(exc), code=-32004) from exc
 
 
+def _observation_proposal_claims() -> dict[str, Any]:
+    """Internal trusted claims for turning observation writes into memory proposals.
+
+    `companion_submit_observation` is the public write surface exposed to hosted
+    companion clients. The legacy proposal tool can stay hidden while this
+    trusted internal bridge still uses the existing proposal/apply safety path.
+    """
+    claims = dict(_legacy_plato_onboarding()["session_claims"])
+    scopes = {str(scope) for scope in claims.get("scopes") or [] if str(scope)}
+    scopes.add("proposals:write")
+    allowed_tools = {str(tool) for tool in claims.get("allowed_tools") or [] if str(tool)}
+    allowed_tools.add("companion_propose_change")
+    claims["scopes"] = sorted(scopes)
+    claims["allowed_tools"] = sorted(allowed_tools)
+    claims["trace_id"] = str(claims.get("trace_id") or f"mcp-observation:{uuid.uuid4()}")
+    return claims
+
+
+def _observation_memory_payload(
+    *,
+    event_id: str,
+    channel: str,
+    title: str | None,
+    text: str,
+) -> dict[str, Any]:
+    display_title = title or f"MCP observation from {channel}"
+    return {
+        "title": display_title[:240],
+        "description": f"Trusted companion observation submitted through MCP channel `{channel}`.",
+        "target": {
+            "canonical_identity": _plato_canonical_identity(),
+            "uid": _plato_uid(),
+            "durable_owner": "observer_memory",
+        },
+        "evidence": [
+            {
+                "event_id": event_id,
+                "channel": channel,
+                "provider": "mcp_companion",
+                "mcp_tool": "companion_submit_observation",
+            }
+        ],
+        "requested_change": {
+            "memory": text,
+            "source_text": text,
+            "source_channel": channel,
+            "source_title": title or "",
+            "category": "mcp_companion_observation",
+        },
+        "source": "plato_mcp",
+        "write_policy": "proposal_only",
+        "confidence": 0.92,
+    }
+
+
 async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, Any]:
     text = _compact_text(arguments.get("text"), MAX_OBSERVATION_CHARS)
     if not text or len(text.strip()) < 10:
@@ -1108,12 +1157,31 @@ async def _companion_submit_observation(arguments: dict[str, Any]) -> dict[str, 
         metadata={"title": title} if title else {},
     )
     result = await _canonical_store.write_batch([event])
+    try:
+        proposal_result = proposal_ingest.create_proposal(
+            session_claims=_observation_proposal_claims(),
+            tool_name="companion_propose_change",
+            proposal_type="memory_note",
+            payload=_observation_memory_payload(
+                event_id=event_id,
+                channel=channel,
+                title=title,
+                text=text,
+            ),
+            idempotency_key=f"mcp-observation:{event_id}:memory_note",
+        )
+    except proposal_ingest.ProposalIngestError as exc:
+        raise ToolExecutionError(f"Observation recorded but memory proposal failed: {exc}", code=-32004) from exc
     return {
         "accepted": True,
         "event_id": event_id,
         "channel": channel,
         "inserted": result.get("inserted", 0) > 0,
-        "note": "Observation recorded. Hermes will process it during the next Observer run.",
+        "memory_proposal": proposal_result,
+        "note": (
+            "Observation recorded and submitted as a durable memory proposal. "
+            "Observer apply will promote it into recallable memory if accepted."
+        ),
     }
 
 

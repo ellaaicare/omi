@@ -72,7 +72,7 @@ def test_plato_mcp_rejects_missing_and_invalid_token(monkeypatch):
     assert invalid.status_code == 401
 
 
-def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
+def test_plato_mcp_lists_default_safe_tools(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
 
@@ -87,7 +87,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert tool_names == {
         "companion_start_here",
         "companion_surface_prompt",
-        "companion_get_proposal_status",
+        "companion_submit_observation",
         "plato_recent_context",
         "plato_search_memory",
         "plato_latest_omi",
@@ -99,6 +99,7 @@ def test_plato_mcp_lists_only_read_only_tools(monkeypatch):
     assert "delete_memory" not in tool_names
     assert "update_conversation_summary" not in tool_names
     assert "companion_propose_change" not in tool_names
+    assert "companion_get_proposal_status" not in tool_names
 
 
 def test_companion_surface_prompt_returns_no_secret_bootstrap(monkeypatch):
@@ -123,7 +124,7 @@ def test_companion_surface_prompt_returns_no_secret_bootstrap(monkeypatch):
     assert "test-token" not in payload["prompt"]
 
 
-def test_plato_mcp_lists_proposal_tool_only_when_enabled(monkeypatch):
+def test_plato_mcp_keeps_deprecated_proposal_tools_hidden_when_enabled(monkeypatch):
     monkeypatch.setenv("ELLA_PLATO_MCP_ENABLE_PROPOSALS", "true")
     module = _load_module(monkeypatch)
     client = _client(module)
@@ -136,7 +137,9 @@ def test_plato_mcp_lists_proposal_tool_only_when_enabled(monkeypatch):
 
     assert response.status_code == 200
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
-    assert "companion_propose_change" in tool_names
+    assert "companion_submit_observation" in tool_names
+    assert "companion_propose_change" not in tool_names
+    assert "companion_get_proposal_status" not in tool_names
 
 
 def test_streamable_http_prefers_json_when_client_accepts_json_and_sse(monkeypatch):
@@ -194,16 +197,9 @@ def test_companion_start_here_tool_returns_generic_startup_packet(monkeypatch):
     assert result["account"]["role"] == "self"
 
 
-def test_companion_get_proposal_status_tool_is_read_only(monkeypatch):
+def test_companion_get_proposal_status_tool_is_hidden(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)
-
-    def fake_status(*, session_claims, proposal_id):
-        assert session_claims["profile_uid"] == module._plato_uid()
-        assert proposal_id == "proposal-1"
-        return {"proposal_id": "proposal-1", "status": "submitted", "profile_uid": module._plato_uid()}
-
-    monkeypatch.setattr(module.proposal_ingest, "get_proposal_status", fake_status)
 
     response = client.post(
         "/v1/ella/plato/mcp",
@@ -215,30 +211,14 @@ def test_companion_get_proposal_status_tool_is_read_only(monkeypatch):
     )
 
     assert response.status_code == 200
-    result = _tool_result(response)
-    assert result["proposal_id"] == "proposal-1"
-    assert result["status"] == "submitted"
+    payload = response.json()
+    assert payload["error"]["code"] == -32601
 
 
-def test_companion_propose_change_creates_proposal_when_enabled(monkeypatch):
+def test_companion_propose_change_is_hidden_when_enabled(monkeypatch):
     monkeypatch.setenv("ELLA_PLATO_MCP_ENABLE_PROPOSALS", "true")
     module = _load_module(monkeypatch)
     client = _client(module)
-    captured = {}
-
-    def fake_create(*, session_claims, tool_name, proposal_type, payload, idempotency_key):
-        captured["session_claims"] = session_claims
-        captured["tool_name"] = tool_name
-        captured["proposal_type"] = proposal_type
-        captured["payload"] = payload
-        captured["idempotency_key"] = idempotency_key
-        return {
-            "created": True,
-            "deduped": False,
-            "proposal": {"proposal_id": "proposal-1", "status": "submitted"},
-        }
-
-    monkeypatch.setattr(module.proposal_ingest, "create_proposal", fake_create)
 
     response = client.post(
         "/v1/ella/plato/mcp",
@@ -260,15 +240,8 @@ def test_companion_propose_change_creates_proposal_when_enabled(monkeypatch):
     )
 
     assert response.status_code == 200
-    result = _tool_result(response)
-    assert result["created"] is True
-    assert result["proposal"]["proposal_id"] == "proposal-1"
-    assert captured["tool_name"] == "companion_propose_change"
-    assert captured["proposal_type"] == "scanner_rule_change"
-    assert "proposals:write" in captured["session_claims"]["scopes"]
-    assert "companion_propose_change" in captured["session_claims"]["allowed_tools"]
-    assert captured["payload"]["write_policy"] == "proposal_only"
-    assert captured["idempotency_key"] == "glasses-1"
+    payload = response.json()
+    assert payload["error"]["code"] == -32601
 
 
 def test_companion_propose_change_is_unknown_when_disabled(monkeypatch):
@@ -319,8 +292,78 @@ def test_companion_propose_change_rejects_unsupported_type(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["error"]["code"] == -32602
-    assert "proposal_type must be one of" in payload["error"]["message"]
+    assert payload["error"]["code"] == -32601
+
+
+def test_companion_submit_observation_creates_memory_proposal(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+    captured = {"events": [], "proposal": {}}
+
+    class FakeCanonicalStore:
+        async def write_batch(self, events):
+            captured["events"].extend(events)
+            return {"ok": True, "inserted": len(events), "duplicates": 0}
+
+    def fake_create(*, session_claims, tool_name, proposal_type, payload, idempotency_key):
+        captured["proposal"] = {
+            "session_claims": session_claims,
+            "tool_name": tool_name,
+            "proposal_type": proposal_type,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+        }
+        return {
+            "created": True,
+            "deduped": False,
+            "proposal": {"proposal_id": "proposal-memory-1", "status": "submitted"},
+        }
+
+    monkeypatch.setattr(module, "_canonical_store", FakeCanonicalStore())
+    monkeypatch.setattr(module.proposal_ingest, "create_proposal", fake_create)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_submit_observation",
+                "arguments": {
+                    "channel": "grok_conversation",
+                    "title": "Grok MCP sentinel",
+                    "text": "Live Grok MCP test phrase is copper sailboat.",
+                    "idempotency_key": "MCP-WRITE-PROBE-4417",
+                },
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["accepted"] is True
+    assert result["event_id"] == "MCP-WRITE-PROBE-4417"
+    assert result["channel"] == "grok_conversation"
+    assert result["memory_proposal"]["proposal"]["proposal_id"] == "proposal-memory-1"
+
+    assert len(captured["events"]) == 1
+    raw_event = captured["events"][0]
+    assert raw_event.channel == "grok_conversation"
+    assert raw_event.provider == "mcp_companion"
+    assert raw_event.role == "companion"
+    assert raw_event.text == "Live Grok MCP test phrase is copper sailboat."
+    assert raw_event.source_ref == {"mcp_tool": "companion_submit_observation"}
+
+    proposal = captured["proposal"]
+    assert proposal["tool_name"] == "companion_propose_change"
+    assert proposal["proposal_type"] == "memory_note"
+    assert proposal["idempotency_key"] == "mcp-observation:MCP-WRITE-PROBE-4417:memory_note"
+    assert "proposals:write" in proposal["session_claims"]["scopes"]
+    assert "companion_propose_change" in proposal["session_claims"]["allowed_tools"]
+    assert proposal["payload"]["source"] == "plato_mcp"
+    assert proposal["payload"]["target"]["canonical_identity"] == module._plato_canonical_identity()
+    assert proposal["payload"]["requested_change"]["memory"] == "Live Grok MCP test phrase is copper sailboat."
+    assert proposal["payload"]["evidence"][0]["event_id"] == "MCP-WRITE-PROBE-4417"
 
 
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
