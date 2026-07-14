@@ -102,6 +102,22 @@ def test_plato_mcp_lists_default_safe_tools(monkeypatch):
     assert "companion_get_proposal_status" not in tool_names
 
 
+def test_plato_mcp_info_accepts_post_and_lists_visible_tools(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    response = client.post("/v1/ella/plato/mcp/info")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["transport"] == "streamable-http"
+    assert payload["write_tools_enabled"] is True
+    assert "observations:write" in payload["authentication"]["oauth"]["scopes"]
+    assert "companion_submit_observation" in payload["tools"]
+    assert "companion_propose_change" not in payload["tools"]
+    assert "companion_get_proposal_status" not in payload["tools"]
+
+
 def test_companion_surface_prompt_returns_no_secret_bootstrap(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)

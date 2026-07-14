@@ -1794,9 +1794,11 @@ async def plato_mcp_token(request: Request):
 
 
 @router.get("/mcp/info")
+@router.post("/mcp/info")
 async def plato_mcp_info(request: Request):
     base_url = str(request.base_url).rstrip("/")
     endpoint = f"{base_url}/v1/ella/plato/mcp"
+    visible_tools = [tool["name"] for tool in _visible_tools()]
     return {
         "endpoint": endpoint,
         "transport": "streamable-http",
@@ -1810,10 +1812,18 @@ async def plato_mcp_info(request: Request):
                 "client_id": _env("ELLA_MCP_OAUTH_CLIENT_ID", "ella-mcp"),
                 "authorization_endpoint": f"{base_url}/v1/ella/mcp/authorize",
                 "token_endpoint": f"{base_url}/v1/ella/mcp/token",
-                "scopes": ["tools:read", "startup:read", "timeline:read", "memory:read"],
+                "scopes": [
+                    "tools:read",
+                    "startup:read",
+                    "timeline:read",
+                    "memory:read",
+                    "context:read",
+                    "profile:read",
+                    "observations:write",
+                ],
             },
         },
-        "tools": [tool["name"] for tool in MCP_TOOLS],
-        "write_tools_enabled": False,
+        "tools": visible_tools,
+        "write_tools_enabled": "companion_submit_observation" in visible_tools,
         "rollback": "remove or rotate ELLA_PLATO_MCP_TOKEN / ELLA_PLATO_MCP_TOKENS",
     }
