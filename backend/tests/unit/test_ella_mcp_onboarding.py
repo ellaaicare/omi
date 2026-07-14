@@ -131,6 +131,9 @@ def test_dynamic_client_registration_issues_fresh_client_ids(monkeypatch):
     assert first_payload["client_id"].startswith("dcr-")
     assert second_payload["client_id"].startswith("dcr-")
     assert first_payload["client_id"] != second_payload["client_id"]
+    assert first_payload["client_secret"].startswith("dcr-secret-")
+    assert second_payload["client_secret"].startswith("dcr-secret-")
+    assert first_payload["client_secret"] != second_payload["client_secret"]
     assert first_payload["client_id_issued_at"] > 0
     assert first_payload["client_secret_expires_at"] == 0
     assert first_payload["token_endpoint_auth_method"] == "none"
