@@ -794,6 +794,62 @@ def test_plato_search_memory_prefers_deep_hermes_workspace_matches(monkeypatch):
     assert result["results"][1]["event_id"] == "today-meta-chat"
 
 
+def test_plato_search_memory_prefers_observer_memory_over_workspace_tie(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def recent_context(arguments):
+        return {
+            "uid": module._plato_uid(),
+            "source": "canonical_timeline",
+            "events": [
+                {
+                    "event_id": "observer-sentinel",
+                    "channel": "observer_memory",
+                    "provider": "ella-observer",
+                    "role": "system",
+                    "title": "MCP observation from companion_observation",
+                    "text": "Requested change: MCP-PROMOTE-PROBE-8891 durable-recall-verify",
+                    "started_at": "2026-07-14T23:46:52Z",
+                }
+            ],
+        }
+
+    async def workspace_search(query, max_results):
+        return [
+            {
+                "event_id": "hermes-workspace:TIMELINE.md:7",
+                "channel": "hermes_workspace",
+                "provider": "hermes-provision-search",
+                "role": "memory",
+                "title": "Recent Summary",
+                "text": "Older workspace note mentioning sentinel handling.",
+                "source_ref": {"source": "hermes_workspace", "file": "TIMELINE.md", "line": 7},
+            }
+        ]
+
+    monkeypatch.setattr(module, "_recent_context", recent_context)
+    monkeypatch.setattr(module, "_fetch_workspace_search", workspace_search)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "plato_search_memory",
+                "arguments": {"query": "sentinel code", "max_results": 5},
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline_with_hermes_workspace_search"
+    assert result["results"][0]["event_id"] == "observer-sentinel"
+    assert result["results"][1]["channel"] == "hermes_workspace"
+
+
 def test_plato_search_memory_temporal_query_returns_morning_window_without_keyword_match(monkeypatch):
     module = _load_module(monkeypatch)
     client = _client(module)

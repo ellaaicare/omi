@@ -736,14 +736,102 @@ async def _omi_activity_window(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tokens(text: str) -> set[str]:
-    return {
-        token for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", text.lower()) if token not in SEARCH_STOPWORDS
-    }
+    tokens: set[str] = set()
+    for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,}", text.lower()):
+        if token not in SEARCH_STOPWORDS:
+            tokens.add(token)
+        for part in re.split(r"[-_]", token):
+            if len(part) >= 3 and part not in SEARCH_STOPWORDS:
+                tokens.add(part)
+    return tokens
+
+
+def _is_assistant_search_failure(item: dict[str, Any]) -> bool:
+    role = str(item.get("role") or "")
+    if role != "assistant":
+        return False
+    text = " ".join(str(item.get(key) or "") for key in ("title", "text", "summary", "overview")).lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "do not have",
+            "don't have",
+            "did not find",
+            "could not find",
+            "no exact",
+            "nothing specific came up",
+        )
+    )
+
+
+def _is_observation_recall_query(query_tokens: set[str]) -> bool:
+    return bool(
+        query_tokens
+        & {
+            "code",
+            "sentinel",
+            "probe",
+            "test",
+            "remember",
+            "remembered",
+            "saved",
+            "stored",
+            "observation",
+            "observations",
+            "mcp",
+            "grok",
+            "phrase",
+        }
+    )
 
 
 def _score_item(query_tokens: set[str], item: dict[str, Any]) -> int:
     haystack = " ".join(str(item.get(key) or "") for key in ("title", "text", "summary", "overview"))
-    return len(query_tokens & _tokens(haystack))
+    score = len(query_tokens & _tokens(haystack))
+    if str(item.get("channel") or "") in {"observer_memory", "companion_observation"} and _is_observation_recall_query(
+        query_tokens
+    ):
+        score += 3
+    if _is_assistant_search_failure(item):
+        score -= 4
+    return max(score, 0)
+
+
+def _search_source_priority(item: dict[str, Any]) -> int:
+    channel = str(item.get("channel") or "")
+    if _is_assistant_search_failure(item):
+        return -1
+    if channel in {"observer_memory", "companion_observation"}:
+        return 2
+    if channel == "hermes_workspace":
+        return 0
+    return 1
+
+
+def _merge_search_results(
+    *,
+    query_tokens: set[str],
+    canonical_results: list[dict[str, Any]],
+    workspace_results: list[dict[str, Any]],
+    max_results: int,
+) -> list[dict[str, Any]]:
+    merged: list[tuple[int, int, int, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for idx, item in enumerate([*canonical_results, *workspace_results]):
+        identity = _event_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(
+            (
+                _score_item(query_tokens, item),
+                _search_source_priority(item),
+                -idx,
+                item,
+            )
+        )
+    merged.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    return [item for _score, _priority, _idx, item in merged[:max_results]]
 
 
 def _workspace_search_result_to_event(result: dict[str, Any]) -> dict[str, Any]:
@@ -842,8 +930,12 @@ async def _search_memory(arguments: dict[str, Any]) -> dict[str, Any]:
         results = (meaningful_events or list(events))[-max_results:]
     workspace_results = await _fetch_workspace_search(query, max_results)
     if workspace_results:
-        seen = {_event_identity(item) for item in workspace_results}
-        results = (workspace_results + [item for item in results if _event_identity(item) not in seen])[:max_results]
+        results = _merge_search_results(
+            query_tokens=query_tokens,
+            canonical_results=results,
+            workspace_results=workspace_results,
+            max_results=max_results,
+        )
     return {
         "query": query,
         "source": (
