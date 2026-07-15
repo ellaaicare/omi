@@ -66,7 +66,11 @@ Parameters:
   window sorted chronologically ascending inside that window.
 - `since`: optional ISO timestamp lower bound.
 - `channels`: optional comma-separated filter, for example
-  `omi,ios_chat,ios_voice,imessage,telegram,memory`.
+  `omi,ios_chat,ios_voice,imessage,telegram,memory,observer_memory,companion_observation,grok_conversation`.
+  Default hot-context callers include OMI, app chat, voice, iMessage,
+  Telegram, Guardian, memory, observer memory, and external companion
+  observation channels so MCP/Grok writes can appear in normal startup context
+  without a deep search.
 
 Response shape:
 
@@ -236,4 +240,3 @@ For new context features:
 4. Keep downstream stores behind owner APIs or workers.
 5. Add tests that prove the user-visible path reads canonical data, not a
    private source-specific fallback.
-

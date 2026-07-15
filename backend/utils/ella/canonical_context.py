@@ -19,6 +19,12 @@ DEFAULT_CONTEXT_CHANNELS = [
     "telegram",
     "guardian",
     "memory",
+    "observer_memory",
+    "companion_observation",
+    "grok_conversation",
+    "companion_note",
+    "companion_summary",
+    "companion_idea",
 ]
 
 
