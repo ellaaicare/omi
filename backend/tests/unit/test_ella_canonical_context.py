@@ -7,6 +7,7 @@ sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.
 from ella.routers import chat as ella_chat
 from ella.routers import guardian
 from utils.ella.canonical_context import (
+    DEFAULT_CONTEXT_CHANNELS,
     canonical_events_to_server_messages,
     canonical_events_to_chat_turns,
     format_canonical_context,
@@ -37,6 +38,13 @@ def test_format_canonical_context_includes_latest_omi_summary():
     assert "2026-05-07T11:56:59" in context
     assert "Cafe Coffee and Waffle Stop" in context
     assert "waffle with oat" in context
+
+
+def test_default_context_channels_include_external_continuity_sources():
+    assert "observer_memory" in DEFAULT_CONTEXT_CHANNELS
+    assert "companion_observation" in DEFAULT_CONTEXT_CHANNELS
+    assert "grok_conversation" in DEFAULT_CONTEXT_CHANNELS
+    assert "companion_note" in DEFAULT_CONTEXT_CHANNELS
 
 
 def test_canonical_events_to_server_messages_maps_ios_history_shape():
