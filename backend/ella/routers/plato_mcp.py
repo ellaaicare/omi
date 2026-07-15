@@ -1540,9 +1540,17 @@ def _mcp_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 def _argument_summary(arguments: dict[str, Any]) -> dict[str, Any]:
+    safe_scalar_keys = {
+        "channel",
+        "mode",
+        "proposal_id",
+        "proposal_type",
+        "surface",
+        "tool",
+    }
     summary: dict[str, Any] = {}
     for key, value in arguments.items():
-        if key in {"prompt", "query", "correction_text", "fact"}:
+        if isinstance(value, str) and key not in safe_scalar_keys:
             summary[key] = {"chars": len(str(value or ""))}
         elif isinstance(value, (str, int, float, bool)) or value is None:
             summary[key] = value
@@ -1563,7 +1571,8 @@ def _audit_tool_call(
     status: str,
     error: str = "",
 ) -> None:
-    logger.info(
+    log = logger.warning if status != "ok" or tool_name == "companion_submit_observation" else logger.info
+    log(
         "plato_mcp_tool_call %s",
         json.dumps(
             {

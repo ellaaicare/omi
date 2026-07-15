@@ -1095,3 +1095,21 @@ def test_oauth_authorize_redirects_with_code_and_state(monkeypatch):
 
     assert response.status_code == 302
     assert response.headers["location"] == "https://grok.example/callback?code=plato_mcp&state=abc"
+
+
+def test_argument_summary_redacts_observation_text(monkeypatch):
+    module = _load_module(monkeypatch)
+
+    summary = module._argument_summary(
+        {
+            "channel": "companion_observation",
+            "title": "Private title",
+            "text": "Private memory text that should not appear in logs.",
+            "idempotency_key": "private-key",
+        }
+    )
+
+    assert summary["channel"] == "companion_observation"
+    assert summary["title"] == {"chars": len("Private title")}
+    assert summary["text"] == {"chars": len("Private memory text that should not appear in logs.")}
+    assert summary["idempotency_key"] == {"chars": len("private-key")}
