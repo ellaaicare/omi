@@ -519,6 +519,10 @@ def test_mcp_surface_prompt_returns_bootstrap_without_secret(monkeypatch):
     assert payload["profile_uid"] == "user-1"
     assert payload["auth_policy"]["prompt_contains_secrets"] is False
     assert "companion_start_here" in payload["prompt"]
+    assert "companion_submit_observation" in payload["prompt"]
+    assert "companion_recent_writes" in payload["prompt"]
+    assert "write_receipt.canonical_visible" in payload["prompt"]
+    assert "call companion_propose_change" not in payload["prompt"]
     assert "test-token" not in payload["prompt"]
 
 
@@ -537,6 +541,10 @@ def test_public_mcp_surface_prompt_is_unauthenticated_and_secret_free(monkeypatc
     assert payload["auth_policy"]["prompt_contains_secrets"] is False
     assert payload["auth_policy"]["runtime_auth_required"] is True
     assert "companion_start_here" in payload["prompt"]
+    assert "companion_submit_observation" in payload["prompt"]
+    assert "companion_recent_writes" in payload["prompt"]
+    assert "write_receipt.canonical_visible" in payload["prompt"]
+    assert "call companion_propose_change" not in payload["prompt"]
     assert "test-token" not in payload["prompt"]
 
 

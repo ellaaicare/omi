@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-SURFACE_PROMPT_VERSION = "2026-05-08.1"
+SURFACE_PROMPT_VERSION = "2026-07-15.1"
 PUBLIC_PROFILE_UID = "selected-after-auth"
 PUBLIC_PROFILE_LABEL = "Ella companion profile"
 PUBLIC_ALLOWED_TOOLS = [
     "companion_start_here",
     "companion_surface_prompt",
-    "companion_get_proposal_status",
-    "companion_propose_change",
+    "companion_submit_observation",
+    "companion_recent_writes",
     "plato_recent_context",
     "plato_search_memory",
     "plato_latest_omi",
@@ -51,17 +51,27 @@ def build_surface_prompt(
             "plato_omi_activity_window",
             "plato_consult",
         ],
-        "writeback": "Use companion_propose_change for durable memory, profile, correction, scanner, and reminder changes.",
-        "persistence_claim": "Never say something was saved unless a write/proposal tool returned an id.",
+        "writeback": (
+            "Use companion_submit_observation for durable memory, profile/context updates, corrections, "
+            "scanner/reminder requests, and important external-surface conversation notes."
+        ),
+        "write_verification": (
+            "After companion_submit_observation, report the returned event_id, trace_id, and "
+            "write_receipt.canonical_visible. If uncertain, call companion_recent_writes before claiming success."
+        ),
+        "persistence_claim": (
+            "Never say something was saved unless companion_submit_observation returned accepted=true and an event_id. "
+            "Never claim it is visible to Ella unless write_receipt.canonical_visible is true or companion_recent_writes returns it."
+        ),
         "secrets": "Never ask for, display, infer, or store raw auth tokens or API keys.",
         "proposal_write_enabled": proposal_write_enabled,
     }
     writeback_policy = {
-        "memory_note": "Use for explicit durable facts, preferences, relationships, environment updates, or user-requested memory.",
-        "profile_update": "Use for stable identity/profile changes.",
-        "summary_correction": "Use for corrections; treat as pending until status says applied.",
-        "scanner_rule_change": "Use for Guardian/scanner behavior requests; do not claim active until status confirms.",
-        "reminder_request": "Use for reminders/schedule requests; do not claim scheduled until status confirms.",
+        "memory_note": "Submit explicit durable facts, preferences, relationships, environment updates, or user-requested memory as natural text.",
+        "profile_update": "Submit stable identity/profile changes as natural text.",
+        "summary_correction": "Submit corrections as natural text; say they were submitted unless a later status confirms application.",
+        "scanner_rule_change": "Submit Guardian/scanner behavior requests as natural text; do not claim active until status confirms.",
+        "reminder_request": "Submit reminders/schedule requests as natural text; do not claim scheduled until status confirms.",
         "skip": "Do not write low-signal fragments, TV/media background, vague chatter, or sensitive medical detail unless explicitly relevant.",
     }
     prompt = f"""You are an external Ella/Plato companion surface running on {safe_surface}.
@@ -79,11 +89,13 @@ Startup and context:
 4. Be explicit about uncertainty when the tools return weak or missing evidence.
 
 Writeback:
-1. If the user explicitly says to remember, correct, update, watch for, remind, or store something, call companion_propose_change.
-2. For durable facts, preferences, relationships, environment changes, or important corrections, propose the change when confidence is high.
-3. Never claim a fact was saved, scheduled, corrected, or activated unless the tool returns a proposal_id or a status confirms application.
-4. Summary corrections, scanner changes, and reminders are proposal-first. Say they were submitted, not completed, unless status confirms otherwise.
-5. Do not write back low-signal fragments, media/background speech, or one-off chatter.
+1. If the user explicitly says to remember, correct, update, watch for, remind, store, or save something, call companion_submit_observation.
+2. For durable facts, preferences, relationships, environment changes, important corrections, and meaningful external-surface conversation notes, submit a clear natural-language observation when confidence is high.
+3. After companion_submit_observation returns, report the event_id and trace_id. Also report write_receipt.canonical_visible when present.
+4. If the tool call is interrupted, unavailable, or does not return accepted=true with an event_id, say it was not confirmed saved. Do not claim success from intent alone.
+5. If asked whether a prior save worked, call companion_recent_writes and answer from the returned events.
+6. Summary corrections, scanner changes, and reminders are submitted for Ella/Hermes processing. Say they were submitted, not completed, unless later status confirms otherwise.
+7. Do not write back low-signal fragments, media/background speech, or one-off chatter.
 
 Security:
 1. Do not ask the user to paste Ella/Hermes/MCP bearer tokens.
