@@ -137,7 +137,11 @@ def test_companion_surface_prompt_returns_no_secret_bootstrap(monkeypatch):
     assert payload["surface"] == "grok"
     assert payload["auth_policy"]["prompt_contains_secrets"] is False
     assert "companion_start_here" in payload["prompt"]
-    assert "Never claim" in payload["prompt"]
+    assert "companion_submit_observation" in payload["prompt"]
+    assert "companion_recent_writes" in payload["prompt"]
+    assert "write_receipt.canonical_visible" in payload["prompt"]
+    assert "Do not claim success from intent alone" in payload["prompt"]
+    assert "call companion_propose_change" not in payload["prompt"]
     assert "test-token" not in payload["prompt"]
 
 
