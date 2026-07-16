@@ -1061,6 +1061,7 @@ def _legacy_plato_onboarding() -> dict[str, Any]:
     tools = [
         "companion_start_here",
         "companion_surface_prompt",
+        "companion_recent_writes",
         "companion_submit_observation",
         "plato_recent_context",
         "plato_search_memory",
@@ -1248,6 +1249,56 @@ def _observation_memory_payload(
     }
 
 
+async def _observation_write_receipt(*, event_id: str, channel: str) -> dict[str, Any]:
+    """Return a bounded read-after-write receipt for hosted MCP clients.
+
+    The write itself is still authoritative if canonical verification cannot run.
+    This receipt exists so external clients can distinguish "tool call accepted"
+    from "I merely claimed I saved it" without exposing raw server logs.
+    """
+    try:
+        if not hasattr(_canonical_store, "timeline"):
+            return {
+                "checked": False,
+                "canonical_visible": None,
+                "reason": "canonical_store_has_no_timeline",
+            }
+        since = datetime.now(timezone.utc) - timedelta(minutes=10)
+        events = await _canonical_store.timeline(
+            uid=_plato_uid(),
+            since=since,
+            limit=50,
+            channels=[channel],
+        )
+        for event in events:
+            if str(event.get("event_id") or event.get("id") or "") == event_id:
+                return {
+                    "checked": True,
+                    "canonical_visible": True,
+                    "event_id": event_id,
+                    "channel": event.get("channel") or channel,
+                    "provider": event.get("provider"),
+                    "started_at": _event_time(event),
+                    "source_identity": event.get("source_identity"),
+                }
+        return {
+            "checked": True,
+            "canonical_visible": False,
+            "event_id": event_id,
+            "channel": channel,
+            "reason": "event_not_in_recent_canonical_window",
+        }
+    except Exception as exc:
+        logger.warning("plato_mcp write receipt check failed: %s", exc)
+        return {
+            "checked": False,
+            "canonical_visible": None,
+            "event_id": event_id,
+            "channel": channel,
+            "error": type(exc).__name__,
+        }
+
+
 async def _companion_submit_observation(
     arguments: dict[str, Any],
     *,
@@ -1296,16 +1347,63 @@ async def _companion_submit_observation(
         )
     except proposal_ingest.ProposalIngestError as exc:
         raise ToolExecutionError(f"Observation recorded but memory proposal failed: {exc}", code=-32004) from exc
+    write_receipt = await _observation_write_receipt(event_id=event_id, channel=channel)
     return {
         "accepted": True,
         "event_id": event_id,
         "channel": channel,
         "inserted": result.get("inserted", 0) > 0,
+        "write_receipt": write_receipt,
         "memory_proposal": proposal_result,
         "note": (
             "Observation recorded and submitted as a durable memory proposal. "
             "Observer apply will promote it into recallable memory if accepted."
         ),
+    }
+
+
+async def _companion_recent_writes(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return recent hosted-companion writes visible in canonical context."""
+    limit = _clamp_int(arguments.get("limit"), 10, 1, MAX_CONTEXT_LIMIT)
+    raw_channels = arguments.get("channels") or []
+    if raw_channels and not isinstance(raw_channels, list):
+        raise ToolExecutionError("channels must be a list", code=-32602)
+    allowed_channels = set(OBSERVATION_CHANNELS) | {"observer_memory"}
+    channels = [str(channel).strip().lower() for channel in raw_channels if str(channel).strip()]
+    invalid = [channel for channel in channels if channel not in allowed_channels]
+    if invalid:
+        allowed = ", ".join(sorted(allowed_channels))
+        raise ToolExecutionError(f"channels must be one of: {allowed}", code=-32602)
+    if not channels:
+        channels = sorted(allowed_channels)
+    context = await _recent_context({"limit": limit, "channels": channels})
+    events = []
+    for event in context.get("events") or []:
+        text = str(event.get("text") or event.get("overview") or event.get("summary") or "")
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        events.append(
+            {
+                "event_id": event.get("event_id") or event.get("id"),
+                "channel": event.get("channel"),
+                "provider": event.get("provider"),
+                "role": event.get("role"),
+                "started_at": _event_time(event),
+                "started_at_local": event.get("started_at_local"),
+                "relative_to_now": event.get("relative_to_now"),
+                "title": event.get("title") or metadata.get("title") or "",
+                "text_preview": _compact_text(text, 500),
+                "text_chars": len(text),
+                "source_identity": event.get("source_identity"),
+                "source_ref": event.get("source_ref") if isinstance(event.get("source_ref"), dict) else {},
+            }
+        )
+    return {
+        "source": context.get("source"),
+        "time_context": context.get("time_context") or build_time_context(_plato_timezone()),
+        "channels": channels,
+        "count": len(events),
+        "events": events,
+        "note": "If a claimed Grok write is absent here, the MCP server did not receive or accept that write.",
     }
 
 
@@ -1416,6 +1514,25 @@ MCP_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "companion_recent_writes",
+        "description": (
+            "Return recent hosted-companion MCP writes that are actually visible in canonical context. "
+            "Use this to verify whether a claimed Grok/hosted-agent save really reached Hermes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": MAX_CONTEXT_LIMIT},
+                "channels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": [],
+                    "description": "Optional subset of companion/observer write channels.",
+                },
+            },
+        },
+    },
+    {
         "name": "plato_recent_context",
         "description": "Read recent Plato timeline context from canonical events, with OMI Firestore fallback.",
         "inputSchema": {
@@ -1519,6 +1636,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
 _TOOL_HANDLERS = {
     "companion_start_here": _companion_start_here,
     "companion_surface_prompt": _companion_surface_prompt,
+    "companion_recent_writes": _companion_recent_writes,
     "companion_get_proposal_status": _companion_get_proposal_status,
     "companion_propose_change": _companion_propose_change,
     "companion_submit_observation": _companion_submit_observation,
