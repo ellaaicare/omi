@@ -87,6 +87,7 @@ def test_plato_mcp_lists_default_safe_tools(monkeypatch):
     assert tool_names == {
         "companion_start_here",
         "companion_surface_prompt",
+        "companion_recent_writes",
         "companion_submit_observation",
         "plato_recent_context",
         "plato_search_memory",
@@ -154,6 +155,7 @@ def test_plato_mcp_keeps_deprecated_proposal_tools_hidden_when_enabled(monkeypat
     assert response.status_code == 200
     tool_names = {tool["name"] for tool in response.json()["result"]["tools"]}
     assert "companion_submit_observation" in tool_names
+    assert "companion_recent_writes" in tool_names
     assert "companion_propose_change" not in tool_names
     assert "companion_get_proposal_status" not in tool_names
 
@@ -360,6 +362,8 @@ def test_companion_submit_observation_creates_memory_proposal(monkeypatch):
     assert result["accepted"] is True
     assert result["event_id"] == "MCP-WRITE-PROBE-4417"
     assert result["channel"] == "grok_conversation"
+    assert result["write_receipt"]["checked"] is False
+    assert result["write_receipt"]["canonical_visible"] is None
     assert result["memory_proposal"]["proposal"]["proposal_id"] == "proposal-memory-1"
 
     assert len(captured["events"]) == 1
@@ -434,6 +438,56 @@ def test_companion_submit_observation_rejects_read_only_session_token(monkeypatc
     assert "observations:write" in payload["error"]["message"]
     assert captured["write_called"] is False
     assert captured["proposal_called"] is False
+
+
+def test_companion_recent_writes_returns_recent_companion_context(monkeypatch):
+    module = _load_module(monkeypatch)
+    client = _client(module)
+
+    async def fake_recent_context(arguments):
+        assert arguments["limit"] == 2
+        assert arguments["channels"] == ["grok_conversation"]
+        return {
+            "source": "canonical_timeline",
+            "time_context": {"now_local": "2026-07-15T17:00:00-07:00"},
+            "events": [
+                {
+                    "event_id": "grok-write-1",
+                    "channel": "grok_conversation",
+                    "provider": "mcp_companion",
+                    "role": "companion",
+                    "started_at": "2026-07-16T00:00:00Z",
+                    "started_at_local": "2026-07-15 17:00 PDT",
+                    "relative_to_now": "just now",
+                    "title": "Grok write probe",
+                    "text": "Grok wrote a durable test observation through MCP.",
+                    "source_identity": "mcp:grok-write-1",
+                    "source_ref": {"mcp_tool": "companion_submit_observation"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(module, "_recent_context", fake_recent_context)
+
+    response = client.post(
+        "/v1/ella/plato/mcp",
+        headers={"Authorization": "Bearer test-token"},
+        json=_rpc(
+            "tools/call",
+            params={
+                "name": "companion_recent_writes",
+                "arguments": {"limit": 2, "channels": ["grok_conversation"]},
+            },
+        ),
+    )
+
+    assert response.status_code == 200
+    result = _tool_result(response)
+    assert result["source"] == "canonical_timeline"
+    assert result["count"] == 1
+    assert result["events"][0]["event_id"] == "grok-write-1"
+    assert result["events"][0]["text_preview"] == "Grok wrote a durable test observation through MCP."
+    assert "did not receive or accept" in result["note"]
 
 
 def test_plato_recent_context_uses_canonical_timeline(monkeypatch):
