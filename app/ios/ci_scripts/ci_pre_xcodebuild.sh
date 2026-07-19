@@ -11,6 +11,6 @@ export PATH="$HOME/flutter/bin:$PATH"
 cd "$APP_DIR"
 
 echo "=== Building Flutter for iOS (prod, release) ==="
-flutter build ios --flavor prod --release --no-codesign
+flutter build ios --flavor prod --release --no-codesign --dart-define=ELLA_PUBLIC_BUILD=true
 
 echo "=== ci_pre_xcodebuild.sh complete ==="

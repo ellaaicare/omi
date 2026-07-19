@@ -14,6 +14,7 @@ set -euo pipefail
 #
 # Optional env vars:
 #   FLAVOR         — "prod" (default) or "dev"
+#   ELLA_PUBLIC_BUILD — "true"/"1" forces public launch mode (default: true)
 #   SKIP_PULL      — set to "1" to skip git pull
 #   SKIP_UPLOAD    — set to "1" to build only, no TestFlight upload
 #   ASC_ISSUER_ID  — App Store Connect API Issuer ID (has default)
@@ -28,6 +29,13 @@ DART="/Users/ellaai/dev/flutter/bin/dart"
 RCODESIGN="/usr/local/bin/rcodesign"
 
 FLAVOR="${FLAVOR:-prod}"
+if [ -z "${ELLA_PUBLIC_BUILD+x}" ]; then
+  if [ "$FLAVOR" = "prod" ]; then
+    ELLA_PUBLIC_BUILD="true"
+  else
+    ELLA_PUBLIC_BUILD="false"
+  fi
+fi
 TEAM_ID="H6S4582TRM"
 SCHEME="$FLAVOR"
 ASC_ISSUER_ID="${ASC_ISSUER_ID:-5ed3a276-d6c0-43eb-ba70-13eed9b35a7e}"
@@ -55,6 +63,11 @@ else
 fi
 
 log() { echo "=== $(date '+%H:%M:%S') $1 ==="; }
+
+DART_DEFINES=()
+if [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; then
+  DART_DEFINES+=(--dart-define=ELLA_PUBLIC_BUILD=true)
+fi
 
 # ── Preflight: verify signing credentials exist ───────────────
 if [ ! -f "$PRIVKEY_PEM" ] || [ ! -s "$PRIVKEY_PEM" ]; then
@@ -128,8 +141,8 @@ PLIST_PROJECT_ID="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$PLIST_PATH"
 log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PLIST_PROJECT_ID"
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
-log "Flutter build ios --flavor $FLAVOR --release --no-codesign"
-$FLUTTER build ios --flavor "$FLAVOR" --release --no-codesign
+log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD"
+$FLUTTER build ios --flavor "$FLAVOR" --release --no-codesign "${DART_DEFINES[@]}"
 
 # ── Step 5: CocoaPods ─────────────────────────────────────────
 log "Pod install"

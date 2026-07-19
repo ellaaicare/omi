@@ -259,6 +259,11 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
 Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    Logger.debug('[EllaChat] Blocked chat stream without AI consent');
+    return;
+  }
+
   if (SharedPreferencesUtil().demoMode) {
     final message = DemoFixtures.chatMessages().last;
     yield ServerMessageChunk(message.id, message.text, MessageChunkType.done, message: message);
