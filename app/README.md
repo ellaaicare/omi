@@ -4,6 +4,8 @@ The Omi App is a Flutter-based mobile application that serves as the companion a
 
 ## 📚 **[View Full App setup instructions in the documentation](https://docs.omi.me/doc/developer/AppSetup)**
 
+Ella iOS fork/source-of-truth notes: [app/docs/ella-ios-source-of-truth.md](docs/ella-ios-source-of-truth.md)
+
 ### Quick Setup
 
 Before getting started, make sure your device is connected and unlocked. If you're using an iPhone, ensure that Developer Mode is enabled — you can toggle this in the iPhone settings. For Android devices, make sure the device is connected and USB debugging is enabled in Developer Options
