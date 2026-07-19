@@ -18,6 +18,7 @@ import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
@@ -85,6 +86,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   TextEditingController? titleController;
   FocusNode? titleFocusNode;
+  bool titleIsEllaGenerated = false;
 
   bool isTranscriptExpanded = false;
 
@@ -221,13 +223,19 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
     showUnassignedFloatingButton = true;
 
-    titleController!.text = conversation.structured.title;
+    final titleDisplayValue = parseEllaDisplayValue(conversation.structured.title);
+    titleIsEllaGenerated = titleDisplayValue.isEllaGenerated;
+    titleController!.text = titleDisplayValue.text;
     titleFocusNode!.addListener(() {
       print('titleFocusNode focus changed');
       if (!titleFocusNode!.hasFocus) {
-        conversation.structured.title = titleController!.text;
+        final persistedTitle = persistEllaDisplayValue(
+          titleController!.text,
+          isEllaGenerated: titleIsEllaGenerated,
+        );
+        conversation.structured.title = persistedTitle;
         if (!SharedPreferencesUtil().demoMode) {
-          updateConversationTitle(conversation.id, titleController!.text);
+          updateConversationTitle(conversation.id, persistedTitle);
         }
       }
     });

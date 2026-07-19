@@ -5,13 +5,13 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/widgets/ella_source_indicator.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversations/conversations_page.dart';
 import 'package:omi/pages/settings/daily_summary_detail_page.dart';
 import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/home_provider.dart';
-import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef DailySummaryLoader = Future<List<DailySummary>> Function();
@@ -143,11 +143,14 @@ class TodayPageState extends State<TodayPage> {
                               height: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
+                          else if (_dailySummary?.overview.trim().isNotEmpty == true)
+                            EllaSourceText(
+                              _dailySummary!.overview.trim(),
+                              style: const TextStyle(fontSize: 17, height: 1.45, color: Color(0xFF4C4641)),
+                            )
                           else
                             Text(
-                              _dailySummary?.overview.trim().isNotEmpty == true
-                                  ? stripEllaDisplayPrefix(_dailySummary!.overview.trim())
-                                  : context.l10n.dailyNoteEmpty,
+                              context.l10n.dailyNoteEmpty,
                               style: const TextStyle(fontSize: 17, height: 1.45, color: Color(0xFF4C4641)),
                             ),
                         ],

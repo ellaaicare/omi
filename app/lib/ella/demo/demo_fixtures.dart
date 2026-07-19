@@ -17,14 +17,14 @@ class DemoFixtures {
     return [
       _conversation(
         id: 'demo-planning-tuesday-dinner-with-david',
-        title: '🪽 Planning Tuesday Dinner with David',
+        title: '🪽 [Ella] Planning Tuesday Dinner with David',
         startedAt: day.add(const Duration(hours: 17, minutes: 40)),
         duration: const Duration(minutes: 3, seconds: 12),
         overview: 'Mom and David talked through a simple Tuesday dinner plan.',
       ),
       _conversation(
         id: gardenConversationId,
-        title: '🪽 Garden Chat with Margaret',
+        title: '🪽 [Ella] Garden Chat with Margaret',
         startedAt: day.add(const Duration(hours: 14, minutes: 15)),
         duration: const Duration(minutes: 12, seconds: 4),
         overview:
@@ -32,14 +32,14 @@ class DemoFixtures {
       ),
       _conversation(
         id: 'demo-where-did-the-scissors-go',
-        title: '🪽 Where Did the Scissors Go',
+        title: '🪽 [Ella] Where Did the Scissors Go',
         startedAt: day.add(const Duration(hours: 11, minutes: 32)),
         duration: const Duration(minutes: 1, seconds: 8),
         overview: 'Mom found the scissors in the kitchen drawer.',
       ),
       _conversation(
         id: 'demo-morning-crossword-and-coffee',
-        title: '🪽 Morning Crossword & Coffee',
+        title: '🪽 [Ella] Morning Crossword & Coffee',
         startedAt: day.add(const Duration(hours: 8, minutes: 10)),
         duration: const Duration(minutes: 4, seconds: 21),
         overview: 'Mom started the morning with coffee and her crossword.',
@@ -90,7 +90,7 @@ class DemoFixtures {
       date: _dateString(day),
       createdAt: day.add(const Duration(hours: 19)),
       headline: '🪽 Today with Mom',
-      overview: dailyRecap,
+      overview: '[Ella] $dailyRecap',
       dayEmoji: '🪽',
       stats: DayStats(totalConversations: 4, totalDurationMinutes: 21),
       highlights: [

@@ -8662,4 +8662,7 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get ellaAdvancedSettingsSubtitle => 'Language and app options';
+
+  @override
+  String get ellaSummarySource => 'Ella summary';
 }

@@ -34,6 +34,7 @@ import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
 import 'maps_util.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/widgets/ella_source_indicator.dart';
 
 // Highlight search matches with current result highlighting
 List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int currentResultIndex = -1}) {
@@ -268,6 +269,7 @@ class GetSummaryWidgets extends StatelessWidget {
       selector: (context, provider) => Tuple3(provider.conversation, provider.titleController, provider.titleFocusNode),
       builder: (context, data, child) {
         ServerConversation conversation = data.item1;
+        final titleDisplayValue = parseEllaDisplayValue(conversation.structured.title.decodeString);
         return Column(
           mainAxisAlignment: MainAxisAlignment.start,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -283,17 +285,31 @@ class GetSummaryWidgets extends StatelessWidget {
                       height: 1.3,
                     ),
                   )
-                : GetEditTextField(
-                    conversationId: conversation.id,
-                    focusNode: data.item3,
-                    controller: data.item2,
-                    content: stripEllaDisplayPrefix(conversation.structured.title.decodeString),
-                    style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w600,
-                      color: EllaColors.textPrimary,
-                      height: 1.3,
-                    ),
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (titleDisplayValue.isEllaGenerated) ...[
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: EllaSourceIndicator(size: 18),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      Expanded(
+                        child: GetEditTextField(
+                          conversationId: conversation.id,
+                          focusNode: data.item3,
+                          controller: data.item2,
+                          content: titleDisplayValue.text,
+                          style: const TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w600,
+                            color: EllaColors.textPrimary,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
             const SizedBox(height: 16),
             _buildInfoChips(context, conversation),
@@ -564,7 +580,8 @@ class AppResultDetailWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String content = stripEllaDisplayPrefix(appResponse.content.trim().decodeString);
+    final displayValue = parseEllaDisplayValue(appResponse.content.trim().decodeString);
+    final String content = displayValue.text;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
@@ -596,10 +613,24 @@ class AppResultDetailWidget extends StatelessWidget {
                       ),
                     ],
                   )
-                : ConversationMarkdownWidget(
-                    content: content,
-                    searchQuery: searchQuery,
-                    currentResultIndex: currentResultIndex,
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (displayValue.isEllaGenerated) ...[
+                        const Padding(
+                          padding: EdgeInsets.only(top: 3),
+                          child: EllaSourceIndicator(),
+                        ),
+                        const SizedBox(width: 7),
+                      ],
+                      Expanded(
+                        child: ConversationMarkdownWidget(
+                          content: content,
+                          searchQuery: searchQuery,
+                          currentResultIndex: currentResultIndex,
+                        ),
+                      ),
+                    ],
                   ),
           ),
 
@@ -1136,12 +1167,15 @@ class GetSheetTitle extends StatelessWidget {
       return Column(
         children: [
           ListTile(
-            title: Text(
-              provider.conversation.discarded
-                  ? context.l10n.discardedConversation
-                  : stripEllaDisplayPrefix(provider.conversation.structured.title),
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
+            title: provider.conversation.discarded
+                ? Text(
+                    context.l10n.discardedConversation,
+                    style: Theme.of(context).textTheme.labelLarge,
+                  )
+                : EllaSourceText(
+                    provider.conversation.structured.title,
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
             leading: const Icon(Icons.description),
             trailing: IconButton(
               icon: const Icon(Icons.cancel_outlined),

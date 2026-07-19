@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/widgets/ella_source_indicator.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -55,6 +56,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
 
   @override
   Widget build(BuildContext context) {
+    final titleDisplayValue = parseEllaDisplayValue(conversation.structured.title.decodeString);
     // Is new conversation
     DateTime memorizedAt = conversation.createdAt;
     if (conversation.finishedAt != null && conversation.finishedAt!.isAfter(memorizedAt)) {
@@ -88,7 +90,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _getConversationHeader(),
+                      _getConversationHeader(titleDisplayValue),
                       const SizedBox(height: 16),
                       conversation.discarded
                           ? Text(
@@ -97,7 +99,7 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
                               maxLines: 1,
                             )
                           : Text(
-                              stripEllaDisplayPrefix(conversation.structured.title.decodeString),
+                              titleDisplayValue.text,
                               style: Theme.of(context).textTheme.titleLarge,
                               maxLines: 1,
                             ),
@@ -148,16 +150,26 @@ class _SyncedConversationListItemState extends State<SyncedConversationListItem>
     );
   }
 
-  _getConversationHeader() {
+  _getConversationHeader(EllaDisplayValue titleDisplayValue) {
     return Padding(
       padding: const EdgeInsets.only(left: 4.0, right: 12),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          conversation.discarded
-              ? const SizedBox.shrink()
-              : Text(conversation.structured.getEmoji(),
-                  style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w500)),
+          if (!conversation.discarded)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  conversation.structured.getEmoji(),
+                  style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w500),
+                ),
+                if (titleDisplayValue.isEllaGenerated) ...[
+                  const SizedBox(width: 6),
+                  const EllaSourceIndicator(size: 13),
+                ],
+              ],
+            ),
           const SizedBox(
             width: 16,
           ),

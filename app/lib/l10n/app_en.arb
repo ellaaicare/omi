@@ -10256,5 +10256,9 @@
   "ellaAdvancedSettingsSubtitle": "Language and app options",
   "@ellaAdvancedSettingsSubtitle": {
     "description": "Plain-language description of advanced settings"
+  },
+  "ellaSummarySource": "Ella summary",
+  "@ellaSummarySource": {
+    "description": "Tooltip and accessibility label for Ella-generated summaries"
   }
 }

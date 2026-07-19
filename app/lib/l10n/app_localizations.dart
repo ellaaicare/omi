@@ -16130,6 +16130,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Language and app options'**
   String get ellaAdvancedSettingsSubtitle;
+
+  /// Tooltip and accessibility label for Ella-generated summaries
+  ///
+  /// In en, this message translates to:
+  /// **'Ella summary'**
+  String get ellaSummarySource;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
