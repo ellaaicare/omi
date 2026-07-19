@@ -248,6 +248,9 @@ Future<String> transcribeVoiceMessage(
   File audioFile, {
   String? language,
 }) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw StateError('AI consent is required before audio transcription');
+  }
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v2/voice-message/transcribe',

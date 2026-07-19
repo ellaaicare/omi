@@ -10038,10 +10038,10 @@
   "ellaDeviceSection": "DEVICE",
   "ellaAboutSection": "ABOUT",
   "ellaMaxConversationLengthTitle": "Maximum Conversation Length",
-  "ellaMaxConversationLengthConfig": "Split long captures on the backend",
-  "ellaMaxConversationLengthDescription": "Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.",
-  "ellaMaxConversationLengthBackendDefault": "Backend default",
-  "ellaMaxConversationLengthBackendDefaultDesc": "Use Ella's current default: 30 minutes.",
+  "ellaMaxConversationLengthConfig": "Choose when a long conversation starts a new memory",
+  "ellaMaxConversationLengthDescription": "Ella can automatically keep long conversations organized as separate memories while listening continues.",
+  "ellaMaxConversationLengthBackendDefault": "Automatic",
+  "ellaMaxConversationLengthBackendDefaultDesc": "Ella chooses the conversation length.",
   "ellaMaxConversationLengthDisabled": "Disabled",
   "ellaMaxConversationLengthDisabledDesc": "Do not split conversations just because a recording is long.",
   "ellaMaxConversationLengthMinutesDesc": "Split after {minutes} minutes of continuous recording.",
@@ -10176,5 +10176,85 @@
         "type": "String"
       }
     }
+  },
+  "publicBuildPreview": "Public Build Preview",
+  "@publicBuildPreview": {
+    "description": "Developer setting title for previewing the public experience"
+  },
+  "publicBuildPreviewDescription": "Preview the simplified public experience",
+  "@publicBuildPreviewDescription": {
+    "description": "Developer setting description for public mode"
+  },
+  "dailyNoteEmpty": "Ella's note about today arrives this evening 🪽",
+  "@dailyNoteEmpty": {
+    "description": "Empty state shown when today's daily note has not arrived"
+  },
+  "talkToElla": "Talk to Ella",
+  "@talkToElla": {
+    "description": "Primary action that opens Ella voice chat"
+  },
+  "reminders": "Reminders",
+  "@reminders": {
+    "description": "Heading for today's upcoming reminders"
+  },
+  "readAloud": "Read aloud",
+  "@readAloud": {
+    "description": "Accessibility label for reading a daily note aloud"
+  },
+  "stopReading": "Stop reading",
+  "@stopReading": {
+    "description": "Accessibility label for stopping read-aloud playback"
+  },
+  "necklaceResting": "Ella's necklace is resting — tap to reconnect",
+  "@necklaceResting": {
+    "description": "Gentle device reconnection action shown on Today"
+  },
+  "aiConsentTitle": "Ella listens to help remember.",
+  "@aiConsentTitle": {
+    "description": "Locked first-run listening consent title"
+  },
+  "aiConsentBodyIntro": "To turn speech into memories, audio from your device and necklace is sent securely to our processing partners: ",
+  "@aiConsentBodyIntro": {
+    "description": "Locked consent body before the Deepgram processor name"
+  },
+  "aiConsentDeepgram": "Deepgram",
+  "@aiConsentDeepgram": {
+    "description": "Speech-to-text processor named in the locked consent disclosure"
+  },
+  "aiConsentBodyMiddle": " (speech-to-text) and ",
+  "@aiConsentBodyMiddle": {
+    "description": "Locked consent body between processor names"
+  },
+  "aiConsentAiPartners": "Google (Gemini), OpenAI, and Groq",
+  "@aiConsentAiPartners": {
+    "description": "Summary and answer processors named in the locked consent disclosure"
+  },
+  "aiConsentBodyEnd": " (to write summaries and answer you). Summaries are shared only with family members you choose. You can turn listening off any time in Settings.",
+  "@aiConsentBodyEnd": {
+    "description": "Locked final portion of the listening consent body"
+  },
+  "allowAndContinue": "Allow and continue",
+  "@allowAndContinue": {
+    "description": "Accept listening consent action"
+  },
+  "notNow": "Not now",
+  "@notNow": {
+    "description": "Decline or defer listening consent action"
+  },
+  "listeningAndConsent": "Listening & consent",
+  "@listeningAndConsent": {
+    "description": "Settings row that opens the listening consent sheet"
+  },
+  "ellaMoreSection": "MORE",
+  "@ellaMoreSection": {
+    "description": "Settings section for additional options"
+  },
+  "ellaAdvancedSettings": "Advanced Settings",
+  "@ellaAdvancedSettings": {
+    "description": "Plain-language link to advanced app settings"
+  },
+  "ellaAdvancedSettingsSubtitle": "Language and app options",
+  "@ellaAdvancedSettingsSubtitle": {
+    "description": "Plain-language description of advanced settings"
   }
 }

@@ -1,10 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:flutter/services.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
@@ -26,7 +23,6 @@ import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/chat/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
-import 'package:omi/pages/conversations/conversations_page.dart';
 import 'package:omi/pages/memories/page.dart';
 import 'package:omi/pages/settings/daily_summary_detail_page.dart';
 import 'package:omi/pages/settings/data_privacy_page.dart';
@@ -47,7 +43,6 @@ import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
-import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -55,9 +50,7 @@ import 'package:omi/widgets/freemium_switch_dialog.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/ella/widgets/ella_emergency_button.dart';
-import 'package:omi/ella/widgets/guardian_mode_button.dart';
-import 'widgets/battery_info_widget.dart';
+import 'today_page.dart';
 
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
@@ -117,7 +110,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   bool scriptsInProgress = false;
   StreamSubscription? _notificationStreamSubscription;
 
-  final GlobalKey<State<ConversationsPage>> _conversationsPageKey = GlobalKey<State<ConversationsPage>>();
+  final GlobalKey<TodayPageState> _todayPageKey = GlobalKey<TodayPageState>();
   late final List<Widget> _pages;
 
   // Freemium switch handler for auto-switch dialogs
@@ -132,10 +125,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   void _scrollToTop(int pageIndex) {
     if (pageIndex == 0) {
-      final conversationsState = _conversationsPageKey.currentState;
-      if (conversationsState != null) {
-        (conversationsState as dynamic).scrollToTop();
-      }
+      _todayPageKey.currentState?.scrollToTop();
     }
   }
 
@@ -187,7 +177,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   @override
   void initState() {
     _pages = [
-      ConversationsPage(key: _conversationsPageKey),
+      TodayPage(key: _todayPageKey),
       const ChatPage(isPivotBottom: true),
       const EllaVoiceChatPage(),
       const EllaSettingsPage(),
@@ -610,47 +600,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                               children: _pages,
                             ),
                           ),
-                          // Bottom padding to account for emergency button + BottomNavBar overlay
-                          // Only needed on home (index 0) where Guardian + Emergency buttons are shown.
-                          // Chat (1), voice (2), and settings (3) handle their own padding.
-                          if (context.watch<HomeProvider>().selectedIndex == 0)
-                            SizedBox(
-                                height: EllaSizes.guardianButtonHeight +
-                                    EllaSizes.emergencyButtonHeight +
-                                    EllaSizes.navBarHeight +
-                                    (EllaSizes.buttonStackSpacing * 2) +
-                                    MediaQuery.of(context).padding.bottom),
                           // Settings and other non-home tabs just need nav bar clearance
                           if (context.watch<HomeProvider>().selectedIndex == 3)
                             SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
                         ],
-                      ),
-                      // Action buttons stack (Guardian + Emergency) - consolidated for self-adjusting layout
-                      Positioned(
-                        bottom: 0,
-                        left: 0,
-                        right: 0,
-                        child: Consumer<HomeProvider>(
-                          builder: (context, home, _) {
-                            return Padding(
-                              padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // Action buttons (only on home screen)
-                                  if (home.selectedIndex == 0) ...[
-                                    const GuardianModeButton(),
-                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
-                                    const EllaEmergencyButton(),
-                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
-                                  ],
-                                  // Always reserve space for nav bar
-                                  SizedBox(height: EllaSizes.navBarHeight),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
                       ),
                       Consumer<HomeProvider>(
                         builder: (context, home, child) {
@@ -684,11 +637,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     return AppBar(
       automaticallyImplyLeading: false,
       backgroundColor: Theme.of(context).colorScheme.primary,
-      leading: const Padding(
-        padding: EdgeInsets.only(left: 8),
-        child: Center(child: BatteryInfoWidget()),
-      ),
-      leadingWidth: 140,
       title: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

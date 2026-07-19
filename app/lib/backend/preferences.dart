@@ -17,6 +17,8 @@ class SharedPreferencesUtil {
   static final SharedPreferencesUtil _instance = SharedPreferencesUtil._internal();
   static SharedPreferences? _preferences;
 
+  static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
+
   factory SharedPreferencesUtil() {
     return _instance;
   }
@@ -184,6 +186,30 @@ class SharedPreferencesUtil {
   set demoMode(bool value) => saveBool('demoMode', value);
 
   bool get demoMode => getBool('demoMode', defaultValue: false);
+
+  set publicMode(bool value) {
+    if (!isPublicBuild) saveBool('publicMode', value);
+  }
+
+  bool get publicMode => isPublicBuild || getBool('publicMode', defaultValue: false);
+
+  set aiConsentAccepted(bool value) => saveBool('aiConsentAccepted', value);
+
+  bool get aiConsentAccepted => getBool('aiConsentAccepted', defaultValue: false);
+
+  set aiConsentAcceptedAt(String value) => saveString('aiConsentAcceptedAt', value);
+
+  String get aiConsentAcceptedAt => getString('aiConsentAcceptedAt');
+
+  void acceptAiConsent() {
+    aiConsentAccepted = true;
+    aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
+  }
+
+  void declineAiConsent() {
+    aiConsentAccepted = false;
+    remove('aiConsentAcceptedAt');
+  }
 
   // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
   set notificationFrequency(int value) => saveInt('notificationFrequency', value);

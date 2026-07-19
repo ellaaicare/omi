@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/messages.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/main.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -57,6 +58,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> startRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (_state == VoiceRecorderState.recording) return;
 
     _state = VoiceRecorderState.recording;
@@ -151,6 +153,10 @@ class VoiceRecorderProvider extends ChangeNotifier {
   }
 
   Future<void> processRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      close();
+      return;
+    }
     if (_isProcessing) return;
 
     if (_audioChunks.isEmpty) {

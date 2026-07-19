@@ -210,6 +210,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _onOrbTap() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     debugPrint(
       '[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive, v2v: $_isV2VMode',
     );
@@ -273,6 +274,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startListening() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     debugPrint('[VoiceChat] _startListening called');
 
     if (_isRestarting) {
@@ -462,6 +464,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   // --- V2V (Voice-to-Voice) WebSocket mode ---
 
   Future<void> _startV2V(String provider) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
     _isV2VMode = true;
 

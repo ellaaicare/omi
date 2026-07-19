@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/desktop/desktop_app.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/settings/asana_settings_page.dart';
@@ -15,6 +16,8 @@ import 'package:omi/pages/settings/usage_page.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/auth_provider.dart';
+import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/integration_provider.dart';
 import 'package:omi/providers/message_provider.dart';
@@ -42,6 +45,9 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
+  AuthenticationProvider? _authProvider;
+  bool _wasSignedIn = false;
+  bool _consentPromptPresented = false;
 
   Future<void> initDeepLinks() async {
     _appLinks = AppLinks();
@@ -296,10 +302,35 @@ class _AppShellState extends State<AppShell> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _initializeProviders());
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final authProvider = context.read<AuthenticationProvider>();
+    if (identical(_authProvider, authProvider)) return;
+    _authProvider?.removeListener(_onAuthChanged);
+    _authProvider = authProvider;
+    _wasSignedIn = authProvider.isSignedIn();
+    authProvider.addListener(_onAuthChanged);
+  }
+
+  void _onAuthChanged() {
+    final isSignedIn = _authProvider?.isSignedIn() ?? false;
+    if (isSignedIn && !_wasSignedIn) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showConsentIfNeeded();
+      });
+    } else if (!isSignedIn) {
+      _consentPromptPresented = false;
+    }
+    _wasSignedIn = isSignedIn;
+  }
+
   Future<void> _initializeProviders() async {
     if (!mounted) return;
     final isSignedIn = context.read<AuthenticationProvider>().isSignedIn();
     if (isSignedIn) {
+      await _showConsentIfNeeded();
+      if (!mounted) return;
       context.read<HomeProvider>().setupHasSpeakerProfile();
       context.read<HomeProvider>().setupUserPrimaryLanguage();
       context.read<UserProvider>().initialize();
@@ -327,8 +358,20 @@ class _AppShellState extends State<AppShell> {
     PlatformManager.instance.intercom.setUserAttributes();
   }
 
+  Future<void> _showConsentIfNeeded() async {
+    if (SharedPreferencesUtil().aiConsentAccepted || _consentPromptPresented) return;
+    _consentPromptPresented = true;
+    final accepted = await AiConsentSheet.show(context);
+    if (accepted == true && mounted) {
+      await context.read<CaptureProvider>().streamDeviceRecording(
+            device: context.read<DeviceProvider>().connectedDevice,
+          );
+    }
+  }
+
   @override
   void dispose() {
+    _authProvider?.removeListener(_onAuthChanged);
     _linkSubscription?.cancel();
     super.dispose();
   }

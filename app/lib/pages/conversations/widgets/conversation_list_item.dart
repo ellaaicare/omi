@@ -15,6 +15,7 @@ import 'package:omi/pages/settings/usage_page.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
@@ -288,7 +289,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                       Text(
                         widget.conversation.discarded
                             ? widget.conversation.getTranscript(maxCount: 100)
-                            : widget.conversation.structured.title.decodeString,
+                            : stripEllaDisplayPrefix(widget.conversation.structured.title.decodeString),
                         style: Theme.of(context).textTheme.titleMedium,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -408,7 +409,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          widget.conversation.structured.title.decodeString,
+          stripEllaDisplayPrefix(widget.conversation.structured.title.decodeString),
           style: Theme.of(context).textTheme.titleLarge,
         ),
       ],
@@ -456,27 +457,6 @@ class _ConversationListItemState extends State<ConversationListItem> {
                   Text(
                     widget.conversation.structured.getEmoji(),
                     style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w500),
-                  ),
-                if (widget.conversation.structured.category.isNotEmpty && !widget.conversation.discarded)
-                  const SizedBox(width: 8),
-                if (widget.conversation.structured.category.isNotEmpty)
-                  Flexible(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: widget.conversation.getTagColor(),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      child: Text(
-                        widget.conversation.getTag(),
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodyMedium!
-                            .copyWith(color: widget.conversation.getTagTextColor()),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 1,
-                      ),
-                    ),
                   ),
               ],
             ),

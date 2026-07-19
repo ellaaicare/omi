@@ -54,6 +54,7 @@ class V2VClient {
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return false;
     final uid = SharedPreferencesUtil().uid;
     if (uid.isEmpty) {
       Logger.debug('[V2V] No uid, cannot connect');
@@ -218,7 +219,7 @@ class V2VClient {
       ));
 
       _micSub = stream.listen((data) {
-        if (_isConnected && _channel != null && !_micMuted) {
+        if (_isConnected && _channel != null && !_micMuted && SharedPreferencesUtil().aiConsentAccepted) {
           _channel!.sink.add(data);
         }
       });

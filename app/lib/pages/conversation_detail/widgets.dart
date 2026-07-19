@@ -26,6 +26,7 @@ import 'package:omi/pages/conversations/widgets/move_to_folder_sheet.dart';
 import 'package:omi/pages/settings/developer.dart';
 import 'package:omi/providers/folder_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/folders/folder_icon_mapper.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
@@ -286,7 +287,7 @@ class GetSummaryWidgets extends StatelessWidget {
                     conversationId: conversation.id,
                     focusNode: data.item3,
                     controller: data.item2,
-                    content: conversation.structured.title.decodeString,
+                    content: stripEllaDisplayPrefix(conversation.structured.title.decodeString),
                     style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.w600,
@@ -563,7 +564,7 @@ class AppResultDetailWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String content = appResponse.content.trim().decodeString;
+    final String content = stripEllaDisplayPrefix(appResponse.content.trim().decodeString);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
@@ -1138,7 +1139,7 @@ class GetSheetTitle extends StatelessWidget {
             title: Text(
               provider.conversation.discarded
                   ? context.l10n.discardedConversation
-                  : provider.conversation.structured.title,
+                  : stripEllaDisplayPrefix(provider.conversation.structured.title),
               style: Theme.of(context).textTheme.labelLarge,
             ),
             leading: const Icon(Icons.description),

@@ -109,6 +109,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
   @override
   Widget build(BuildContext context) {
+    final publicMode = SharedPreferencesUtil().publicMode;
     if (!_isSignedIn) {
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,
@@ -160,22 +161,23 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
                 }),
               ),
               EllaConnect(
-                onNext: () => _goToPage(2),
-                onSkip: () => _goToPage(2),
+                onNext: publicMode ? _completeOnboarding : () => _goToPage(2),
+                onSkip: publicMode ? _completeOnboarding : () => _goToPage(2),
                 onBack: () => _goToPage(0),
               ),
-              EllaEmergency(
-                onComplete: _completeOnboarding,
-                onSkip: _completeOnboarding,
-                onBack: () => _goToPage(1),
-              ),
+              if (!publicMode)
+                EllaEmergency(
+                  onComplete: _completeOnboarding,
+                  onSkip: _completeOnboarding,
+                  onBack: () => _goToPage(1),
+                ),
             ],
           ),
           Positioned(
             bottom: MediaQuery.of(context).padding.bottom + 8,
             left: 0,
             right: 0,
-            child: EllaProgressDots(currentPage: _currentPage, totalPages: 3),
+            child: EllaProgressDots(currentPage: _currentPage, totalPages: publicMode ? 2 : 3),
           ),
         ],
       ),

@@ -445,6 +445,10 @@ class CaptureProvider extends ChangeNotifier
     bool force = false,
     String? source,
   }) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      _transcriptServiceReady = false;
+      return;
+    }
     Logger.debug('initiateWebsocket in capture_provider');
 
     BleAudioCodec codec = audioCodec;
@@ -491,6 +495,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   void _processVoiceCommandBytes(String deviceId, List<List<int>> data) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (data.isEmpty) {
       Logger.debug("voice frames is empty");
       return;
@@ -635,6 +640,11 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future streamAudioToWs(String deviceId, BleAudioCodec codec) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      await _bleBytesStream?.cancel();
+      _bleBytesStream = null;
+      return;
+    }
     Logger.debug('streamAudioToWs in capture_provider');
     _bleBytesStream?.cancel();
     _startMetricsTracking();
@@ -667,6 +677,7 @@ class CaptureProvider extends ChangeNotifier
 
       // Send WS
       if (_socket?.state == SocketServiceState.connected) {
+        if (!SharedPreferencesUtil().aiConsentAccepted) return;
         final paddingLeft =
             (_recordingDevice?.type == DeviceType.omi || _recordingDevice?.type == DeviceType.openglass) ? 3 : 0;
         final trimmedValue = paddingLeft > 0 ? value.sublist(paddingLeft) : value;
@@ -792,6 +803,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> _initiateDevicePhotoStreaming() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (_recordingDevice == null) return;
     final deviceId = _recordingDevice!.id;
     var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
@@ -966,6 +978,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   streamRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     updateRecordingState(RecordingState.initialising);
     await Permission.microphone.request();
 
@@ -997,6 +1010,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future streamDeviceRecording({BtDevice? device}) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     Logger.debug("streamDeviceRecording $device");
     if (device != null) _updateRecordingDevice(device);
 
@@ -1023,6 +1037,7 @@ class CaptureProvider extends ChangeNotifier
   }
 
   Future<void> streamSystemAudioRecording() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (!PlatformService.isDesktop) {
       notifyError('System audio recording is only available on macOS and Windows.');
       return;
