@@ -53,6 +53,9 @@ BUILD_DIR="$APP_DIR/build/ios"
 ARCHIVE_PATH="$BUILD_DIR/EllaCare.xcarchive"
 PAYLOAD_DIR="/tmp/ella-payload"
 IPA_PATH="$BUILD_DIR/EllaCare.ipa"
+PUBSPEC_VERSION="$(awk '/^version:/ {print $2; exit}' "$APP_DIR/pubspec.yaml")"
+EXPECTED_BUILD_NAME="${PUBSPEC_VERSION%%+*}"
+EXPECTED_BUILD_NUMBER="${PUBSPEC_VERSION##*+}"
 
 if [ "$FLAVOR" = "prod" ]; then
   BUNDLE_ID="com.ellaaicare.ella"
@@ -142,7 +145,13 @@ log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PL
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD"
-$FLUTTER build ios --flavor "$FLAVOR" --release --no-codesign "${DART_DEFINES[@]}"
+$FLUTTER build ios \
+  --flavor "$FLAVOR" \
+  --release \
+  --no-codesign \
+  --build-name "$EXPECTED_BUILD_NAME" \
+  --build-number "$EXPECTED_BUILD_NUMBER" \
+  "${DART_DEFINES[@]}"
 
 # ── Step 5: CocoaPods ─────────────────────────────────────────
 log "Pod install"
@@ -152,6 +161,7 @@ pod install --repo-update
 # ── Step 6: xcodebuild archive (unsigned) ────────────────────
 log "Archiving ($SCHEME) — unsigned"
 mkdir -p "$BUILD_DIR"
+rm -rf "$ARCHIVE_PATH"
 xcodebuild archive \
   -workspace Runner.xcworkspace \
   -scheme "$SCHEME" \
@@ -161,7 +171,7 @@ xcodebuild archive \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
   CODE_SIGNING_ALLOWED=NO \
-  2>&1 | tee /tmp/ella-xcodebuild-archive.log | grep -E "(error:|ARCHIVE|succeeded|BUILD)" || true
+  2>&1 | tee /tmp/ella-xcodebuild-archive.log
 
 if [ ! -d "$ARCHIVE_PATH" ]; then
   echo "ERROR: Archive failed. Full log at /tmp/ella-xcodebuild-archive.log"
@@ -171,6 +181,12 @@ fi
 log "Archive succeeded: $ARCHIVE_PATH"
 
 APP_BUNDLE="$ARCHIVE_PATH/Products/Applications/Ella Care.app"
+ACTUAL_BUILD_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Info.plist" 2>/dev/null || true)"
+ACTUAL_BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_BUNDLE/Info.plist" 2>/dev/null || true)"
+if [ "$ACTUAL_BUILD_NAME" != "$EXPECTED_BUILD_NAME" ] || [ "$ACTUAL_BUILD_NUMBER" != "$EXPECTED_BUILD_NUMBER" ]; then
+  echo "ERROR: Archive version mismatch. Expected $EXPECTED_BUILD_NAME+$EXPECTED_BUILD_NUMBER, got $ACTUAL_BUILD_NAME+$ACTUAL_BUILD_NUMBER"
+  exit 1
+fi
 
 # ── Step 7: Embed provisioning profile ───────────────────────
 log "Embedding provisioning profile"
