@@ -412,14 +412,15 @@ class MessageProvider extends ChangeNotifier {
       if (cached.isNotEmpty) {
         messages = cached;
         setHasCachedMessages(true);
-      } else {
-        // Cache empty (e.g. after logout/login) — rehydrate from server
-        final history = await fetchEllaChatHistory(limit: 50);
-        if (history.isNotEmpty) {
-          messages = history;
-          SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(true);
-        }
+      }
+
+      // Always try to rehydrate from server so a bad local/demo cache from a
+      // previous TestFlight cannot mask the real account timeline.
+      final history = await fetchEllaChatHistory(limit: 50);
+      if (history.isNotEmpty) {
+        messages = history;
+        SharedPreferencesUtil().cachedMessages = messages;
+        setHasCachedMessages(true);
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);

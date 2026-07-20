@@ -506,6 +506,18 @@ class SharedPreferencesUtil {
     saveString('cachedMessagesUid', '');
   }
 
+  void clearDemoStateForAccountBuild() {
+    demoMode = false;
+    publicMode = false;
+
+    final hasDemoConversationCache = getStringList('cachedConversations').any((value) => value.contains('"id":"demo-'));
+    final hasDemoMemoryCache = getStringList('cachedMemories').any((value) => value.contains('"id":"demo-'));
+    final hasDemoMessageCache = getStringList('cachedMessages').any((value) => value.contains('"id":"demo-chat-'));
+    if (hasDemoConversationCache || hasDemoMemoryCache || hasDemoMessageCache) {
+      clearUserCaches();
+    }
+  }
+
   // Pending memories - memories created offline that need to be synced
   List<Memory> get pendingMemories {
     final memories = getStringList('pendingMemories');
