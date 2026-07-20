@@ -141,8 +141,20 @@ fi
 # ── Step 2: Flutter setup ─────────────────────────────────────
 log "Flutter pub get + build_runner"
 cd "$APP_DIR"
+if [ "$FLAVOR" = "prod" ] && [ ! -f .prod.env ]; then
+  cat > .prod.env <<'EOF'
+API_BASE_URL=https://api.ella-ai-care.com/
+USE_WEB_AUTH=false
+USE_AUTH_CUSTOM_TOKEN=false
+EOF
+fi
 $FLUTTER pub get
 $DART run build_runner build --delete-conflicting-outputs
+
+if [ "$FLAVOR" = "prod" ] && grep -q "static final String? apiBaseUrl = null;" lib/env/prod_env.g.dart; then
+  echo "ERROR: ProdEnv.apiBaseUrl is null after build_runner; refusing to ship a backend-disconnected prod app."
+  exit 1
+fi
 
 # ── Step 3: Ensure Firebase/env configs exist ─────────────────
 log "Checking configs"
@@ -190,13 +202,18 @@ log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PL
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD"
-run_with_release_env "$FLUTTER" build ios \
+FLUTTER_BUILD_ARGS=(
+  build ios
   --flavor "$FLAVOR" \
   --release \
   --no-codesign \
   --build-name "$EXPECTED_BUILD_NAME" \
-  --build-number "$EXPECTED_BUILD_NUMBER" \
-  "${DART_DEFINES[@]}"
+  --build-number "$EXPECTED_BUILD_NUMBER"
+)
+if [ "${#DART_DEFINES[@]}" -gt 0 ]; then
+  FLUTTER_BUILD_ARGS+=("${DART_DEFINES[@]}")
+fi
+run_with_release_env "$FLUTTER" "${FLUTTER_BUILD_ARGS[@]}"
 
 # ── Step 5: CocoaPods ─────────────────────────────────────────
 log "Pod install"
