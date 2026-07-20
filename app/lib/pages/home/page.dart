@@ -580,7 +580,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             return Scaffold(
               backgroundColor: Theme.of(context).colorScheme.primary,
               resizeToAvoidBottomInset: false,
-              appBar: homeProvider.selectedIndex == 0 ? _buildAppBar(context) : null,
+              appBar: null,
               body: DefaultTabController(
                 length: 4,
                 initialIndex: homeProvider.selectedIndex,
@@ -630,54 +630,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           },
         ),
       ),
-    );
-  }
-
-  PreferredSizeWidget _buildAppBar(BuildContext context) {
-    return AppBar(
-      automaticallyImplyLeading: false,
-      backgroundColor: Theme.of(context).colorScheme.primary,
-      title: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
-              ),
-            ),
-            child: const Center(
-              child: Text(
-                'e',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w300,
-                  color: Colors.white,
-                  fontFamily: 'Manrope',
-                  height: 1.1,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          const Text(
-            'ella',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w600,
-              fontFamily: 'Manrope',
-              letterSpacing: 1,
-            ),
-          ),
-        ],
-      ),
-      centerTitle: true,
-      elevation: 0,
     );
   }
 

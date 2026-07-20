@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
-
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/chat/widgets/files_handler_widget.dart';
@@ -64,30 +62,24 @@ class HumanMessage extends StatelessWidget {
                 ),
               ),
             ),
-          if (message.fromVoice)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4, right: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  FaIcon(FontAwesomeIcons.microphone, size: 10, color: EllaColors.primary.withOpacity(0.5)),
-                  const SizedBox(width: 4),
-                  Text('voice', style: TextStyle(fontSize: 11, color: EllaColors.primary.withOpacity(0.5))),
-                ],
-              ),
-            ),
-          Wrap(
-            alignment: WrapAlignment.end,
-            children: [
-              Container(
+          Align(
+            alignment: Alignment.centerRight,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.78),
+              child: Container(
                 decoration: BoxDecoration(
-                  color: message.fromVoice ? EllaColors.primary.withOpacity(0.85) : EllaColors.primary,
-                  borderRadius: BorderRadius.circular(20.0),
+                  color: EllaColors.teal,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(18),
+                    topRight: Radius.circular(18),
+                    bottomLeft: Radius.circular(18),
+                    bottomRight: Radius.circular(4),
+                  ),
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                 child: SelectableText(
                   messageText.trimRight(),
-                  style: const TextStyle(color: Colors.white, fontSize: 16, height: 1.4),
+                  style: EllaTextStyles.body.copyWith(color: EllaColors.paper),
                   contextMenuBuilder: (context, editableTextState) {
                     return omiSelectionMenuBuilder(context, editableTextState, (text) {
                       onAskOmi?.call(text);
@@ -95,7 +87,7 @@ class HumanMessage extends StatelessWidget {
                   },
                 ),
               ),
-            ],
+            ),
           ),
         ],
       ),

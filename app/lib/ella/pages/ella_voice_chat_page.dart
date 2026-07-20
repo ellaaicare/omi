@@ -20,6 +20,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
+import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
@@ -857,23 +858,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     });
   }
 
-  String get _transcriptContent {
-    if (_orbState == VoiceOrbState.listening && _currentWords.isNotEmpty) {
-      return _currentWords;
-    }
-    if (_ellaDisplayText.isNotEmpty) return _ellaDisplayText;
-    if (_lastUserText.isNotEmpty) return _lastUserText;
-    return '';
-  }
-
-  Color get _transcriptColor {
-    if (_orbState == VoiceOrbState.listening && _currentWords.isNotEmpty) {
-      return EllaColors.textTertiary.withOpacity(0.7);
-    }
-    if (_ellaDisplayText.isNotEmpty) return EllaColors.textSecondary;
-    return EllaColors.textTertiary.withOpacity(0.7);
-  }
-
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -909,26 +893,25 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             const SizedBox(height: 24),
             Center(
               child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 decoration: BoxDecoration(
-                  color: EllaColors.bgSecondary,
+                  color: EllaColors.card,
                   borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                  border: Border.all(
-                    color: EllaColors.primary.withOpacity(0.22),
-                    width: 1,
-                  ),
+                  border: Border.all(color: EllaColors.cardDeep),
                 ),
-                child: Text(
-                  _statusText,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: EllaColors.textSecondary,
-                  ),
-                  textAlign: TextAlign.center,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_orbState == VoiceOrbState.listening) ...[
+                      const EllaBreathingDot(),
+                      const SizedBox(width: 10),
+                    ],
+                    Text(
+                      _orbState == VoiceOrbState.listening ? 'Listening' : _statusText,
+                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -938,17 +921,30 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
               width: double.infinity,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: _transcriptContent.isEmpty
+                child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
                     ? const SizedBox.shrink()
                     : SingleChildScrollView(
                         controller: _transcriptScrollController,
-                        child: Text(
-                          _transcriptContent,
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: _transcriptColor,
-                          ),
-                          textAlign: TextAlign.center,
+                        child: Column(
+                          children: [
+                            if (_lastUserText.isNotEmpty)
+                              Opacity(
+                                opacity: 0.6,
+                                child: Text(
+                                  _lastUserText,
+                                  style: EllaTextStyles.secondary,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
+                              const SizedBox(height: 8),
+                            if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
+                              Text(
+                                _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
+                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
+                                textAlign: TextAlign.center,
+                              ),
+                          ],
                         ),
                       ),
               ),

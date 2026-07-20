@@ -18,8 +18,8 @@ class AiConsentSheet extends StatelessWidget {
       enableDrag: false,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: EllaColors.bgSecondary,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(8))),
+      backgroundColor: EllaColors.paper,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (_) => const AiConsentSheet(),
     );
   }
@@ -33,14 +33,14 @@ class AiConsentSheet extends StatelessWidget {
     return PopScope(
       canPop: false,
       child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(24, 28, 24, 24 + MediaQuery.paddingOf(context).bottom),
+        padding: EdgeInsets.fromLTRB(24, 16, 24, 44 + MediaQuery.paddingOf(context).bottom),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               context.l10n.aiConsentTitle,
-              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
+              style: EllaTextStyles.display,
             ),
             const SizedBox(height: 16),
             Text.rich(
@@ -70,15 +70,15 @@ class AiConsentSheet extends StatelessWidget {
             const SizedBox(height: 28),
             SizedBox(
               width: double.infinity,
-              height: 54,
+              height: 56,
               child: FilledButton(
                 onPressed: () {
                   SharedPreferencesUtil().acceptAiConsent();
                   Navigator.of(context).pop(true);
                 },
                 style: FilledButton.styleFrom(
-                  backgroundColor: EllaColors.primary,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  backgroundColor: EllaColors.tealDeep,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
                 ),
                 child: Text(context.l10n.allowAndContinue, style: const TextStyle(fontSize: 17)),
               ),
@@ -92,7 +92,15 @@ class AiConsentSheet extends StatelessWidget {
                   SharedPreferencesUtil().declineAiConsent();
                   Navigator.of(context).pop(false);
                 },
-                child: Text(context.l10n.notNow, style: const TextStyle(fontSize: 17)),
+                child: Text(
+                  context.l10n.notNow,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    color: EllaColors.inkSoft,
+                    decoration: TextDecoration.underline,
+                    decorationColor: EllaColors.inkSoft,
+                  ),
+                ),
               ),
             ),
           ],

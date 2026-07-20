@@ -212,13 +212,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             ),
             const SizedBox(height: 8),
 
-            // Guardian Mode row
+            // Internal policy picker; the public label remains Whispers.
             if (!publicMode)
               EllaSettingsRow(
                 icon: Icons.shield,
                 iconColor: _guardianMode?.color ?? EllaColors.primary,
                 iconBgColor: _guardianMode?.color ?? EllaColors.primary,
-                title: 'Guardian Mode',
+                title: 'Whisper settings',
                 subtitle: _guardianMode != null ? _guardianMode!.displayName : 'Loading…',
                 onTap: () async {
                   final updated = await Navigator.push<GuardianModeState>(
@@ -282,15 +282,17 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 },
               ),
               const SizedBox(height: 8),
-              EllaSettingsRow(
-                icon: Icons.history,
-                title: context.l10n.guardianAlertsHistoryTitle,
-                subtitle: context.l10n.guardianAlertsHistorySubtitle,
-                onTap: () {
-                  Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
-                },
-              ),
             ],
+
+            const SizedBox(height: 8),
+            EllaSettingsRow(
+              icon: Icons.record_voice_over_rounded,
+              title: 'Whispers',
+              subtitle: 'Things Ella has said and why',
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
+              },
+            ),
 
             // CAPTURE section
             _buildSectionHeader(context.l10n.ellaCaptureSection),

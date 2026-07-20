@@ -25,12 +25,12 @@ Widget getMarkdownWidget(BuildContext context, String message, {Function(String)
     data: formatEllaReplyForDisplay(message),
     selectable: false,
     styleSheet: MarkdownStyleSheet(
-      p: const TextStyle(color: EllaColors.textPrimary, fontSize: 16, height: 1.4),
-      a: const TextStyle(color: Colors.blue, decoration: TextDecoration.underline),
-      listBullet: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
+      p: EllaTextStyles.body,
+      a: const TextStyle(color: EllaColors.tealDeep, fontSize: 18, decoration: TextDecoration.underline),
+      listBullet: EllaTextStyles.body,
       blockquote: const TextStyle(
         color: EllaColors.textPrimary,
-        fontSize: 16,
+        fontSize: 18,
         height: 1.4,
         backgroundColor: Colors.transparent,
       ),
