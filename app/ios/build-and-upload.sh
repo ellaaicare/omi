@@ -67,6 +67,51 @@ fi
 
 log() { echo "=== $(date '+%H:%M:%S') $1 ==="; }
 
+SENSITIVE_BUILD_ENV_VARS=(
+  A2A_BOT_REGISTRY_PATH
+  A2A_GUIDANCE_COOLDOWN_SECONDS
+  A2A_TRUST_REGISTRY_BOTS
+  AI_API_KEY
+  AI_PROVIDER_SECRETS_FILE
+  ALLOWED_BOT_IDS
+  ALLOWED_CHAT_IDS
+  ALLOWED_SENDER_IDS
+  ALLOWED_USER_IDS
+  ANTHROPIC_API_KEY
+  CLOUDFLARE_API_TOKEN
+  CODEX_ADD_DIRS
+  CODEX_BRIDGE_LOG_FILE
+  CODEX_BRIDGE_PORT
+  CODEX_BRIDGE_STATE_DIR
+  CODEX_CI
+  CODEX_DEFAULT_FOLDER
+  CODEX_DANGEROUS_BYPASS
+  CODEX_FULL_AUTO
+  CODEX_MANAGED_BY_NPM
+  CODEX_MANAGED_PACKAGE_ROOT
+  CODEX_MODEL
+  CODEX_SANDBOX
+  CODEX_SKIP_GIT_REPO_CHECK
+  CODEX_TELEGRAM_BOT_TOKEN
+  CODEX_THREAD_ID
+  CODEX_TIMEOUT
+  GH_TOKEN
+  GITHUB_TOKEN
+  GOOGLE_API_KEY
+  OPENAI_API_KEY
+  OPENROUTER_API_KEY
+  TELEGRAM_BOT_TOKEN
+)
+
+run_with_release_env() {
+  local env_cmd=(env)
+  local var
+  for var in "${SENSITIVE_BUILD_ENV_VARS[@]}"; do
+    env_cmd+=("-u" "$var")
+  done
+  "${env_cmd[@]}" "$@"
+}
+
 DART_DEFINES=()
 if [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; then
   DART_DEFINES+=(--dart-define=ELLA_PUBLIC_BUILD=true)
@@ -145,7 +190,7 @@ log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PL
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD"
-$FLUTTER build ios \
+run_with_release_env "$FLUTTER" build ios \
   --flavor "$FLAVOR" \
   --release \
   --no-codesign \
@@ -162,7 +207,7 @@ pod install --repo-update
 log "Archiving ($SCHEME) — unsigned"
 mkdir -p "$BUILD_DIR"
 rm -rf "$ARCHIVE_PATH"
-xcodebuild archive \
+run_with_release_env xcodebuild archive \
   -workspace Runner.xcworkspace \
   -scheme "$SCHEME" \
   -configuration "$CONFIG" \
