@@ -16,6 +16,7 @@ set -euo pipefail
 #   FLAVOR         — "prod" (default) or "dev"
 #   ELLA_PUBLIC_BUILD — "true"/"1" forces public launch mode (default: true)
 #   SKIP_PULL      — set to "1" to skip git pull
+#   RUN_TESTS      — set to "1" to run the Flutter suite after env generation
 #   SKIP_UPLOAD    — set to "1" to build only, no TestFlight upload
 #   ASC_ISSUER_ID  — App Store Connect API Issuer ID (has default)
 # ──────────────────────────────────────────────────────────────
@@ -154,6 +155,11 @@ $DART run build_runner build --delete-conflicting-outputs
 if [ "$FLAVOR" = "prod" ] && grep -q "static final String? apiBaseUrl = null;" lib/env/prod_env.g.dart; then
   echo "ERROR: ProdEnv.apiBaseUrl is null after build_runner; refusing to ship a backend-disconnected prod app."
   exit 1
+fi
+
+if [ "${RUN_TESTS:-0}" = "1" ]; then
+  log "Running Flutter test suite"
+  run_with_release_env "$FLUTTER" test --no-pub
 fi
 
 # ── Step 3: Ensure Firebase/env configs exist ─────────────────

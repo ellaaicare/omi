@@ -125,12 +125,12 @@ Do not change Firebase, auth, bundle ID, signing, provisioning, or App Store Con
 
 ### Design v2 build 790 handoff
 
-The release commit is pinned by the `testflight/design-v2-790` tag. From any
+The release commit is pinned by the `testflight/design-v2-790-r1` tag. From any
 machine authenticated to the Ella GitHub organization, this one command queues
 Sophia's self-hosted Mac Mini runner:
 
 ```bash
-gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-790
+gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-790-r1
 ```
 
 The workflow checks out that immutable tag, runs the Flutter test suite, and
