@@ -1,6 +1,6 @@
 # Ella iOS Source Of Truth
 
-Last verified: 2026-07-19
+Last verified: 2026-07-20
 
 ## Where The App Lives
 
@@ -122,6 +122,20 @@ Firebase project: omi-dev-ca005
 ```
 
 Do not change Firebase, auth, bundle ID, signing, provisioning, or App Store Connect configuration just to make a local build pass. If TestFlight is required, use the repo deploy scripts and the Mac Mini App Store Connect environment documented in the agent runbooks.
+
+### Design v2 build 790 handoff
+
+The release commit is pinned by the `testflight/design-v2-790` tag. From any
+machine authenticated to the Ella GitHub organization, this one command queues
+Sophia's self-hosted Mac Mini runner:
+
+```bash
+gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-790
+```
+
+The workflow checks out that immutable tag, runs the Flutter test suite, and
+then invokes the existing `app/ios/build-and-upload.sh` TestFlight path. It does
+not change signing, bundle ID, Firebase, or App Store Connect configuration.
 
 ## Branch Hygiene
 

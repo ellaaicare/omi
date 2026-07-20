@@ -31,6 +31,12 @@ jobs:
           echo "/opt/homebrew/lib/ruby/gems/4.0.0/bin" >> $GITHUB_PATH
           echo "/opt/homebrew/bin" >> $GITHUB_PATH
 
+      - name: Run test suite
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter test --no-pub
+
       - name: Build and Upload
         working-directory: app/ios
         run: |
