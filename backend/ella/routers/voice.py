@@ -16,10 +16,13 @@ Provider types:
 """
 
 import base64
+import hmac
 import json
 import os
 import logging
 import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import List, Optional
@@ -70,6 +73,11 @@ PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:82
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
 HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
+HERMES_PROVISION_API_URL = os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
+HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").strip()
+VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
+VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
+VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
@@ -81,6 +89,88 @@ def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
         "ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS",
         uid,
     )
+
+
+@dataclass(frozen=True)
+class VoiceProxyPrincipal:
+    uid: str
+    session_id: str
+    provider: str
+    voice_mode: str
+    isolated_runtime: bool
+
+
+def _voice_proxy_bearer(request: Request) -> str:
+    authorization = str(request.headers.get("Authorization") or "")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail={"code": "voice_session_token_required"})
+    return authorization[7:].strip()
+
+
+def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> VoiceProxyPrincipal:
+    """Require service auth and bind the body UID to the signed Firebase subject."""
+    if not VOICE_PROXY_SERVICE_TOKEN:
+        raise HTTPException(status_code=503, detail={"code": "voice_proxy_service_auth_not_configured"})
+    presented_service_token = str(request.headers.get(VOICE_PROXY_SERVICE_HEADER) or "")
+    if not presented_service_token or not hmac.compare_digest(
+        presented_service_token.encode("utf-8"),
+        VOICE_PROXY_SERVICE_TOKEN.encode("utf-8"),
+    ):
+        raise HTTPException(status_code=403, detail={"code": "voice_proxy_service_auth_invalid"})
+    if not jwt or not ELLA_SESSION_SECRET:
+        raise HTTPException(status_code=503, detail={"code": "voice_session_auth_not_configured"})
+
+    try:
+        claims = jwt.decode(
+            _voice_proxy_bearer(request),
+            ELLA_SESSION_SECRET,
+            algorithms=["HS256"],
+            issuer="omi-backend",
+            audience=VOICE_SESSION_AUDIENCE,
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "uid"]},
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail={"code": "voice_session_expired"}) from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"}) from exc
+
+    subject = str(claims.get("sub") or "").strip()
+    claim_uid = str(claims.get("uid") or "").strip()
+    requested_uid = str(requested_uid or "").strip()
+    if not subject or claim_uid != subject or requested_uid != subject:
+        raise HTTPException(status_code=403, detail={"code": "voice_session_ownership_mismatch"})
+
+    return VoiceProxyPrincipal(
+        uid=subject,
+        session_id=str(claims.get("jti") or ""),
+        provider=str(claims.get("provider") or ""),
+        voice_mode=str(claims.get("voice_mode") or ""),
+        isolated_runtime=claims.get("isolated_runtime") is True,
+    )
+
+
+async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
+    """Resolve an isolated session to the exact active Hermes receipt."""
+    bindings_enabled = runtime_bindings_enabled(principal.uid)
+    if principal.isolated_runtime != bindings_enabled:
+        raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
+    if not bindings_enabled:
+        return None
+    try:
+        return await resolve_isolated_runtime(principal.uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+
+
+def _hermes_workspace_headers(uid: str) -> dict[str, str]:
+    if not HERMES_PROVISION_API_TOKEN:
+        raise HTTPException(status_code=503, detail={"code": "hermes_service_auth_not_configured"})
+    return {
+        "Authorization": f"Bearer {HERMES_PROVISION_API_TOKEN}",
+        "X-Ella-Owner-Uid": uid,
+        "Content-Type": "application/json",
+    }
+
 
 # Database connection pool (lazy-initialized, shared pattern with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
@@ -250,6 +340,7 @@ def create_session_token(
     display_name: Optional[str] = None,
     voice_mode: str = "v3-rich",
     provider: str = "grok-voice",
+    isolated_runtime: bool = False,
 ) -> str:
     """
     Create a JWT session token for V2V connection.
@@ -272,13 +363,17 @@ def create_session_token(
         raise HTTPException(status_code=500, detail="Session secret not configured")
 
     payload = {
+        "sub": firebase_uid,
         "uid": uid,
         "firebase_uid": firebase_uid,
         "name": display_name or "User",
         "voice_mode": voice_mode,
         "provider": provider,
+        "isolated_runtime": isolated_runtime,
         "context_url": f"{ELLA_API_BASE}/v1/users/{uid}/context",
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
+        "aud": VOICE_SESSION_AUDIENCE,
+        "jti": str(uuid.uuid4()),
         "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
@@ -418,7 +513,8 @@ async def create_voice_session(
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
 
-    if runtime_bindings_enabled(uid):
+    isolated_runtime = runtime_bindings_enabled(uid)
+    if isolated_runtime:
         try:
             await resolve_isolated_runtime(uid)
         except ProvisioningError as exc:
@@ -468,6 +564,7 @@ async def create_voice_session(
             display_name=user_display_name,
             voice_mode=resolved_mode,
             provider=provider,
+            isolated_runtime=isolated_runtime,
         )
 
         # Build endpoint URL with mode query param
@@ -875,24 +972,37 @@ async def get_voice_context(request: Request):
     uid = body.get("uid")
     if not uid:
         raise HTTPException(status_code=400, detail="uid is required")
+    principal = authenticate_voice_proxy_request(request, uid)
+    uid = principal.uid
+    runtime = await _resolve_voice_runtime(principal)
 
     budget = body.get("context_budget", 8000)
     memory_timeout_seconds = float(body.get("memory_timeout_seconds", 2.0))
     _start = time.time()
 
-    # 1. DB lookup — user + agent cluster
+    # 1. DB lookup. Isolated users never resolve routing through agent_clusters.
     pool = await _get_pool()
     try:
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.conditions, u.medications, u.guardian_mode,
-                   ac.agents
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.omi_uid = $1
-            """,
-            uid,
-        )
+        if runtime:
+            row = await pool.fetchrow(
+                """
+                SELECT u.id, u.name, u.conditions, u.medications, u.guardian_mode
+                FROM users u
+                WHERE u.omi_uid = $1
+                """,
+                uid,
+            )
+        else:
+            row = await pool.fetchrow(
+                """
+                SELECT u.id, u.name, u.conditions, u.medications, u.guardian_mode,
+                       ac.agents
+                FROM users u
+                LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+                WHERE u.omi_uid = $1
+                """,
+                uid,
+            )
     except Exception as e:
         logger.error(f"[FLOW:VOICE-CONTEXT] DB error for uid={uid}: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -901,7 +1011,7 @@ async def get_voice_context(request: Request):
         raise HTTPException(status_code=404, detail=f"User not found for uid: {uid}")
 
     # Parse agents JSONB (asyncpg may return as str or dict)
-    agents_raw = row["agents"]
+    agents_raw = row.get("agents") if hasattr(row, "get") else None
     if isinstance(agents_raw, str):
         agents = json.loads(agents_raw)
     elif isinstance(agents_raw, dict):
@@ -909,33 +1019,38 @@ async def get_voice_context(request: Request):
     else:
         agents = {}
 
-    agent_id = agents.get("userAgentId", "")
-    gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
-    gateway_token = agents.get("gatewayToken", OPENCLAW_GATEWAY_TOKEN)
+    if runtime:
+        agent_id = runtime.agent_id
+        gateway_url = ""
+        gateway_token = ""
+        workspace_api_url = HERMES_PROVISION_API_URL
+        workspace_headers = _hermes_workspace_headers(uid)
+    else:
+        agent_id = agents.get("userAgentId", "")
+        gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
+        gateway_token = agents.get("gatewayToken", OPENCLAW_GATEWAY_TOKEN)
+        workspace_api_url = PROVISION_API_URL
+        workspace_headers = {
+            "Authorization": f"Bearer {PROVISION_API_TOKEN}",
+            "Content-Type": "application/json",
+        }
 
     # 2. Read workspace files from provision API
     files = {}
-    if agent_id and PROVISION_API_TOKEN:
+    if agent_id and workspace_headers.get("Authorization") != "Bearer ":
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
-                    f"{PROVISION_API_URL}/workspace/{agent_id}/files",
-                    headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                    f"{workspace_api_url}/workspace/{agent_id}/files",
+                    headers=workspace_headers,
                 )
                 if resp.status_code == 200:
                     file_list = resp.json().get("files", [])
-                    files = {
-                        f.get("name", f.get("filename", "")): f.get("content", "")
-                        for f in file_list
-                    }
-                    logger.info(
-                        f"[FLOW:VOICE-CONTEXT] Loaded {len(files)} workspace files "
-                        f"for agent={agent_id}"
-                    )
+                    files = {f.get("name", f.get("filename", "")): f.get("content", "") for f in file_list}
+                    logger.info(f"[FLOW:VOICE-CONTEXT] Loaded {len(files)} workspace files " f"for agent={agent_id}")
                 else:
                     logger.warning(
-                        f"[FLOW:VOICE-CONTEXT] Provision API returned "
-                        f"{resp.status_code} for agent={agent_id}"
+                        f"[FLOW:VOICE-CONTEXT] Provision API returned " f"{resp.status_code} for agent={agent_id}"
                     )
         except Exception as e:
             logger.warning(f"[FLOW:VOICE-CONTEXT] Provision API error: {e}")
@@ -964,16 +1079,20 @@ async def get_voice_context(request: Request):
     memory_context = ""
     try:
         import asyncio as _aio
+
         conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=8))
         timeline_task = _aio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
-        mem_task = _aio.create_task(
-            _fetch_memory_context(
-                gateway_url,
-                gateway_token,
-                row["name"] or "user",
-                timeout_seconds=memory_timeout_seconds,
+        if runtime:
+            mem_task = _aio.create_task(_aio.sleep(0, result=""))
+        else:
+            mem_task = _aio.create_task(
+                _fetch_memory_context(
+                    gateway_url,
+                    gateway_token,
+                    row["name"] or "user",
+                    timeout_seconds=memory_timeout_seconds,
+                )
             )
-        )
         recent_conversations, recent_timeline, memory_context = await _aio.gather(
             conv_task,
             timeline_task,
@@ -987,7 +1106,7 @@ async def get_voice_context(request: Request):
     user_profile = files.get("USER.md", "")[:2000]
     # Read last 2 days of daily voice logs (today + yesterday, UTC)
     voice_summaries = ""
-    if agent_id and PROVISION_API_TOKEN:
+    if agent_id and workspace_headers.get("Authorization") != "Bearer ":
         try:
             _today = datetime.utcnow()
             _yesterday = _today - timedelta(days=1)
@@ -996,8 +1115,8 @@ async def get_voice_context(request: Request):
                 for _d in [_yesterday, _today]:
                     _vpath = f"voice/{_d.strftime('%Y-%m-%d')}.md"
                     _vresp = await _vc.get(
-                        f"{PROVISION_API_URL}/workspace/{agent_id}/files/{_vpath}",
-                        headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                        f"{workspace_api_url}/workspace/{agent_id}/files/{_vpath}",
+                        headers=workspace_headers,
                     )
                     if _vresp.status_code == 200:
                         _vcontent = _vresp.json().get("content", "").strip()
@@ -1010,7 +1129,7 @@ async def get_voice_context(request: Request):
         except Exception as _ve:
             logger.warning(f"[FLOW:VOICE-CONTEXT] Voice daily log read error: {_ve}")
     memory = files.get("MEMORY.md", "")[:500]
-    
+
     # Additional workspace files for richer context
     tools_md = files.get("TOOLS.md", "")[:500]  # Agent capabilities awareness
     shared_reports = ""
@@ -1033,11 +1152,14 @@ async def get_voice_context(request: Request):
         flush=True,
     )
 
-    return {
+    response = {
         "user_name": row["name"],
         "user_agent_id": agent_id,
-        "gateway_url": gateway_url,
-        "gateway_token": gateway_token,
+        "runtime": {
+            "provider": "hermes" if runtime else "legacy",
+            "agent_id": agent_id,
+            "binding_revision": runtime.revision if runtime else None,
+        },
         "soul": soul,
         "user_profile": user_profile,
         "memory": memory,
@@ -1052,6 +1174,69 @@ async def get_voice_context(request: Request):
         "dynamic_rules": dynamic_rules,
         "voice_rules": VOICE_INTERACTION_RULES,
     }
+    if not runtime:
+        # Legacy credentials remain restricted to this dual-authenticated
+        # proxy endpoint while the existing Plato path is still enabled.
+        response["gateway_url"] = gateway_url
+        response["gateway_token"] = gateway_token
+    return response
+
+
+@router.post("/tool")
+async def execute_voice_tool(request: Request):
+    """Run a bounded read-only tool against the session's exact Hermes runtime."""
+    body = await request.json()
+    uid = str(body.get("uid") or "").strip()
+    tool_name = str(body.get("tool_name") or "").strip()
+    arguments = body.get("arguments") if isinstance(body.get("arguments"), dict) else {}
+    if not uid:
+        raise HTTPException(status_code=400, detail={"code": "uid_required"})
+
+    principal = authenticate_voice_proxy_request(request, uid)
+    runtime = await _resolve_voice_runtime(principal)
+    if not runtime:
+        raise HTTPException(status_code=409, detail={"code": "isolated_runtime_required"})
+    if tool_name != "ask_ella":
+        raise HTTPException(status_code=400, detail={"code": "voice_tool_not_allowed"})
+
+    prompt = str(arguments.get("query") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail={"code": "voice_tool_query_required"})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{HERMES_PROVISION_API_URL.rstrip('/')}/runtime/{runtime.agent_id}/chat",
+                headers=_hermes_workspace_headers(principal.uid),
+                json={
+                    "prompt": prompt,
+                    "session_id": str(body.get("session_id") or principal.session_id),
+                    "max_tokens": 320,
+                },
+            )
+        if response.status_code != 200:
+            logger.warning(
+                "[FLOW:VOICE-TOOL] runtime=%s uid=%s status=%s",
+                runtime.agent_id,
+                principal.uid,
+                response.status_code,
+            )
+            raise HTTPException(status_code=503, detail={"code": "hermes_voice_tool_unavailable"})
+        payload = response.json()
+        answer = str(payload.get("answer") or "").strip()
+        if not answer:
+            raise HTTPException(status_code=503, detail={"code": "hermes_voice_tool_empty"})
+        return {
+            "answer": answer,
+            "runtime": "hermes",
+            "agent_id": runtime.agent_id,
+            "binding_revision": runtime.revision,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[FLOW:VOICE-TOOL] runtime=%s error=%s", runtime.agent_id, exc)
+        raise HTTPException(status_code=503, detail={"code": "hermes_voice_tool_unavailable"}) from exc
 
 
 @router.post("/search-omi")
@@ -1059,33 +1244,37 @@ async def search_omi_conversations(request: Request):
     """
     Search OMI conversations for a user. Called by Grok voice proxy during live calls
     when the user asks to look up specific past conversations.
-    
+
     Body:
         uid (str): Firebase UID of the user
         query (str): Search terms (matched against title and overview)
         limit (int, optional): Max results (default: 5, max: 10)
-    
+
     Returns list of matching conversations with title, overview, and timestamp.
     """
     body = await request.json()
     uid = body.get("uid", "")
     query = body.get("query", "")
     limit = min(body.get("limit", 5), 10)
-    
+
     if not uid:
         raise HTTPException(status_code=400, detail="uid required")
     if not query:
         raise HTTPException(status_code=400, detail="query required")
-    
+    principal = authenticate_voice_proxy_request(request, uid)
+    await _resolve_voice_runtime(principal)
+    uid = principal.uid
+
     logger.info(f"[FLOW:VOICE-SEARCH] uid={uid} query=\"{query}\" limit={limit}")
-    
+
     try:
         from google.cloud import firestore
+
         db = firestore.Client()
-        
+
         from datetime import datetime, timedelta
         import re as re_mod
-        
+
         # Parse date hints from query for date-range filtering
         now_local = _pacific_now()
         now_local = _pacific_now()
@@ -1677,12 +1866,26 @@ async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars:
     return timeline
 
 
-async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> list:
+async def _search_workspace(
+    uid: str,
+    agent_id: str,
+    query: str,
+    limit: int,
+    *,
+    provision_url: Optional[str] = None,
+    provision_token: Optional[str] = None,
+    owner_uid: str = "",
+) -> list:
     """Search workspace files via Provision API. Falls back to reading key files
     and doing keyword matching if no search endpoint exists."""
     results = []
-    if not agent_id or not PROVISION_API_TOKEN:
+    provision_url = (provision_url or PROVISION_API_URL).rstrip("/")
+    provision_token = PROVISION_API_TOKEN if provision_token is None else provision_token
+    if not agent_id or not provision_token:
         return results
+    headers = {"Authorization": f"Bearer {provision_token}", "Content-Type": "application/json"}
+    if owner_uid:
+        headers["X-Ella-Owner-Uid"] = owner_uid
 
     query_terms = _expand_query_terms(_significant_query_terms(query))
     if not query_terms:
@@ -1691,35 +1894,45 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Try the search endpoint first
-            resp = await client.get(
-                f"{PROVISION_API_URL}/workspace/{agent_id}/search",
-                params={"q": query},
-                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
-            )
+            if owner_uid:
+                resp = await client.post(
+                    f"{provision_url}/workspace/{agent_id}/search",
+                    headers=headers,
+                    json={"query": query, "limit": limit},
+                )
+            else:
+                resp = await client.get(
+                    f"{provision_url}/workspace/{agent_id}/search",
+                    params={"q": query},
+                    headers=headers,
+                )
             if resp.status_code == 200:
                 data = resp.json()
                 for item in data.get("results", [])[:limit]:
-                    results.append({
-                        "source": "workspace",
-                        "title": item.get("file", ""),
-                        "content": (item.get("snippet", "") or item.get("content", ""))[:500],
-                        "timestamp": "",
-                        "score": item.get("score", 1),
-                        "metadata": {"provenance": "hermes_workspace_mirror", "file": item.get("file", "")},
-                    })
+                    file_name = item.get("file", "") or item.get("path", "")
+                    results.append(
+                        {
+                            "source": "workspace",
+                            "title": item.get("heading", "") or file_name,
+                            "content": (item.get("snippet", "") or item.get("excerpt", "") or item.get("content", ""))[
+                                :500
+                            ],
+                            "timestamp": item.get("date", "") or "",
+                            "score": item.get("score", 1),
+                            "metadata": {"provenance": "hermes_workspace", "file": file_name},
+                        }
+                    )
                 return results
 
             # 404 = no search endpoint; fall back to reading key files
             if resp.status_code != 404:
-                logger.warning(
-                    f"[FLOW:UNIFIED-SEARCH] Provision search returned {resp.status_code}"
-                )
+                logger.warning(f"[FLOW:UNIFIED-SEARCH] Provision search returned {resp.status_code}")
                 return results
 
             # Fallback: read files list and grep
             resp2 = await client.get(
-                f"{PROVISION_API_URL}/workspace/{agent_id}/files",
-                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                f"{provision_url}/workspace/{agent_id}/files",
+                headers=headers,
             )
             if resp2.status_code != 200:
                 return results
@@ -1745,14 +1958,16 @@ async def _search_workspace(uid: str, agent_id: str, query: str, limit: int) -> 
                     if not snippet:
                         snippet = content[:200]
 
-                    results.append({
-                        "source": "workspace",
-                        "title": fname,
-                        "content": snippet,
-                        "timestamp": "",
-                        "score": score,
-                        "metadata": {"provenance": "hermes_workspace_mirror", "file": fname},
-                    })
+                    results.append(
+                        {
+                            "source": "workspace",
+                            "title": fname,
+                            "content": snippet,
+                            "timestamp": "",
+                            "score": score,
+                            "metadata": {"provenance": "hermes_workspace_mirror", "file": fname},
+                        }
+                    )
 
             # Sort by score desc, limit
             results.sort(key=lambda x: x["score"], reverse=True)
@@ -2191,12 +2406,26 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
         return results
 
 
-async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) -> list:
+async def _search_voice_logs(
+    uid: str,
+    agent_id: str,
+    query: str,
+    limit: int,
+    *,
+    provision_url: Optional[str] = None,
+    provision_token: Optional[str] = None,
+    owner_uid: str = "",
+) -> list:
     """Search voice daily log files (voice/YYYY-MM-DD.md) via Provision API.
     Reads the last 7 days of logs and performs keyword matching."""
     results = []
-    if not agent_id or not PROVISION_API_TOKEN:
+    provision_url = (provision_url or PROVISION_API_URL).rstrip("/")
+    provision_token = PROVISION_API_TOKEN if provision_token is None else provision_token
+    if not agent_id or not provision_token:
         return results
+    headers = {"Authorization": f"Bearer {provision_token}", "Content-Type": "application/json"}
+    if owner_uid:
+        headers["X-Ella-Owner-Uid"] = owner_uid
 
     query_terms = _expand_query_terms(_significant_query_terms(query))
     if not query_terms:
@@ -2206,8 +2435,8 @@ async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) ->
         async with httpx.AsyncClient(timeout=5.0) as client:
             # Read workspace files and filter to voice/ directory
             resp = await client.get(
-                f"{PROVISION_API_URL}/workspace/{agent_id}/files",
-                headers={"Authorization": f"Bearer {PROVISION_API_TOKEN}"},
+                f"{provision_url}/workspace/{agent_id}/files",
+                headers=headers,
             )
             if resp.status_code != 200:
                 return results
@@ -2252,14 +2481,16 @@ async def _search_voice_logs(uid: str, agent_id: str, query: str, limit: int) ->
                     if not snippet:
                         snippet = content[:200]
 
-                    results.append({
-                        "source": "voice",
-                        "title": fname,
-                        "content": snippet,
-                        "timestamp": fname.replace("voice/", "").replace(".md", ""),
-                        "score": score,
-                        "metadata": {"file": fname},
-                    })
+                    results.append(
+                        {
+                            "source": "voice",
+                            "title": fname,
+                            "content": snippet,
+                            "timestamp": fname.replace("voice/", "").replace(".md", ""),
+                            "score": score,
+                            "metadata": {"file": fname},
+                        }
+                    )
 
             results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
@@ -2382,11 +2613,19 @@ async def unified_search(request: Request):
         raise HTTPException(status_code=400, detail="uid required")
     if not query:
         raise HTTPException(status_code=400, detail="query required")
+    principal = authenticate_voice_proxy_request(request, uid)
+    uid = principal.uid
+    runtime = await _resolve_voice_runtime(principal)
     if agent_role not in SEARCH_POLICY:
-        raise HTTPException(status_code=400, detail=f"Invalid agent_role: {agent_role}. Must be one of: {list(SEARCH_POLICY.keys())}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid agent_role: {agent_role}. Must be one of: {list(SEARCH_POLICY.keys())}"
+        )
 
-    # Validate agent-uid association
-    if not _validate_agent_uid(agent_id, uid):
+    if runtime and agent_id and agent_id != runtime.agent_id:
+        raise HTTPException(status_code=403, detail={"code": "voice_runtime_agent_mismatch"})
+    if runtime:
+        agent_id = runtime.agent_id
+    elif not _validate_agent_uid(agent_id, uid):
         raise HTTPException(status_code=403, detail="agent_id does not belong to this uid")
 
     _start = time.time()
@@ -2394,7 +2633,7 @@ async def unified_search(request: Request):
     # Realtime voice needs a bounded fast path. If the compact Hermes memory
     # pack has a high-confidence answer, return it immediately and avoid
     # waiting on slower Firestore/workspace/Honcho fallback searches.
-    if agent_role == "voice" and not requested_sources and _should_use_voice_memory_fast_path(query):
+    if not runtime and agent_role == "voice" and not requested_sources and _should_use_voice_memory_fast_path(query):
         fast_results = await _search_voice_memory_pack(uid, query, limit)
         if fast_results and fast_results[0].get("score", 0) >= 120:
             _elapsed = int((time.time() - _start) * 1000)
@@ -2414,7 +2653,7 @@ async def unified_search(request: Request):
             }
 
     # Resolve agent_id from postgres if not provided
-    if not agent_id:
+    if not agent_id and not runtime:
         try:
             pool = await _get_pool()
             row = await pool.fetchrow(
@@ -2444,8 +2683,9 @@ async def unified_search(request: Request):
     tasks = []
     task_source_names = []
 
-    include_voice_memory = bool(requested_sources and "voice_memory" in requested_sources) or (
-        not requested_sources and _should_use_voice_memory_fast_path(query)
+    include_voice_memory = not runtime and (
+        bool(requested_sources and "voice_memory" in requested_sources)
+        or (not requested_sources and _should_use_voice_memory_fast_path(query))
     )
     if agent_role in {"voice", "user"} and include_voice_memory:
         tasks.append(_search_voice_memory_pack(uid, query, limit))
@@ -2456,7 +2696,20 @@ async def unified_search(request: Request):
         task_source_names.append("timeline")
 
     if allowed.get("workspace"):
-        tasks.append(_search_workspace(uid, agent_id, query, limit))
+        if runtime:
+            tasks.append(
+                _search_workspace(
+                    uid,
+                    agent_id,
+                    query,
+                    limit,
+                    provision_url=HERMES_PROVISION_API_URL,
+                    provision_token=HERMES_PROVISION_API_TOKEN,
+                    owner_uid=uid,
+                )
+            )
+        else:
+            tasks.append(_search_workspace(uid, agent_id, query, limit))
         task_source_names.append("workspace")
 
     if allowed.get("omi_full") or allowed.get("omi_meta"):
@@ -2469,7 +2722,20 @@ async def unified_search(request: Request):
         task_source_names.append("memories")
 
     if allowed.get("voice"):
-        tasks.append(_search_voice_logs(uid, agent_id, query, limit))
+        if runtime:
+            tasks.append(
+                _search_voice_logs(
+                    uid,
+                    agent_id,
+                    query,
+                    limit,
+                    provision_url=HERMES_PROVISION_API_URL,
+                    provision_token=HERMES_PROVISION_API_TOKEN,
+                    owner_uid=uid,
+                )
+            )
+        else:
+            tasks.append(_search_voice_logs(uid, agent_id, query, limit))
         task_source_names.append("voice")
 
     scanner_access = allowed.get("scanner")
