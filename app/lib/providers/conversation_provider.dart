@@ -20,6 +20,8 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
   String? correctionText,
 });
 
+typedef ConversationsFetchCall = Future<ConversationsFetchResult> Function();
+
 class _ProcessingRetryPoll {
   final String requestId;
   final String? correctionText;
@@ -79,11 +81,24 @@ class ConversationProvider extends ChangeNotifier {
 
   final AppReviewService _appReviewService = AppReviewService();
   final RetryConversationProcessingCall _retryConversationProcessing;
+  final ConversationsFetchCall? _conversationsFetch;
+  final ConversationsFetchCall? _failedConversationsFetch;
+  final Duration _conversationsFetchTimeout;
+  final Duration _failedConversationsFetchTimeout;
 
   bool isFetchingConversations = false;
 
-  ConversationProvider({RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing})
-      : _retryConversationProcessing = retryConversationProcessingCall {
+  ConversationProvider({
+    RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
+    ConversationsFetchCall? conversationsFetchCall,
+    ConversationsFetchCall? failedConversationsFetchCall,
+    Duration conversationsFetchTimeout = const Duration(seconds: 15),
+    Duration failedConversationsFetchTimeout = const Duration(seconds: 8),
+  })  : _retryConversationProcessing = retryConversationProcessingCall,
+        _conversationsFetch = conversationsFetchCall,
+        _failedConversationsFetch = failedConversationsFetchCall,
+        _conversationsFetchTimeout = conversationsFetchTimeout,
+        _failedConversationsFetchTimeout = failedConversationsFetchTimeout {
     _setupMergeListener();
     _loadSettings();
   }
@@ -400,15 +415,17 @@ class ConversationProvider extends ChangeNotifier {
     }
     if (isLoadingConversations) return;
     setLoadingConversations(true);
+    final requestId = _fetchRequestId;
     try {
       final conversationsFuture = _getConversationsFromServer();
       final failuresFuture = _getFailedConversationsFromServer();
-      final result = await conversationsFuture;
-      final retryableFailures = await failuresFuture;
+      unawaited(_applyFailedConversations(requestId, failuresFuture));
+      final result = await _waitForConversations(conversationsFuture);
+      if (requestId != _fetchRequestId) return;
       if (!result.succeeded) return;
 
       final newConversations = result.conversations;
-      failedConversations = _mergeRetryableFailures(retryableFailures, [
+      failedConversations = _mergeRetryableFailures(failedConversations, [
         ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
         ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       ]);
@@ -464,15 +481,14 @@ class ConversationProvider extends ChangeNotifier {
     setLoadingConversations(true);
     try {
       late final List<ServerConversation> fetchedConversations;
-      late final List<ServerConversation> fetchedFailures;
       if (SharedPreferencesUtil().demoMode) {
         fetchedConversations = DemoFixtures.conversations();
-        fetchedFailures = [];
+        failedConversations = [];
       } else {
         final conversationsFuture = _getConversationsFromServer();
         final failuresFuture = _getFailedConversationsFromServer();
-        final result = await conversationsFuture;
-        fetchedFailures = await failuresFuture;
+        unawaited(_applyFailedConversations(requestId, failuresFuture));
+        final result = await _waitForConversations(conversationsFuture);
         if (requestId != _fetchRequestId) return;
         if (!result.succeeded) {
           if (conversations.isEmpty && selectedFolderId == null) {
@@ -492,7 +508,7 @@ class ConversationProvider extends ChangeNotifier {
       if (requestId != _fetchRequestId) return;
       conversations = fetchedConversations;
       failedConversations = _mergeRetryableFailures(
-        fetchedFailures,
+        failedConversations,
         conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
       );
       hasFreshConversations = true;
@@ -782,6 +798,9 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future<ConversationsFetchResult> _getConversationsFromServer() async {
+    final fetch = _conversationsFetch;
+    if (fetch != null) return fetch();
+
     final (startDate, endDate) = _getDateFilterRange();
 
     return getConversationsResult(
@@ -794,23 +813,62 @@ class ConversationProvider extends ChangeNotifier {
     );
   }
 
-  Future<List<ServerConversation>> _getFailedConversationsFromServer() async {
-    final (startDate, endDate) = _getDateFilterRange();
-    final failed = await getConversations(
-      limit: 100,
-      statuses: const [ConversationStatus.failed],
-      includeDiscarded: true,
-      startDate: startDate,
-      endDate: endDate,
-      folderId: selectedFolderId,
-      starred: showStarredOnly ? true : null,
-    );
+  Future<ConversationsFetchResult> _getFailedConversationsFromServer() async {
+    final fetch = _failedConversationsFetch;
+    final ConversationsFetchResult result;
+    if (fetch != null) {
+      result = await fetch();
+    } else {
+      final (startDate, endDate) = _getDateFilterRange();
+      result = await getConversationsResult(
+        limit: 100,
+        statuses: const [ConversationStatus.failed],
+        includeDiscarded: true,
+        startDate: startDate,
+        endDate: endDate,
+        folderId: selectedFolderId,
+        starred: showStarredOnly ? true : null,
+      );
+    }
+    if (!result.succeeded) return result;
+
+    final failed = [...result.conversations];
     failed.sort((a, b) {
       final aDate = a.processingErrorAt ?? a.finishedAt ?? a.createdAt;
       final bDate = b.processingErrorAt ?? b.finishedAt ?? b.createdAt;
       return bDate.compareTo(aDate);
     });
-    return failed.where((conversation) => conversation.isRetryableSummaryFailure).toList();
+    return ConversationsFetchResult.success(
+      failed.where((conversation) => conversation.isRetryableSummaryFailure).toList(),
+    );
+  }
+
+  Future<ConversationsFetchResult> _waitForConversations(Future<ConversationsFetchResult> request) async {
+    try {
+      return await request.timeout(_conversationsFetchTimeout);
+    } on TimeoutException {
+      Logger.error('Timed out loading recent memories after ${_conversationsFetchTimeout.inSeconds}s');
+      return const ConversationsFetchResult.failure();
+    }
+  }
+
+  Future<void> _applyFailedConversations(int requestId, Future<ConversationsFetchResult> request) async {
+    try {
+      final result = await request.timeout(_failedConversationsFetchTimeout);
+      if (requestId != _fetchRequestId || !result.succeeded) return;
+      failedConversations = _mergeRetryableFailures(
+        result.conversations,
+        conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      );
+      notifyListeners();
+    } on TimeoutException {
+      Logger.debug(
+        'Timed out refreshing failed conversations after ${_failedConversationsFetchTimeout.inSeconds}s; '
+        'recent memories remain available',
+      );
+    } catch (error, stackTrace) {
+      Logger.error('Failed to refresh failed conversations: $error\n$stackTrace');
+    }
   }
 
   List<ServerConversation> _mergeRetryableFailures(

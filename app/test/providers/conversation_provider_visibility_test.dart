@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -63,5 +65,75 @@ void main() {
     await SharedPreferencesUtil.init();
 
     expect(SharedPreferencesUtil().cachedConversations.single.id, 'current');
+  });
+
+  test('primary memories finish loading while failed-summary request is still pending', () async {
+    final failedRequest = Completer<ConversationsFetchResult>();
+    final provider = ConversationProvider(
+      conversationsFetchCall: () async => ConversationsFetchResult.success([conversation('recent')]),
+      failedConversationsFetchCall: () => failedRequest.future,
+    );
+    addTearDown(() {
+      if (!failedRequest.isCompleted) {
+        failedRequest.complete(const ConversationsFetchResult.failure());
+      }
+      provider.dispose();
+    });
+
+    await provider.fetchConversations().timeout(const Duration(seconds: 1));
+
+    expect(provider.hasLoadedConversations, isTrue);
+    expect(provider.isLoadingConversations, isFalse);
+    expect(provider.hasFreshConversations, isTrue);
+    expect(provider.visibleConversations.map((item) => item.id), ['recent']);
+  });
+
+  test('failed-summary refresh updates separately after primary memories load', () async {
+    final failedRequest = Completer<ConversationsFetchResult>();
+    final startedAt = DateTime.parse('2026-07-08T19:00:00Z');
+    final failedWithReason = ServerConversation(
+      id: 'failed-summary',
+      createdAt: startedAt,
+      startedAt: startedAt,
+      finishedAt: startedAt.add(const Duration(minutes: 10)),
+      structured: Structured('Failed memory', 'Overview'),
+      status: ConversationStatus.failed,
+      processingError: 'conversation_summary_failed',
+    );
+    final provider = ConversationProvider(
+      conversationsFetchCall: () async => ConversationsFetchResult.success([conversation('recent')]),
+      failedConversationsFetchCall: () => failedRequest.future,
+    );
+    addTearDown(provider.dispose);
+
+    await provider.fetchConversations();
+    expect(provider.failedConversations, isEmpty);
+
+    failedRequest.complete(ConversationsFetchResult.success([failedWithReason]));
+    await pumpEventQueue();
+
+    expect(provider.failedConversations.map((item) => item.id), ['failed-summary']);
+    expect(provider.visibleConversations.map((item) => item.id), ['recent']);
+  });
+
+  test('primary memory timeout releases the loading state', () async {
+    final primaryRequest = Completer<ConversationsFetchResult>();
+    final provider = ConversationProvider(
+      conversationsFetchCall: () => primaryRequest.future,
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+      conversationsFetchTimeout: const Duration(milliseconds: 10),
+    );
+    addTearDown(() {
+      if (!primaryRequest.isCompleted) {
+        primaryRequest.complete(const ConversationsFetchResult.failure());
+      }
+      provider.dispose();
+    });
+
+    await provider.fetchConversations();
+
+    expect(provider.hasLoadedConversations, isTrue);
+    expect(provider.isLoadingConversations, isFalse);
+    expect(provider.hasFreshConversations, isFalse);
   });
 }
