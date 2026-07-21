@@ -73,6 +73,16 @@ HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
+
+def isolated_voice_routing_enabled() -> bool:
+    """Keep isolated users off the legacy OpenClaw voice proxy until cutover."""
+    return os.getenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 # Database connection pool (lazy-initialized, shared pattern with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
 
@@ -414,6 +424,8 @@ async def create_voice_session(
             await resolve_isolated_runtime(uid)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        if not isolated_voice_routing_enabled():
+            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
 
     # Validate provider
     if provider not in V2V_PROVIDERS:

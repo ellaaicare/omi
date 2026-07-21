@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import posixpath
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 from database.ella_provisioning import EllaProvisioningRepository
 from ella.services.provisioning import (
@@ -26,6 +28,10 @@ class IsolatedRuntime:
     agent_id: str
     gateway_url: str
     gateway_token: str
+    workspace_root: str
+    honcho_workspace: str
+    observed_peer: str
+    observer_peer: str
     model_policy_version: str
     voice_policy_version: str
     revision: int
@@ -49,15 +55,42 @@ def runtime_from_binding(binding: dict, uid: str) -> IsolatedRuntime:
     if profile_name == "plato-eval" and uid != plato_uid:
         raise ProvisioningError("plato_binding_forbidden", retryable=False)
 
+    workspace_root = str(binding.get("workspace_root") or "")
+    profiles_root = os.getenv("ELLA_HERMES_PROFILES_ROOT", "/Users/ellaai/.hermes/profiles")
+    expected_workspace = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/workspace")
+    if posixpath.normpath(workspace_root) != expected_workspace:
+        raise ProvisioningError("workspace_ownership_mismatch", retryable=False)
+
+    gateway_url = validate_internal_gateway_url(str(binding.get("internal_gateway_url") or ""))
+    try:
+        gateway_port = int(binding.get("gateway_port") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ProvisioningError("invalid_gateway_port", retryable=False) from exc
+    if not 1024 <= gateway_port <= 65535 or urlparse(gateway_url).port != gateway_port:
+        raise ProvisioningError("gateway_port_mismatch", retryable=False)
+
+    honcho_workspace = str(binding.get("honcho_workspace") or "")
+    observed_peer = str(binding.get("observed_peer") or "")
+    observer_peer = str(binding.get("observer_peer") or "")
+    if not all([honcho_workspace, observed_peer, observer_peer]):
+        raise ProvisioningError("honcho_receipt_incomplete", retryable=False)
+    revision = int(binding.get("revision") or 0)
+    if revision < 1:
+        raise ProvisioningError("invalid_binding_revision", retryable=False)
+
     return IsolatedRuntime(
         uid=uid,
         profile_name=profile_name,
         agent_id=agent_id,
-        gateway_url=validate_internal_gateway_url(str(binding.get("internal_gateway_url") or "")),
+        gateway_url=gateway_url,
         gateway_token=resolve_gateway_credential(binding.get("credential_ref")),
+        workspace_root=workspace_root,
+        honcho_workspace=honcho_workspace,
+        observed_peer=observed_peer,
+        observer_peer=observer_peer,
         model_policy_version=str(binding.get("model_policy_version") or ""),
         voice_policy_version=str(binding.get("voice_policy_version") or ""),
-        revision=int(binding.get("revision") or 0),
+        revision=revision,
     )
 
 

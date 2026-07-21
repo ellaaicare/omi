@@ -148,3 +148,22 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
         )
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "hermes_not_provisioned"}
+
+
+def test_voice_session_cannot_fall_back_to_openclaw_before_isolated_proxy_cutover(monkeypatch):
+    async def ready_runtime(uid):
+        return object()
+
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda: False)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(uid="user-a", provider="grok-voice"),
+                authenticated_uid="user-a",
+            )
+        )
+    assert error.value.status_code == 503
+    assert error.value.detail == {"code": "isolated_voice_not_ready"}

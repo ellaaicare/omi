@@ -349,7 +349,7 @@ class EllaProvisioningRepository:
                 health_state = EXCLUDED.health_state,
                 health_receipt = EXCLUDED.health_receipt,
                 revision = ella_runtime_bindings.revision + 1,
-                active = false,
+                active = ella_runtime_bindings.active,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING *
             """,
@@ -445,15 +445,24 @@ class EllaProvisioningRepository:
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
 
-    async def resolve_active_runtime(self, uid: str, role: str = "user") -> Optional[dict[str, Any]]:
+    async def resolve_active_runtime(
+        self,
+        uid: str,
+        role: str = "user",
+        template_version: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
             SELECT b.*, u.omi_uid, u.name, u.status AS user_status
             FROM ella_runtime_bindings b
             JOIN users u ON u.id = b.user_id
-            WHERE u.omi_uid = $1 AND b.role = $2 AND b.active = true
+            WHERE u.omi_uid = $1
+              AND b.role = $2
+              AND b.active = true
+              AND ($3::text IS NULL OR b.template_version = $3)
             """,
             uid,
             role,
+            template_version,
         )
         return _row_dict(row)

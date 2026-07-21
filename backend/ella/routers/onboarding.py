@@ -118,5 +118,8 @@ async def onboarding_status(
     job = await repository.get_job(uid, target_schema_version)
     if not job:
         raise HTTPException(status_code=404, detail={"code": "setup_not_started"})
-    binding = await repository.resolve_active_runtime(uid)
+    binding = await repository.resolve_active_runtime(
+        uid,
+        template_version=target_schema_version,
+    )
     return public_receipt(job, binding)

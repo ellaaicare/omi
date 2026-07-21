@@ -110,7 +110,16 @@ def validate_internal_gateway_url(value: str) -> str:
     """Accept only loopback, tailnet, or explicitly allowlisted internal gateways."""
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "http" or not host or parsed.username or parsed.password:
+    if (
+        parsed.scheme != "http"
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ProvisioningError("invalid_internal_gateway_url", retryable=False)
 
     allowlisted = {
@@ -179,7 +188,11 @@ class HermesProvisionClient:
         return result
 
 
-def extract_runtime_binding(result: dict[str, Any], uid: str) -> dict[str, Any]:
+def extract_runtime_binding(
+    result: dict[str, Any],
+    uid: str,
+    expected_template_version: Optional[str] = None,
+) -> dict[str, Any]:
     raw = result.get("runtimeBinding") or result.get("runtime_binding")
     if not isinstance(raw, dict):
         raise ProvisioningError("runtime_receipt_missing", retryable=True)
@@ -233,6 +246,10 @@ def extract_runtime_binding(result: dict[str, Any], uid: str) -> dict[str, Any]:
         raise ProvisioningError("gateway_port_mismatch", retryable=False)
     validate_gateway_credential_ref(str(credential_ref))
 
+    template_version = str(raw.get("templateVersion") or DEFAULT_TEMPLATE_VERSION)
+    if expected_template_version and template_version != expected_template_version:
+        raise ProvisioningError("runtime_template_version_mismatch", retryable=True)
+
     return {
         "role": "user",
         "provider": "hermes",
@@ -246,7 +263,7 @@ def extract_runtime_binding(result: dict[str, Any], uid: str) -> dict[str, Any]:
         "honcho_workspace": str(honcho_workspace),
         "observed_peer": str(observed_peer),
         "observer_peer": str(observer_peer),
-        "template_version": str(raw.get("templateVersion") or DEFAULT_TEMPLATE_VERSION),
+        "template_version": template_version,
         "model_policy_version": str(raw.get("modelPolicyVersion") or DEFAULT_MODEL_POLICY_VERSION),
         "voice_policy_version": str(raw.get("voicePolicyVersion") or DEFAULT_VOICE_POLICY_VERSION),
         "health_state": "healthy",
@@ -300,7 +317,10 @@ class ProvisioningCoordinator:
                 error_code="omi_identity_unavailable",
             )
             return job, None, False
-        binding = await self.repository.resolve_active_runtime(identity.uid)
+        binding = await self.repository.resolve_active_runtime(
+            identity.uid,
+            template_version=target_schema_version,
+        )
         if binding:
             if str(binding.get("user_status") or "") != "ACTIVE":
                 await self.repository.activate_user(identity.uid)
@@ -328,7 +348,11 @@ class ProvisioningCoordinator:
     async def process_claimed_job(self, *, job: dict[str, Any], identity: VerifiedIdentity) -> None:
         try:
             result = await self.client.provision(identity, str(job["target_schema_version"]))
-            binding_data = extract_runtime_binding(result, identity.uid)
+            binding_data = extract_runtime_binding(
+                result,
+                identity.uid,
+                expected_template_version=str(job["target_schema_version"]),
+            )
             binding = await self.repository.stage_runtime_binding(uid=identity.uid, binding=binding_data)
             await self.repository.update_job(
                 job_id=str(job["id"]),

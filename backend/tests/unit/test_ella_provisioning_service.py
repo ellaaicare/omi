@@ -81,7 +81,9 @@ class FakeRepository:
         self.omi_identity_calls.append(kwargs)
         return True
 
-    async def resolve_active_runtime(self, uid):
+    async def resolve_active_runtime(self, uid, template_version=None):
+        if self.binding and template_version and self.binding.get("template_version") != template_version:
+            return None
         return self.binding
 
     async def claim_job(self, job_id):
@@ -215,6 +217,13 @@ def test_internal_gateway_is_limited_to_loopback_tailnet_or_allowlist(monkeypatc
     assert validate_internal_gateway_url("http://100.76.138.56:8701/") == "http://100.76.138.56:8701"
     with pytest.raises(ProvisioningError, match="invalid_internal_gateway_url"):
         validate_internal_gateway_url("https://example.com/runtime")
+    for invalid in (
+        "http://100.76.138.56:8701/admin",
+        "http://100.76.138.56:8701/?token=secret",
+        "http://100.76.138.56:8701/#fragment",
+    ):
+        with pytest.raises(ProvisioningError, match="invalid_internal_gateway_url"):
+            validate_internal_gateway_url(invalid)
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_ALLOWED_HOSTS", "hermes.internal")
     assert validate_internal_gateway_url("http://hermes.internal:8701") == "http://hermes.internal:8701"
 
@@ -247,6 +256,13 @@ def test_runtime_receipt_requires_owned_workspace_port_and_honcho():
     with pytest.raises(ProvisioningError, match="honcho_receipt_incomplete"):
         extract_runtime_binding(no_honcho, "user-a")
 
+    with pytest.raises(ProvisioningError, match="runtime_template_version_mismatch"):
+        extract_runtime_binding(
+            _runtime_receipt(),
+            "user-a",
+            expected_template_version="hermes-user-v2",
+        )
+
 
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
@@ -257,6 +273,14 @@ def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     assert runtime.gateway_token == "secret-value"
     with pytest.raises(ProvisioningError, match="runtime_ownership_mismatch"):
         runtime_from_binding(binding, "user-b")
+
+    invalid_honcho = dict(binding, honcho_workspace="")
+    with pytest.raises(ProvisioningError, match="honcho_receipt_incomplete"):
+        runtime_from_binding(invalid_honcho, "user-a")
+
+    invalid_workspace = dict(binding, workspace_root="/Users/ellaai/.hermes/profiles/another-user/workspace")
+    with pytest.raises(ProvisioningError, match="workspace_ownership_mismatch"):
+        runtime_from_binding(invalid_workspace, "user-a")
 
 
 def test_disabled_provisioning_stays_retryable_and_can_resume(monkeypatch):
@@ -315,7 +339,12 @@ def test_omi_identity_failure_is_durable_and_does_not_call_hermes(monkeypatch):
 
 def test_existing_binding_reconciles_pending_user_to_active(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
-    binding = {"revision": 4, "user_status": "PENDING", "active": True}
+    binding = {
+        "revision": 4,
+        "user_status": "PENDING",
+        "active": True,
+        "template_version": "hermes-user-v1",
+    }
     repository = FakeRepository(binding=binding)
     coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
     identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
