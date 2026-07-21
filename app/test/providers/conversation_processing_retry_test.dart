@@ -9,13 +9,36 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/providers/conversation_provider.dart';
 
-ServerConversation _conversation(ConversationStatus status) {
+ServerConversation _conversation(
+  ConversationStatus status, {
+  String overview = '',
+  Map<String, dynamic>? enrichmentState,
+}) {
   return ServerConversation(
     id: 'conversation-1',
     createdAt: DateTime.utc(2026, 7, 20, 8),
-    structured: Structured(status == ConversationStatus.completed ? 'Recovered summary' : '', ''),
+    structured: Structured('Conversation', overview),
     status: status,
+    enrichmentState: enrichmentState,
     processingError: status == ConversationStatus.failed ? 'conversation_summary_failed' : null,
+  );
+}
+
+ConversationProcessingRetryResult _result(
+  ConversationProcessingRetryOutcome outcome,
+  ServerConversation conversation, {
+  String? phase,
+}) {
+  return ConversationProcessingRetryResult(
+    outcome: outcome,
+    recoveryMode: ConversationProcessingRecoveryMode.enrichmentOnly,
+    phase: phase,
+    genericStatus: 'completed',
+    genericVectorStatus: 'completed',
+    enrichmentStatus: outcome == ConversationProcessingRetryOutcome.completed ? 'completed' : 'pending',
+    vectorStatus: outcome == ConversationProcessingRetryOutcome.completed ? 'completed' : 'pending',
+    attemptCount: 1,
+    conversation: conversation,
   );
 }
 
@@ -25,119 +48,173 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  testWidgets('retry moves failed conversation through processing to completed', (tester) async {
-    final failed = _conversation(ConversationStatus.failed);
-    final processing = _conversation(ConversationStatus.processing);
-    final completed = _conversation(ConversationStatus.completed);
-    var retryCalls = 0;
-    var pollCalls = 0;
+  test('parses the complete processing retry receipt', () {
+    final result = ConversationProcessingRetryResult.fromJson({
+      'outcome': 'processing',
+      'recovery_mode': 'enrichment_only',
+      'phase': 'generic_completed',
+      'generic_status': 'completed',
+      'generic_vector_status': 'completed',
+      'enrichment_status': 'pending',
+      'vector_status': 'pending',
+      'lease_expires_at': '2026-07-20T08:15:00Z',
+      'attempt_count': 2,
+      'conversation': {
+        'id': 'conversation-1',
+        'created_at': '2026-07-20T08:00:00Z',
+        'structured': {
+          'title': 'Generic',
+          'overview': 'Generic summary',
+          'emoji': '',
+          'category': 'other',
+        },
+        'status': 'completed',
+      },
+    });
+
+    expect(result.outcome, ConversationProcessingRetryOutcome.processing);
+    expect(result.recoveryMode, ConversationProcessingRecoveryMode.enrichmentOnly);
+    expect(result.phase, 'generic_completed');
+    expect(result.genericStatus, 'completed');
+    expect(result.genericVectorStatus, 'completed');
+    expect(result.enrichmentStatus, 'pending');
+    expect(result.vectorStatus, 'pending');
+    expect(result.leaseExpiresAt, isNotNull);
+    expect(result.attemptCount, 2);
+    expect(result.conversation.status, ConversationStatus.completed);
+    expect(result.isTerminal, isFalse);
+  });
+
+  testWidgets('enrichment-only retry keeps generic summary visible until Hermes completes', (tester) async {
+    final failedEnrichment = _conversation(
+      ConversationStatus.completed,
+      overview: 'Generic summary',
+      enrichmentState: {'status': 'failed', 'pending': true},
+    );
+    final generic = _conversation(ConversationStatus.completed, overview: 'Generic summary');
+    final enriched = _conversation(ConversationStatus.completed, overview: 'Ella enriched summary');
+    final conversationIds = <String>[];
+    final requestIds = <String>[];
+    final contexts = <String?>[];
 
     final provider = ConversationProvider(
       retryConversationProcessingCall: (conversationId, requestId, {correctionText}) async {
-        retryCalls += 1;
-        expect(conversationId, failed.id);
-        expect(requestId, isNotEmpty);
-        expect(correctionText, 'The speakers were discussing their summer plans.');
-        return ConversationProcessingRetryResult(
-          outcome: ConversationProcessingRetryOutcome.processing,
-          conversation: processing,
-        );
-      },
-      conversationByIdCall: (conversationId) async {
-        pollCalls += 1;
-        return completed;
+        conversationIds.add(conversationId);
+        requestIds.add(requestId);
+        contexts.add(correctionText);
+        return requestIds.length == 1
+            ? _result(ConversationProcessingRetryOutcome.processing, generic, phase: 'generic_completed')
+            : _result(ConversationProcessingRetryOutcome.completed, enriched, phase: 'completed');
       },
     );
-    provider.failedConversations = [failed];
-    provider.conversations = [failed];
+    provider.failedConversations = [failedEnrichment];
+    provider.conversations = [failedEnrichment];
 
     expect(
       await provider.retryFailedConversation(
-        failed.id,
+        failedEnrichment.id,
         correctionText: 'The speakers were discussing their summer plans.',
       ),
       isTrue,
     );
-    expect(retryCalls, 1);
     expect(provider.failedConversations, isEmpty);
-    expect(provider.processingConversations.single.status, ConversationStatus.processing);
-    expect(provider.isConversationRetrying(failed.id), isTrue);
-    expect(await provider.retryFailedConversation(failed.id), isTrue);
-    expect(retryCalls, 1);
+    expect(provider.conversations.single.structured.overview, 'Generic summary');
+    expect(provider.isConversationRetrying(failedEnrichment.id), isTrue);
+    expect(await provider.retryFailedConversation(failedEnrichment.id), isTrue);
+    expect(requestIds, hasLength(1));
 
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
 
-    expect(pollCalls, 1);
-    expect(provider.processingConversations, isEmpty);
-    expect(provider.conversations.single.status, ConversationStatus.completed);
-    expect(provider.isConversationRetrying(failed.id), isFalse);
+    expect(requestIds, hasLength(2));
+    expect(conversationIds, everyElement(failedEnrichment.id));
+    expect(requestIds.toSet(), hasLength(1));
+    expect(contexts, everyElement('The speakers were discussing their summer plans.'));
+    expect(provider.failedConversations, isEmpty);
+    expect(provider.conversations.single.structured.overview, 'Ella enriched summary');
+    expect(provider.isConversationRetrying(failedEnrichment.id), isFalse);
 
     provider.dispose();
   });
 
-  testWidgets('failed retry response remains visible and retryable', (tester) async {
-    final failed = _conversation(ConversationStatus.failed);
+  testWidgets('terminal enrichment failure stays visible and a user retry gets a fresh id', (tester) async {
+    final generic = _conversation(ConversationStatus.completed, overview: 'Generic summary');
+    final failedEnrichment = _conversation(
+      ConversationStatus.completed,
+      overview: 'Generic summary',
+      enrichmentState: {'status': 'failed', 'pending': true},
+    );
+    final requestIds = <String>[];
+
     final provider = ConversationProvider(
-      retryConversationProcessingCall: (_, __, {correctionText}) async {
-        expect(correctionText, isNull);
-        return ConversationProcessingRetryResult(
-          outcome: ConversationProcessingRetryOutcome.failed,
-          conversation: failed,
-        );
+      retryConversationProcessingCall: (_, requestId, {correctionText}) async {
+        requestIds.add(requestId);
+        if (requestIds.length == 1) {
+          return _result(ConversationProcessingRetryOutcome.processing, generic);
+        }
+        return _result(ConversationProcessingRetryOutcome.failed, failedEnrichment, phase: 'failed');
       },
     );
-    provider.failedConversations = [failed];
+    provider.failedConversations = [failedEnrichment];
+    provider.conversations = [generic];
 
-    expect(await provider.retryFailedConversation(failed.id), isTrue);
-    expect(provider.failedConversations.single.id, failed.id);
-    expect(provider.isConversationRetrying(failed.id), isFalse);
+    expect(await provider.retryFailedConversation(generic.id), isTrue);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+
+    expect(requestIds, hasLength(2));
+    expect(requestIds[1], requestIds[0]);
+    expect(provider.failedConversations.single.id, generic.id);
+    expect(provider.conversations.single.structured.overview, 'Generic summary');
+    expect(provider.isConversationRetrying(generic.id), isFalse);
+
+    expect(await provider.retryFailedConversation(generic.id), isTrue);
+    expect(requestIds, hasLength(3));
+    expect(requestIds[2], isNot(requestIds[0]));
+    expect(provider.failedConversations.single.id, generic.id);
 
     provider.dispose();
   });
 
   testWidgets('slow processing poll never overlaps another request', (tester) async {
     final processing = _conversation(ConversationStatus.processing);
-    final completed = _conversation(ConversationStatus.completed);
-    final firstPoll = Completer<ServerConversation?>();
-    var pollCalls = 0;
+    final completed = _conversation(ConversationStatus.completed, overview: 'Recovered summary');
+    final firstPoll = Completer<ConversationProcessingRetryResult?>();
+    var calls = 0;
     var inFlight = 0;
     var maxInFlight = 0;
 
     final provider = ConversationProvider(
-      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
-        outcome: ConversationProcessingRetryOutcome.processing,
-        conversation: processing,
-      ),
-      conversationByIdCall: (_) async {
-        pollCalls += 1;
+      retryConversationProcessingCall: (_, __, {correctionText}) async {
+        calls += 1;
+        if (calls == 1) return _result(ConversationProcessingRetryOutcome.processing, processing);
         inFlight += 1;
         if (inFlight > maxInFlight) maxInFlight = inFlight;
-        if (pollCalls == 1) {
+        if (calls == 2) {
           final result = await firstPoll.future;
           inFlight -= 1;
           return result;
         }
         inFlight -= 1;
-        return completed;
+        return _result(ConversationProcessingRetryOutcome.completed, completed);
       },
     );
 
     expect(await provider.retryFailedConversation(processing.id), isTrue);
     await tester.pump(const Duration(seconds: 3));
-    expect(pollCalls, 1);
+    expect(calls, 2);
     expect(inFlight, 1);
 
     await tester.pump(const Duration(seconds: 12));
-    expect(pollCalls, 1);
+    expect(calls, 2);
     expect(maxInFlight, 1);
 
-    firstPoll.complete(processing);
+    firstPoll.complete(_result(ConversationProcessingRetryOutcome.processing, processing));
     await tester.pump();
     await tester.pump(const Duration(seconds: 3));
     await tester.pump();
 
-    expect(pollCalls, 2);
+    expect(calls, 3);
     expect(maxInFlight, 1);
     expect(provider.conversations.single.status, ConversationStatus.completed);
     expect(provider.isConversationRetrying(processing.id), isFalse);
@@ -147,15 +224,11 @@ void main() {
 
   testWidgets('processing poll stops after forty completed attempts', (tester) async {
     final processing = _conversation(ConversationStatus.processing);
-    var pollCalls = 0;
+    var calls = 0;
     final provider = ConversationProvider(
-      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
-        outcome: ConversationProcessingRetryOutcome.processing,
-        conversation: processing,
-      ),
-      conversationByIdCall: (_) async {
-        pollCalls += 1;
-        return null;
+      retryConversationProcessingCall: (_, __, {correctionText}) async {
+        calls += 1;
+        return calls == 1 ? _result(ConversationProcessingRetryOutcome.processing, processing) : null;
       },
     );
 
@@ -165,10 +238,10 @@ void main() {
       await tester.pump();
     }
 
-    expect(pollCalls, 40);
+    expect(calls, 41);
     expect(provider.isConversationRetrying(processing.id), isFalse);
     await tester.pump(const Duration(seconds: 30));
-    expect(pollCalls, 40);
+    expect(calls, 41);
 
     provider.dispose();
   });
@@ -176,28 +249,25 @@ void main() {
   testWidgets('completion after provider disposal cannot restart or update polling', (tester) async {
     final processing = _conversation(ConversationStatus.processing);
     final completed = _conversation(ConversationStatus.completed);
-    final latePoll = Completer<ServerConversation?>();
-    var pollCalls = 0;
+    final latePoll = Completer<ConversationProcessingRetryResult?>();
+    var calls = 0;
     final provider = ConversationProvider(
-      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
-        outcome: ConversationProcessingRetryOutcome.processing,
-        conversation: processing,
-      ),
-      conversationByIdCall: (_) {
-        pollCalls += 1;
-        return latePoll.future;
+      retryConversationProcessingCall: (_, __, {correctionText}) async {
+        calls += 1;
+        if (calls == 1) return _result(ConversationProcessingRetryOutcome.processing, processing);
+        return await latePoll.future;
       },
     );
 
     expect(await provider.retryFailedConversation(processing.id), isTrue);
     await tester.pump(const Duration(seconds: 3));
-    expect(pollCalls, 1);
+    expect(calls, 2);
 
     provider.dispose();
-    latePoll.complete(completed);
+    latePoll.complete(_result(ConversationProcessingRetryOutcome.completed, completed));
     await tester.pump();
     await tester.pump(const Duration(seconds: 30));
 
-    expect(pollCalls, 1);
+    expect(calls, 2);
   });
 }

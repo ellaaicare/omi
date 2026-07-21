@@ -192,6 +192,8 @@ class ServerConversation {
   final Object? internalAssessment;
   final List<String> ellaTags;
   final Map<String, dynamic>? ellaSignal;
+  final Map<String, dynamic>? enrichmentState;
+  final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
 
@@ -204,6 +206,12 @@ class ServerConversation {
   bool get isRetryableSummaryFailure =>
       status == ConversationStatus.failed &&
       (processingError == 'conversation_summary_failed' || processingError == 'conversation_summary_recovery_failed');
+
+  bool get isRetryableEnrichmentFailure =>
+      status == ConversationStatus.completed &&
+      (enrichmentState?['status'] == 'failed' ||
+          enrichmentState?['canonical_status'] == 'failed' ||
+          processingRetryEnrichmentVectorStatus == 'failed');
 
   String? folderId;
 
@@ -230,6 +238,8 @@ class ServerConversation {
     this.internalAssessment,
     this.ellaTags = const [],
     this.ellaSignal,
+    this.enrichmentState,
+    this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
     this.status = ConversationStatus.completed,
@@ -266,6 +276,8 @@ class ServerConversation {
       internalAssessment: json['internal_assessment'],
       ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
+      enrichmentState: json['enrichment_state'] is Map ? Map<String, dynamic>.from(json['enrichment_state']) : null,
+      processingRetryEnrichmentVectorStatus: json['processing_retry_enrichment_vector_status'],
       processingError: json['processing_error'],
       processingErrorAt:
           json['processing_error_at'] != null ? DateTime.parse(json['processing_error_at']).toLocal() : null,
@@ -298,6 +310,8 @@ class ServerConversation {
       'internal_assessment': internalAssessment,
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
+      'enrichment_state': enrichmentState,
+      'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),
       'status': status.toString().split('.').last,

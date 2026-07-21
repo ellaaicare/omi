@@ -70,16 +70,51 @@ Future<List<ServerConversation>> getConversations({
 
 enum ConversationProcessingRetryOutcome { processing, completed, failed }
 
+enum ConversationProcessingRecoveryMode { none, full, enrichmentOnly }
+
 class ConversationProcessingRetryResult {
   final ConversationProcessingRetryOutcome outcome;
+  final ConversationProcessingRecoveryMode recoveryMode;
+  final String? phase;
+  final String? genericStatus;
+  final String? genericVectorStatus;
+  final String? enrichmentStatus;
+  final String? vectorStatus;
+  final DateTime? leaseExpiresAt;
+  final int attemptCount;
   final ServerConversation conversation;
 
-  const ConversationProcessingRetryResult({required this.outcome, required this.conversation});
+  const ConversationProcessingRetryResult({
+    required this.outcome,
+    this.recoveryMode = ConversationProcessingRecoveryMode.none,
+    this.phase,
+    this.genericStatus,
+    this.genericVectorStatus,
+    this.enrichmentStatus,
+    this.vectorStatus,
+    this.leaseExpiresAt,
+    this.attemptCount = 0,
+    required this.conversation,
+  });
+
+  bool get isTerminal =>
+      outcome == ConversationProcessingRetryOutcome.completed || outcome == ConversationProcessingRetryOutcome.failed;
 
   factory ConversationProcessingRetryResult.fromJson(Map<String, dynamic> json) {
     return ConversationProcessingRetryResult(
       outcome: ConversationProcessingRetryOutcome.values.asNameMap()[json['outcome']] ??
           ConversationProcessingRetryOutcome.failed,
+      recoveryMode: json['recovery_mode'] == 'enrichment_only'
+          ? ConversationProcessingRecoveryMode.enrichmentOnly
+          : ConversationProcessingRecoveryMode.values.asNameMap()[json['recovery_mode']] ??
+              ConversationProcessingRecoveryMode.none,
+      phase: json['phase'],
+      genericStatus: json['generic_status'],
+      genericVectorStatus: json['generic_vector_status'],
+      enrichmentStatus: json['enrichment_status'],
+      vectorStatus: json['vector_status'],
+      leaseExpiresAt: json['lease_expires_at'] != null ? DateTime.tryParse(json['lease_expires_at'])?.toLocal() : null,
+      attemptCount: (json['attempt_count'] as num?)?.toInt() ?? 0,
       conversation: ServerConversation.fromJson(json['conversation']),
     );
   }

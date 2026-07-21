@@ -19,7 +19,6 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
   String requestId, {
   String? correctionText,
 });
-typedef ConversationByIdCall = Future<ServerConversation?> Function(String conversationId);
 
 class _ProcessingRetryPoll {
   final String requestId;
@@ -75,15 +74,12 @@ class ConversationProvider extends ChangeNotifier {
 
   final AppReviewService _appReviewService = AppReviewService();
   final RetryConversationProcessingCall _retryConversationProcessing;
-  final ConversationByIdCall _getConversationById;
 
   bool isFetchingConversations = false;
 
   ConversationProvider({
     RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing,
-    ConversationByIdCall conversationByIdCall = getConversationById,
-  })  : _retryConversationProcessing = retryConversationProcessingCall,
-        _getConversationById = conversationByIdCall {
+  }) : _retryConversationProcessing = retryConversationProcessingCall {
     _setupMergeListener();
     _loadSettings();
   }
@@ -398,7 +394,13 @@ class ConversationProvider extends ChangeNotifier {
       _getFailedConversationsFromServer(),
     ]);
     List<ServerConversation> newConversations = results[0];
-    failedConversations = results[1];
+    failedConversations = _mergeRetryableFailures(
+      results[1],
+      [
+        ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+        ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      ],
+    );
     setLoadingConversations(false);
 
     List<ServerConversation> upsertConvos = [];
@@ -449,7 +451,10 @@ class ConversationProvider extends ChangeNotifier {
         _getFailedConversationsFromServer(),
       ]);
       conversations = results[0];
-      failedConversations = results[1];
+      failedConversations = _mergeRetryableFailures(
+        results[1],
+        conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      );
     }
     setLoadingConversations(false);
 
@@ -496,8 +501,8 @@ class ConversationProvider extends ChangeNotifier {
       return false;
     }
 
-    _applyProcessingRetryState(result.conversation);
-    if (result.conversation.status == ConversationStatus.processing) {
+    _applyProcessingRetryResult(result);
+    if (!result.isTerminal) {
       _startProcessingRetryPoll(
         conversationId,
         requestId: requestId,
@@ -507,19 +512,31 @@ class ConversationProvider extends ChangeNotifier {
     return true;
   }
 
-  void _applyProcessingRetryState(ServerConversation conversation) {
+  void _applyProcessingRetryResult(ConversationProcessingRetryResult result) {
+    final conversation = result.conversation;
     failedConversations.removeWhere((item) => item.id == conversation.id);
     processingConversations.removeWhere((item) => item.id == conversation.id);
 
-    if (conversation.status == ConversationStatus.failed) {
+    if (result.outcome == ConversationProcessingRetryOutcome.failed) {
       failedConversations.insert(0, conversation);
       retryingConversationIds.remove(conversation.id);
-    } else if (conversation.status == ConversationStatus.processing) {
-      processingConversations.insert(0, conversation);
-    } else if (conversation.status == ConversationStatus.completed) {
+      if (conversation.status == ConversationStatus.completed) {
+        upsertConversation(conversation);
+      } else {
+        conversations.removeWhere((item) => item.id == conversation.id);
+      }
+    } else if (result.outcome == ConversationProcessingRetryOutcome.processing) {
+      if (conversation.status == ConversationStatus.completed) {
+        upsertConversation(conversation);
+      } else {
+        conversations.removeWhere((item) => item.id == conversation.id);
+        processingConversations.insert(0, conversation);
+      }
+    } else {
       retryingConversationIds.remove(conversation.id);
       upsertConversation(conversation);
     }
+    _groupConversationsByDateWithoutNotify();
     notifyListeners();
   }
 
@@ -549,17 +566,21 @@ class ConversationProvider extends ChangeNotifier {
     if (!_isCurrentProcessingRetryPoll(conversationId, poll)) return;
 
     poll.attempts += 1;
-    ServerConversation? conversation;
+    ConversationProcessingRetryResult? result;
     try {
-      conversation = await _getConversationById(conversationId);
+      result = await _retryConversationProcessing(
+        conversationId,
+        poll.requestId,
+        correctionText: poll.correctionText,
+      );
     } catch (error, stackTrace) {
       Logger.error('Failed to poll conversation processing retry: $error\n$stackTrace');
     }
     if (!_isCurrentProcessingRetryPoll(conversationId, poll)) return;
 
-    if (conversation != null) {
-      _applyProcessingRetryState(conversation);
-      if (conversation.status == ConversationStatus.completed || conversation.status == ConversationStatus.failed) {
+    if (result != null) {
+      _applyProcessingRetryResult(result);
+      if (result.isTerminal) {
         _cancelProcessingRetryPoll(conversationId);
         return;
       }
@@ -749,6 +770,23 @@ class ConversationProvider extends ChangeNotifier {
     return failed.where((conversation) => conversation.isRetryableSummaryFailure).toList();
   }
 
+  List<ServerConversation> _mergeRetryableFailures(
+    Iterable<ServerConversation> processingFailures,
+    Iterable<ServerConversation> enrichmentFailures,
+  ) {
+    final byId = <String, ServerConversation>{
+      for (final conversation in processingFailures) conversation.id: conversation,
+      for (final conversation in enrichmentFailures) conversation.id: conversation,
+    };
+    final merged = byId.values.toList();
+    merged.sort((a, b) {
+      final aDate = a.processingErrorAt ?? a.finishedAt ?? a.createdAt;
+      final bDate = b.processingErrorAt ?? b.finishedAt ?? b.createdAt;
+      return bDate.compareTo(aDate);
+    });
+    return merged;
+  }
+
   void updateActionItemState(String convoId, bool state, int i, DateTime date) {
     conversations.firstWhere((element) => element.id == convoId).structured.actionItems[i].completed = state;
     groupedConversations[date]!.firstWhere((element) => element.id == convoId).structured.actionItems[i].completed =
@@ -773,6 +811,10 @@ class ConversationProvider extends ChangeNotifier {
       endDate: endDate,
       folderId: selectedFolderId,
       starred: showStarredOnly ? true : null,
+    );
+    failedConversations = _mergeRetryableFailures(
+      failedConversations,
+      newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
     );
     conversations.addAll(newConversations);
     conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));

@@ -98,4 +98,59 @@ void main() {
     );
     expect(unrelatedFailure.isRetryableSummaryFailure, isFalse);
   });
+
+  test('keeps a completed generic summary retryable when contextual enrichment failed', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'generic-fallback',
+      'created_at': '2026-07-20T08:00:00Z',
+      'structured': {
+        'title': 'Generic title',
+        'overview': 'Usable generic summary',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'status': 'completed',
+      'enrichment_state': {
+        'status': 'failed',
+        'pending': true,
+        'error_code': 'conversation_summary_recovery_failed',
+      },
+    });
+
+    expect(conversation.isRetryableSummaryFailure, isFalse);
+    expect(conversation.isRetryableEnrichmentFailure, isTrue);
+    expect(conversation.structured.overview, 'Usable generic summary');
+    expect(conversation.toJson()['enrichment_state'], {
+      'status': 'failed',
+      'pending': true,
+      'error_code': 'conversation_summary_recovery_failed',
+    });
+  });
+
+  test('surfaces canonical and enriched-vector terminal failures without flagging active writes', () {
+    final canonicalFailure = ServerConversation(
+      id: 'canonical-failure',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Generic', 'Usable generic summary'),
+      enrichmentState: {'status': 'writeback_pending_canonical', 'canonical_status': 'failed', 'pending': true},
+    );
+    final vectorFailure = ServerConversation(
+      id: 'vector-failure',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Enriched', 'Usable enriched summary'),
+      processingRetryEnrichmentVectorStatus: 'failed',
+    );
+    final activeWrite = ServerConversation(
+      id: 'active-write',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Generic', 'Usable generic summary'),
+      enrichmentState: {'status': 'writeback_pending_canonical', 'pending': true},
+    );
+
+    expect(canonicalFailure.isRetryableEnrichmentFailure, isTrue);
+    expect(vectorFailure.isRetryableEnrichmentFailure, isTrue);
+    expect(activeWrite.isRetryableEnrichmentFailure, isFalse);
+  });
 }
