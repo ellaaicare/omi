@@ -378,6 +378,9 @@ class Conversation(BaseModel):
     processing_conversation_id: Optional[str] = None
 
     status: Optional[ConversationStatus] = ConversationStatus.completed
+    processing_error: Optional[str] = None
+    processing_error_at: Optional[datetime] = None
+    historical_repair: Optional[Dict[str, Any]] = None
     is_locked: bool = False
     data_protection_level: Optional[str] = None
     folder_id: Optional[str] = Field(default=None, description="ID of the folder this conversation belongs to")

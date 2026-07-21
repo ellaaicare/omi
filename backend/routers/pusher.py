@@ -20,7 +20,7 @@ from utils.app_integrations import (
     trigger_external_integrations,
 )
 from utils.conversations.location import get_google_maps_location
-from utils.conversations.process_conversation import process_conversation
+from utils.conversations.process_conversation import mark_conversation_processing_failed, process_conversation
 from utils.webhooks import (
     send_audio_bytes_developer_webhook,
     realtime_transcript_webhook,
@@ -81,12 +81,16 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
 
             # Run blocking operations in thread pool to avoid blocking event loop
             conversation = await asyncio.to_thread(process_conversation, uid, language, conversation)
-            messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
-            conversations_db.set_conversation_as_discarded(uid, conversation.id)
-            conversation.discarded = True
+            await asyncio.to_thread(mark_conversation_processing_failed, uid, conversation)
             messages = []
+        else:
+            try:
+                messages = await asyncio.to_thread(trigger_external_integrations, uid, conversation)
+            except Exception as e:
+                print(f"External integrations failed after conversation processing: {e}", uid, conversation_id)
+                messages = []
 
         # Send success response back (minimal - transcribe will fetch from DB)
         response = {"conversation_id": conversation_id, "success": True}
