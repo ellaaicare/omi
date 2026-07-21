@@ -144,4 +144,60 @@ void main() {
 
     provider.dispose();
   });
+
+  testWidgets('processing poll stops after forty completed attempts', (tester) async {
+    final processing = _conversation(ConversationStatus.processing);
+    var pollCalls = 0;
+    final provider = ConversationProvider(
+      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
+        outcome: ConversationProcessingRetryOutcome.processing,
+        conversation: processing,
+      ),
+      conversationByIdCall: (_) async {
+        pollCalls += 1;
+        return null;
+      },
+    );
+
+    expect(await provider.retryFailedConversation(processing.id), isTrue);
+    for (var attempt = 0; attempt < 40; attempt += 1) {
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+    }
+
+    expect(pollCalls, 40);
+    expect(provider.isConversationRetrying(processing.id), isFalse);
+    await tester.pump(const Duration(seconds: 30));
+    expect(pollCalls, 40);
+
+    provider.dispose();
+  });
+
+  testWidgets('completion after provider disposal cannot restart or update polling', (tester) async {
+    final processing = _conversation(ConversationStatus.processing);
+    final completed = _conversation(ConversationStatus.completed);
+    final latePoll = Completer<ServerConversation?>();
+    var pollCalls = 0;
+    final provider = ConversationProvider(
+      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
+        outcome: ConversationProcessingRetryOutcome.processing,
+        conversation: processing,
+      ),
+      conversationByIdCall: (_) {
+        pollCalls += 1;
+        return latePoll.future;
+      },
+    );
+
+    expect(await provider.retryFailedConversation(processing.id), isTrue);
+    await tester.pump(const Duration(seconds: 3));
+    expect(pollCalls, 1);
+
+    provider.dispose();
+    latePoll.complete(completed);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 30));
+
+    expect(pollCalls, 1);
+  });
 }
