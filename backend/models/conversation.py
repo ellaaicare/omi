@@ -391,6 +391,7 @@ class Conversation(BaseModel):
     processing_retry_enrichment_vector_version_id: Optional[str] = None
     processing_retry_enrichment_vector_sha256: Optional[str] = None
     processing_retry_transcript_sha256: Optional[str] = None
+    processing_retry_generic_summary_sha256: Optional[str] = None
     processing_retry_source_request_id: Optional[str] = None
     is_locked: bool = False
     data_protection_level: Optional[str] = None

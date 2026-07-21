@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 SUMMARY_RECOVERY_FAILED = 'conversation_summary_recovery_failed'
+LEGACY_GENERIC_SUMMARY_BASELINE = 'legacy-unversioned-summary'
 
 
 def _transcript_metadata(conversation: dict[str, Any]) -> tuple[int, int]:
@@ -95,6 +96,11 @@ def build_conversation_processing_retry_plan(uid: str, conversation_id: str) -> 
         'transcript_character_count': transcript_character_count,
         'transcript_sha256': transcript_sha256,
         'structured_summary_present': conversations_db.has_usable_conversation_summary(conversation),
+        'structured_summary_sha256': (
+            _summary_content_sha256(conversation)
+            if conversations_db.has_usable_conversation_summary(conversation)
+            else None
+        ),
         'active_summary_version_id': active_summary_version_id,
         'active_summary_source': active_version.get('source'),
         'active_summary_kind': active_version.get('kind'),
@@ -392,6 +398,7 @@ async def invoke_hermes_recovery(
         raise RuntimeError('Hermes API is required for historical enrichment recovery')
     conversation_id = str(conversation['id'])
     _, source_sha256 = build_hermes_recovery_source(conversation)
+    source_summary_sha256 = _summary_content_sha256(conversation)
     trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
     summary = await generate_summary_from_prompt(
         prompt=_build_recovery_prompt(conversation, client_context),
@@ -409,6 +416,8 @@ async def invoke_hermes_recovery(
     _, current_source_sha256 = build_hermes_recovery_source(current)
     if current_source_sha256 != source_sha256:
         raise ConcurrentConversationRecoveryChangeError('conversation_transcript_changed_before_recovery_apply')
+    if _summary_content_sha256(current) != source_summary_sha256:
+        raise ConcurrentConversationRecoveryChangeError('conversation_summary_changed_before_recovery_apply')
     if not _is_current_retry(current, request_id, attempt_count):
         raise ConcurrentConversationRecoveryChangeError('conversation_recovery_attempt_superseded')
     if current.get('active_summary_version_id') != conversation.get('active_summary_version_id'):
@@ -455,7 +464,7 @@ def _existing_generic_version_id(conversation: dict[str, Any]) -> Optional[str]:
         return str(retry_version_id)
     if conversation.get('processing_retry_mode') == 'enrichment_only':
         active_version_id = conversation.get('active_summary_version_id')
-        return str(active_version_id) if active_version_id else 'existing-generic-summary'
+        return str(active_version_id) if active_version_id else LEGACY_GENERIC_SUMMARY_BASELINE
     enrichment_state = conversation.get('enrichment_state') or {}
     if enrichment_state.get('status') == 'writeback_applied' and enrichment_state.get('kind') in {
         'generic_recovered',
@@ -597,6 +606,13 @@ async def recover_failed_conversation_summary(
         return status or 'superseded'
 
     _, transcript_sha256 = build_hermes_recovery_source(conversation)
+    legacy_generic_summary_sha256 = (
+        _summary_content_sha256(conversation)
+        if conversation.get('processing_retry_mode') == 'enrichment_only'
+        and not conversation.get('active_summary_version_id')
+        and conversations_db.has_usable_conversation_summary(conversation)
+        else None
+    )
     if (
         conversation.get('processing_retry_source_request_id') == request_id
         and conversation.get('processing_retry_transcript_sha256')
@@ -621,6 +637,7 @@ async def recover_failed_conversation_summary(
         transcript_sha256,
         len(conversation.get('transcript_segments') or []),
         attempt_count=attempt_count,
+        generic_summary_sha256=legacy_generic_summary_sha256,
     )
     if not source_recorded:
         return 'superseded'
@@ -744,15 +761,25 @@ async def recover_failed_conversation_summary(
         transcript_sha256,
         len(latest.get('transcript_segments') or []),
         attempt_count=attempt_count,
+        generic_summary_sha256=legacy_generic_summary_sha256,
     )
     if not lease_renewed:
         return 'superseded'
     latest_enrichment_state = latest.get('enrichment_state') or {}
-    if (
+    legacy_generic_baseline_changed = bool(
+        generic_version_id == LEGACY_GENERIC_SUMMARY_BASELINE
+        and (
+            latest.get('active_summary_version_id') is not None
+            or _summary_content_sha256(latest) != legacy_generic_summary_sha256
+        )
+    )
+    versioned_generic_baseline_changed = bool(
         generic_version_id
+        and generic_version_id != LEGACY_GENERIC_SUMMARY_BASELINE
         and str(latest.get('active_summary_version_id') or '') != str(generic_version_id)
         and latest_enrichment_state.get('kind') != 'recovered_enriched'
-    ):
+    )
+    if legacy_generic_baseline_changed or versioned_generic_baseline_changed:
         await asyncio.to_thread(
             conversations_db.finish_conversation_processing_retry,
             uid,

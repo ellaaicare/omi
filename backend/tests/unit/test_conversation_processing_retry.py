@@ -317,6 +317,7 @@ def test_decrypted_source_hash_is_receipted_without_transcript_content():
         99,
         updated_at,
         lease_expires_at,
+        generic_summary_sha256='b' * 64,
     )
 
     assert result is True
@@ -324,14 +325,56 @@ def test_decrypted_source_hash_is_receipted_without_transcript_content():
         'processing_retry_lease_expires_at': lease_expires_at,
         'processing_retry_transcript_sha256': 'a' * 64,
         'processing_retry_source_request_id': 'request-123',
+        'processing_retry_generic_summary_sha256': 'b' * 64,
     }
     assert transaction.updates[1][1] == {
         'transcript_sha256': 'a' * 64,
         'transcript_segment_count': 99,
         'lease_expires_at': lease_expires_at,
         'updated_at': updated_at,
+        'generic_summary_sha256': 'b' * 64,
     }
     assert 'transcript_segments' not in transaction.updates[1][1]
+
+
+def test_legacy_generic_summary_bootstraps_version_history_before_enrichment():
+    legacy_structured = {
+        'title': 'Legacy generic summary',
+        'overview': '[Ella] The preserved generic summary.',
+        'emoji': 'brain',
+        'category': 'other',
+    }
+    enriched_structured = {
+        'title': 'Enriched summary',
+        'overview': '[Ella] The full-context enriched summary.',
+        'emoji': 'brain',
+        'category': 'personal',
+    }
+
+    update = conversations_db.build_summary_version_update(
+        {
+            'created_at': datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc),
+            'structured': legacy_structured,
+            'summary_versions': [],
+            'active_summary_version_id': None,
+        },
+        next_structured=enriched_structured,
+        source='observer',
+        kind='recovered_enriched',
+        based_on_version_id=None,
+    )
+
+    assert len(update['summary_versions']) == 2
+    legacy_version, enriched_version = update['summary_versions']
+    assert legacy_version['kind'] == 'legacy_current'
+    assert legacy_version['title'] == legacy_structured['title']
+    assert legacy_version['overview'] == legacy_structured['overview']
+    assert legacy_version['is_active'] is False
+    assert enriched_version['kind'] == 'recovered_enriched'
+    assert enriched_version['title'] == enriched_structured['title']
+    assert enriched_version['based_on_version_id'] == legacy_version['id']
+    assert enriched_version['is_active'] is True
+    assert update['active_summary_version_id'] == enriched_version['id']
 
 
 def test_generic_completion_keeps_overall_receipt_processing_for_hermes():

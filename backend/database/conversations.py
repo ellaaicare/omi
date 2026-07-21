@@ -1174,6 +1174,7 @@ def _record_conversation_processing_retry_source_transaction(
     updated_at: datetime,
     lease_expires_at: datetime,
     attempt_count: Optional[int] = None,
+    generic_summary_sha256: Optional[str] = None,
 ):
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     retry_snapshot = retry_ref.get(transaction=transaction)
@@ -1190,23 +1191,22 @@ def _record_conversation_processing_retry_source_transaction(
         return False
     if retry_data.get('outcome') != ConversationStatus.processing.value:
         return False
-    transaction.update(
-        conversation_ref,
-        {
-            'processing_retry_lease_expires_at': lease_expires_at,
-            'processing_retry_transcript_sha256': transcript_sha256,
-            'processing_retry_source_request_id': request_id,
-        },
-    )
-    transaction.update(
-        retry_ref,
-        {
-            'transcript_sha256': transcript_sha256,
-            'transcript_segment_count': segment_count,
-            'lease_expires_at': lease_expires_at,
-            'updated_at': updated_at,
-        },
-    )
+    conversation_update = {
+        'processing_retry_lease_expires_at': lease_expires_at,
+        'processing_retry_transcript_sha256': transcript_sha256,
+        'processing_retry_source_request_id': request_id,
+    }
+    retry_update = {
+        'transcript_sha256': transcript_sha256,
+        'transcript_segment_count': segment_count,
+        'lease_expires_at': lease_expires_at,
+        'updated_at': updated_at,
+    }
+    if generic_summary_sha256:
+        conversation_update['processing_retry_generic_summary_sha256'] = generic_summary_sha256
+        retry_update['generic_summary_sha256'] = generic_summary_sha256
+    transaction.update(conversation_ref, conversation_update)
+    transaction.update(retry_ref, retry_update)
     return True
 
 
@@ -1221,6 +1221,7 @@ def _record_conversation_processing_retry_source(
     updated_at: datetime,
     lease_expires_at: datetime,
     attempt_count: Optional[int],
+    generic_summary_sha256: Optional[str],
 ):
     return _record_conversation_processing_retry_source_transaction(
         transaction,
@@ -1232,6 +1233,7 @@ def _record_conversation_processing_retry_source(
         updated_at,
         lease_expires_at,
         attempt_count,
+        generic_summary_sha256,
     )
 
 
@@ -1244,6 +1246,7 @@ def record_conversation_processing_retry_source(
     updated_at: Optional[datetime] = None,
     lease_seconds: int = conversation_processing_retry_lease_seconds,
     attempt_count: Optional[int] = None,
+    generic_summary_sha256: Optional[str] = None,
 ):
     now = updated_at or datetime.now(timezone.utc)
     conversation_ref = (
@@ -1260,6 +1263,7 @@ def record_conversation_processing_retry_source(
         now,
         now + timedelta(seconds=max(1, lease_seconds)),
         attempt_count,
+        generic_summary_sha256,
     )
 
 

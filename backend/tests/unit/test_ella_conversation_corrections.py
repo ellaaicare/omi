@@ -1061,6 +1061,7 @@ def test_retry_plan_is_uid_scoped_metadata_only_and_zero_write(monkeypatch):
     assert payload["transcript_segment_count"] == 2
     assert payload["transcript_character_count"] == 150
     assert payload["transcript_sha256"] == summary_recovery.build_hermes_recovery_source(conversation)[1]
+    assert payload["structured_summary_sha256"] == summary_recovery._summary_content_sha256(conversation)
     assert payload["zero_writes"] is True
     assert "transcript_segments" not in payload
     assert "transcript" not in payload
@@ -1741,6 +1742,97 @@ def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypat
         "enrichment:canonical_completed",
         "vector:enriched-v2",
         "enrichment:completed",
+    ]
+
+
+def test_summary_recovery_enriches_legacy_generic_without_version_or_generic_rewrite(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    legacy = {
+        **_retry_conversation(status="completed", request_id=request_id),
+        "processing_retry_mode": "enrichment_only",
+        "active_summary_version_id": None,
+        "summary_versions": [],
+        "structured": {
+            "title": "Legacy generic",
+            "overview": "[Ella] A preserved generic summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    }
+    enriched = {
+        **legacy,
+        "active_summary_version_id": "enriched-v2",
+        "summary_versions": [
+            {"id": "legacy-v1", "kind": "legacy_current", "is_active": False},
+            {"id": "enriched-v2", "kind": "recovered_enriched", "is_active": True},
+        ],
+        "enrichment_state": {
+            "status": "writeback_applied",
+            "kind": "recovered_enriched",
+            "canonical_status": "completed",
+        },
+    }
+    reads = [legacy, legacy, legacy, enriched]
+    events = []
+    source_hashes = []
+    expected_summary_hash = summary_recovery._summary_content_sha256(legacy)
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_source",
+        lambda *args, **kwargs: source_hashes.append(kwargs.get("generic_summary_sha256")) or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda *args: pytest.fail("legacy generic content must not be regenerated"),
+    )
+    monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: True)
+    monkeypatch.setattr(
+        summary_recovery,
+        "_ensure_conversation_vector",
+        lambda uid, conv: pytest.fail("the existing legacy generic vector must not be overwritten"),
+    )
+
+    async def fake_invoke(**kwargs):
+        assert kwargs["conversation"]["active_summary_version_id"] is None
+        assert summary_recovery._summary_content_sha256(kwargs["conversation"]) == expected_summary_hash
+        events.append("hermes")
+        return {"active_summary_version_id": "enriched-v2", "canonical_confirmed": True}
+
+    monkeypatch.setattr(summary_recovery, "invoke_hermes_recovery", fake_invoke)
+    monkeypatch.setattr(
+        summary_recovery,
+        "_write_and_confirm_enriched_vector",
+        lambda uid, conv, version_id: _async_event_result(events, "enriched_vector", "e" * 64),
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_generic_vector",
+        lambda *args, **kwargs: events.append("generic_vector_receipt") or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_enrichment",
+        lambda *args, **kwargs: events.append(args[3]) or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "completed"
+    assert source_hashes == [expected_summary_hash, expected_summary_hash]
+    assert events == [
+        "generic_vector_receipt",
+        "hermes",
+        "canonical_completed",
+        "enriched_vector",
+        "completed",
     ]
 
 

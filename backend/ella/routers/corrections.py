@@ -172,6 +172,7 @@ class ConversationProcessingRetryPlan(BaseModel):
     transcript_character_count: int
     transcript_sha256: str
     structured_summary_present: bool
+    structured_summary_sha256: Optional[str] = None
     active_summary_version_id: Optional[str] = None
     active_summary_source: Optional[str] = None
     active_summary_kind: Optional[str] = None
