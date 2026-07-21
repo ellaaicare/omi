@@ -16,6 +16,8 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/geolocation.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/chat/page.dart';
@@ -52,7 +54,16 @@ import 'today_page.dart';
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
   final String? autoMessage;
-  const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage});
+  final bool provisioningGateStartOnMount;
+
+  const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage, this.provisioningGateStartOnMount = true})
+      : _provisioningVerified = false;
+
+  const HomePageWrapper._provisioned({this.navigateToRoute, this.autoMessage})
+      : provisioningGateStartOnMount = true,
+        _provisioningVerified = true;
+
+  final bool _provisioningVerified;
 
   @override
   State<HomePageWrapper> createState() => _HomePageWrapperState();
@@ -64,28 +75,38 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
 
   @override
   void initState() {
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (mounted) {
-        context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper', boundDeviceOnly: true);
-      }
-      if (SharedPreferencesUtil().notificationsEnabled) {
-        NotificationService.instance.register();
-        NotificationService.instance.saveNotificationToken();
-
-        // Schedule daily reflection notification if enabled
-        if (SharedPreferencesUtil().dailyReflectionEnabled) {
-          DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+    if (!_requiresProvisioningGate) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (mounted) {
+          context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper', boundDeviceOnly: true);
         }
-      }
-    });
+        if (SharedPreferencesUtil().notificationsEnabled) {
+          NotificationService.instance.register();
+          NotificationService.instance.saveNotificationToken();
+
+          // Schedule daily reflection notification if enabled
+          if (SharedPreferencesUtil().dailyReflectionEnabled) {
+            DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+          }
+        }
+      });
+    }
     _navigateToRoute = widget.navigateToRoute;
     _autoMessage = widget.autoMessage;
 
     super.initState();
   }
 
+  bool get _requiresProvisioningGate => isHermesProvisioningGateEnabled && !widget._provisioningVerified;
+
   @override
   Widget build(BuildContext context) {
+    if (_requiresProvisioningGate) {
+      return EllaProvisioningGatePage(
+        startOnMount: widget.provisioningGateStartOnMount,
+        readyChild: HomePageWrapper._provisioned(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage),
+      );
+    }
     return HomePage(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage);
   }
 }
@@ -152,9 +173,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   }
 
   ///Screens with respect to subpage
-  final Map<String, Widget> screensWithRespectToPath = {
-    '/facts': const MemoriesPage(),
-  };
+  final Map<String, Widget> screensWithRespectToPath = {'/facts': const MemoriesPage()};
   bool? previousConnection;
 
   void _onReceiveTaskData(dynamic data) async {
@@ -228,8 +247,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
       }
       if (mounted) {
-        await Provider.of<CaptureProvider>(context, listen: false)
-            .streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        await Provider.of<CaptureProvider>(
+          context,
+          listen: false,
+        ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
       }
 
       // Navigate
@@ -240,12 +261,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             final appProvider = context.read<AppProvider>();
             var app = await appProvider.getAppFromId(detailPageId);
             if (app != null && mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => AppDetailPage(app: app),
-                ),
-              );
+              Navigator.push(context, MaterialPageRoute(builder: (context) => AppDetailPage(app: app)));
             }
           }
           break;
@@ -309,19 +325,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             }
           });
           if (detailPageId == 'data-privacy') {
-            MyApp.navigatorKey.currentState?.push(
-              MaterialPageRoute(
-                builder: (context) => const DataPrivacyPage(),
-              ),
-            );
+            MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const DataPrivacyPage()));
           }
           break;
         case "facts":
-          MyApp.navigatorKey.currentState?.push(
-            MaterialPageRoute(
-              builder: (context) => const MemoriesPage(),
-            ),
-          );
+          MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const MemoriesPage()));
           break;
         case "conversation":
           // Handle conversation deep link: /conversation/{id}?share=1
@@ -339,10 +347,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => ConversationDetailPage(
-                      conversation: conversation,
-                      openShareToContactsOnLoad: shouldOpenShare,
-                    ),
+                    builder: (context) =>
+                        ConversationDetailPage(conversation: conversation, openShareToContactsOnLoad: shouldOpenShare),
                   ),
                 );
               } else {
@@ -363,9 +369,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
               if (mounted) {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (context) => DailySummaryDetailPage(summaryId: detailPageId!),
-                  ),
+                  MaterialPageRoute(builder: (context) => DailySummaryDetailPage(summaryId: detailPageId!)),
                 );
               }
             });
@@ -374,12 +378,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         case "wrapped":
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const Wrapped2025Page(),
-                ),
-              );
+              Navigator.push(context, MaterialPageRoute(builder: (context) => const Wrapped2025Page()));
             }
           });
           break;
@@ -577,10 +576,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                       Column(
                         children: [
                           Expanded(
-                            child: IndexedStack(
-                              index: context.watch<HomeProvider>().selectedIndex,
-                              children: _pages,
-                            ),
+                            child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
                           ),
                           // Settings and other non-home tabs just need nav bar clearance
                           if (context.watch<HomeProvider>().selectedIndex == 3)

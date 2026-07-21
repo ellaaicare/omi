@@ -25,7 +25,7 @@ void main() {
         child: const MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
-          home: EllaProvisioningGatePage(startOnMount: false),
+          home: EllaProvisioningGatePage(readyChild: SizedBox(), startOnMount: false),
         ),
       ),
     );

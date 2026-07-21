@@ -9,7 +9,6 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/auth.dart';
@@ -83,11 +82,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   }
 
   void _goToPage(int page) {
-    _pageController.animateToPage(
-      page,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-    );
+    _pageController.animateToPage(page, duration: const Duration(milliseconds: 300), curve: Curves.easeInOut);
     setState(() => _currentPage = page);
   }
 
@@ -101,11 +96,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   }
 
   void _routeToAuthenticatedHome() {
-    routeToPage(
-      context,
-      isHermesProvisioningGateEnabled ? const EllaProvisioningGatePage() : const HomePageWrapper(),
-      replace: true,
-    );
+    routeToPage(context, const HomePageWrapper(), replace: true);
   }
 
   @override
@@ -147,11 +138,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
                 onBack: () => _goToPage(0),
               ),
               if (!publicMode)
-                EllaEmergency(
-                  onComplete: _completeOnboarding,
-                  onSkip: _completeOnboarding,
-                  onBack: () => _goToPage(1),
-                ),
+                EllaEmergency(onComplete: _completeOnboarding, onSkip: _completeOnboarding, onBack: () => _goToPage(1)),
             ],
           ),
           Positioned(
