@@ -25,4 +25,12 @@ void main() {
       }
     }
   });
+
+  test('memories remain in a loading state until the first fetch completes', () {
+    expect(shouldShowMemoriesLoading(hasLoaded: false, isLoading: false, hasMemories: false), isTrue);
+    expect(shouldShowMemoriesLoading(hasLoaded: false, isLoading: true, hasMemories: false), isTrue);
+    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: false), isTrue);
+    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: false, hasMemories: false), isFalse);
+    expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: true), isFalse);
+  });
 }

@@ -33,6 +33,8 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final capture = context.watch<CaptureProvider>();
     final live = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final groups = _group(conversationProvider.conversations);
+    final loading =
+        groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -61,23 +63,35 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
               ),
               const SizedBox(height: 24),
             ],
-            for (final entry in groups.entries) ...[
-              Text(entry.key, style: EllaTextStyles.eyebrow),
-              const SizedBox(height: EllaSizes.cardGap),
-              for (final conversation in entry.value) ...[
-                _MemoryRow(
-                  conversation: conversation,
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => ConversationDetailPage(conversation: conversation),
-                    ),
+            if (loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 80),
+                child: Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
                   ),
                 ),
+              )
+            else
+              for (final entry in groups.entries) ...[
+                Text(entry.key, style: EllaTextStyles.eyebrow),
                 const SizedBox(height: EllaSizes.cardGap),
+                for (final conversation in entry.value) ...[
+                  _MemoryRow(
+                    conversation: conversation,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ConversationDetailPage(conversation: conversation),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: EllaSizes.cardGap),
+                ],
+                const SizedBox(height: 16),
               ],
-              const SizedBox(height: 16),
-            ],
-            if (groups.isEmpty)
+            if (!loading && groups.isEmpty)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 80),
                 child:

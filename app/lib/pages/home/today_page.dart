@@ -28,6 +28,13 @@ typedef DailySummaryLoader = Future<List<DailySummary>> Function();
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
+bool shouldShowMemoriesLoading({
+  required bool hasLoaded,
+  required bool isLoading,
+  required bool hasMemories,
+}) =>
+    !hasMemories && (!hasLoaded || isLoading);
+
 String whisperStatusDetail(bool enabled) => enabled
     ? ' — Ella will speak up when she can help. 🪽'
     : " — Ella stays quiet, but she's still listening and remembering.";
@@ -166,6 +173,11 @@ class TodayPageState extends State<TodayPage> {
     );
     final capture = context.watch<CaptureProvider>();
     final conversations = context.watch<ConversationProvider>();
+    final memoriesLoading = shouldShowMemoriesLoading(
+      hasLoaded: conversations.hasLoadedConversations,
+      isLoading: conversations.isLoadingConversations,
+      hasMemories: conversations.conversations.isNotEmpty,
+    );
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
 
@@ -230,14 +242,17 @@ class TodayPageState extends State<TodayPage> {
               const SizedBox(height: EllaSizes.sectionGap),
               _RemindersSection(reminders: reminders.take(3).toList()),
             ],
-            if (conversations.conversations.isNotEmpty) ...[
+            if (memoriesLoading || conversations.conversations.isNotEmpty) ...[
               const SizedBox(height: EllaSizes.sectionGap),
-              _RecentMemories(
-                conversations: conversations.conversations.take(4).toList(),
-                onOpenAll: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const EllaMemoriesPage()),
+              if (memoriesLoading)
+                const _RecentMemoriesLoading()
+              else
+                _RecentMemories(
+                  conversations: conversations.conversations.take(4).toList(),
+                  onOpenAll: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const EllaMemoriesPage()),
+                  ),
                 ),
-              ),
             ],
           ],
         ),
@@ -677,12 +692,7 @@ class _RecentMemories extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scale = MediaQuery.textScalerOf(context).scale(1);
-    final height = scale >= 1.45
-        ? 210.0
-        : scale >= 1.15
-            ? 176.0
-            : 148.0;
+    final height = _memoryCarouselHeight(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -715,6 +725,43 @@ class _RecentMemories extends StatelessWidget {
       ],
     );
   }
+}
+
+class _RecentMemoriesLoading extends StatelessWidget {
+  const _RecentMemoriesLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow),
+        const SizedBox(height: EllaSizes.cardGap),
+        Container(
+          height: _memoryCarouselHeight(context),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: EllaColors.card,
+            borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+          ),
+          child: const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+double _memoryCarouselHeight(BuildContext context) {
+  final scale = MediaQuery.textScalerOf(context).scale(1);
+  return scale >= 1.45
+      ? 210.0
+      : scale >= 1.15
+          ? 176.0
+          : 148.0;
 }
 
 class _MemoryPreviewCard extends StatelessWidget {

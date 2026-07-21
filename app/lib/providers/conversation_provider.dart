@@ -19,6 +19,7 @@ class ConversationProvider extends ChangeNotifier {
   Map<DateTime, List<ServerConversation>> groupedConversations = {};
 
   bool isLoadingConversations = false;
+  bool hasLoadedConversations = false;
   bool showDiscardedConversations = false;
   bool showShortConversations = false;
   int shortConversationThreshold = 0; // in seconds
@@ -69,6 +70,7 @@ class ConversationProvider extends ChangeNotifier {
     groupedConversations = {};
     processingConversations = [];
     isLoadingConversations = false;
+    hasLoadedConversations = false;
     isFetchingConversations = false;
     previousQuery = '';
     totalSearchPages = 1;
@@ -397,29 +399,31 @@ class ConversationProvider extends ChangeNotifier {
     searchedConversations = [];
 
     setLoadingConversations(true);
-    conversations =
-        SharedPreferencesUtil().demoMode ? DemoFixtures.conversations() : await _getConversationsFromServer();
-    setLoadingConversations(false);
+    try {
+      conversations =
+          SharedPreferencesUtil().demoMode ? DemoFixtures.conversations() : await _getConversationsFromServer();
 
-    // processing convos
-    processingConversations = conversations.where((m) => m.status == ConversationStatus.processing).toList();
+      // processing convos
+      processingConversations = conversations.where((m) => m.status == ConversationStatus.processing).toList();
 
-    // completed convos
-    conversations = conversations.where((m) => m.status == ConversationStatus.completed).toList();
+      // completed convos
+      conversations = conversations.where((m) => m.status == ConversationStatus.completed).toList();
 
-    // Only use cache when no folder filter is applied
-    if (conversations.isEmpty && selectedFolderId == null) {
-      conversations = SharedPreferencesUtil().cachedConversations;
-    } else if (selectedFolderId == null) {
-      // Only cache when viewing all folders
-      SharedPreferencesUtil().cachedConversations = conversations;
+      // Only use cache when no folder filter is applied
+      if (conversations.isEmpty && selectedFolderId == null) {
+        conversations = SharedPreferencesUtil().cachedConversations;
+      } else if (selectedFolderId == null) {
+        // Only cache when viewing all folders
+        SharedPreferencesUtil().cachedConversations = conversations;
+      }
+      if (searchedConversations.isEmpty) {
+        searchedConversations = conversations;
+      }
+      _groupConversationsByDateWithoutNotify();
+    } finally {
+      hasLoadedConversations = true;
+      setLoadingConversations(false);
     }
-    if (searchedConversations.isEmpty) {
-      searchedConversations = conversations;
-    }
-    _groupConversationsByDateWithoutNotify();
-
-    notifyListeners();
   }
 
   Future getInitialConversations() async {

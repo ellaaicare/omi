@@ -123,19 +123,24 @@ Firebase project: omi-dev-ca005
 
 Do not change Firebase, auth, bundle ID, signing, provisioning, or App Store Connect configuration just to make a local build pass. If TestFlight is required, use the repo deploy scripts and the Mac Mini App Store Connect environment documented in the agent runbooks.
 
-### Design v2 build 790 handoff
+### Design v2 TestFlight handoff
 
-The release commit is pinned by the `testflight/design-v2-790-r1` tag. From any
+The current release candidate is pinned by the `testflight/design-v2-792` tag. From any
 machine authenticated to the Ella GitHub organization, this one command queues
 Sophia's self-hosted Mac Mini runner:
 
 ```bash
-gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-790-r1
+gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-792
 ```
 
 The workflow checks out that immutable tag, runs the Flutter test suite, and
 then invokes the existing `app/ios/build-and-upload.sh` TestFlight path. It does
 not change signing, bundle ID, Firebase, or App Store Connect configuration.
+
+Build 790 used stale tracked Firebase fallback files and must not be used for
+authentication testing. Build 791 restored the production `omi-dev-ca005`
+identity. Build 792 retains that identity and prevents the initial Memories
+fetch from rendering as an empty account while data is still loading.
 
 ## Branch Hygiene
 
