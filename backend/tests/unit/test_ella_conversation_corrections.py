@@ -13,7 +13,10 @@ sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.other.endpoints", MagicMock())
-sys.modules.setdefault("utils.conversations.vector", MagicMock(save_structured_vector=MagicMock()))
+sys.modules.setdefault(
+    "utils.conversations.vector",
+    MagicMock(refresh_structured_summary_vector=MagicMock()),
+)
 sys.modules.setdefault(
     "utils.conversations.generic_summary",
     MagicMock(generate_stock_conversation_summary=MagicMock()),
@@ -43,6 +46,7 @@ def _disable_external_observer_side_effects(monkeypatch):
 
     monkeypatch.setattr(corrections, "_emit_canonical_correction_event", noop_emit)
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
+    monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
 
 
 def _conversation():
@@ -1253,7 +1257,7 @@ def test_vector_confirmation_skips_existing_vector_without_duplicate_write(monke
             "summary_content_sha256": content_sha256,
         },
     )
-    monkeypatch.setattr(summary_recovery, "save_structured_vector", lambda *args: writes.append(args))
+    monkeypatch.setattr(summary_recovery, "refresh_structured_summary_vector", lambda *args: writes.append(args))
 
     asyncio.run(summary_recovery._ensure_conversation_vector("user-1", conversation))
 
@@ -1279,7 +1283,7 @@ def test_vector_confirmation_requires_post_write_visibility(monkeypatch):
     monkeypatch.setattr(summary_recovery, "_conversation_vector_metadata", lambda uid, cid: next(checks))
     monkeypatch.setattr(
         summary_recovery,
-        "save_structured_vector",
+        "refresh_structured_summary_vector",
         lambda uid, conv, **kwargs: writes.append((conv.id, kwargs)) or {"upserted_count": 1},
     )
 
@@ -1319,7 +1323,7 @@ def test_enriched_vector_is_force_upserted_and_verified_by_version_and_hash(monk
         "get_conversation",
         lambda uid, cid: conversation,
     )
-    monkeypatch.setattr(summary_recovery, "save_structured_vector", fake_save)
+    monkeypatch.setattr(summary_recovery, "refresh_structured_summary_vector", fake_save)
     monkeypatch.setattr(
         summary_recovery,
         "_conversation_vector_metadata",
@@ -1365,7 +1369,7 @@ def test_enriched_vector_fails_closed_when_active_summary_changes_after_upsert(m
     )
     monkeypatch.setattr(
         summary_recovery,
-        "save_structured_vector",
+        "refresh_structured_summary_vector",
         lambda uid, model, **kwargs: {"upserted_count": 1},
     )
     monkeypatch.setattr(
@@ -1693,8 +1697,13 @@ def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypat
     monkeypatch.setattr(summary_recovery, "invoke_hermes_recovery", fake_invoke)
     monkeypatch.setattr(
         summary_recovery,
+        "_conversation_vector_present",
+        lambda uid, cid: True,
+    )
+    monkeypatch.setattr(
+        summary_recovery,
         "_ensure_conversation_vector",
-        lambda uid, conv: _async_event(events, f"vector:{conv['active_summary_version_id']}"),
+        lambda uid, conv: pytest.fail("stage-2-only recovery must preserve the existing generic vector"),
     )
     monkeypatch.setattr(
         summary_recovery,
@@ -1727,7 +1736,6 @@ def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypat
 
     assert outcome == "completed"
     assert events == [
-        "vector:generic-v1",
         "generic_vector:completed",
         "hermes_provision",
         "enrichment:canonical_completed",

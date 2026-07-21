@@ -17,7 +17,7 @@ from ella.services.hermes_session import canonical_omi_session_key
 from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
-from utils.conversations.vector import save_structured_vector
+from utils.conversations.vector import refresh_structured_summary_vector
 
 logger = logging.getLogger(__name__)
 
@@ -492,13 +492,7 @@ async def _ensure_conversation_vector(uid: str, conversation: dict[str, Any]) ->
     if not summary_version_id:
         if await asyncio.to_thread(_conversation_vector_present, uid, conversation_id):
             return
-        await asyncio.to_thread(save_structured_vector, uid, Conversation(**conversation))
-        for delay_seconds in (0, 0.2, 0.5):
-            if delay_seconds:
-                await asyncio.sleep(delay_seconds)
-            if await asyncio.to_thread(_conversation_vector_present, uid, conversation_id):
-                return
-        raise RuntimeError('conversation_vector_write_unconfirmed')
+        raise RuntimeError('conversation_summary_version_missing_for_vector_refresh')
 
     content_sha256 = _summary_content_sha256(conversation)
     metadata = await asyncio.to_thread(_conversation_vector_metadata, uid, conversation_id)
@@ -509,7 +503,7 @@ async def _ensure_conversation_vector(uid: str, conversation: dict[str, Any]) ->
     ):
         return
     write_result = await asyncio.to_thread(
-        save_structured_vector,
+        refresh_structured_summary_vector,
         uid,
         Conversation(**conversation),
         summary_version_id=summary_version_id,
@@ -530,6 +524,21 @@ async def _ensure_conversation_vector(uid: str, conversation: dict[str, Any]) ->
     raise RuntimeError('conversation_vector_metadata_unconfirmed')
 
 
+async def _ensure_generic_phase_vector(
+    uid: str,
+    conversation: dict[str, Any],
+    recovery_mode: Optional[str],
+) -> None:
+    conversation_id = str(conversation['id'])
+    if recovery_mode == 'enrichment_only' and await asyncio.to_thread(
+        _conversation_vector_present,
+        uid,
+        conversation_id,
+    ):
+        return
+    await _ensure_conversation_vector(uid, conversation)
+
+
 async def _write_and_confirm_enriched_vector(
     uid: str,
     conversation: dict[str, Any],
@@ -544,7 +553,7 @@ async def _write_and_confirm_enriched_vector(
         raise ConcurrentConversationRecoveryChangeError('active_summary_changed_before_vector_write')
     content_sha256 = _summary_content_sha256(current)
     write_result = await asyncio.to_thread(
-        save_structured_vector,
+        refresh_structured_summary_vector,
         uid,
         Conversation(**current),
         summary_version_id=summary_version_id,
@@ -618,6 +627,7 @@ async def recover_failed_conversation_summary(
 
     generic_version_id = _existing_generic_version_id(conversation)
     generic_applied = generic_version_id is not None
+    recovery_mode = conversation.get('processing_retry_mode')
     try:
         if not generic_version_id:
             stock_structured = await asyncio.to_thread(
@@ -667,7 +677,7 @@ async def recover_failed_conversation_summary(
         latest = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
         if not _is_current_retry(latest, request_id, attempt_count):
             return 'superseded'
-        await _ensure_conversation_vector(uid, latest)
+        await _ensure_generic_phase_vector(uid, latest, recovery_mode)
         recorded = await asyncio.to_thread(
             conversations_db.record_conversation_processing_retry_generic_vector,
             uid,

@@ -1,5 +1,7 @@
 """Conversation vector write helpers shared by initial processing and recovery."""
 
+import json
+
 import database.notifications as notification_db
 from database.vector_db import upsert_vector2, update_vector_metadata
 from models.conversation import Conversation, ConversationSource, ExternalIntegrationConversationSource
@@ -11,14 +13,7 @@ from utils.llm.chat import (
 from utils.llm.clients import generate_embedding
 
 
-def save_structured_vector(
-    uid: str,
-    conversation: Conversation,
-    update_only: bool = False,
-    *,
-    summary_version_id: str | None = None,
-    summary_content_sha256: str | None = None,
-):
+def save_structured_vector(uid: str, conversation: Conversation, update_only: bool = False):
     vector = generate_embedding(str(conversation.structured)) if not update_only else None
     timezone = notification_db.get_user_time_zone(uid)
     metadata = {}
@@ -56,13 +51,44 @@ def save_structured_vector(
         )
 
     metadata['created_at'] = int(conversation.created_at.timestamp())
-    if summary_version_id:
-        metadata['active_summary_version_id'] = summary_version_id
-    if summary_content_sha256:
-        metadata['summary_content_sha256'] = summary_content_sha256
     if not update_only:
         print('save_structured_vector creating vector')
-        return upsert_vector2(uid, conversation, vector, metadata)
+        upsert_vector2(uid, conversation, vector, metadata)
     else:
         print('save_structured_vector updating metadata')
-        return update_vector_metadata(uid, conversation.id, metadata)
+        update_vector_metadata(uid, conversation.id, metadata)
+
+
+def refresh_structured_summary_vector(
+    uid: str,
+    conversation: Conversation,
+    *,
+    summary_version_id: str,
+    summary_content_sha256: str,
+):
+    """Refresh only the summary embedding while preserving existing vector metadata."""
+
+    from database.vector_db import fetch_conversation_vector_metadata, upsert_conversation_vector
+
+    structured = conversation.structured
+    if hasattr(structured, 'model_dump'):
+        structured = structured.model_dump(mode='json')
+    summary_payload = json.dumps(
+        structured,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    vector = generate_embedding(summary_payload)
+    metadata = dict(fetch_conversation_vector_metadata(uid, conversation.id) or {})
+    metadata.update(
+        {
+            'uid': uid,
+            'memory_id': conversation.id,
+            'created_at': metadata.get('created_at') or int(conversation.created_at.timestamp()),
+            'active_summary_version_id': summary_version_id,
+            'summary_content_sha256': summary_content_sha256,
+        }
+    )
+    return upsert_conversation_vector(uid, conversation.id, vector, metadata)
