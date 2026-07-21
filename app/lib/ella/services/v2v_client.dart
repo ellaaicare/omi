@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -177,7 +178,10 @@ class V2VClient {
       final response = await makeApiCall(
         url: '${Env.apiBaseUrl}v1/voice/session',
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'uid': uid, 'provider': provider}),
+        body: jsonEncode({
+          if (!isHermesProvisioningGateEnabled) 'uid': uid,
+          if (!isHermesProvisioningGateEnabled) 'provider': provider,
+        }),
         method: 'POST',
         timeout: const Duration(seconds: 10),
       );

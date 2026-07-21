@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -18,6 +19,8 @@ import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
@@ -26,6 +29,7 @@ import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/developer_mode_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -159,7 +163,18 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   }
 
   Future<void> _openListeningConsent() async {
-    final accepted = await AiConsentSheet.show(context);
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final accepted = await AiConsentSheet.show(
+      context,
+      onAccept: isHermesProvisioningGateEnabled
+          ? () async {
+              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
+              if (receiptId == null) return false;
+              if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+              return true;
+            }
+          : null,
+    );
     if (!mounted) return;
     final captureProvider = context.read<CaptureProvider>();
     if (accepted == true) {

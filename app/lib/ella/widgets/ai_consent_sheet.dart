@@ -6,12 +6,14 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
-class AiConsentSheet extends StatelessWidget {
+class AiConsentSheet extends StatefulWidget {
   static final Uri privacyPolicyUri = Uri.parse('https://ella-ai-care.com/privacy');
 
-  const AiConsentSheet({super.key});
+  const AiConsentSheet({super.key, this.onAccept});
 
-  static Future<bool?> show(BuildContext context) {
+  final Future<bool> Function()? onAccept;
+
+  static Future<bool?> show(BuildContext context, {Future<bool> Function()? onAccept}) {
     return showModalBottomSheet<bool>(
       context: context,
       isDismissible: false,
@@ -20,8 +22,43 @@ class AiConsentSheet extends StatelessWidget {
       useSafeArea: true,
       backgroundColor: EllaColors.paper,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      builder: (_) => const AiConsentSheet(),
+      builder: (_) => AiConsentSheet(onAccept: onAccept),
     );
+  }
+
+  @override
+  State<AiConsentSheet> createState() => _AiConsentSheetState();
+}
+
+class _AiConsentSheetState extends State<AiConsentSheet> {
+  bool _isSubmitting = false;
+  bool _hasError = false;
+
+  Future<void> _accept() async {
+    if (_isSubmitting) return;
+    setState(() {
+      _isSubmitting = true;
+      _hasError = false;
+    });
+
+    try {
+      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(true));
+      if (!mounted) return;
+      if (accepted) {
+        if (widget.onAccept == null) SharedPreferencesUtil().acceptAiConsent();
+        Navigator.of(context).pop(true);
+        return;
+      }
+    } catch (_) {
+      // Keep the consent surface open and capture disabled on acknowledgement failure.
+    }
+
+    if (mounted) {
+      setState(() {
+        _isSubmitting = false;
+        _hasError = true;
+      });
+    }
   }
 
   @override
@@ -64,23 +101,33 @@ class AiConsentSheet extends StatelessWidget {
                   decoration: TextDecoration.underline,
                   decorationColor: EllaColors.primary,
                 ),
-                recognizer: TapGestureRecognizer()..onTap = () => launchUrl(privacyPolicyUri),
+                recognizer: TapGestureRecognizer()..onTap = () => launchUrl(AiConsentSheet.privacyPolicyUri),
               ),
             ),
             const SizedBox(height: 28),
+            if (_hasError) ...[
+              Text(
+                context.l10n.somethingWentWrongTryAgain,
+                style: bodyStyle?.copyWith(color: EllaColors.error),
+              ),
+              const SizedBox(height: 12),
+            ],
             SizedBox(
               width: double.infinity,
               height: 56,
               child: FilledButton(
-                onPressed: () {
-                  SharedPreferencesUtil().acceptAiConsent();
-                  Navigator.of(context).pop(true);
-                },
+                onPressed: _isSubmitting ? null : _accept,
                 style: FilledButton.styleFrom(
                   backgroundColor: EllaColors.tealDeep,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
                 ),
-                child: Text(context.l10n.allowAndContinue, style: const TextStyle(fontSize: 17)),
+                child: _isSubmitting
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.paper),
+                      )
+                    : Text(context.l10n.allowAndContinue, style: const TextStyle(fontSize: 17)),
               ),
             ),
             const SizedBox(height: 10),
@@ -88,10 +135,12 @@ class AiConsentSheet extends StatelessWidget {
               width: double.infinity,
               height: 50,
               child: TextButton(
-                onPressed: () {
-                  SharedPreferencesUtil().declineAiConsent();
-                  Navigator.of(context).pop(false);
-                },
+                onPressed: _isSubmitting
+                    ? null
+                    : () {
+                        SharedPreferencesUtil().declineAiConsent();
+                        Navigator.of(context).pop(false);
+                      },
                 child: Text(
                   context.l10n.notNow,
                   style: const TextStyle(

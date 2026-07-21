@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:app_links/app_links.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/desktop/desktop_app.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/settings/asana_settings_page.dart';
@@ -18,6 +21,7 @@ import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/auth_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/integration_provider.dart';
 import 'package:omi/providers/message_provider.dart';
@@ -73,7 +77,7 @@ class _AppShellState extends State<AppShell> {
           if (mounted) {
             Navigator.of(context).push(MaterialPageRoute(builder: (context) => AppDetailPage(app: app)));
           }
-        } else {
+        } else if (mounted) {
           Logger.debug('App not found: ${uri.pathSegments[1]}');
           AppSnackbar.showSnackbarError(context.l10n.appNotAvailable);
         }
@@ -359,13 +363,42 @@ class _AppShellState extends State<AppShell> {
   }
 
   Future<void> _showConsentIfNeeded() async {
-    if (SharedPreferencesUtil().aiConsentAccepted || _consentPromptPresented) return;
+    if (_consentPromptPresented) return;
+
+    final preferences = SharedPreferencesUtil();
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (isHermesProvisioningGateEnabled) {
+      if (uid.isEmpty) return;
+      await preferences.prepareEllaProvisioningAccount(uid);
+      if (!mounted || _consentPromptPresented) return;
+      if (preferences.hasAccountBoundAiConsent(uid)) return;
+
+      // Legacy local consent is not sufficient for a newly isolated account.
+      preferences.declineAiConsent();
+    } else if (preferences.aiConsentAccepted) {
+      return;
+    }
+
     _consentPromptPresented = true;
-    final accepted = await AiConsentSheet.show(context);
+    final accepted = await AiConsentSheet.show(
+      context,
+      onAccept: isHermesProvisioningGateEnabled
+          ? () async {
+              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
+              if (receiptId == null) return false;
+              if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+              return true;
+            }
+          : null,
+    );
     if (accepted == true && mounted) {
-      await context.read<CaptureProvider>().streamDeviceRecording(
-            device: context.read<DeviceProvider>().connectedDevice,
-          );
+      final captureProvider = context.read<CaptureProvider>();
+      final device = context.read<DeviceProvider>().connectedDevice;
+      await captureProvider.streamDeviceRecording(device: device);
+    } else if (accepted == false && mounted && isHermesProvisioningGateEnabled) {
+      final captureProvider = context.read<CaptureProvider>();
+      await captureProvider.stopStreamDeviceRecording();
+      await captureProvider.stopStreamRecording();
     }
   }
 

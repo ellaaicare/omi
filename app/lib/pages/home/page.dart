@@ -9,9 +9,6 @@ import 'package:upgrader/upgrader.dart';
 
 import 'package:uuid/uuid.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
-
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -393,26 +390,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _listenToMessagesFromNotification();
     _listenToFreemiumThreshold();
     _checkForAnnouncements();
-    _provisionEllaIfNeeded();
 
     super.initState();
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
-  }
-
-  void _provisionEllaIfNeeded() async {
-    if (SharedPreferencesUtil().ellaUserId.isNotEmpty) return;
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final timezone = await FlutterTimezone.getLocalTimezone();
-    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
-    provisionEllaUser(
-      firebaseUid: user.uid,
-      email: user.email ?? '',
-      name: name.isNotEmpty ? name : (user.displayName ?? ''),
-      timezone: timezone,
-    );
   }
 
   void _checkForAnnouncements() {
