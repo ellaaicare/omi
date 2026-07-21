@@ -467,7 +467,9 @@ class ConversationProvider extends ChangeNotifier {
       _groupConversationsByDateWithoutNotify();
       notifyListeners();
     } finally {
-      setLoadingConversations(false);
+      if (requestId == _fetchRequestId) {
+        setLoadingConversations(false);
+      }
     }
   }
 
