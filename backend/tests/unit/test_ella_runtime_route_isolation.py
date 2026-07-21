@@ -49,7 +49,7 @@ def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
     async def forbidden_legacy(uid):
         raise AssertionError("OpenClaw fallback must not run in isolated mode")
 
-    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
     monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
@@ -68,7 +68,7 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
     async def missing_runtime(uid):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
-    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", missing_runtime)
 
     with pytest.raises(HTTPException) as error:
@@ -93,7 +93,7 @@ def test_public_resolver_is_authenticated_and_redacts_internal_runtime(monkeypat
             },
         }
 
-    monkeypatch.setattr(resolve, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(resolve, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(resolve, "resolve_user_routing", fake_resolve)
 
     result = asyncio.run(resolve.resolve_endpoint(uid="user-a", email=None, phone=None, authenticated_uid="user-a"))
@@ -136,7 +136,7 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
     async def missing_runtime(uid):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
-    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", missing_runtime)
 
     with pytest.raises(HTTPException) as error:
@@ -154,9 +154,9 @@ def test_voice_session_cannot_fall_back_to_openclaw_before_isolated_proxy_cutove
     async def ready_runtime(uid):
         return object()
 
-    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda: True)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(

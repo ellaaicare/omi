@@ -78,7 +78,7 @@ async def ensure_onboarding(
     response: Response,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> dict[str, Any]:
-    if not provisioning_enabled():
+    if not provisioning_enabled(uid):
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     if not SCHEMA_VERSION_RE.fullmatch(payload.target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
@@ -110,7 +110,7 @@ async def onboarding_status(
     target_schema_version: str = DEFAULT_TARGET_SCHEMA_VERSION,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> dict[str, Any]:
-    if not provisioning_enabled():
+    if not provisioning_enabled(uid):
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})

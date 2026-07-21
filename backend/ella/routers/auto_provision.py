@@ -13,7 +13,6 @@ Two-phase flow:
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -33,6 +32,7 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 def _slugify(s: str) -> str:
     """Create a safe ID slug from a string."""
     import re
+
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')[:40]
 
 
@@ -82,9 +82,7 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
 
         # A cluster without userAgentId is incomplete — treat as missing
         if not agents.get("userAgentId"):
-            logger.warning(
-                f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision"
-            )
+            logger.warning(f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision")
             return None
 
         return {
@@ -119,25 +117,13 @@ async def ensure_firestore_user_document(uid: str) -> bool:
         if not row:
             return False
 
-        from database._client import db
+        from database.ella_provisioning import EllaProvisioningRepository
 
-        user_ref = db.collection("users").document(uid)
-        if user_ref.get().exists:
-            return True
-
-        now = datetime.now(timezone.utc)
-        user_ref.set(
-            {
-                "uid": uid,
-                "name": row["name"] or "User",
-                "email": row["email"],
-                "time_zone": row["timezone"] or "America/Los_Angeles",
-                "created_at": now,
-                "updated_at": now,
-                "private_cloud_sync_enabled": True,
-                "store_recording_permission": True,
-            },
-            merge=True,
+        await EllaProvisioningRepository(pool).ensure_omi_user_document(
+            uid=uid,
+            name=row["name"] or "User",
+            email=row["email"],
+            timezone_name=row["timezone"] or "America/Los_Angeles",
         )
         logger.info(f"Created Firestore OMI user document for uid={uid}")
         return True
@@ -290,7 +276,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
             "provisionedAt": provision_result.get("provisionedAt")
-                or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
         for field, fallback in [
             ("userAgentId", f"ella-{openclaw_user_id}"),
@@ -299,9 +285,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             ("summarizerAgentId", "summarizer"),
         ]:
             cluster_agents_dict[field] = provision_result.get(field) or fallback
-        cluster_agents_dict["gatewayToken"] = (
-            provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
-        )
+        cluster_agents_dict["gatewayToken"] = provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
         cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:

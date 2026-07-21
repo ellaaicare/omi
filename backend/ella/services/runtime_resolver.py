@@ -13,12 +13,17 @@ from ella.services.provisioning import (
     PROFILE_NAME_RE,
     ProvisioningError,
     resolve_gateway_credential,
+    rollout_enabled,
     validate_internal_gateway_url,
 )
 
 
-def runtime_bindings_enabled() -> bool:
-    return os.getenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
+    return rollout_enabled(
+        "ELLA_RUNTIME_BINDINGS_ENABLED",
+        "ELLA_RUNTIME_BINDINGS_ENABLED_UIDS",
+        uid,
+    )
 
 
 @dataclass(frozen=True)
@@ -99,7 +104,7 @@ async def resolve_isolated_runtime(
     repository: Optional[EllaProvisioningRepository] = None,
 ) -> Optional[IsolatedRuntime]:
     """Return None while shadow mode is disabled; otherwise fail closed."""
-    if not runtime_bindings_enabled():
+    if not runtime_bindings_enabled(uid):
         return None
     repository = repository or await EllaProvisioningRepository.create()
     binding = await repository.resolve_active_runtime(uid)

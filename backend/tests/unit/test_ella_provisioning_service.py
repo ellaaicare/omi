@@ -11,11 +11,13 @@ from ella.services.provisioning import (
     VerifiedIdentity,
     extract_runtime_binding,
     public_receipt,
+    provisioning_enabled,
     resolve_gateway_credential,
+    rollout_enabled,
     stable_payload_hash,
     validate_internal_gateway_url,
 )
-from ella.services.runtime_resolver import runtime_from_binding
+from ella.services.runtime_resolver import runtime_bindings_enabled, runtime_from_binding
 
 
 def _job(**overrides):
@@ -155,6 +157,30 @@ class _FakeFirestore:
 def test_payload_hash_is_stable_and_sensitive_to_values():
     assert stable_payload_hash({"b": 2, "a": 1}) == stable_payload_hash({"a": 1, "b": 2})
     assert stable_payload_hash({"a": 1}) != stable_payload_hash({"a": 2})
+
+
+def test_uid_scoped_rollout_is_exact_and_global_flag_still_wins(monkeypatch):
+    monkeypatch.setenv("TEST_ROLLOUT_ENABLED", "false")
+    monkeypatch.setenv("TEST_ROLLOUT_UIDS", "firebase-A, firebase-B")
+
+    assert rollout_enabled("TEST_ROLLOUT_ENABLED", "TEST_ROLLOUT_UIDS", "firebase-A") is True
+    assert rollout_enabled("TEST_ROLLOUT_ENABLED", "TEST_ROLLOUT_UIDS", "firebase-a") is False
+    assert rollout_enabled("TEST_ROLLOUT_ENABLED", "TEST_ROLLOUT_UIDS", None) is False
+
+    monkeypatch.setenv("TEST_ROLLOUT_ENABLED", "true")
+    assert rollout_enabled("TEST_ROLLOUT_ENABLED", "TEST_ROLLOUT_UIDS", "unlisted") is True
+
+
+def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", "provision-user")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "runtime-user")
+
+    assert provisioning_enabled("provision-user") is True
+    assert provisioning_enabled("runtime-user") is False
+    assert runtime_bindings_enabled("runtime-user") is True
+    assert runtime_bindings_enabled("provision-user") is False
 
 
 def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission(monkeypatch):

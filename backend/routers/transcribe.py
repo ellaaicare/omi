@@ -2033,7 +2033,9 @@ async def _stream_handler(
     elif codec == 'lc3':
         lc3_decoder = lc3.Decoder(lc3_frame_duration_us, sample_rate)
 
-    async def receive_data(dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock):
+    async def receive_data(
+        dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock
+    ):
         nonlocal websocket_active, websocket_close_code, last_audio_received_time, last_activity_time, current_conversation_id
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
@@ -2099,6 +2101,7 @@ async def _stream_handler(
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
                 try:
                     from websockets.connection import State as _WsState
+
                     _grok_dead = grok_sock.state != _WsState.OPEN
                 except Exception:
                     _grok_dead = False
@@ -2362,7 +2365,12 @@ async def _stream_handler(
         # Tasks
         data_process_task = asyncio.create_task(
             receive_data(
-                deepgram_socket, deepgram_profile_socket, soniox_socket, soniox_profile_socket, speechmatics_socket, grok_socket
+                deepgram_socket,
+                deepgram_profile_socket,
+                soniox_socket,
+                soniox_profile_socket,
+                speechmatics_socket,
+                grok_socket,
             )
         )
         stream_transcript_task = asyncio.create_task(stream_transcript_process())
@@ -2523,16 +2531,11 @@ async def listen_handler(
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
 
     # Ella sidecar: require isolated Hermes when the runtime cutover flag is on.
-    isolated_runtime_cutover = os.getenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    isolated_runtime_cutover = False
     try:
         from ella.services.runtime_resolver import runtime_bindings_enabled
 
-        isolated_runtime_cutover = runtime_bindings_enabled()
+        isolated_runtime_cutover = runtime_bindings_enabled(uid)
         if isolated_runtime_cutover:
             from ella.routers.auto_provision import validate_isolated_listen_runtime
 

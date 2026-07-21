@@ -25,6 +25,7 @@ PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 ALLOWED_CREDENTIAL_ENV_RE = re.compile(r"^(HERMES_API_SERVER_KEY|ELLA_HERMES_GATEWAY_KEY_[A-Z0-9_]+)$")
 logger = logging.getLogger("ella.provisioning")
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 class ProvisioningError(RuntimeError):
@@ -43,8 +44,22 @@ class VerifiedIdentity:
     timezone: str
 
 
-def provisioning_enabled() -> bool:
-    return os.getenv("ELLA_HERMES_PROVISIONING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+def rollout_enabled(global_flag: str, uid_allowlist: str, uid: Optional[str] = None) -> bool:
+    """Enable a rollout globally or for an exact Firebase UID canary."""
+    if os.getenv(global_flag, "false").strip().lower() in TRUE_VALUES:
+        return True
+    if not uid:
+        return False
+    allowed_uids = {value.strip() for value in os.getenv(uid_allowlist, "").split(",") if value.strip()}
+    return uid in allowed_uids
+
+
+def provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return rollout_enabled(
+        "ELLA_HERMES_PROVISIONING_ENABLED",
+        "ELLA_HERMES_PROVISIONING_ENABLED_UIDS",
+        uid,
+    )
 
 
 def stable_payload_hash(payload: dict[str, Any]) -> str:
@@ -333,7 +348,7 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not provisioning_enabled():
+        if not provisioning_enabled(identity.uid):
             job = await self.repository.update_job(
                 job_id=str(job["id"]),
                 state="degraded",

@@ -1077,7 +1077,7 @@ async def ella_chat_history(
     if uid and uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
     uid = authenticated_uid
-    if runtime_bindings_enabled():
+    if runtime_bindings_enabled(authenticated_uid):
         try:
             await resolve_isolated_runtime(authenticated_uid)
         except ProvisioningError as exc:
@@ -1106,7 +1106,7 @@ async def ella_chat_history(
         uid,
     )
 
-    if runtime_bindings_enabled():
+    if runtime_bindings_enabled(uid):
         return {"messages": [], "hasMore": False, "source": "canonical_timeline_empty", "fallback": False}
 
     # Resolve user to get their OpenClaw user ID for migration fallback only.

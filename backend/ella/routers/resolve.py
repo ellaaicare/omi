@@ -90,7 +90,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     if not row:
         return None
 
-    if runtime_bindings_enabled():
+    if runtime_bindings_enabled(uid):
         runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool))
         return {
             "user": {
@@ -192,7 +192,7 @@ async def resolve_endpoint(
     if uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
 
-    if runtime_bindings_enabled():
+    if runtime_bindings_enabled(authenticated_uid):
         try:
             resolved = await resolve_user_routing(authenticated_uid)
         except ProvisioningError as exc:
@@ -305,7 +305,7 @@ async def proxy_chat_history(
     The iOS app can't reach the Mac Mini's Tailscale IP directly,
     so this endpoint forwards the request.
     """
-    if runtime_bindings_enabled():
+    if runtime_bindings_enabled(authenticated_uid):
         raise HTTPException(status_code=410, detail={"code": "legacy_history_disabled"})
 
     resolved = await resolve_user_routing(authenticated_uid)

@@ -93,6 +93,7 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
         raise AssertionError("disabled onboarding must not touch provisioning storage")
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
     monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
 
     with pytest.raises(onboarding.HTTPException) as error:
@@ -106,3 +107,46 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
         )
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "provisioning_disabled"}
+
+
+def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
+    captured = {}
+
+    class FakeCoordinator:
+        async def ensure_job(self, **kwargs):
+            captured.update(kwargs)
+            return (
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "target_schema_version": "hermes-user-v1",
+                    "state": "provisioning",
+                    "stage": "profile_ready",
+                    "retryable": True,
+                },
+                None,
+                False,
+            )
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", "canary-user")
+    monkeypatch.setattr(
+        onboarding.auth,
+        "get_user",
+        lambda uid: SimpleNamespace(email="canary@example.com", display_name="Canary"),
+    )
+
+    async def fake_coordinator():
+        return FakeCoordinator()
+
+    monkeypatch.setattr(onboarding, "_coordinator", fake_coordinator)
+    result = asyncio.run(
+        onboarding.ensure_onboarding(
+            onboarding.OnboardingEnsureRequest(),
+            BackgroundTasks(),
+            Response(),
+            uid="canary-user",
+        )
+    )
+
+    assert result["state"] == "provisioning"
+    assert captured["identity"].uid == "canary-user"
