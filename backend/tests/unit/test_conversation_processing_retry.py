@@ -106,7 +106,7 @@ def test_failed_summary_is_atomically_claimed_without_returning_protected_transc
     assert transaction.sets[0][1]['outcome'] == ConversationStatus.processing.value
 
 
-def test_repeated_failed_request_id_reclaims_retryable_work():
+def test_repeated_failed_request_id_returns_terminal_receipt_without_requeue():
     result, transaction = _claim(
         _failed_conversation(request_id='newer-request'),
         retry_data={
@@ -118,11 +118,24 @@ def test_repeated_failed_request_id_reclaims_retryable_work():
         },
     )
 
-    assert result['outcome'] == 'claimed'
-    assert result['reason'] == 'lease_reclaimed'
-    assert result['attempt_count'] == 2
-    assert len(transaction.updates) == 2
+    assert result['outcome'] == 'failed'
+    assert result['phase'] == 'enrichment_failed'
+    assert result['attempt_count'] == 1
+    assert transaction.updates == []
     assert transaction.sets == []
+
+
+def test_new_request_id_can_retry_after_terminal_failure():
+    conversation = _failed_conversation(request_id='request-123')
+    conversation['processing_retry_completed_at'] = datetime(2026, 7, 20, 8, 4, tzinfo=timezone.utc)
+
+    result, transaction = _claim(conversation, request_id='request-456')
+
+    assert result['outcome'] == 'claimed'
+    assert result['mode'] == 'full'
+    assert result['attempt_count'] == 1
+    assert transaction.updates[0][1]['processing_retry_id'] == 'request-456'
+    assert transaction.sets[0][1]['request_id'] == 'request-456'
 
 
 def test_concurrent_request_observes_processing_without_reclaiming():

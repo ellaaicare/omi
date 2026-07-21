@@ -1012,6 +1012,9 @@ def _claim_conversation_processing_retry_transaction(
     ):
         return _retry_claim_metadata('busy')
 
+    if retry_data and retry_data.get('outcome') == ConversationStatus.failed.value:
+        return _retry_claim_metadata(ConversationStatus.failed.value, retry_data=retry_data)
+
     if retry_snapshot.exists:
         retry_data = retry_data or {}
         retry_outcome = retry_data.get('outcome')
@@ -1023,7 +1026,7 @@ def _claim_conversation_processing_retry_transaction(
         )
         if retry_lease_active:
             return _retry_claim_metadata(retry_outcome, retry_data=retry_data)
-        if retry_outcome not in {ConversationStatus.processing.value, ConversationStatus.failed.value}:
+        if retry_outcome != ConversationStatus.processing.value:
             return _retry_claim_metadata('invalid_state', retry_data=retry_data)
 
         current_mode, _ = conversation_processing_recovery_mode(conversation)
