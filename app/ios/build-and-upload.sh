@@ -161,11 +161,6 @@ if [ "$FLAVOR" = "prod" ] && grep -q "static final String? apiBaseUrl = null;" l
   exit 1
 fi
 
-if [ "${RUN_TESTS:-0}" = "1" ]; then
-  log "Running Flutter test suite"
-  run_with_release_env "$FLUTTER" test --no-pub
-fi
-
 # ── Step 3: Ensure Firebase/env configs exist ─────────────────
 log "Checking configs"
 mkdir -p ios/Config/Dev/ ios/Config/Prod/ ios/Runner/
@@ -237,6 +232,11 @@ if grep -E "projectId:" "$FIREBASE_OPTIONS_FILE" | grep -Fv "projectId: '$EXPECT
   exit 1
 fi
 log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PLIST_PROJECT_ID"
+
+if [ "${RUN_TESTS:-0}" = "1" ]; then
+  log "Running Flutter test suite"
+  run_with_release_env "$FLUTTER" test --no-pub
+fi
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
 log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD"
