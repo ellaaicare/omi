@@ -371,6 +371,55 @@ def test_update_conversation_summary_persists_internal_assessment_when_available
     assert captured["update_data"]["internal_assessment"]["reason_codes"] == ["likely_media_or_background_audio"]
 
 
+def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
+    requests = []
+    runtime = MagicMock(agent_id="omi-isolated")
+
+    async def fake_runtime(uid):
+        assert uid == "uid-isolated"
+        return runtime
+
+    async def fail_legacy(_uid):
+        raise AssertionError("isolated summary metadata must not use OpenClaw routing")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"internal_assessment": {"risk_level": "none"}}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 5.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, headers=None):
+            requests.append((url, headers))
+            return FakeResponse()
+
+    monkeypatch.setattr(callbacks, "runtime_bindings_enabled", lambda uid=None: uid == "uid-isolated")
+    monkeypatch.setattr(callbacks, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(callbacks, "_resolve_agent_id_for_uid", fail_legacy)
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-provision/")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-token")
+
+    result = asyncio.run(callbacks._fetch_internal_assessment("uid-isolated", "conv-123"))
+
+    assert result == {"risk_level": "none"}
+    assert requests == [
+        (
+            "http://hermes-provision/workspace/omi-isolated/metadata/conversations/conv-123",
+            {"Authorization": "Bearer hermes-token"},
+        )
+    ]
+
+
 def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatch):
     canonical_writes = []
 

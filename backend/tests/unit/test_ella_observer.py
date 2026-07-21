@@ -392,11 +392,13 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
         )
     )
 
-    async def fake_build_extraction_result(events, *, mode, timeout_seconds=45.0, limit=60):
+    async def fake_build_extraction_result(events, *, mode, uid="", timeout_seconds=45.0, limit=60):
         assert mode == "heuristic"
+        assert uid == "user-1"
         return await extractor_module.build_extraction_result(
             events,
             mode=mode,
+            uid=uid,
             timeout_seconds=timeout_seconds,
             limit=limit,
         )
@@ -419,6 +421,44 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     assert body["proposal_count"] == 1
     assert body["model_metadata"]["extractor_mode"] == "heuristic"
     assert body["model_metadata"]["extractor"] == "heuristic_candidate_extractor"
+
+
+def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
+    import asyncio
+
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+    runtime_module = types.ModuleType("ella.services.runtime_resolver")
+    captured = {}
+
+    async def fake_runtime(uid):
+        assert uid == "uid-isolated"
+        return types.SimpleNamespace(
+            gateway_url="http://isolated-hermes:8642",
+            gateway_token="isolated-token",
+            agent_id="omi-isolated",
+        )
+
+    async def fake_hermes(events, **kwargs):
+        captured.update(kwargs)
+        return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
+
+    runtime_module.runtime_bindings_enabled = lambda uid=None: uid == "uid-isolated"
+    runtime_module.resolve_isolated_runtime = fake_runtime
+    monkeypatch.setitem(sys.modules, "ella.services.runtime_resolver", runtime_module)
+    monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
+
+    asyncio.run(
+        extractor_module.build_extraction_result(
+            [_event()],
+            mode="hermes",
+            uid="uid-isolated",
+        )
+    )
+
+    assert captured["gateway_url"] == "http://isolated-hermes:8642"
+    assert captured["token"] == "isolated-token"
+    assert captured["model"] == "omi-isolated"
 
 
 def test_model_extractor_rejects_assistant_only_evidence():

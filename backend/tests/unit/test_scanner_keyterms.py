@@ -1,8 +1,8 @@
 import asyncio
 import time
+from types import SimpleNamespace
 
 from utils.ella import scanner_keyterms
-
 
 SCANNER_TUNING = """
 ## @runtime: current-state
@@ -189,6 +189,65 @@ def test_refresh_scanner_keyterms_fetches_provision_file(monkeypatch):
         )
     ]
     assert scanner_keyterms.cache_status("uid-1")["count"] == len(terms)
+
+
+def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypatch):
+    requests = []
+
+    async def fake_runtime(uid):
+        assert uid == "uid-isolated"
+        return SimpleNamespace(agent_id="omi-isolated")
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": SCANNER_TUNING}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, headers=None):
+            requests.append((url, headers))
+            return FakeResponse()
+
+    scanner_keyterms._cache["uid-isolated"] = scanner_keyterms.KeytermCacheEntry(
+        terms=["shared-term"],
+        agent_id="legacy-agent",
+        fetched_at=time.time(),
+        source="provision_api",
+    )
+    scanner_keyterms._uid_agent_ids["uid-isolated"] = "legacy-agent"
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "uid-isolated")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-provision")
+    monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-token")
+    monkeypatch.setenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "true")
+    monkeypatch.setattr(scanner_keyterms, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", FakeClient)
+
+    terms = asyncio.run(scanner_keyterms.refresh_scanner_keyterms("uid-isolated"))
+
+    assert "Hey Ella" in terms
+    assert "shared-term" not in terms
+    assert requests == [
+        (
+            "http://hermes-provision/workspace/omi-isolated/files/scanner-tuning.md",
+            {"Authorization": "Bearer hermes-token"},
+        )
+    ]
+    assert scanner_keyterms._cache["uid-isolated"].source == "hermes_provision_api"
 
 
 def test_fetch_scanner_tuning_does_not_use_shared_fallback_by_default(monkeypatch):

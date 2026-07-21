@@ -408,6 +408,7 @@ async def build_extraction_result(
     events: list[dict[str, Any]],
     *,
     mode: str,
+    uid: str = "",
     timeout_seconds: float = 45.0,
     limit: int = MAX_EXTRACTOR_EVENTS,
 ) -> ExtractionResult:
@@ -418,7 +419,32 @@ async def build_extraction_result(
         return _heuristic_extraction_result(events)
 
     heuristic = _heuristic_extraction_result(events)
-    hermes = await hermes_candidate_extraction(events, timeout_seconds=timeout_seconds, limit=limit)
+    hermes_kwargs: dict[str, str] = {}
+    if uid:
+        from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+
+        if runtime_bindings_enabled(uid):
+            runtime = await resolve_isolated_runtime(uid)
+            if runtime is None:
+                return ExtractionResult(
+                    candidates_by_event_id=heuristic.candidates_by_event_id,
+                    metadata={
+                        "extractor": "hermes_plus_heuristic",
+                        "heuristic": heuristic.metadata,
+                        "hermes": {"error": "isolated_runtime_unavailable"},
+                    },
+                )
+            hermes_kwargs = {
+                "gateway_url": runtime.gateway_url,
+                "token": runtime.gateway_token,
+                "model": runtime.agent_id,
+            }
+    hermes = await hermes_candidate_extraction(
+        events,
+        timeout_seconds=timeout_seconds,
+        limit=limit,
+        **hermes_kwargs,
+    )
     merged = {event_id: list(candidates) for event_id, candidates in heuristic.candidates_by_event_id.items()}
     for event_id, candidates in hermes.candidates_by_event_id.items():
         merged.setdefault(event_id, []).extend(candidates)

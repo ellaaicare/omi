@@ -45,6 +45,7 @@ from database._client import db
 from models.conversation import CategoryEnum
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
     ConversationSummaryNotFoundError,
@@ -268,24 +269,42 @@ async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
     return agents.get("userAgentId")
 
 
-async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional[dict]:
-    """Best-effort fetch of Observer sidecar internal_assessment.
+async def _resolve_workspace_target_for_uid(uid: str) -> Optional[tuple[str, str, str]]:
+    if runtime_bindings_enabled(uid):
+        runtime = await resolve_isolated_runtime(uid)
+        if runtime is None:
+            return None
+        return (
+            runtime.agent_id,
+            os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/"),
+            os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", ""),
+        )
 
-    This keeps the app-facing conversation payload aligned with the OpenClaw sidecar
-    without making the summary PATCH path depend on Mac Mini reachability.
+    agent_id = await _resolve_agent_id_for_uid(uid)
+    if not agent_id:
+        return None
+    return agent_id, PROVISION_API_URL.rstrip("/"), PROVISION_API_KEY
+
+
+async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional[dict]:
+    """Best-effort fetch of the user's Observer internal_assessment.
+
+    Isolated users fail closed on their active Hermes runtime. Legacy users retain
+    the existing 8200 lookup until the canary rollout is complete.
     """
     try:
-        agent_id = await _resolve_agent_id_for_uid(uid)
-        if not agent_id:
+        target = await _resolve_workspace_target_for_uid(uid)
+        if not target:
             return None
+        agent_id, provision_api_url, provision_api_key = target
 
         headers = {}
-        if PROVISION_API_KEY:
-            headers["Authorization"] = f"Bearer {PROVISION_API_KEY}"
+        if provision_api_key:
+            headers["Authorization"] = f"Bearer {provision_api_key}"
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
-                f"{PROVISION_API_URL}/workspace/{agent_id}/metadata/conversations/{conversation_id}",
+                f"{provision_api_url}/workspace/{agent_id}/metadata/conversations/{conversation_id}",
                 headers=headers,
             )
 
