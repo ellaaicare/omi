@@ -410,7 +410,7 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
         or {"ok": True, "inserted": 1, "duplicates": 0},
     )
 
-    asyncio.run(
+    result = asyncio.run(
         callbacks.update_conversation_summary(
             "cafe-123",
             callbacks.ConversationSummaryUpdate(
@@ -419,10 +419,13 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
                 summary_source="observer",
                 summary_kind="observer_enriched",
                 trace_id="trace-cafe",
+                require_canonical=True,
             ),
             uid="user-123",
         )
     )
+
+    assert result["canonical_confirmed"] is True
 
     assert canonical_writes[0]["uid"] == "user-123"
     assert canonical_writes[0]["conversation"]["id"] == "cafe-123"
@@ -436,3 +439,46 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
         "summary_kind": "observer_enriched",
         "trace_id": "trace-cafe",
     }
+
+
+def test_update_conversation_summary_same_trace_is_idempotent(monkeypatch):
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {
+            "id": conversation_id,
+            "active_summary_version_id": "recovered-v1",
+            "enrichment_state": {
+                "status": "writeback_applied",
+                "kind": "recovered_enriched",
+                "trace_id": "summary-retry:conversation-1:request-1",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        callbacks.conversations_db,
+        "update_conversation",
+        lambda *args, **kwargs: pytest.fail("idempotent replay must not write Firestore"),
+    )
+    monkeypatch.setattr(
+        callbacks,
+        "write_omi_canonical_event",
+        lambda *args, **kwargs: pytest.fail("idempotent replay must not duplicate the canonical event"),
+    )
+
+    result = asyncio.run(
+        callbacks.update_conversation_summary(
+            "conversation-1",
+            callbacks.ConversationSummaryUpdate(
+                title="Recovered",
+                overview="[Ella] Recovered summary with enough detail.",
+                summary_kind="recovered_enriched",
+                trace_id="summary-retry:conversation-1:request-1",
+            ),
+            uid="user-1",
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["active_summary_version_id"] == "recovered-v1"
+    assert result["idempotent_replay"] is True

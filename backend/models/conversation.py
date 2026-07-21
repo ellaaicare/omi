@@ -334,8 +334,6 @@ class ConversationPostProcessing(BaseModel):
     fail_reason: Optional[str] = None
 
 
-
-
 class Conversation(BaseModel):
     id: str
     created_at: datetime
@@ -380,6 +378,21 @@ class Conversation(BaseModel):
     status: Optional[ConversationStatus] = ConversationStatus.completed
     processing_error: Optional[str] = None
     processing_error_at: Optional[datetime] = None
+    processing_retry_id: Optional[str] = None
+    processing_retry_mode: Optional[str] = None
+    processing_retry_started_at: Optional[datetime] = None
+    processing_retry_lease_expires_at: Optional[datetime] = None
+    processing_retry_completed_at: Optional[datetime] = None
+    processing_retry_attempt_count: Optional[int] = None
+    processing_retry_summary_version_id: Optional[str] = None
+    processing_retry_enriched_version_id: Optional[str] = None
+    processing_retry_generic_vector_status: Optional[str] = None
+    processing_retry_enrichment_vector_status: Optional[str] = None
+    processing_retry_enrichment_vector_version_id: Optional[str] = None
+    processing_retry_enrichment_vector_sha256: Optional[str] = None
+    processing_retry_transcript_sha256: Optional[str] = None
+    processing_retry_generic_summary_sha256: Optional[str] = None
+    processing_retry_source_request_id: Optional[str] = None
     is_locked: bool = False
     data_protection_level: Optional[str] = None
     folder_id: Optional[str] = Field(default=None, description="ID of the folder this conversation belongs to")

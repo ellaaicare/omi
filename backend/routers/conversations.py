@@ -116,7 +116,10 @@ def reprocess_conversation(
 def get_conversations(
     limit: int = 100,
     offset: int = 0,
-    statuses: Optional[str] = "processing,completed",
+    statuses: Optional[str] = Query(
+        "processing,completed",
+        description="Comma-separated conversation statuses, including failed for retryable summary failures",
+    ),
     include_discarded: bool = True,
     start_date: Optional[datetime] = Query(None, description="Filter by start date (inclusive)"),
     end_date: Optional[datetime] = Query(None, description="Filter by end date (inclusive)"),
