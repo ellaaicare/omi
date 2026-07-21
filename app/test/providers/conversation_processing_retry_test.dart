@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -90,6 +92,55 @@ void main() {
     expect(await provider.retryFailedConversation(failed.id), isTrue);
     expect(provider.failedConversations.single.id, failed.id);
     expect(provider.isConversationRetrying(failed.id), isFalse);
+
+    provider.dispose();
+  });
+
+  testWidgets('slow processing poll never overlaps another request', (tester) async {
+    final processing = _conversation(ConversationStatus.processing);
+    final completed = _conversation(ConversationStatus.completed);
+    final firstPoll = Completer<ServerConversation?>();
+    var pollCalls = 0;
+    var inFlight = 0;
+    var maxInFlight = 0;
+
+    final provider = ConversationProvider(
+      retryConversationProcessingCall: (_, __, {correctionText}) async => ConversationProcessingRetryResult(
+        outcome: ConversationProcessingRetryOutcome.processing,
+        conversation: processing,
+      ),
+      conversationByIdCall: (_) async {
+        pollCalls += 1;
+        inFlight += 1;
+        if (inFlight > maxInFlight) maxInFlight = inFlight;
+        if (pollCalls == 1) {
+          final result = await firstPoll.future;
+          inFlight -= 1;
+          return result;
+        }
+        inFlight -= 1;
+        return completed;
+      },
+    );
+
+    expect(await provider.retryFailedConversation(processing.id), isTrue);
+    await tester.pump(const Duration(seconds: 3));
+    expect(pollCalls, 1);
+    expect(inFlight, 1);
+
+    await tester.pump(const Duration(seconds: 12));
+    expect(pollCalls, 1);
+    expect(maxInFlight, 1);
+
+    firstPoll.complete(processing);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pump();
+
+    expect(pollCalls, 2);
+    expect(maxInFlight, 1);
+    expect(provider.conversations.single.status, ConversationStatus.completed);
+    expect(provider.isConversationRetrying(processing.id), isFalse);
 
     provider.dispose();
   });

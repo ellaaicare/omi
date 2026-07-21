@@ -12,17 +12,21 @@ class FailedConversationsSection extends StatelessWidget {
   final List<ServerConversation> conversations;
   final bool Function(String conversationId) isRetrying;
   final RetryFailedConversation onRetry;
+  final bool isSearchActive;
+  final bool showDailySummaries;
 
   const FailedConversationsSection({
     super.key,
     required this.conversations,
     required this.isRetrying,
     required this.onRetry,
+    this.isSearchActive = false,
+    this.showDailySummaries = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (conversations.isEmpty) return const SizedBox.shrink();
+    if (conversations.isEmpty || isSearchActive || showDailySummaries) return const SizedBox.shrink();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),

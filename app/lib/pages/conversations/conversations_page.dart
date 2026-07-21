@@ -173,6 +173,10 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
     Logger.debug('building conversations page');
     super.build(context);
     return Consumer<ConversationProvider>(builder: (context, convoProvider, child) {
+      final homeProvider = context.watch<HomeProvider>();
+      final isSearchActive = homeProvider.showConvoSearchBar || convoProvider.previousQuery.isNotEmpty;
+      final showFailedConversations = !isSearchActive && !convoProvider.showDailySummaries;
+
       return RefreshIndicator(
         onRefresh: () async {
           HapticFeedback.mediumImpact();
@@ -220,6 +224,8 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
                 conversations: convoProvider.failedConversations,
                 isRetrying: convoProvider.isConversationRetrying,
                 onRetry: convoProvider.retryFailedConversation,
+                isSearchActive: isSearchActive,
+                showDailySummaries: convoProvider.showDailySummaries,
               ),
             ),
             getProcessingConversationsWidget(convoProvider.processingConversations),
@@ -291,7 +297,7 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             if (convoProvider.showDailySummaries)
               const DailySummariesList()
             else if (convoProvider.groupedConversations.isEmpty &&
-                convoProvider.failedConversations.isEmpty &&
+                (!showFailedConversations || convoProvider.failedConversations.isEmpty) &&
                 !convoProvider.isLoadingConversations &&
                 !convoProvider.isFetchingConversations)
               SliverToBoxAdapter(

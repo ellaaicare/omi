@@ -30,7 +30,12 @@ ServerConversation _failedConversation() {
   );
 }
 
-Widget _app({required bool retrying, required RetryFailedConversation onRetry}) {
+Widget _app({
+  required bool retrying,
+  required RetryFailedConversation onRetry,
+  bool isSearchActive = false,
+  bool showDailySummaries = false,
+}) {
   return MaterialApp(
     localizationsDelegates: AppLocalizations.localizationsDelegates,
     supportedLocales: AppLocalizations.supportedLocales,
@@ -39,6 +44,8 @@ Widget _app({required bool retrying, required RetryFailedConversation onRetry}) 
         conversations: [_failedConversation()],
         isRetrying: (_) => retrying,
         onRetry: onRetry,
+        isSearchActive: isSearchActive,
+        showDailySummaries: showDailySummaries,
       ),
     ),
   );
@@ -95,5 +102,17 @@ void main() {
     expect(find.text('Processing...'), findsOneWidget);
     final button = tester.widget<FilledButton>(find.byKey(const ValueKey('retry-conversation-failed-conversation')));
     expect(button.onPressed, isNull);
+  });
+
+  testWidgets('hides failed conversations during search and Daily Summaries modes', (tester) async {
+    Future<bool> onRetry(String _, {String? correctionText}) async => true;
+
+    await tester.pumpWidget(_app(retrying: false, onRetry: onRetry, isSearchActive: true));
+    await tester.pumpAndSettle();
+    expect(find.text('Needs processing'), findsNothing);
+
+    await tester.pumpWidget(_app(retrying: false, onRetry: onRetry, showDailySummaries: true));
+    await tester.pumpAndSettle();
+    expect(find.text('Needs processing'), findsNothing);
   });
 }
