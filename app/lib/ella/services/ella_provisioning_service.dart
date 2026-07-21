@@ -7,7 +7,7 @@ import 'package:omi/env/env.dart';
 
 const bool isHermesProvisioningGateEnabled = bool.fromEnvironment('ELLA_HERMES_PROVISIONING_GATE', defaultValue: false);
 
-const String ellaProvisioningTargetSchema = 'hermes-onboarding-v1';
+const String ellaProvisioningTargetSchema = 'hermes-user-v1';
 
 enum EllaProvisioningState { idle, checking, queued, provisioning, ready, degraded, blocked }
 
@@ -17,18 +17,29 @@ class EllaProvisioningRequestContext {
     required this.locale,
     required this.timezone,
     String? clientRequestId,
+    this.consentReceiptId = '',
   }) : clientRequestId = clientRequestId ?? const Uuid().v4();
 
   final String appVersion;
   final String locale;
   final String timezone;
   final String clientRequestId;
+  final String consentReceiptId;
 
   Map<String, dynamic> toJson() => {
         'target_schema_version': ellaProvisioningTargetSchema,
         'client_request_id': clientRequestId,
         'client': {'platform': 'ios', 'app_version': appVersion, 'locale': locale, 'timezone': timezone},
+        if (consentReceiptId.isNotEmpty) 'consent_receipt_id': consentReceiptId,
       };
+
+  EllaProvisioningRequestContext copyWithConsentReceiptId(String value) => EllaProvisioningRequestContext(
+        appVersion: appVersion,
+        locale: locale,
+        timezone: timezone,
+        clientRequestId: clientRequestId,
+        consentReceiptId: value,
+      );
 }
 
 class EllaProvisioningReceipt {
@@ -41,7 +52,7 @@ class EllaProvisioningReceipt {
     this.supportCode = '',
     this.targetSchemaVersion = '',
     this.bindingState = '',
-    this.bindingRevision = '',
+    this.bindingRevision = 0,
     this.effectivePolicyRevision = '',
     this.effectiveVoiceMode = '',
     this.effectiveModel = '',
@@ -56,7 +67,7 @@ class EllaProvisioningReceipt {
   final String supportCode;
   final String targetSchemaVersion;
   final String bindingState;
-  final String bindingRevision;
+  final int bindingRevision;
   final String effectivePolicyRevision;
   final String effectiveVoiceMode;
   final String effectiveModel;
@@ -65,6 +76,7 @@ class EllaProvisioningReceipt {
   bool get isOperational =>
       state == EllaProvisioningState.ready &&
       bindingState.toLowerCase() == 'active' &&
+      bindingRevision > 0 &&
       effectivePolicyRevision.isNotEmpty;
 
   Map<String, dynamic> toCacheJson() => {
@@ -97,6 +109,8 @@ class EllaProvisioningReceipt {
     final policy = _mapValue(receipt, const ['effective_policy', 'policy']) ?? const <String, dynamic>{};
     final errorValue = responseJson['error'] ?? receipt['error'];
     final error = errorValue is Map ? errorValue.map((key, value) => MapEntry(key.toString(), value)) : null;
+    final detailValue = responseJson['detail'];
+    final detail = detailValue is Map ? detailValue.map((key, value) => MapEntry(key.toString(), value)) : null;
 
     final rawState = _stringValue(receipt, const ['state', 'status']) ??
         _stringValue(responseJson, const ['state', 'status']) ??
@@ -117,9 +131,9 @@ class EllaProvisioningReceipt {
       bindingState: _stringValue(binding, const ['state', 'status']) ??
           _stringValue(receipt, const ['binding_state', 'bindingState']) ??
           '',
-      bindingRevision: _stringValue(binding, const ['revision', 'binding_revision']) ??
-          _stringValue(receipt, const ['binding_revision', 'bindingRevision']) ??
-          '',
+      bindingRevision: _intValue(binding, const ['revision', 'binding_revision']) ??
+          _intValue(receipt, const ['binding_revision', 'bindingRevision']) ??
+          0,
       effectivePolicyRevision: _stringValue(policy, const ['revision', 'policy_revision']) ??
           _stringValue(receipt, const ['effective_policy_revision', 'policy_revision', 'policyRevision']) ??
           '',
@@ -130,7 +144,9 @@ class EllaProvisioningReceipt {
           _stringValue(receipt, const ['effective_model', 'model', 'chat_model', 'chatModel']) ??
           '',
       errorCode: _stringValue(error, const ['code']) ??
+          _stringValue(detail, const ['code']) ??
           (errorValue is String ? errorValue : null) ??
+          (detailValue is String ? detailValue : null) ??
           _stringValue(receipt, const ['error_code', 'errorCode']) ??
           '',
     );
@@ -199,7 +215,7 @@ class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
   @override
   Future<EllaProvisioningResponse> status() async {
     final response = await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/ella/onboarding/status',
+      url: buildEllaProvisioningStatusUrl(Env.apiBaseUrl),
       headers: _headers,
       body: '',
       method: 'GET',
@@ -224,6 +240,10 @@ class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
     }
   }
 }
+
+String buildEllaProvisioningStatusUrl(String? apiBaseUrl) => Uri.parse(
+      '${apiBaseUrl ?? ''}v1/ella/onboarding/status',
+    ).replace(queryParameters: {'target_schema_version': ellaProvisioningTargetSchema}).toString();
 
 Map<String, dynamic>? _mapValue(Map<String, dynamic> source, List<String> keys) {
   for (final key in keys) {

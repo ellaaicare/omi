@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:provider/provider.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
@@ -40,12 +41,15 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
     }
     if (!mounted) return;
 
+    final preferences = SharedPreferencesUtil();
+
     await context.read<EllaProvisioningProvider>().start(
           uid: user.uid,
           requestContext: EllaProvisioningRequestContext(
             appVersion: PlatformManager.instance.appVersion,
             locale: Localizations.localeOf(context).toLanguageTag(),
             timezone: timezone,
+            consentReceiptId: preferences.hasAccountBoundAiConsent(user.uid) ? preferences.aiConsentReceiptId : '',
           ),
         );
   }

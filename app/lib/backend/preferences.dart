@@ -201,14 +201,27 @@ class SharedPreferencesUtil {
 
   String get aiConsentAcceptedAt => getString('aiConsentAcceptedAt');
 
-  void acceptAiConsent() {
+  String get aiConsentReceiptId => getString('aiConsentReceiptId');
+
+  String get aiConsentReceiptUid => getString('aiConsentReceiptUid');
+
+  bool hasAccountBoundAiConsent(String uid) =>
+      uid.isNotEmpty && aiConsentAccepted && aiConsentReceiptId.isNotEmpty && aiConsentReceiptUid == uid;
+
+  void acceptAiConsent({String receiptId = '', String uid = ''}) {
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
+    if (receiptId.isNotEmpty && uid.isNotEmpty) {
+      saveString('aiConsentReceiptId', receiptId);
+      saveString('aiConsentReceiptUid', uid);
+    }
   }
 
   void declineAiConsent() {
     aiConsentAccepted = false;
     remove('aiConsentAcceptedAt');
+    remove('aiConsentReceiptId');
+    remove('aiConsentReceiptUid');
   }
 
   // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
@@ -576,6 +589,8 @@ class SharedPreferencesUtil {
       'ellaSettingsLastSyncError',
       'aiConsentAccepted',
       'aiConsentAcceptedAt',
+      'aiConsentReceiptId',
+      'aiConsentReceiptUid',
     ]) {
       await remove(key);
     }

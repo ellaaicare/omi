@@ -47,6 +47,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
   int _pollAttempts = 0;
   int _generation = 0;
   bool _requestInFlight = false;
+  bool _retryEnsureAfterCurrentRequest = false;
 
   bool get isOperational => state == EllaProvisioningState.ready && receipt?.isOperational == true;
 
@@ -65,6 +66,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _requestContext = requestContext;
     _pollAttempts = 0;
     _requestInFlight = false;
+    _retryEnsureAfterCurrentRequest = false;
     state = EllaProvisioningState.checking;
     errorCode = '';
 
@@ -83,6 +85,10 @@ class EllaProvisioningProvider extends ChangeNotifier {
 
   Future<void> retry() async {
     if (_activeUid.isEmpty || _requestContext == null) return;
+    if (_requestInFlight) {
+      _retryEnsureAfterCurrentRequest = true;
+      return;
+    }
     final generation = ++_generation;
     _cancelPoll();
     _pollAttempts = 0;
@@ -90,6 +96,14 @@ class EllaProvisioningProvider extends ChangeNotifier {
     errorCode = '';
     notifyListeners();
     await _ensure(generation);
+  }
+
+  void setConsentReceiptId(String receiptId) {
+    final context = _requestContext;
+    if (receiptId.isEmpty || context == null || context.consentReceiptId == receiptId) return;
+    _requestContext = context.copyWithConsentReceiptId(receiptId);
+    if (isOperational) return;
+    unawaited(retry());
   }
 
   void setForeground(bool value) {
@@ -112,6 +126,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     _requestContext = null;
     _pollAttempts = 0;
     _requestInFlight = false;
+    _retryEnsureAfterCurrentRequest = false;
     receipt = null;
     errorCode = '';
     state = EllaProvisioningState.idle;
@@ -132,7 +147,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       _setFailure('network_unavailable');
       _schedulePoll(generation, _backoffDelay);
     } finally {
-      if (generation == _generation) _requestInFlight = false;
+      _finishRequest(generation);
     }
   }
 
@@ -155,7 +170,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
       _setFailure('network_unavailable');
       _schedulePoll(generation, _backoffDelay);
     } finally {
-      if (generation == _generation) _requestInFlight = false;
+      _finishRequest(generation);
     }
   }
 
@@ -254,6 +269,15 @@ class EllaProvisioningProvider extends ChangeNotifier {
   void _cancelPoll() {
     _pollHandle?.cancel();
     _pollHandle = null;
+  }
+
+  void _finishRequest(int generation) {
+    if (generation != _generation) return;
+    _requestInFlight = false;
+    if (_retryEnsureAfterCurrentRequest) {
+      _retryEnsureAfterCurrentRequest = false;
+      unawaited(retry());
+    }
   }
 
   @override
