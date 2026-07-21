@@ -152,6 +152,9 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
     bindings_enabled = runtime_bindings_enabled(principal.uid)
+    voice_enabled = isolated_voice_routing_enabled(principal.uid)
+    if bindings_enabled != voice_enabled:
+        raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
     if principal.isolated_runtime != bindings_enabled:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
     if not bindings_enabled:

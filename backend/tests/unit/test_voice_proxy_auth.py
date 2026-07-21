@@ -137,6 +137,36 @@ def test_voice_proxy_requires_service_secret_and_unexpired_session():
     assert expired.value.detail == {"code": "voice_session_expired"}
 
 
+@pytest.mark.parametrize(
+    ("bindings_enabled", "voice_enabled", "isolated_claim"),
+    [
+        (True, False, True),
+        (False, True, False),
+    ],
+)
+def test_voice_runtime_rechecks_rollout_gate_on_every_request(
+    monkeypatch,
+    bindings_enabled,
+    voice_enabled,
+    isolated_claim,
+):
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: bindings_enabled)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: voice_enabled)
+    principal = voice.VoiceProxyPrincipal(
+        uid="uid-a",
+        session_id="session-uid-a",
+        provider="grok-voice",
+        voice_mode="v4",
+        isolated_runtime=isolated_claim,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(voice._resolve_voice_runtime(principal))
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "voice_runtime_claim_stale"}
+
+
 def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeypatch):
     runtime = SimpleNamespace(agent_id="ella-uid-a", revision=7)
     queries = []
@@ -184,6 +214,7 @@ def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeyp
         return ""
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(voice, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
     monkeypatch.setattr(voice, "_fetch_recent_conversations", empty)
@@ -221,6 +252,7 @@ def test_isolated_search_forces_receipt_agent_and_owner_header(monkeypatch):
         return [{"source": "workspace", "content": "private-a", "score": 10, "metadata": {}}]
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(voice, "_search_workspace", workspace)
 
@@ -337,6 +369,7 @@ def test_isolated_tool_calls_exact_runtime_without_returning_credentials(monkeyp
             return Response()
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(voice.httpx, "AsyncClient", Client)
 
