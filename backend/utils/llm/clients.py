@@ -81,9 +81,12 @@ _apply_ella_llm_patch()
 # All exported llm_* variables are RunnableWithFallbacks (or plain ChatOpenAI if only 1 provider).
 # Callers use .invoke(), .ainvoke(), pipe (|), .stream() — all work transparently.
 #
-# Dead providers (out of credits): OpenRouter, xAI — NOT included in the default chain.
+# xAI is intentionally excluded from this generic-summary chain. OpenRouter is
+# supported as an OpenAI-compatible provider and can be placed first without
+# enabling direct OpenAI API billing.
 
 _openai_api_key = os.getenv('OPENAI_API_KEY')
+_openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
 _ollama_api_key = os.getenv('OLLAMA_API_KEY')
 _groq_api_key = os.getenv('GROQ_API_KEY')
 _gemini_api_key = os.getenv('GEMINI_API_KEY')
@@ -97,6 +100,9 @@ _direct_openai_llm_enabled = os.getenv('OMI_ALLOW_DIRECT_OPENAI_LLM', 'false').l
     'yes',
     'on',
 )
+_openrouter_base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
+_openrouter_site_url = os.getenv('OPENROUTER_SITE_URL', 'https://ella-ai-care.com')
+_openrouter_app_name = os.getenv('OPENROUTER_APP_NAME', 'Ella AI OMI Summary')
 
 # Ollama Cloud endpoint (direct to ollama.com — local proxy had auth issues)
 _ollama_cloud_base_url = "https://ollama.com/v1"
@@ -104,13 +110,14 @@ _ollama_cloud_base_url = "https://ollama.com/v1"
 # Model selections per provider
 _openai_mini = os.getenv('OMI_OPENAI_MINI', 'gpt-4.1-mini')
 _openai_medium = os.getenv('OMI_OPENAI_MEDIUM', 'gpt-4.1-mini')
+_openrouter_model = os.getenv('OMI_OPENROUTER_MODEL', 'google/gemini-3.1-flash-lite')
 _ollama_model = os.getenv('OMI_OLLAMA_MODEL', 'nemotron-3-super')
 _ollama_fallback_model = os.getenv('OMI_OLLAMA_FALLBACK', 'gemma3:27b')
 _groq_model = os.getenv('OMI_GROQ_MODEL', 'llama-3.1-8b-instant')
 _gemini_model = os.getenv('OMI_GEMINI_MODEL', 'gemini-2.5-flash')
 _provider_order = [
     provider.strip()
-    for provider in os.getenv('OMI_LLM_PROVIDER_ORDER', 'gemini,groq,ollama_cloud').split(',')
+    for provider in os.getenv('OMI_LLM_PROVIDER_ORDER', 'openrouter,gemini,groq,ollama_cloud').split(',')
     if provider.strip()
 ]
 
@@ -118,6 +125,23 @@ _provider_order = [
 def _make_openai(model=None, **kwargs):
     """Create a ChatOpenAI instance using OpenAI direct."""
     return ChatOpenAI(api_key=_openai_api_key, model=model or _openai_medium, **kwargs)
+
+
+def _make_openrouter(model=None, **kwargs):
+    """Create a ChatOpenAI instance using OpenRouter's compatible endpoint."""
+    supplied_headers = kwargs.pop('default_headers', None) or {}
+    default_headers = {
+        'HTTP-Referer': _openrouter_site_url,
+        'X-Title': _openrouter_app_name,
+        **supplied_headers,
+    }
+    return ChatOpenAI(
+        api_key=_openrouter_api_key,
+        base_url=_openrouter_base_url,
+        model=model or _openrouter_model,
+        default_headers=default_headers,
+        **kwargs,
+    )
 
 
 def _make_ella_proxy(**kwargs):
@@ -165,12 +189,20 @@ def _with_fallbacks(primary, fallbacks):
 
 
 def _provider_instance(
-    provider: str, openai_model=None, ollama_model=None, groq_model=None, gemini_model=None, **kwargs
+    provider: str,
+    openai_model=None,
+    openrouter_model=None,
+    ollama_model=None,
+    groq_model=None,
+    gemini_model=None,
+    **kwargs,
 ):
     if provider == 'ella_proxy':
         return _make_ella_proxy(**kwargs) if (_ella_proxy_enabled and _ella_base_url) else None
     if provider == 'openai':
         return _make_openai(model=openai_model, **kwargs) if (_direct_openai_llm_enabled and _openai_api_key) else None
+    if provider == 'openrouter':
+        return _make_openrouter(model=openrouter_model, **kwargs) if _openrouter_api_key else None
     if provider == 'ollama_cloud':
         return _make_ollama_cloud(model=ollama_model, **kwargs) if _ollama_api_key else None
     if provider == 'groq':
@@ -185,9 +217,17 @@ _providers_available = [provider for provider in _provider_order if _provider_in
 print(f"[FLOW:LLM-INIT] providers_available={_providers_available} mode=runtime_fallback", flush=True)
 
 
-def _build_chain(openai_model=None, ollama_model=None, groq_model=None, gemini_model=None, **kwargs):
+def _build_chain(
+    openai_model=None,
+    openrouter_model=None,
+    ollama_model=None,
+    groq_model=None,
+    gemini_model=None,
+    **kwargs,
+):
     """Build a primary→fallback chain from all available providers."""
     openai_model = openai_model or _openai_medium
+    openrouter_model = openrouter_model or _openrouter_model
     ollama_model = ollama_model or _ollama_model
     groq_model = groq_model or _groq_model
     gemini_model = gemini_model or _gemini_model
@@ -199,6 +239,7 @@ def _build_chain(openai_model=None, ollama_model=None, groq_model=None, gemini_m
         inst = _provider_instance(
             provider,
             openai_model=openai_model,
+            openrouter_model=openrouter_model,
             ollama_model=ollama_model,
             groq_model=groq_model,
             gemini_model=gemini_model,
