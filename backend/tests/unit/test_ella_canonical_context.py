@@ -70,7 +70,7 @@ def test_chat_history_prefers_canonical_timeline(monkeypatch):
     monkeypatch.setattr(ella_chat, "_fetch_chat_canonical_events", fake_events)
     monkeypatch.setattr(ella_chat, "resolve_user_routing", fail_resolve)
 
-    result = asyncio.run(ella_chat.ella_chat_history("uid-1", limit=5))
+    result = asyncio.run(ella_chat.ella_chat_history("uid-1", limit=5, authenticated_uid="uid-1"))
 
     assert result["source"] == "canonical_timeline"
     assert result["fallback"] is False
@@ -91,6 +91,21 @@ def test_guardian_recent_turns_prefers_canonical_timeline(monkeypatch):
     turns = asyncio.run(guardian._get_recent_chat_turns("uid-1", limit=3))
 
     assert turns == [{"role": "user", "content": _cafe_event()["text"]}]
+
+
+def test_guardian_isolated_context_never_uses_openclaw_history(monkeypatch):
+    async def no_events(uid, **kwargs):
+        assert uid == "uid-isolated"
+        return []
+
+    async def fail_resolve(_uid):
+        raise AssertionError("isolated Guardian context must not use OpenClaw history")
+
+    monkeypatch.setattr(guardian, "fetch_canonical_timeline", no_events)
+    monkeypatch.setattr(guardian, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(guardian, "resolve_user_routing", fail_resolve)
+
+    assert asyncio.run(guardian._get_recent_chat_turns("uid-isolated", limit=3)) == []
 
 
 def test_canonical_events_to_chat_turns_newest_first_for_guardian():

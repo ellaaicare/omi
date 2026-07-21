@@ -120,6 +120,7 @@ def create_observer_router(
         extraction = await build_extraction_result(
             source_events,
             mode=extractor_mode,
+            uid=request.uid,
             timeout_seconds=max(5.0, min(float(request.extractor_timeout_seconds or 45.0), 120.0)),
             limit=max(1, min(int(request.extractor_limit or 60), 100)),
         )

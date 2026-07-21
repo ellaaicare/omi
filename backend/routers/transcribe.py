@@ -96,6 +96,12 @@ from utils.translation import TranslationService
 from utils.translation_cache import TranscriptSegmentLanguageCache
 from utils.webhooks import get_audio_bytes_webhook_seconds
 from utils.onboarding import OnboardingHandler
+from ella.routers.auto_provision import (
+    auto_provision_user,
+    ensure_firestore_user_document,
+    get_agent_cluster,
+    listen_runtime_gate,
+)
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -2033,7 +2039,9 @@ async def _stream_handler(
     elif codec == 'lc3':
         lc3_decoder = lc3.Decoder(lc3_frame_duration_us, sample_rate)
 
-    async def receive_data(dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock):
+    async def receive_data(
+        dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock
+    ):
         nonlocal websocket_active, websocket_close_code, last_audio_received_time, last_activity_time, current_conversation_id
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
@@ -2099,6 +2107,7 @@ async def _stream_handler(
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
                 try:
                     from websockets.connection import State as _WsState
+
                     _grok_dead = grok_sock.state != _WsState.OPEN
                 except Exception:
                     _grok_dead = False
@@ -2362,7 +2371,12 @@ async def _stream_handler(
         # Tasks
         data_process_task = asyncio.create_task(
             receive_data(
-                deepgram_socket, deepgram_profile_socket, soniox_socket, soniox_profile_socket, speechmatics_socket, grok_socket
+                deepgram_socket,
+                deepgram_profile_socket,
+                soniox_socket,
+                soniox_profile_socket,
+                speechmatics_socket,
+                grok_socket,
             )
         )
         stream_transcript_task = asyncio.create_task(stream_transcript_process())
@@ -2522,25 +2536,35 @@ async def listen_handler(
     onboarding_mode = onboarding == 'enabled'
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
 
-    # Ella sidecar: auto-provision check
+    # Ella sidecar: require isolated Hermes when the runtime cutover flag is on.
+    isolated_runtime_cutover = False
     try:
-        from ella.routers.auto_provision import (
-            auto_provision_user,
-            ensure_firestore_user_document,
-            get_agent_cluster,
-        )
-
-        await ensure_firestore_user_document(uid)
-        cluster = await get_agent_cluster(uid)
-        if not cluster:
-            logger = logging.getLogger(__name__)
-            logger.info(f"No agent cluster for uid={uid}, auto-provisioning...")
-            result = await auto_provision_user(uid)
-            if not result.get("success"):
-                logger.warning(f"Auto-provision failed: {result.get('error')}")
+        runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+        isolated_runtime_cutover = runtime_gate.get("required", False)
+        if isolated_runtime_cutover:
+            if not runtime_gate.get("success"):
+                logging.getLogger(__name__).warning(
+                    "Isolated Ella listen setup incomplete for uid=%s code=%s",
+                    uid,
+                    runtime_gate.get("error"),
+                )
+                await websocket.close(code=1013, reason="Ella setup incomplete")
+                return
+        else:
+            await ensure_firestore_user_document(uid, user_db.db)
+            cluster = await get_agent_cluster(uid)
+            if not cluster:
+                logger = logging.getLogger(__name__)
+                logger.info(f"No agent cluster for uid={uid}, auto-provisioning...")
+                result = await auto_provision_user(uid)
+                if not result.get("success"):
+                    logger.warning(f"Auto-provision failed: {result.get('error')}")
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Auto-provision check error: {e}")
+        if isolated_runtime_cutover:
+            await websocket.close(code=1013, reason="Ella setup incomplete")
+            return
 
     await _listen(
         websocket,
@@ -2609,6 +2633,23 @@ async def web_listen_handler(
         print(f"web_listen_handler: auth error {e}")
         await websocket.send_json({"type": "auth_response", "success": False})
         await websocket.close(code=1008, reason="Auth error")
+        return
+
+    runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+    if runtime_gate.get("required") and not runtime_gate.get("success"):
+        logging.getLogger(__name__).warning(
+            "Isolated Ella web listen setup incomplete for uid=%s code=%s",
+            uid,
+            runtime_gate.get("error"),
+        )
+        await websocket.send_json(
+            {
+                "type": "auth_response",
+                "success": False,
+                "error": "ella_setup_incomplete",
+            }
+        )
+        await websocket.close(code=1013, reason="Ella setup incomplete")
         return
 
     # Send success response

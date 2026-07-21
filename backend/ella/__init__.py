@@ -21,6 +21,8 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
+from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -88,7 +90,7 @@ def get_all_adapters() -> Dict[str, Callable]:
 # =============================================================================
 
 
-def register_ella_extensions(app) -> None:
+def register_ella_extensions(app, *, firestore_db=None) -> None:
     """
     Register all Ella extensions with the FastAPI app.
 
@@ -102,6 +104,8 @@ def register_ella_extensions(app) -> None:
     if not ELLA_ENABLED:
         print("🔕 Ella extensions disabled (ELLA_ENABLED=false)", flush=True)
         return
+
+    configure_firestore_db(firestore_db)
 
     print("", flush=True)
     print("🏥 ════════════════════════════════════════════", flush=True)
@@ -364,6 +368,13 @@ def _register_routers(app) -> None:
         print("  🌐 /v1/ella/settings* - Server-backed app settings", flush=True)
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
+
+    # Authenticated, idempotent per-user Hermes onboarding
+    try:
+        app.include_router(onboarding_router, tags=["Ella Onboarding"])
+        print("  🌐 /v1/ella/onboarding/* - Isolated Hermes onboarding", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella onboarding not available: {e}", flush=True)
 
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:

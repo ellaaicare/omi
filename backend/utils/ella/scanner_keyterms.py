@@ -10,6 +10,8 @@ from typing import Optional
 
 import httpx
 
+from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+
 logger = logging.getLogger("ella.scanner_keyterms")
 
 DEFAULT_PROVISION_API_URL = "http://100.76.138.56:8200"
@@ -60,7 +62,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _provision_url() -> str:
+def _provision_url(uid: str = "") -> str:
+    if uid and runtime_bindings_enabled(uid):
+        return os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/")
     return (
         os.getenv("ELLA_PROVISION_API_URL")
         or os.getenv("ELLA_PROVISION_URL")
@@ -69,7 +73,9 @@ def _provision_url() -> str:
     ).rstrip("/")
 
 
-def _provision_token() -> str:
+def _provision_token(uid: str = "") -> str:
+    if uid and runtime_bindings_enabled(uid):
+        return os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
     return (
         os.getenv("ELLA_PROVISION_API_TOKEN")
         or os.getenv("ELLA_PROVISION_API_KEY")
@@ -106,7 +112,9 @@ def _enabled() -> bool:
     return os.getenv("ELLA_SCANNER_KEYTERMS_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 
 
-def _allow_shared_fallback() -> bool:
+def _allow_shared_fallback(uid: str = "") -> bool:
+    if uid and runtime_bindings_enabled(uid):
+        return False
     return os.getenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
 
 
@@ -130,6 +138,13 @@ async def _get_pool():
 async def _resolve_agent_id(uid: str) -> str:
     if not uid:
         return ""
+
+    if runtime_bindings_enabled(uid):
+        runtime = await resolve_isolated_runtime(uid)
+        if runtime is None:
+            return ""
+        _uid_agent_ids[uid] = runtime.agent_id
+        return runtime.agent_id
 
     if uid in _uid_agent_ids:
         return _uid_agent_ids[uid]
@@ -362,14 +377,14 @@ def combine_deepgram_keyterms(vocabulary: list[str], scanner_terms: list[str]) -
     )
 
 
-async def _fetch_scanner_tuning(agent_id: str) -> str:
-    token = _provision_token()
+async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
+    token = _provision_token(uid)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    url = f"{_provision_url()}/workspace/{agent_id}/files/scanner-tuning.md"
+    url = f"{_provision_url(uid)}/workspace/{agent_id}/files/scanner-tuning.md"
     async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
         response = await client.get(url, headers=headers)
-        if response.status_code == 404 and _allow_shared_fallback():
-            shared = f"{_provision_url()}/workspace/shared/files/scanner-tuning.md"
+        if response.status_code == 404 and _allow_shared_fallback(uid):
+            shared = f"{_provision_url(uid)}/workspace/shared/files/scanner-tuning.md"
             response = await client.get(shared, headers=headers)
         response.raise_for_status()
         try:
@@ -386,14 +401,16 @@ async def refresh_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> 
     if not _enabled() or not uid:
         return []
 
-    resolved_agent_id = agent_id or await _resolve_agent_id(uid)
+    isolated = runtime_bindings_enabled(uid)
+    resolved_agent_id = await _resolve_agent_id(uid) if isolated else agent_id or await _resolve_agent_id(uid)
     key = resolved_agent_id or uid
     _refreshing.add(key)
     started = time.time()
     try:
-        content = await _fetch_scanner_tuning(resolved_agent_id)
+        content = await _fetch_scanner_tuning(resolved_agent_id, uid=uid)
         terms = parse_scanner_tuning_keyterms(content)
-        entry = KeytermCacheEntry(terms=terms, agent_id=resolved_agent_id, fetched_at=time.time(), source="provision_api")
+        source = "hermes_provision_api" if isolated else "provision_api"
+        entry = KeytermCacheEntry(terms=terms, agent_id=resolved_agent_id, fetched_at=time.time(), source=source)
         _cache[key] = entry
         _cache[uid] = entry
         _uid_agent_ids[uid] = resolved_agent_id
@@ -407,6 +424,8 @@ async def refresh_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> 
         return terms
     except Exception as e:
         stale = _cache.get(key) or _cache.get(uid)
+        if isolated and stale and stale.source != "hermes_provision_api":
+            stale = None
         if stale:
             stale.error = str(e)
         logger.warning("scanner_keyterms_refresh_failed uid=%s agent_id=%s error=%s", uid, resolved_agent_id, e)
@@ -440,6 +459,8 @@ async def get_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> list
 
     resolved_key = agent_id or _uid_agent_ids.get(uid) or uid
     entry = _cache.get(resolved_key) or _cache.get(uid)
+    if runtime_bindings_enabled(uid) and entry and entry.source != "hermes_provision_api":
+        entry = None
     now = time.time()
     if entry and now - entry.fetched_at <= _ttl_seconds():
         return entry.terms

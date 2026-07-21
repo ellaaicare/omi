@@ -32,7 +32,10 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from database.conversations import _decrypt_conversation_data
+from ella.services.provisioning import ProvisioningError, rollout_enabled
+from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
 from utils.ella.canonical_context import fetch_canonical_timeline
+from utils.other import endpoints as auth
 
 # JWT handling
 try:
@@ -69,6 +72,15 @@ HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.13
 HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+
+
+def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
+    """Keep isolated users off the legacy OpenClaw voice proxy until cutover."""
+    return rollout_enabled(
+        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED",
+        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS",
+        uid,
+    )
 
 # Database connection pool (lazy-initialized, shared pattern with other Ella routers)
 _pool: Optional[asyncpg.Pool] = None
@@ -142,7 +154,7 @@ V2V_PROVIDERS = {
 class VoiceSessionRequest(BaseModel):
     """Request for creating a V2V voice session."""
 
-    uid: str
+    uid: Optional[str] = None
     provider: str = "grok-voice"
     voice_mode: Optional[str] = None
 
@@ -371,6 +383,7 @@ async def create_voice_session(
     uid: Optional[str] = None,
     provider: Optional[str] = None,
     voice_mode: Optional[str] = None,
+    authenticated_uid: str = Depends(auth.get_current_user_uid),
 ):
     """
     Create a voice session token for connecting to V2V service.
@@ -398,12 +411,21 @@ async def create_voice_session(
         audio_format: Required audio configuration
     """
     # Merge body and query params (body takes priority)
-    uid = (body.uid if body else None) or uid
+    requested_uid = (body.uid if body else None) or uid
+    if requested_uid and requested_uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
+    uid = authenticated_uid
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
 
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid required")
+    if runtime_bindings_enabled(uid):
+        try:
+            await resolve_isolated_runtime(uid)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        # Session issuance must remain closed until every downstream voice
+        # context/tool path consumes the same active Hermes binding.
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
 
     # Validate provider
     if provider not in V2V_PROVIDERS:

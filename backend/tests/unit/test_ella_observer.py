@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import sys
 import types
@@ -299,8 +300,6 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     event_store = canonical_module.InMemoryCanonicalEventStore()
     log_store = logs_module.InMemoryObserverRunLogStore()
 
-    import asyncio
-
     asyncio.run(
         event_store.write_batch(
             [
@@ -371,8 +370,6 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     event_store = canonical_module.InMemoryCanonicalEventStore()
     log_store = logs_module.InMemoryObserverRunLogStore()
 
-    import asyncio
-
     asyncio.run(
         event_store.write_batch(
             [
@@ -392,11 +389,13 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
         )
     )
 
-    async def fake_build_extraction_result(events, *, mode, timeout_seconds=45.0, limit=60):
+    async def fake_build_extraction_result(events, *, mode, uid="", timeout_seconds=45.0, limit=60):
         assert mode == "heuristic"
+        assert uid == "user-1"
         return await extractor_module.build_extraction_result(
             events,
             mode=mode,
+            uid=uid,
             timeout_seconds=timeout_seconds,
             limit=limit,
         )
@@ -419,6 +418,44 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     assert body["proposal_count"] == 1
     assert body["model_metadata"]["extractor_mode"] == "heuristic"
     assert body["model_metadata"]["extractor"] == "heuristic_candidate_extractor"
+
+
+def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+    captured = {}
+
+    async def fake_runtime(uid):
+        assert uid == "uid-isolated"
+        return types.SimpleNamespace(
+            gateway_url="http://isolated-hermes:8642",
+            gateway_token="isolated-token",
+            agent_id="omi-isolated",
+        )
+
+    async def fake_hermes(events, **kwargs):
+        captured.update(kwargs)
+        return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
+
+    monkeypatch.setattr(
+        extractor_module.runtime_resolver,
+        "runtime_bindings_enabled",
+        lambda uid=None: uid == "uid-isolated",
+    )
+    monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
+
+    asyncio.run(
+        extractor_module.build_extraction_result(
+            [_event()],
+            mode="hermes",
+            uid="uid-isolated",
+        )
+    )
+
+    assert captured["gateway_url"] == "http://isolated-hermes:8642"
+    assert captured["token"] == "isolated-token"
+    assert captured["model"] == "omi-isolated"
 
 
 def test_model_extractor_rejects_assistant_only_evidence():
@@ -499,8 +536,6 @@ def test_observer_apply_pending_writes_safe_memory_event(monkeypatch):
     assert body["decisions"][0]["action"] == "applied"
     proposals_db.update_proposal_status.assert_called_once()
 
-    import asyncio
-
     events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
     assert len(events) == 1
     assert events[0]["channel"] == "observer_memory"
@@ -555,8 +590,6 @@ def test_observer_apply_pending_accepts_trusted_mcp_memory_proposal(monkeypatch)
     assert body["applied_count"] == 1
     assert body["decisions"][0]["action"] == "applied"
     assert body["decisions"][0]["confidence"] == 0.92
-
-    import asyncio
 
     events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
     assert len(events) == 1

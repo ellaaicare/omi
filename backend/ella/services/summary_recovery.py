@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -14,6 +14,7 @@ import httpx
 
 import database.conversations as conversations_db
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.runtime_resolver import resolve_isolated_runtime
 from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
 from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
@@ -164,6 +165,25 @@ def default_summary_provider_config() -> SummaryProviderConfig:
             os.getenv('ELLA_CORRECTION_API_KEY') or os.getenv('XAI_API_KEY') or os.getenv('HERMES_API_KEY') or ''
         ),
         timeout_seconds=float(os.getenv('ELLA_CORRECTION_TIMEOUT_SECONDS', '45')),
+    )
+
+
+async def summary_provider_config_for_uid(
+    uid: str,
+    config: Optional[SummaryProviderConfig] = None,
+) -> SummaryProviderConfig:
+    """Bind Hermes summary work to the active isolated runtime when selected."""
+    selected = config or default_summary_provider_config()
+    runtime = await resolve_isolated_runtime(uid)
+    if runtime is None:
+        return selected
+    return replace(
+        selected,
+        provider='hermes-api',
+        hermes_url=f"{runtime.gateway_url.rstrip('/')}/v1/chat/completions",
+        hermes_model=runtime.agent_id,
+        hermes_api_key=runtime.gateway_token,
+        legacy_api_key='',
     )
 
 
@@ -600,6 +620,7 @@ async def recover_failed_conversation_summary(
     request_id: str,
     client_context: Optional[str] = None,
     attempt_count: Optional[int] = None,
+    config: Optional[SummaryProviderConfig] = None,
 ) -> str:
     conversation = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
     if not _is_current_retry(conversation, request_id, attempt_count):
@@ -818,12 +839,14 @@ async def recover_failed_conversation_summary(
             if not enriched_version_id or apply_result.get('canonical_confirmed') is not True:
                 raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed')
         else:
+            isolated_config = await summary_provider_config_for_uid(uid, config)
             apply_result = await invoke_hermes_recovery(
                 uid=uid,
                 conversation=latest,
                 request_id=request_id,
                 attempt_count=attempt_count,
                 client_context=client_context,
+                config=isolated_config,
             )
             enriched_version_id = apply_result.get('active_summary_version_id')
             if not enriched_version_id:

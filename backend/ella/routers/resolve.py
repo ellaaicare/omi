@@ -24,7 +24,14 @@ import os
 from typing import Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+
+from database.ella_provisioning import EllaProvisioningRepository
+from ella.services.provisioning import ProvisioningError
+from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +89,33 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     )
     if not row:
         return None
+
+    if runtime_bindings_enabled(uid):
+        runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool))
+        return {
+            "user": {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "omiUid": row["omi_uid"],
+                "status": row["status"],
+                "guardianMode": row["guardian_mode"],
+                "timezone": row["timezone"],
+                "conditions": row["conditions"],
+                "medications": row["medications"],
+            },
+            "routing": {
+                "agentId": runtime.agent_id,
+                "sessionKey": f"ella:omi:{uid.lower()}:canonical",
+                "gatewayUrl": runtime.gateway_url,
+                "token": runtime.gateway_token,
+                "historyUrl": "/v1/ella/chat/history",
+                "platform": "hermes",
+                "profileName": runtime.profile_name,
+                "bindingRevision": runtime.revision,
+                "modelPolicyVersion": runtime.model_policy_version,
+                "voicePolicyVersion": runtime.voice_policy_version,
+            },
+        }
 
     agents = json.loads(row["agents"]) if row["agents"] else None
 
@@ -145,17 +179,38 @@ async def resolve_endpoint(
     uid: Optional[str] = Query(None, description="Firebase UID (omiUid)"),
     email: Optional[str] = Query(None, description="User email"),
     phone: Optional[str] = Query(None, description="User phone (E.164)"),
+    authenticated_uid: str = Depends(auth.get_current_user_uid),
 ):
     """Resolve a user identifier to active agent routing info.
 
     Accepts one of: uid, email, phone. Returns the user's agent cluster
     routing information including agentId, sessionKey, gatewayUrl, and token.
     """
-    if not uid and not email and not phone:
-        raise HTTPException(
-            status_code=400,
-            detail="One of uid, email, or phone is required",
-        )
+    if email or phone:
+        raise HTTPException(status_code=400, detail={"code": "unsupported_identity_lookup"})
+    uid = uid or authenticated_uid
+    if uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
+
+    if runtime_bindings_enabled(authenticated_uid):
+        try:
+            resolved = await resolve_user_routing(authenticated_uid)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        if not resolved:
+            raise HTTPException(status_code=404, detail={"code": "user_not_found"})
+        routing = resolved.get("routing") or {}
+        return {
+            "user": resolved["user"],
+            "routing": {
+                "agentId": routing.get("agentId"),
+                "historyUrl": "/v1/ella/chat/history",
+                "platform": "hermes",
+                "bindingRevision": routing.get("bindingRevision"),
+                "modelPolicyVersion": routing.get("modelPolicyVersion"),
+                "voicePolicyVersion": routing.get("voicePolicyVersion"),
+            },
+        }
 
     pool = await _get_pool()
 
@@ -172,31 +227,8 @@ async def resolve_endpoint(
             """,
             uid,
         )
-    elif email:
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
-                   ac.agents, ac.status AS cluster_status
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.email = $1
-            """,
-            email,
-        )
     else:
-        # Phone lookup via identities JSONB
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
-                   ac.agents, ac.status AS cluster_status
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.identities->>'phone' = $1
-            """,
-            phone,
-        )
+        raise HTTPException(status_code=400, detail={"code": "uid_required"})
 
     if not row:
         identifier = uid or email or phone
@@ -262,13 +294,23 @@ async def resolve_endpoint(
 
 
 @router.get("/chat/history/{agent_id}")
-async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Optional[str] = None):
+async def proxy_chat_history(
+    agent_id: str,
+    limit: int = 50,
+    session_key: Optional[str] = None,
+    authenticated_uid: str = Depends(auth.get_current_user_uid),
+):
     """Proxy chat history requests to the Provision API on Mac Mini.
 
     The iOS app can't reach the Mac Mini's Tailscale IP directly,
     so this endpoint forwards the request.
     """
-    import httpx
+    if runtime_bindings_enabled(authenticated_uid):
+        raise HTTPException(status_code=410, detail={"code": "legacy_history_disabled"})
+
+    resolved = await resolve_user_routing(authenticated_uid)
+    if not resolved or (resolved.get("routing") or {}).get("agentId") != agent_id:
+        raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
 
     provision_base = PROVISION_API_URL.rstrip('/')
     params = f"limit={limit}"
@@ -282,12 +324,8 @@ async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Option
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers={"x-api-key": PROVISION_API_KEY})
             if resp.status_code != 200:
-                from fastapi.responses import JSONResponse
-
                 return JSONResponse(status_code=resp.status_code, content={"error": "upstream_error"})
             return resp.json()
     except Exception as e:
         logger.error(f"Chat history proxy error: {e}")
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(status_code=502, content={"error": "provision_unreachable"})

@@ -13,11 +13,16 @@ Two-phase flow:
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
 import httpx
+
+from database.ella_provisioning import EllaProvisioningRepository
+from ella.services import runtime_resolver
+from ella.services.provisioning import ProvisioningError
 
 logger = logging.getLogger("ella.auto_provision")
 
@@ -32,7 +37,6 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 def _slugify(s: str) -> str:
     """Create a safe ID slug from a string."""
-    import re
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')[:40]
 
 
@@ -82,9 +86,7 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
 
         # A cluster without userAgentId is incomplete — treat as missing
         if not agents.get("userAgentId"):
-            logger.warning(
-                f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision"
-            )
+            logger.warning(f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision")
             return None
 
         return {
@@ -98,7 +100,7 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
         return None
 
 
-async def ensure_firestore_user_document(uid: str) -> bool:
+async def ensure_firestore_user_document(uid: str, firestore_db=None) -> bool:
     """Create the minimal upstream OMI Firestore user doc for a known Ella user.
 
     The websocket transcription path still gates on database/users.py, which
@@ -118,32 +120,49 @@ async def ensure_firestore_user_document(uid: str) -> bool:
         )
         if not row:
             return False
+        if firestore_db is None:
+            logger.error("Cannot initialize OMI identity without an injected Firestore client")
+            return False
 
-        from database._client import db
-
-        user_ref = db.collection("users").document(uid)
-        if user_ref.get().exists:
-            return True
-
-        now = datetime.now(timezone.utc)
-        user_ref.set(
-            {
-                "uid": uid,
-                "name": row["name"] or "User",
-                "email": row["email"],
-                "time_zone": row["timezone"] or "America/Los_Angeles",
-                "created_at": now,
-                "updated_at": now,
-                "private_cloud_sync_enabled": True,
-                "store_recording_permission": True,
-            },
-            merge=True,
+        await EllaProvisioningRepository(pool, firestore_db=firestore_db).ensure_omi_user_document(
+            uid=uid,
+            name=row["name"] or "User",
+            email=row["email"],
+            timezone_name=row["timezone"] or "America/Los_Angeles",
+            private_cloud_sync_default=True,
         )
         logger.info(f"Created Firestore OMI user document for uid={uid}")
         return True
     except Exception as e:
         logger.error(f"Error ensuring Firestore user document for uid={uid}: {e}", exc_info=True)
         return False
+
+
+async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> dict:
+    """Fail closed before listen; never provision OpenClaw in isolated mode."""
+    try:
+        runtime = await runtime_resolver.resolve_isolated_runtime(uid)
+        if runtime is None:
+            return {"success": False, "error": "runtime_bindings_disabled"}
+        if omi_user_exists is None:
+            return {"success": False, "error": "omi_identity_checker_unavailable"}
+        if not omi_user_exists(uid):
+            return {"success": False, "error": "omi_identity_unavailable"}
+        return {"success": True, "provider": "hermes"}
+    except ProvisioningError as exc:
+        return {"success": False, "error": exc.code}
+    except Exception:
+        logger.exception("Isolated listen runtime validation failed for uid=%s", uid)
+        return {"success": False, "error": "runtime_validation_failed"}
+
+
+async def listen_runtime_gate(uid: str, omi_user_exists=None) -> dict:
+    """Apply the same isolated-runtime gate to every authenticated listen surface."""
+    required = runtime_resolver.runtime_bindings_enabled(uid)
+    if not required:
+        return {"required": False, "success": True}
+    result = await validate_isolated_listen_runtime(uid, omi_user_exists)
+    return {"required": True, **result}
 
 
 async def auto_provision_user(uid: str, name: str = "User") -> dict:
@@ -266,8 +285,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             "scannerGatewayUrl": scanner_gateway_url,
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
-            "provisionedAt": provision_result.get("provisionedAt")
-                or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "provisionedAt": provision_result.get("provisionedAt") or datetime.now(timezone.utc).isoformat(),
         }
         for field, fallback in [
             ("userAgentId", f"ella-{openclaw_user_id}"),
@@ -276,9 +294,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             ("summarizerAgentId", "summarizer"),
         ]:
             cluster_agents_dict[field] = provision_result.get(field) or fallback
-        cluster_agents_dict["gatewayToken"] = (
-            provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
-        )
+        cluster_agents_dict["gatewayToken"] = provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
         cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:
