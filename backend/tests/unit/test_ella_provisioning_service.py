@@ -12,6 +12,7 @@ from ella.services.provisioning import (
     ProvisioningError,
     VerifiedIdentity,
     extract_runtime_binding,
+    provision_timeout_seconds,
     public_receipt,
     provisioning_enabled,
     resolve_gateway_credential,
@@ -200,6 +201,27 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
     assert provisioning_enabled("runtime-user") is False
     assert runtime_bindings_enabled("runtime-user") is True
     assert runtime_bindings_enabled("provision-user") is False
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 180.0),
+        ("120", 120.0),
+        ("5", 30.0),
+        ("900", 300.0),
+        ("not-a-number", 180.0),
+        ("nan", 180.0),
+        ("inf", 180.0),
+    ],
+)
+def test_provision_timeout_is_bounded_for_cold_runtime_starts(monkeypatch, configured, expected):
+    if configured is None:
+        monkeypatch.delenv("ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS", configured)
+
+    assert provision_timeout_seconds() == expected
 
 
 def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():

@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import posixpath
 import re
@@ -29,6 +30,9 @@ AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 ALLOWED_CREDENTIAL_ENV_RE = re.compile(r"^(HERMES_API_SERVER_KEY|ELLA_HERMES_GATEWAY_KEY_[A-Z0-9_]+)$")
 logger = logging.getLogger("ella.provisioning")
 TRUE_VALUES = {"1", "true", "yes", "on"}
+DEFAULT_PROVISION_TIMEOUT_SECONDS = 180.0
+MIN_PROVISION_TIMEOUT_SECONDS = 30.0
+MAX_PROVISION_TIMEOUT_SECONDS = 300.0
 
 
 class ProvisioningError(RuntimeError):
@@ -63,6 +67,30 @@ def provisioning_enabled(uid: Optional[str] = None) -> bool:
         "ELLA_HERMES_PROVISIONING_ENABLED_UIDS",
         uid,
     )
+
+
+def provision_timeout_seconds() -> float:
+    """Return a bounded deadline that covers observed cold Hermes starts."""
+    raw = os.getenv("ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_PROVISION_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS=%r; using %.0fs",
+            raw,
+            DEFAULT_PROVISION_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_PROVISION_TIMEOUT_SECONDS
+    if not math.isfinite(value):
+        logger.warning(
+            "Non-finite ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS=%r; using %.0fs",
+            raw,
+            DEFAULT_PROVISION_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_PROVISION_TIMEOUT_SECONDS
+    return min(MAX_PROVISION_TIMEOUT_SECONDS, max(MIN_PROVISION_TIMEOUT_SECONDS, value))
 
 
 def stable_payload_hash(payload: dict[str, Any]) -> str:
@@ -175,7 +203,7 @@ class HermesProvisionClient:
             "targetSchemaVersion": target_schema_version,
         }
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=provision_timeout_seconds()) as client:
                 response = await client.post(
                     f"{self.base_url}/provision",
                     headers={"Authorization": f"Bearer {self.token}"},
