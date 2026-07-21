@@ -513,15 +513,20 @@ async def create_voice_session(
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
 
-    isolated_runtime = runtime_bindings_enabled(uid)
-    if isolated_runtime:
+    runtime_bound = runtime_bindings_enabled(uid)
+    voice_rollout_enabled = isolated_voice_routing_enabled(uid)
+    if voice_rollout_enabled and not runtime_bound:
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
+    isolated_runtime = runtime_bound and voice_rollout_enabled
+    if runtime_bound:
         try:
             await resolve_isolated_runtime(uid)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
-        # Session issuance must remain closed until every downstream voice
-        # context/tool path consumes the same active Hermes binding.
-        raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
+        if not isolated_runtime:
+            # Runtime-bound users must never fall through to legacy voice while
+            # their explicit isolated-voice rollout gate remains disabled.
+            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
 
     # Validate provider
     if provider not in V2V_PROVIDERS:
@@ -549,9 +554,7 @@ async def create_voice_session(
     user_display_name = None
     try:
         pool = await _get_pool()
-        row = await pool.fetchrow(
-            "SELECT name FROM users WHERE omi_uid = $1", uid
-        )
+        row = await pool.fetchrow("SELECT name FROM users WHERE omi_uid = $1", uid)
         if row:
             user_display_name = row["name"]
     except Exception as e:
@@ -665,7 +668,10 @@ async def synthesize_speech(
                 )
             _elapsed = int((time.time() - _start) * 1000)
             if response.status_code != 200:
-                print(f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms", flush=True)
+                print(
+                    f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms",
+                    flush=True,
+                )
                 raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
             audio_size = len(response.content)
             print(f"[FLOW:VOICE-TTS] OK provider={provider} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
@@ -687,7 +693,10 @@ async def synthesize_speech(
             print(f"[FLOW:VOICE-TTS] ERROR provider=xai-tts key_missing=true", flush=True)
             raise HTTPException(status_code=500, detail="XAI_API_KEY not configured")
         voice_id = request.voice_id if request.voice_id != DEFAULT_ELEVENLABS_VOICE_ID else XAI_TTS_VOICE_ID
-        print(f"[FLOW:VOICE-TTS] provider=xai-tts voice={voice_id} language={XAI_TTS_LANGUAGE} text_len={text_len}", flush=True)
+        print(
+            f"[FLOW:VOICE-TTS] provider=xai-tts voice={voice_id} language={XAI_TTS_LANGUAGE} text_len={text_len}",
+            flush=True,
+        )
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -750,7 +759,10 @@ async def synthesize_speech(
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, xai-tts, grok-voice, gemini-live")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, xai-tts, grok-voice, gemini-live",
+        )
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
@@ -779,11 +791,17 @@ async def synthesize_speech(
         _elapsed = int((time.time() - _start) * 1000)
 
         if response.status_code != 200:
-            print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}", flush=True)
+            print(
+                f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}",
+                flush=True,
+            )
             raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
 
         audio_size = len(response.content)
-        print(f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
+        print(
+            f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms",
+            flush=True,
+        )
 
         return Response(content=response.content, media_type="audio/mpeg")
 
@@ -828,8 +846,6 @@ async def voice_health():
 # ============================================================================
 
 
-
-
 async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
     """Fetch recent OMI conversation summaries from Firestore for voice context.
     Returns formatted string of recent conversations (title + overview)."""
@@ -837,17 +853,20 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
         # Direct Firestore query — simpler than get_conversations() to avoid
         # composite index requirements (discarded + created_at needs index)
         from google.cloud import firestore
+
         db = firestore.Client()
         convos_ref = (
-            db.collection("users").document(uid).collection("conversations")
+            db.collection("users")
+            .document(uid)
+            .collection("conversations")
             .order_by("created_at", direction=firestore.Query.DESCENDING)
             .limit(limit)
         )
         convos = [doc.to_dict() for doc in convos_ref.stream()]
-        
+
         if not convos:
             return ""
-        
+
         parts = []
         for c in convos:
             structured = c.get("structured", {})
@@ -855,7 +874,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
             overview = structured.get("overview", "")
             emoji = structured.get("emoji", "")
             created = c.get("created_at")
-            
+
             # Format timestamp
             ts = ""
             if created:
@@ -863,7 +882,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
                     ts = created.strftime("%b %d %I:%M %p")
                 else:
                     ts = str(created)[:16]
-            
+
             entry = f"- {emoji} {title}"
             if overview:
                 # Truncate long overviews
@@ -872,7 +891,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
             if ts:
                 entry += f" ({ts})"
             parts.append(entry)
-        
+
         return "\n".join(parts)
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Conversation fetch failed: {e}")
@@ -889,15 +908,15 @@ async def _fetch_memory_context(
     Returns formatted string of relevant memory snippets."""
     if not gateway_token:
         return ""
-    
+
     headers = {
         "Authorization": f"Bearer {gateway_token}",
         "Content-Type": "application/json",
     }
-    
+
     results_all = []
     queries = [f"{user_name} recent activity today schedule important"]
-    
+
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             for query in queries:
@@ -911,6 +930,7 @@ async def _fetch_memory_context(
                         data = resp.json()
                         if data.get("ok"):
                             import json as json_mod
+
                             results_text = data["result"]["content"][0]["text"]
                             results = json_mod.loads(results_text).get("results", [])
                             for r in results[:3]:
@@ -924,10 +944,10 @@ async def _fetch_memory_context(
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Memory context fetch failed: {e}")
         return ""
-    
+
     if not results_all:
         return ""
-    
+
     # Sort by score, deduplicate, take top 5
     results_all.sort(key=lambda x: x[1], reverse=True)
     seen = set()
@@ -939,8 +959,9 @@ async def _fetch_memory_context(
             unique.append(snippet)
         if len(unique) >= 5:
             break
-    
+
     return "\n---\n".join(unique)
+
 
 def _extract_caregiver_section(user_profile: str) -> str:
     """Extract caregiver-relevant notes from USER.md content."""
@@ -1282,12 +1303,12 @@ async def search_omi_conversations(request: Request):
         date_filter_start = None
         date_filter_end = None
         keyword_terms = []
-        
+
         query_lower = query.lower().strip()
-        
+
         # Date patterns: "march 8", "march 8th", "3/8", "yesterday", "last week", "today"
         date_parsed = False
-        
+
         if "yesterday" in query_lower:
             d = now - timedelta(days=1)
             date_filter_start = d.replace(hour=0, minute=0, second=0)
@@ -1312,15 +1333,34 @@ async def search_omi_conversations(request: Request):
         else:
             # Try "month day" pattern: "march 8", "march 8th", "mar 8"
             month_names = {
-                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
-                "nov": 11, "november": 11, "dec": 12, "december": 12,
+                "jan": 1,
+                "january": 1,
+                "feb": 2,
+                "february": 2,
+                "mar": 3,
+                "march": 3,
+                "apr": 4,
+                "april": 4,
+                "may": 5,
+                "jun": 6,
+                "june": 6,
+                "jul": 7,
+                "july": 7,
+                "aug": 8,
+                "august": 8,
+                "sep": 9,
+                "september": 9,
+                "oct": 10,
+                "october": 10,
+                "nov": 11,
+                "november": 11,
+                "dec": 12,
+                "december": 12,
             }
             date_match = re_mod.search(
                 r"(january|february|march|april|may|june|july|august|september|october|november|december|"
                 r"jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?",
-                query_lower
+                query_lower,
             )
             if date_match:
                 month_str = date_match.group(1)
@@ -1337,24 +1377,26 @@ async def search_omi_conversations(request: Request):
                         date_filter_end = target.replace(hour=23, minute=59, second=59)
                         date_parsed = True
                         # Remove date part from query for keyword matching
-                        remaining = query_lower[:date_match.start()] + query_lower[date_match.end():]
+                        remaining = query_lower[: date_match.start()] + query_lower[date_match.end() :]
                         keyword_terms = [t for t in remaining.split() if t]
                     except ValueError:
                         pass
-        
+
         if not date_parsed:
             keyword_terms = query_lower.split()
 
         keyword_terms = _expand_query_terms(_significant_query_terms(" ".join(keyword_terms)))
         keyword_terms = _normalized_query_terms(" ".join(keyword_terms))
-        
+
         logger.info(f"[FLOW:VOICE-SEARCH] date_filter={date_filter_start}->{date_filter_end}, keywords={keyword_terms}")
-        
+
         # Fetch conversations — use date filter if we have one, otherwise get last 100
         if date_filter_start and date_filter_end:
             # Firestore query with date range
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .where("created_at", ">=", date_filter_start)
                 .where("created_at", "<=", date_filter_end)
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
@@ -1362,29 +1404,31 @@ async def search_omi_conversations(request: Request):
             )
         else:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
                 .limit(100)
             )
         convos = [doc.to_dict() for doc in convos_ref.stream()]
-        
+
         # Client-side keyword match (skip if only date search with no keywords)
         matches = []
-        
+
         for c in convos:
             structured = c.get("structured", {})
             title = (structured.get("title", "") or "").lower()
             overview = (structured.get("overview", "") or "").lower()
             category = (structured.get("category", "") or "").lower()
-            
+
             # Include formatted date in searchable text
             created = c.get("created_at")
             date_str = ""
             if created and hasattr(created, "strftime"):
                 date_str = created.strftime("%B %d %Y %b %A").lower()  # "march 18 2026 mar monday"
-            
+
             searchable = f"{title} {overview} {category} {date_str}"
-            
+
             if keyword_terms:
                 # Score: how many keyword terms match
                 score = _keyword_score(searchable, keyword_terms)
@@ -1393,11 +1437,11 @@ async def search_omi_conversations(request: Request):
             else:
                 # Date-only search — return all conversations from that date
                 matches.append((1, c))
-        
+
         # Sort by score (desc), then by recency
         matches.sort(key=lambda x: x[0], reverse=True)
         matches = matches[:limit]
-        
+
         results = []
         for score, c in matches:
             structured = c.get("structured", {})
@@ -1412,19 +1456,21 @@ async def search_omi_conversations(request: Request):
                     ts = created.strftime("%Y-%m-%d %I:%M %p")
                 else:
                     ts = str(created)[:16]
-            
-            results.append({
-                "title": structured.get("title", "Untitled"),
-                "overview": structured.get("overview", ""),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "timestamp": ts,
-                "score": score,
-            })
-        
+
+            results.append(
+                {
+                    "title": structured.get("title", "Untitled"),
+                    "overview": structured.get("overview", ""),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "timestamp": ts,
+                    "score": score,
+                }
+            )
+
         logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
         return {"results": results, "total_searched": len(convos), "query": query}
-    
+
     except Exception as e:
         logger.error(f"[FLOW:VOICE-SEARCH] Error: {e}")
         return {"results": [], "error": str(e), "query": query}
@@ -1439,21 +1485,53 @@ async def search_omi_conversations(request: Request):
 # Privacy policy: maps agent_role -> source -> access level
 # True = full access, False = no access, "own" = own data only, "full" = full
 SEARCH_POLICY = {
-    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
-    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
-    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
-    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
+    "user": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": True,
+        "omi_meta": True,
+        "memories": True,
+        "voice": True,
+        "scanner": "own",
+    },
+    "caregiver": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": False,
+        "omi_meta": True,
+        "memories": False,
+        "voice": False,
+        "scanner": "full",
+    },
+    "scanner": {
+        "timeline": False,
+        "workspace": False,
+        "omi_full": False,
+        "omi_meta": False,
+        "memories": False,
+        "voice": False,
+        "scanner": False,
+    },
+    "voice": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": True,
+        "omi_meta": True,
+        "memories": True,
+        "voice": True,
+        "scanner": False,
+    },
 }
 
 # Which source keys map to which request-level source names
 _SOURCE_TO_POLICY_KEYS = {
-    "timeline":  ["timeline"],
-    "channel":   ["timeline"],
+    "timeline": ["timeline"],
+    "channel": ["timeline"],
     "workspace": ["workspace"],
-    "omi":       ["omi_full", "omi_meta"],
-    "memories":  ["memories"],
-    "voice":     ["voice"],
-    "scanner":   ["scanner"],
+    "omi": ["omi_full", "omi_meta"],
+    "memories": ["memories"],
+    "voice": ["voice"],
+    "scanner": ["scanner"],
 }
 
 
@@ -1561,14 +1639,66 @@ def _snippet_around_terms(text: str, terms: list, max_chars: int = 900) -> str:
 
 def _normalized_query_terms(query: str) -> list[str]:
     stop = {
-        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
-        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
-        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
-        "memory", "memories", "after", "before", "else", "went", "go", "this",
-        "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "afternoon", "evening", "today",
-        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
-        "caught", "find", "pull", "about",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "in",
+        "on",
+        "of",
+        "for",
+        "with",
+        "what",
+        "where",
+        "when",
+        "who",
+        "why",
+        "how",
+        "did",
+        "do",
+        "does",
+        "i",
+        "me",
+        "my",
+        "you",
+        "greg",
+        "plato",
+        "tell",
+        "check",
+        "latest",
+        "recent",
+        "memory",
+        "memories",
+        "after",
+        "before",
+        "else",
+        "went",
+        "go",
+        "this",
+        "omi",
+        "conversation",
+        "conversations",
+        "transcript",
+        "transcripts",
+        "summary",
+        "summaries",
+        "morning",
+        "afternoon",
+        "evening",
+        "today",
+        "yesterday",
+        "raw",
+        "happened",
+        "happen",
+        "heard",
+        "hear",
+        "catch",
+        "caught",
+        "find",
+        "pull",
+        "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     filtered = [t for t in terms if len(t) > 2 and t not in stop]
@@ -1579,14 +1709,66 @@ def _significant_query_terms(query: str) -> list[str]:
     """Return only evidence-bearing terms; unlike _normalized_query_terms,
     this may return an empty list for broad temporal questions."""
     stop = {
-        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
-        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
-        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
-        "memory", "memories", "after", "before", "else", "went", "go", "this",
-        "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "afternoon", "evening", "today",
-        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
-        "caught", "find", "pull", "about",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "in",
+        "on",
+        "of",
+        "for",
+        "with",
+        "what",
+        "where",
+        "when",
+        "who",
+        "why",
+        "how",
+        "did",
+        "do",
+        "does",
+        "i",
+        "me",
+        "my",
+        "you",
+        "greg",
+        "plato",
+        "tell",
+        "check",
+        "latest",
+        "recent",
+        "memory",
+        "memories",
+        "after",
+        "before",
+        "else",
+        "went",
+        "go",
+        "this",
+        "omi",
+        "conversation",
+        "conversations",
+        "transcript",
+        "transcripts",
+        "summary",
+        "summaries",
+        "morning",
+        "afternoon",
+        "evening",
+        "today",
+        "yesterday",
+        "raw",
+        "happened",
+        "happen",
+        "heard",
+        "hear",
+        "catch",
+        "caught",
+        "find",
+        "pull",
+        "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     return [t for t in terms if len(t) > 2 and t not in stop]
@@ -1742,20 +1924,26 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
             ts = row["started_at"]
             ts_text = ts.strftime("%Y-%m-%d %I:%M %p") if ts else ""
             role_boost = 15 if role == "user" else 3
-            matches.append((score, ts or datetime.min, {
-                "source": "timeline",
-                "title": f"{channel} {role}".strip(),
-                "content": text[:700],
-                "timestamp": ts_text,
-                "score": score + role_boost,
-                "metadata": {
-                    "provenance": "canonical_event",
-                    "channel": channel,
-                    "provider": provider,
-                    "role": role,
-                    "session_id": row["session_id"] or "",
-                },
-            }))
+            matches.append(
+                (
+                    score,
+                    ts or datetime.min,
+                    {
+                        "source": "timeline",
+                        "title": f"{channel} {role}".strip(),
+                        "content": text[:700],
+                        "timestamp": ts_text,
+                        "score": score + role_boost,
+                        "metadata": {
+                            "provenance": "canonical_event",
+                            "channel": channel,
+                            "provider": provider,
+                            "role": role,
+                            "session_id": row["session_id"] or "",
+                        },
+                    },
+                )
+            )
         matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [m[2] for m in matches[:limit]]
     except Exception as e:
@@ -1796,21 +1984,23 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         top = sources[0] if sources else {}
         confidence = data.get("confidence") or "medium"
         score = 120 if confidence == "high" else 70
-        return [{
-            "source": "voice_memory",
-            "title": top.get("title") or "Hermes Voice Memory",
-            "content": answer[:900],
-            "timestamp": top.get("timestamp") or "",
-            "score": score,
-            "metadata": {
-                "provenance": "hermes_voice_memory",
-                "path": data.get("path"),
-                "confidence": confidence,
-                "latency_ms": data.get("latency_ms"),
-                "source_ref": top.get("source_ref"),
-                "channel": top.get("channel"),
-            },
-        }]
+        return [
+            {
+                "source": "voice_memory",
+                "title": top.get("title") or "Hermes Voice Memory",
+                "content": answer[:900],
+                "timestamp": top.get("timestamp") or "",
+                "score": score,
+                "metadata": {
+                    "provenance": "hermes_voice_memory",
+                    "path": data.get("path"),
+                    "confidence": confidence,
+                    "latency_ms": data.get("latency_ms"),
+                    "source_ref": top.get("source_ref"),
+                    "channel": top.get("channel"),
+                },
+            }
+        ]
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-MEMORY] lookup error: {e}")
         return []
@@ -2086,36 +2276,36 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
     for score, _started_sort, event, title, content in matches[:limit]:
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
         structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
-        results.append({
-            "source": "omi",
-            "title": title,
-            "content": content[:1400],
-            "timestamp": _canonical_event_timestamp(event),
-            "score": score + (55 if window_start else 45),
-            "metadata": {
-                "provenance": "canonical_event",
-                "fallback": False,
-                "event_id": event.get("event_id"),
-                "source_identity": event.get("source_identity"),
-                "channel": event.get("channel"),
-                "provider": event.get("provider"),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "time_window_applied": bool(window_start and window_end),
-                "time_window_start_utc": window_start.isoformat() if window_start else "",
-                "time_window_end_utc": window_end.isoformat() if window_end else "",
-                "timestamp_timezone": "America/Los_Angeles",
-            },
-        })
+        results.append(
+            {
+                "source": "omi",
+                "title": title,
+                "content": content[:1400],
+                "timestamp": _canonical_event_timestamp(event),
+                "score": score + (55 if window_start else 45),
+                "metadata": {
+                    "provenance": "canonical_event",
+                    "fallback": False,
+                    "event_id": event.get("event_id"),
+                    "source_identity": event.get("source_identity"),
+                    "channel": event.get("channel"),
+                    "provider": event.get("provider"),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "time_window_applied": bool(window_start and window_end),
+                    "time_window_start_utc": window_start.isoformat() if window_start else "",
+                    "time_window_end_utc": window_end.isoformat() if window_end else "",
+                    "timestamp_timezone": "America/Los_Angeles",
+                },
+            }
+        )
     return results
 
 
 async def _search_omi_canonical_first(uid: str, query: str, limit: int, full_access: bool) -> list:
     canonical_results = await _search_canonical_omi_events(uid, query, limit, full_access)
     if canonical_results:
-        logger.info(
-            f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}"
-        )
+        logger.info(f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}")
         return canonical_results
 
     logger.warning(
@@ -2201,10 +2391,29 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             keyword_terms = [t for t in query_lower.replace("last month", "").split() if t]
         else:
             month_names = {
-                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
-                "nov": 11, "november": 11, "dec": 12, "december": 12,
+                "jan": 1,
+                "january": 1,
+                "feb": 2,
+                "february": 2,
+                "mar": 3,
+                "march": 3,
+                "apr": 4,
+                "april": 4,
+                "may": 5,
+                "jun": 6,
+                "june": 6,
+                "jul": 7,
+                "july": 7,
+                "aug": 8,
+                "august": 8,
+                "sep": 9,
+                "september": 9,
+                "oct": 10,
+                "october": 10,
+                "nov": 11,
+                "november": 11,
+                "dec": 12,
+                "december": 12,
             }
             date_match = _re.search(
                 r"(january|february|march|april|may|june|july|august|september|october|"
@@ -2238,7 +2447,9 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
         # --- Firestore query ---
         if date_filter_start and date_filter_end:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .where("created_at", ">=", date_filter_start)
                 .where("created_at", "<=", date_filter_end)
                 .order_by("created_at", direction=_fs.Query.DESCENDING)
@@ -2246,7 +2457,9 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             )
         else:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .order_by("created_at", direction=_fs.Query.DESCENDING)
                 .limit(100)
             )
@@ -2315,21 +2528,23 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                         + snippet
                     )[:1400]
 
-            results.append({
-                "source": "omi",
-                "title": structured.get("title", "Untitled"),
-                "content": overview_text,
-                "timestamp": ts,
-                "score": score + 18,
-                "metadata": {
-                    "provenance": "firestore_legacy_omi",
-                    "fallback": True,
-                    "emoji": structured.get("emoji", ""),
-                    "category": structured.get("category", ""),
-                    "has_transcript_detail": bool(transcript_text and full_access),
-                    "timestamp_timezone": "America/Los_Angeles",
-                },
-            })
+            results.append(
+                {
+                    "source": "omi",
+                    "title": structured.get("title", "Untitled"),
+                    "content": overview_text,
+                    "timestamp": ts,
+                    "score": score + 18,
+                    "metadata": {
+                        "provenance": "firestore_legacy_omi",
+                        "fallback": True,
+                        "emoji": structured.get("emoji", ""),
+                        "category": structured.get("category", ""),
+                        "has_transcript_detail": bool(transcript_text and full_access),
+                        "timestamp_timezone": "America/Los_Angeles",
+                    },
+                }
+            )
 
         return results
 
@@ -2352,7 +2567,9 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
 
         # Fetch recent memories sorted by scoring (same pattern as database/memories.py)
         memories_ref = (
-            db.collection("users").document(uid).collection("memories")
+            db.collection("users")
+            .document(uid)
+            .collection("memories")
             .order_by("scoring", direction=_fs.Query.DESCENDING)
             .order_by("created_at", direction=_fs.Query.DESCENDING)
             .limit(100)
@@ -2387,17 +2604,19 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
                     ts = str(created)[:16]
 
             display_content = mem.get("structured_memory", "") or mem.get("content", "")
-            results.append({
-                "source": "memories",
-                "title": (mem.get("category", "") or "Memory").title(),
-                "content": (display_content or "")[:500],
-                "timestamp": ts,
-                "score": score,
-                "metadata": {
-                    "category": mem.get("category", ""),
-                    "id": mem.get("id", ""),
-                },
-            })
+            results.append(
+                {
+                    "source": "memories",
+                    "title": (mem.get("category", "") or "Memory").title(),
+                    "content": (display_content or "")[:500],
+                    "timestamp": ts,
+                    "score": score,
+                    "metadata": {
+                        "category": mem.get("category", ""),
+                        "id": mem.get("id", ""),
+                    },
+                }
+            )
 
         return results
 
@@ -2560,19 +2779,24 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
                     ts = row["created_at"].strftime("%Y-%m-%d %I:%M %p")
 
                 display_content = result_data.get("summary", row["transcript_preview"] or "")
-                matches.append((score, {
-                    "source": "scanner",
-                    "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
-                    "content": (display_content or "")[:500],
-                    "timestamp": ts,
-                    "score": score,
-                    "metadata": {
-                        "category": row["category"] or "",
-                        "urgency": row["urgency"] or "",
-                        "escalated": row["escalated"],
-                        "id": str(row["id"]),
-                    },
-                }))
+                matches.append(
+                    (
+                        score,
+                        {
+                            "source": "scanner",
+                            "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
+                            "content": (display_content or "")[:500],
+                            "timestamp": ts,
+                            "score": score,
+                            "metadata": {
+                                "category": row["category"] or "",
+                                "urgency": row["urgency"] or "",
+                                "escalated": row["escalated"],
+                                "id": str(row["id"]),
+                            },
+                        },
+                    )
+                )
 
         matches.sort(key=lambda x: x[0], reverse=True)
         return [m[1] for m in matches[:limit]]
