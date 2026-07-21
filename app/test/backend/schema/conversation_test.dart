@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/structured.dart';
 
 void main() {
   group('ServerConversation internal assessment', () {
@@ -71,7 +72,30 @@ void main() {
     expect(conversation.status, ConversationStatus.failed);
     expect(conversation.processingError, 'conversation_summary_failed');
     expect(conversation.processingErrorAt, isNotNull);
+    expect(conversation.isRetryableSummaryFailure, isTrue);
     expect(conversation.toJson()['processing_error'], 'conversation_summary_failed');
     expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
+  });
+
+  test('treats initial and recovery summary failures as retryable without exposing unrelated errors', () {
+    for (final error in ['conversation_summary_failed', 'conversation_summary_recovery_failed']) {
+      final conversation = ServerConversation(
+        id: error,
+        createdAt: DateTime.utc(2026, 7, 20),
+        structured: Structured('', ''),
+        status: ConversationStatus.failed,
+        processingError: error,
+      );
+      expect(conversation.isRetryableSummaryFailure, isTrue);
+    }
+
+    final unrelatedFailure = ServerConversation(
+      id: 'unrelated',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('', ''),
+      status: ConversationStatus.failed,
+      processingError: 'provider.invalid_api_key',
+    );
+    expect(unrelatedFailure.isRetryableSummaryFailure, isFalse);
   });
 }

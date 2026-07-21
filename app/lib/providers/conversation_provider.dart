@@ -22,9 +22,13 @@ typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResu
 typedef ConversationByIdCall = Future<ServerConversation?> Function(String conversationId);
 
 class _ProcessingRetryPoll {
+  final String requestId;
+  final String? correctionText;
   int attempts = 0;
   Timer? timer;
   bool cancelled = false;
+
+  _ProcessingRetryPoll({required this.requestId, this.correctionText});
 
   void cancel() {
     cancelled = true;
@@ -478,10 +482,13 @@ class ConversationProvider extends ChangeNotifier {
     retryingConversationIds.add(conversationId);
     notifyListeners();
 
+    final requestId = const Uuid().v4();
+    final trimmedCorrection = correctionText?.trim();
+    final normalizedCorrection = trimmedCorrection?.isNotEmpty == true ? trimmedCorrection : null;
     final result = await _retryConversationProcessing(
       conversationId,
-      const Uuid().v4(),
-      correctionText: correctionText,
+      requestId,
+      correctionText: normalizedCorrection,
     );
     if (result == null) {
       retryingConversationIds.remove(conversationId);
@@ -491,7 +498,11 @@ class ConversationProvider extends ChangeNotifier {
 
     _applyProcessingRetryState(result.conversation);
     if (result.conversation.status == ConversationStatus.processing) {
-      _startProcessingRetryPoll(conversationId);
+      _startProcessingRetryPoll(
+        conversationId,
+        requestId: requestId,
+        correctionText: normalizedCorrection,
+      );
     }
     return true;
   }
@@ -512,10 +523,18 @@ class ConversationProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _startProcessingRetryPoll(String conversationId) {
+  void _startProcessingRetryPoll(
+    String conversationId, {
+    required String requestId,
+    String? correctionText,
+  }) {
     _cancelProcessingRetryPoll(conversationId);
-    final poll = _ProcessingRetryPoll();
+    final poll = _ProcessingRetryPoll(requestId: requestId, correctionText: correctionText);
     _processingRetryPolls[conversationId] = poll;
+    Logger.debug(
+      'Starting conversation processing retry poll request=${poll.requestId} '
+      'has_context=${poll.correctionText?.isNotEmpty == true}',
+    );
     _scheduleProcessingRetryPoll(conversationId, poll);
   }
 
@@ -727,7 +746,7 @@ class ConversationProvider extends ChangeNotifier {
       final bDate = b.processingErrorAt ?? b.finishedAt ?? b.createdAt;
       return bDate.compareTo(aDate);
     });
-    return failed.where((conversation) => conversation.processingError == 'conversation_summary_failed').toList();
+    return failed.where((conversation) => conversation.isRetryableSummaryFailure).toList();
   }
 
   void updateActionItemState(String convoId, bool state, int i, DateTime date) {

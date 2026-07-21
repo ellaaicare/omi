@@ -200,6 +200,11 @@ class ServerConversation {
   final bool deleted;
   final bool isLocked;
   bool starred;
+
+  bool get isRetryableSummaryFailure =>
+      status == ConversationStatus.failed &&
+      (processingError == 'conversation_summary_failed' || processingError == 'conversation_summary_recovery_failed');
+
   String? folderId;
 
   // local label
