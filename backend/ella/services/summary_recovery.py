@@ -305,6 +305,7 @@ async def apply_summary_update(
     correction_id: Optional[str] = None,
     require_canonical: bool = False,
     require_based_on_match: bool = False,
+    preserve_generated_results: bool = False,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
@@ -323,6 +324,7 @@ async def apply_summary_update(
         ella_signal=summary.get('ella_signal') or {},
         require_canonical=require_canonical,
         require_based_on_match=require_based_on_match,
+        preserve_generated_results=preserve_generated_results,
     )
 
 
@@ -431,6 +433,7 @@ async def invoke_hermes_recovery(
         summary_kind='recovered_enriched',
         require_canonical=True,
         require_based_on_match=True,
+        preserve_generated_results=True,
     )
     version_id = apply_result.get('active_summary_version_id')
     if not version_id or apply_result.get('canonical_confirmed') is not True:

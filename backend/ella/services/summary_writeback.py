@@ -50,6 +50,7 @@ async def write_conversation_summary(
     canonical_writer: Callable[..., dict] = write_omi_canonical_event,
     require_canonical: bool = False,
     require_based_on_match: bool = False,
+    preserve_generated_results: bool = False,
 ) -> dict[str, Any]:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
@@ -122,8 +123,9 @@ async def write_conversation_summary(
         update_data['structured.title'] = sanitized.title
     if sanitized.overview is not None:
         update_data['structured.overview'] = sanitized.overview
-        update_data['apps_results'] = []
-        update_data['plugins_results'] = []
+        if not preserve_generated_results:
+            update_data['apps_results'] = []
+            update_data['plugins_results'] = []
     if sanitized.emoji is not None:
         update_data['structured.emoji'] = sanitized.emoji
     if sanitized.category is not None:
