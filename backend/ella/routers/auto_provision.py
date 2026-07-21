@@ -32,7 +32,6 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 def _slugify(s: str) -> str:
     """Create a safe ID slug from a string."""
     import re
-
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')[:40]
 
 
@@ -82,7 +81,9 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
 
         # A cluster without userAgentId is incomplete — treat as missing
         if not agents.get("userAgentId"):
-            logger.warning(f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision")
+            logger.warning(
+                f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision"
+            )
             return None
 
         return {
@@ -276,7 +277,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
             "provisionedAt": provision_result.get("provisionedAt")
-            or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
         for field, fallback in [
             ("userAgentId", f"ella-{openclaw_user_id}"),
@@ -285,7 +286,9 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             ("summarizerAgentId", "summarizer"),
         ]:
             cluster_agents_dict[field] = provision_result.get(field) or fallback
-        cluster_agents_dict["gatewayToken"] = provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
+        cluster_agents_dict["gatewayToken"] = (
+            provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
+        )
         cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:
