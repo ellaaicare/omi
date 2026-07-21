@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import asyncpg
@@ -155,6 +157,58 @@ class EllaProvisioningRepository:
             uid,
         )
         return _row_dict(row)
+
+    async def ensure_omi_user_document(
+        self,
+        *,
+        uid: str,
+        email: str,
+        name: str,
+        timezone_name: str,
+    ) -> bool:
+        """Create the upstream OMI identity without granting data permissions."""
+
+        def _ensure() -> bool:
+            from database._client import db
+
+            user_ref = db.collection("users").document(uid)
+            snapshot = user_ref.get()
+            if snapshot.exists:
+                data = snapshot.to_dict() or {}
+                missing_defaults = {
+                    key: value
+                    for key, value in {
+                        "uid": uid,
+                        "email": email,
+                        "name": name,
+                        "time_zone": timezone_name,
+                        "private_cloud_sync_enabled": False,
+                        "store_recording_permission": False,
+                    }.items()
+                    if key not in data
+                }
+                if missing_defaults:
+                    missing_defaults["updated_at"] = datetime.now(timezone.utc)
+                    user_ref.set(missing_defaults, merge=True)
+                    return True
+                return False
+            now = datetime.now(timezone.utc)
+            user_ref.set(
+                {
+                    "uid": uid,
+                    "email": email,
+                    "name": name,
+                    "time_zone": timezone_name,
+                    "created_at": now,
+                    "updated_at": now,
+                    "private_cloud_sync_enabled": False,
+                    "store_recording_permission": False,
+                },
+                merge=False,
+            )
+            return True
+
+        return await asyncio.to_thread(_ensure)
 
     async def acquire_job(
         self,
@@ -369,7 +423,27 @@ class EllaProvisioningRepository:
                     """,
                     selected["id"],
                 )
+                await connection.execute(
+                    """
+                    UPDATE users
+                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    """,
+                    selected["user_id"],
+                )
                 return dict(activated)
+
+    async def activate_user(self, uid: str) -> None:
+        result = await self.pool.execute(
+            """
+            UPDATE users
+            SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+            WHERE omi_uid = $1
+            """,
+            uid,
+        )
+        if result == "UPDATE 0":
+            raise LookupError("user_not_found")
 
     async def resolve_active_runtime(self, uid: str, role: str = "user") -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(

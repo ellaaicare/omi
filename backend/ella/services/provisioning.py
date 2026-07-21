@@ -283,8 +283,27 @@ class ProvisioningCoordinator:
             client_request_id=client_request_id,
             request_payload_hash=stable_payload_hash(request_payload),
         )
+        try:
+            await self.repository.ensure_omi_user_document(
+                uid=identity.uid,
+                email=identity.email,
+                name=identity.name,
+                timezone_name=identity.timezone,
+            )
+        except Exception:
+            logger.exception("OMI identity initialization failed for uid=%s", identity.uid)
+            job = await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="degraded",
+                stage="identity_ready",
+                retryable=True,
+                error_code="omi_identity_unavailable",
+            )
+            return job, None, False
         binding = await self.repository.resolve_active_runtime(identity.uid)
         if binding:
+            if str(binding.get("user_status") or "") != "ACTIVE":
+                await self.repository.activate_user(identity.uid)
             if job.get("state") != "ready":
                 job = await self.repository.update_job(
                     job_id=str(job["id"]),

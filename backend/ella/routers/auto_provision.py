@@ -146,6 +146,29 @@ async def ensure_firestore_user_document(uid: str) -> bool:
         return False
 
 
+async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> dict:
+    """Fail closed before listen; never provision OpenClaw in isolated mode."""
+    from ella.services.provisioning import ProvisioningError
+    from ella.services.runtime_resolver import resolve_isolated_runtime
+
+    try:
+        runtime = await resolve_isolated_runtime(uid)
+        if runtime is None:
+            return {"success": False, "error": "runtime_bindings_disabled"}
+        if omi_user_exists is None:
+            from database import users as user_db
+
+            omi_user_exists = user_db.is_exists_user
+        if not omi_user_exists(uid):
+            return {"success": False, "error": "omi_identity_unavailable"}
+        return {"success": True, "provider": "hermes"}
+    except ProvisioningError as exc:
+        return {"success": False, "error": exc.code}
+    except Exception:
+        logger.exception("Isolated listen runtime validation failed for uid=%s", uid)
+        return {"success": False, "error": "runtime_validation_failed"}
+
+
 async def auto_provision_user(uid: str, name: str = "User") -> dict:
     """Auto-provision a user: call Mac Mini API + store agent IDs in DB.
 

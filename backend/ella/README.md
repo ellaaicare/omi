@@ -262,9 +262,11 @@ print('Adapters:', list(get_all_adapters().keys()))
 New-user Hermes provisioning is disabled by default and has two separate rollout controls:
 
 - `ELLA_HERMES_PROVISIONING_ENABLED` allows authenticated, idempotent `/v1/ella/onboarding/ensure` jobs to call the Hermes-only 8210 provisioner.
-- `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, and voice require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never fall back to OpenClaw or a shared Plato profile.
+- `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, voice, and `/v4/listen` require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never create/fall back to OpenClaw or a shared Plato profile.
 
 Apply the `ella_provisioning_jobs` and `ella_runtime_bindings` database migration before enabling either flag. Enable provisioning first for synthetic users; enable runtime dispatch only after distinct profile, workspace, gateway, Honcho, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
+
+The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Missing cloud-sync and raw-recording permissions are initialized to `false`; iOS must enable the appropriate setting only after the account-bound consent flow completes.
 
 Upstream-managed patch points are tracked in `docs/POST_MERGE_PATCHES.md`. Review that file after every Basehardware upstream sync.
 

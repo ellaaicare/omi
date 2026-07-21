@@ -2522,25 +2522,50 @@ async def listen_handler(
     onboarding_mode = onboarding == 'enabled'
     speaker_auto_assign_enabled = speaker_auto_assign == 'enabled'
 
-    # Ella sidecar: auto-provision check
+    # Ella sidecar: require isolated Hermes when the runtime cutover flag is on.
+    isolated_runtime_cutover = os.getenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     try:
-        from ella.routers.auto_provision import (
-            auto_provision_user,
-            ensure_firestore_user_document,
-            get_agent_cluster,
-        )
+        from ella.services.runtime_resolver import runtime_bindings_enabled
 
-        await ensure_firestore_user_document(uid)
-        cluster = await get_agent_cluster(uid)
-        if not cluster:
-            logger = logging.getLogger(__name__)
-            logger.info(f"No agent cluster for uid={uid}, auto-provisioning...")
-            result = await auto_provision_user(uid)
+        isolated_runtime_cutover = runtime_bindings_enabled()
+        if isolated_runtime_cutover:
+            from ella.routers.auto_provision import validate_isolated_listen_runtime
+
+            result = await validate_isolated_listen_runtime(uid, user_db.is_exists_user)
             if not result.get("success"):
-                logger.warning(f"Auto-provision failed: {result.get('error')}")
+                logging.getLogger(__name__).warning(
+                    "Isolated Ella listen setup incomplete for uid=%s code=%s",
+                    uid,
+                    result.get("error"),
+                )
+                await websocket.close(code=1013, reason="Ella setup incomplete")
+                return
+        else:
+            from ella.routers.auto_provision import (
+                auto_provision_user,
+                ensure_firestore_user_document,
+                get_agent_cluster,
+            )
+
+            await ensure_firestore_user_document(uid)
+            cluster = await get_agent_cluster(uid)
+            if not cluster:
+                logger = logging.getLogger(__name__)
+                logger.info(f"No agent cluster for uid={uid}, auto-provisioning...")
+                result = await auto_provision_user(uid)
+                if not result.get("success"):
+                    logger.warning(f"Auto-provision failed: {result.get('error')}")
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Auto-provision check error: {e}")
+        if isolated_runtime_cutover:
+            await websocket.close(code=1013, reason="Ella setup incomplete")
+            return
 
     await _listen(
         websocket,

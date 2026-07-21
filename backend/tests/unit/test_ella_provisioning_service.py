@@ -1,5 +1,7 @@
 import asyncio
+import sys
 import uuid
+from types import ModuleType
 
 import pytest
 
@@ -57,11 +59,14 @@ def _runtime_receipt(profile_name="omi-user-a"):
 
 
 class FakeRepository:
-    def __init__(self, *, binding=None):
+    def __init__(self, *, binding=None, omi_identity_error=None):
         self.job = _job()
         self.binding = binding
+        self.omi_identity_error = omi_identity_error
         self.staged = None
         self.identity_calls = []
+        self.omi_identity_calls = []
+        self.user_active = False
 
     async def ensure_user_identity(self, **kwargs):
         self.identity_calls.append(kwargs)
@@ -69,6 +74,12 @@ class FakeRepository:
 
     async def acquire_job(self, **kwargs):
         return dict(self.job)
+
+    async def ensure_omi_user_document(self, **kwargs):
+        if self.omi_identity_error:
+            raise self.omi_identity_error
+        self.omi_identity_calls.append(kwargs)
+        return True
 
     async def resolve_active_runtime(self, uid):
         return self.binding
@@ -94,7 +105,11 @@ class FakeRepository:
 
     async def activate_runtime_binding(self, *, uid, provider):
         self.binding = dict(self.staged, active=True, revision=2)
+        self.user_active = True
         return self.binding
+
+    async def activate_user(self, uid):
+        self.user_active = True
 
 
 class FakeProvisionClient:
@@ -107,9 +122,62 @@ class FakeProvisionClient:
         return self.result
 
 
+class _FakeDocument:
+    def __init__(self, *, exists, data=None):
+        self.exists = exists
+        self.data = data or {}
+        self.writes = []
+
+    def get(self):
+        return self
+
+    def to_dict(self):
+        return dict(self.data)
+
+    def set(self, payload, *, merge):
+        self.writes.append((payload, merge))
+
+
+class _FakeFirestore:
+    def __init__(self, document):
+        self.document_ref = document
+
+    def collection(self, name):
+        assert name == "users"
+        return self
+
+    def document(self, _uid):
+        return self.document_ref
+
+
 def test_payload_hash_is_stable_and_sensitive_to_values():
     assert stable_payload_hash({"b": 2, "a": 1}) == stable_payload_hash({"a": 1, "b": 2})
     assert stable_payload_hash({"a": 1}) != stable_payload_hash({"a": 2})
+
+
+def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission(monkeypatch):
+    from database.ella_provisioning import EllaProvisioningRepository
+
+    document = _FakeDocument(exists=True, data={"onboarding": {"completed": True}})
+    client_module = ModuleType("database._client")
+    client_module.db = _FakeFirestore(document)
+    monkeypatch.setitem(sys.modules, "database._client", client_module)
+    repository = EllaProvisioningRepository(pool=None)
+
+    changed = asyncio.run(
+        repository.ensure_omi_user_document(
+            uid="user-a",
+            email="a@example.com",
+            name="A",
+            timezone_name="America/Los_Angeles",
+        )
+    )
+
+    assert changed is True
+    payload, merge = document.writes[0]
+    assert merge is True
+    assert payload["private_cloud_sync_enabled"] is False
+    assert payload["store_recording_permission"] is False
 
 
 def test_public_receipt_does_not_expose_runtime_secrets():
@@ -220,6 +288,51 @@ def test_disabled_provisioning_stays_retryable_and_can_resume(monkeypatch):
     assert claimed is True
 
 
+def test_omi_identity_failure_is_durable_and_does_not_call_hermes(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    repository = FakeRepository(omi_identity_error=RuntimeError("firestore unavailable"))
+    client = FakeProvisionClient(_runtime_receipt())
+    coordinator = ProvisioningCoordinator(repository, client)
+    identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
+
+    job, binding, claimed = asyncio.run(
+        coordinator.ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-a",
+            request_payload={"client": "ios"},
+        )
+    )
+
+    assert (job["state"], job["error_code"], binding, claimed) == (
+        "degraded",
+        "omi_identity_unavailable",
+        None,
+        False,
+    )
+    assert client.calls == []
+
+
+def test_existing_binding_reconciles_pending_user_to_active(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    binding = {"revision": 4, "user_status": "PENDING", "active": True}
+    repository = FakeRepository(binding=binding)
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+    identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
+
+    job, resolved, claimed = asyncio.run(
+        coordinator.ensure_job(
+            identity=identity,
+            target_schema_version="hermes-user-v1",
+            client_request_id="request-a",
+            request_payload={"client": "ios"},
+        )
+    )
+
+    assert (job["state"], resolved, claimed) == ("ready", binding, False)
+    assert repository.user_active is True
+
+
 def test_successful_provision_stages_then_activates_binding(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
     repository = FakeRepository()
@@ -241,6 +354,15 @@ def test_successful_provision_stages_then_activates_binding(monkeypatch):
     assert repository.job["state"] == "ready"
     assert repository.binding["active"] is True
     assert repository.binding["provider"] == "hermes"
+    assert repository.user_active is True
+    assert repository.omi_identity_calls == [
+        {
+            "uid": "user-a",
+            "email": "a@example.com",
+            "name": "A",
+            "timezone_name": "America/Los_Angeles",
+        }
+    ]
     assert client.calls == [(identity, "hermes-user-v1")]
 
 
