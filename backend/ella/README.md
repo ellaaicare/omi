@@ -262,6 +262,7 @@ print('Adapters:', list(get_all_adapters().keys()))
 New-user Hermes provisioning is disabled by default and has two separate rollout controls:
 
 - `ELLA_HERMES_PROVISIONING_ENABLED` allows authenticated, idempotent `/v1/ella/onboarding/ensure` jobs to call the Hermes-only 8210 provisioner.
+- `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` bounds the cold-start request to 30-300 seconds and defaults to 180 seconds.
 - `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, voice, and `/v4/listen` require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never create/fall back to OpenClaw or a shared Plato profile.
 - `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. Until the voice proxy sends authenticated, UID-bound Hermes context/tool requests and removes its OpenClaw fallback, isolated users receive `isolated_voice_not_ready` instead of a V2V session.
 
