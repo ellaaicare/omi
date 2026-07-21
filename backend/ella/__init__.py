@@ -365,6 +365,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
 
+    # Hermes-first agent/provider/model settings used by Developer Settings
+    try:
+        from ella.routers.agent_config import router as agent_config_router
+
+        app.include_router(agent_config_router, tags=["Ella Agent Config"])
+        print("  🌐 /v1/ella/agent-config - Hermes agent model config", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella agent config not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
