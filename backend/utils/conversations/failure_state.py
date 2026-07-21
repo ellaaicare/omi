@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from models.conversation import Conversation, ConversationStatus
 
 CONVERSATION_SUMMARY_FAILED = "conversation_summary_failed"
+CONVERSATION_PROCESSING_FAILED = "conversation_processing_failed"
 
 
 def apply_conversation_processing_failed(

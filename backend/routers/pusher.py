@@ -20,7 +20,10 @@ from utils.app_integrations import (
     trigger_external_integrations,
 )
 from utils.conversations.location import get_google_maps_location
-from utils.conversations.process_conversation import mark_conversation_processing_failed, process_conversation
+from utils.conversations.process_conversation import (
+    mark_unexpected_conversation_processing_failed,
+    process_conversation,
+)
 from utils.webhooks import (
     send_audio_bytes_developer_webhook,
     realtime_transcript_webhook,
@@ -83,7 +86,7 @@ async def _process_conversation_task(uid: str, conversation_id: str, language: s
             conversation = await asyncio.to_thread(process_conversation, uid, language, conversation)
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, conversation_id)
-            await asyncio.to_thread(mark_conversation_processing_failed, uid, conversation)
+            await asyncio.to_thread(mark_unexpected_conversation_processing_failed, uid, conversation)
             messages = []
         else:
             try:
@@ -322,7 +325,7 @@ async def _websocket_util_trigger(
                     res = json.loads(bytes(data[4:]).decode("utf-8"))
                     segments = res.get('segments')
                     memory_id = res.get('memory_id')
-                    
+
                     # DEBUG: Log received transcript segments
                     print(f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}")
                     if segments and len(segments) > 0:
@@ -330,7 +333,7 @@ async def _websocket_util_trigger(
                         first_seg = segments[0]
                         text_preview = first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
                         print(f"[TRANSCRIPT-DEBUG] First segment preview: {text_preview}")
-                    
+
                     # Update conversation_id from transcript if provided
                     if memory_id:
                         current_conversation_id = memory_id

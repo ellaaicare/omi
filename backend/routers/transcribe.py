@@ -67,7 +67,7 @@ from utils.app_integrations import trigger_external_integrations, trigger_realti
 from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
 from utils.conversations.process_conversation import (
-    mark_conversation_processing_failed,
+    mark_unexpected_conversation_processing_failed,
     process_conversation,
     retrieve_in_progress_conversation,
 )
@@ -649,7 +649,7 @@ async def _stream_handler(
             conversation = process_conversation(uid, language, conversation)
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
-            mark_conversation_processing_failed(uid, conversation)
+            mark_unexpected_conversation_processing_failed(uid, conversation)
             messages = []
         else:
             try:

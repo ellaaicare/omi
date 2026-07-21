@@ -77,6 +77,7 @@ from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
 from utils.conversations.failure_state import (
+    CONVERSATION_PROCESSING_FAILED,
     apply_conversation_processing_failed,
     clear_conversation_processing_error,
 )
@@ -238,6 +239,13 @@ def mark_conversation_processing_failed(
 ):
     apply_conversation_processing_failed(conversation, error_code=error_code)
     conversations_db.upsert_conversation(uid, conversation.dict())
+
+
+def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conversation) -> bool:
+    if conversation.status == ConversationStatus.failed and conversation.processing_error:
+        return False
+    mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+    return True
 
 
 # Function to get conversation summary apps from Redis

@@ -145,6 +145,7 @@ except Exception:
 
 from utils.conversations import process_conversation as conversation_processor
 from utils.conversations.failure_state import (
+    CONVERSATION_PROCESSING_FAILED,
     CONVERSATION_SUMMARY_FAILED,
     apply_conversation_processing_failed,
     clear_conversation_processing_error,
@@ -221,6 +222,30 @@ def test_process_conversation_provider_failure_persists_retryable_payload(monkey
     assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
     assert payload["processing_error_at"] is not None
     assert len(payload["transcript_segments"][0]["text"]) > 25_000
+
+    failed_at = conversation.processing_error_at
+    persisted = conversation_processor.mark_unexpected_conversation_processing_failed("uid-1", conversation)
+
+    assert persisted is False
+    assert len(writes) == 1
+    assert conversation.processing_error_at == failed_at
+
+
+def test_unexpected_non_summary_failure_uses_distinct_processing_error(monkeypatch):
+    conversation = _long_conversation()
+    writes = []
+    monkeypatch.setattr(
+        conversation_processor.conversations_db,
+        "upsert_conversation",
+        lambda uid, payload: writes.append((uid, payload)),
+    )
+
+    persisted = conversation_processor.mark_unexpected_conversation_processing_failed("uid-1", conversation)
+
+    assert persisted is True
+    assert len(writes) == 1
+    assert writes[0][1]["status"] == ConversationStatus.failed
+    assert writes[0][1]["processing_error"] == CONVERSATION_PROCESSING_FAILED
 
 
 def test_process_conversation_intentional_discard_stays_completed_discarded(monkeypatch):
