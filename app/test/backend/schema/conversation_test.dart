@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/structured.dart';
 
 void main() {
   group('ServerConversation internal assessment', () {
@@ -46,5 +47,110 @@ void main() {
         'guardian_relevant': true,
       });
     });
+  });
+
+  test('parses and serializes retryable processing failure metadata', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'failed-conversation',
+      'created_at': '2026-07-20T08:00:00Z',
+      'structured': {
+        'title': '',
+        'overview': '',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'transcript_segments': [],
+      'apps_results': [],
+      'audio_files': [],
+      'status': 'failed',
+      'processing_error': 'conversation_summary_failed',
+      'processing_error_at': '2026-07-20T08:05:00Z',
+    });
+
+    expect(conversation.status, ConversationStatus.failed);
+    expect(conversation.processingError, 'conversation_summary_failed');
+    expect(conversation.processingErrorAt, isNotNull);
+    expect(conversation.isRetryableSummaryFailure, isTrue);
+    expect(conversation.toJson()['processing_error'], 'conversation_summary_failed');
+    expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
+  });
+
+  test('treats initial and recovery summary failures as retryable without exposing unrelated errors', () {
+    for (final error in ['conversation_summary_failed', 'conversation_summary_recovery_failed']) {
+      final conversation = ServerConversation(
+        id: error,
+        createdAt: DateTime.utc(2026, 7, 20),
+        structured: Structured('', ''),
+        status: ConversationStatus.failed,
+        processingError: error,
+      );
+      expect(conversation.isRetryableSummaryFailure, isTrue);
+    }
+
+    final unrelatedFailure = ServerConversation(
+      id: 'unrelated',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('', ''),
+      status: ConversationStatus.failed,
+      processingError: 'provider.invalid_api_key',
+    );
+    expect(unrelatedFailure.isRetryableSummaryFailure, isFalse);
+  });
+
+  test('keeps a completed generic summary retryable when contextual enrichment failed', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'generic-fallback',
+      'created_at': '2026-07-20T08:00:00Z',
+      'structured': {
+        'title': 'Generic title',
+        'overview': 'Usable generic summary',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'status': 'completed',
+      'enrichment_state': {
+        'status': 'failed',
+        'pending': true,
+        'error_code': 'conversation_summary_recovery_failed',
+      },
+    });
+
+    expect(conversation.isRetryableSummaryFailure, isFalse);
+    expect(conversation.isRetryableEnrichmentFailure, isTrue);
+    expect(conversation.structured.overview, 'Usable generic summary');
+    expect(conversation.toJson()['enrichment_state'], {
+      'status': 'failed',
+      'pending': true,
+      'error_code': 'conversation_summary_recovery_failed',
+    });
+  });
+
+  test('surfaces canonical and enriched-vector terminal failures without flagging active writes', () {
+    final canonicalFailure = ServerConversation(
+      id: 'canonical-failure',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Generic', 'Usable generic summary'),
+      enrichmentState: {'status': 'writeback_pending_canonical', 'canonical_status': 'failed', 'pending': true},
+    );
+    final vectorFailure = ServerConversation(
+      id: 'vector-failure',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Enriched', 'Usable enriched summary'),
+      processingRetryEnrichmentVectorStatus: 'failed',
+    );
+    final activeWrite = ServerConversation(
+      id: 'active-write',
+      createdAt: DateTime.utc(2026, 7, 20),
+      structured: Structured('Generic', 'Usable generic summary'),
+      enrichmentState: {'status': 'writeback_pending_canonical', 'pending': true},
+    );
+
+    expect(canonicalFailure.isRetryableEnrichmentFailure, isTrue);
+    expect(vectorFailure.isRetryableEnrichmentFailure, isTrue);
+    expect(activeWrite.isRetryableEnrichmentFailure, isFalse);
   });
 }
