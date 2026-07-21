@@ -361,6 +361,14 @@ def test_runtime_receipt_rejects_conflicting_smoke_evidence():
         extract_runtime_binding(receipt, "user-a")
 
 
+def test_runtime_receipt_rejects_conflicting_camel_case_health_smoke_evidence():
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"]["healthReceipt"]["smokePassed"] = False
+
+    with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
+        extract_runtime_binding(receipt, "user-a")
+
+
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
     binding = extract_runtime_binding(_runtime_receipt(), "user-a")

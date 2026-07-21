@@ -231,6 +231,7 @@ def extract_runtime_binding(
     for source, key in (
         (raw, "smokePassed"),
         (raw, "smoke_passed"),
+        (health_receipt, "smokePassed"),
         (health_receipt, "smoke_passed"),
     ):
         if key in source:

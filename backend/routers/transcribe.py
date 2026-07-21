@@ -100,9 +100,8 @@ from ella.routers.auto_provision import (
     auto_provision_user,
     ensure_firestore_user_document,
     get_agent_cluster,
-    validate_isolated_listen_runtime,
+    listen_runtime_gate,
 )
-from ella.services.runtime_resolver import runtime_bindings_enabled
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -2540,14 +2539,14 @@ async def listen_handler(
     # Ella sidecar: require isolated Hermes when the runtime cutover flag is on.
     isolated_runtime_cutover = False
     try:
-        isolated_runtime_cutover = runtime_bindings_enabled(uid)
+        runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+        isolated_runtime_cutover = runtime_gate.get("required", False)
         if isolated_runtime_cutover:
-            result = await validate_isolated_listen_runtime(uid, user_db.is_exists_user)
-            if not result.get("success"):
+            if not runtime_gate.get("success"):
                 logging.getLogger(__name__).warning(
                     "Isolated Ella listen setup incomplete for uid=%s code=%s",
                     uid,
-                    result.get("error"),
+                    runtime_gate.get("error"),
                 )
                 await websocket.close(code=1013, reason="Ella setup incomplete")
                 return
@@ -2634,6 +2633,23 @@ async def web_listen_handler(
         print(f"web_listen_handler: auth error {e}")
         await websocket.send_json({"type": "auth_response", "success": False})
         await websocket.close(code=1008, reason="Auth error")
+        return
+
+    runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)
+    if runtime_gate.get("required") and not runtime_gate.get("success"):
+        logging.getLogger(__name__).warning(
+            "Isolated Ella web listen setup incomplete for uid=%s code=%s",
+            uid,
+            runtime_gate.get("error"),
+        )
+        await websocket.send_json(
+            {
+                "type": "auth_response",
+                "success": False,
+                "error": "ella_setup_incomplete",
+            }
+        )
+        await websocket.close(code=1013, reason="Ella setup incomplete")
         return
 
     # Send success response

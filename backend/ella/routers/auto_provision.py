@@ -155,6 +155,15 @@ async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> di
         return {"success": False, "error": "runtime_validation_failed"}
 
 
+async def listen_runtime_gate(uid: str, omi_user_exists=None) -> dict:
+    """Apply the same isolated-runtime gate to every authenticated listen surface."""
+    required = runtime_resolver.runtime_bindings_enabled(uid)
+    if not required:
+        return {"required": False, "success": True}
+    result = await validate_isolated_listen_runtime(uid, omi_user_exists)
+    return {"required": True, **result}
+
+
 async def auto_provision_user(uid: str, name: str = "User") -> dict:
     """Auto-provision a user: call Mac Mini API + store agent IDs in DB.
 
