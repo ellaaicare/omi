@@ -748,6 +748,35 @@ def test_correction_session_key_matches_chat_memory_scope(monkeypatch):
     assert corrections._correction_session_key("abc123") == chat._hermes_chat_memory_key("abc123")
 
 
+def test_isolated_summary_config_uses_uid_runtime_and_removes_legacy_key(monkeypatch):
+    async def fake_runtime(uid):
+        assert uid == "user-a"
+        return SimpleNamespace(
+            gateway_url="http://100.76.138.56:8701",
+            gateway_token="isolated-secret",
+            agent_id="omi-user-a",
+        )
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", fake_runtime)
+    base = summary_recovery.SummaryProviderConfig(
+        provider="legacy",
+        hermes_url="http://shared.test/v1/chat/completions",
+        hermes_model="shared-plato",
+        hermes_api_key="shared-secret",
+        legacy_url="https://legacy.test/v1/chat/completions",
+        legacy_model="legacy-model",
+        legacy_api_key="legacy-secret",
+        timeout_seconds=45,
+    )
+
+    selected = asyncio.run(summary_recovery.summary_provider_config_for_uid("user-a", base))
+
+    assert selected.provider == "hermes-api"
+    assert selected.hermes_url == "http://100.76.138.56:8701/v1/chat/completions"
+    assert selected.hermes_model == "omi-user-a"
+    assert selected.hermes_api_key == "isolated-secret"
+    assert selected.legacy_api_key == ""
+
 def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
     calls = []
 

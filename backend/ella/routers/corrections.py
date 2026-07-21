@@ -32,6 +32,7 @@ from ella.services.summary_recovery import (
     generate_summary_from_prompt,
     normalize_summary,
     recover_failed_conversation_summary,
+    summary_provider_config_for_uid,
 )
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
@@ -360,14 +361,9 @@ async def _generate_corrected_summary(
         transcript=transcript,
         segment_count=segment_count,
     )
-    return await generate_summary_from_prompt(
-        prompt=prompt,
-        fallback=structured,
-        session_id=_correction_session_id(uid, conversation_id, correction_id),
-        session_key=_correction_session_key(uid),
-        trace_id=trace_id,
-        required_tags=("omi", "correction"),
-        config=SummaryProviderConfig(
+    config = await summary_provider_config_for_uid(
+        uid,
+        SummaryProviderConfig(
             provider=CORRECTION_PROVIDER,
             hermes_url=HERMES_CORRECTION_API_URL,
             hermes_model=HERMES_CORRECTION_MODEL,
@@ -377,6 +373,15 @@ async def _generate_corrected_summary(
             legacy_api_key=_legacy_correction_api_key(),
             timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
         ),
+    )
+    return await generate_summary_from_prompt(
+        prompt=prompt,
+        fallback=structured,
+        session_id=_correction_session_id(uid, conversation_id, correction_id),
+        session_key=_correction_session_key(uid),
+        trace_id=trace_id,
+        required_tags=("omi", "correction"),
+        config=config,
         async_client_factory=httpx.AsyncClient,
     )
 
