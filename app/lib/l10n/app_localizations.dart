@@ -16136,6 +16136,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ella summary'**
   String get ellaSummarySource;
+
+  /// Section and status label for a conversation whose summary failed
+  ///
+  /// In en, this message translates to:
+  /// **'Needs processing'**
+  String get conversationNeedsProcessing;
+
+  /// Reassurance shown for a failed conversation summary
+  ///
+  /// In en, this message translates to:
+  /// **'Your transcript is safe. Ask Ella to create its summary.'**
+  String get conversationNeedsProcessingDescription;
+
+  /// Action to ask Ella to rebuild a failed conversation summary
+  ///
+  /// In en, this message translates to:
+  /// **'Retry with Ella'**
+  String get retryWithElla;
+
+  /// Explanation shown before retrying a failed summary
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will rebuild the summary from your saved transcript. Add any context that could help.'**
+  String get retryWithEllaDescription;
+
+  /// Label for optional context supplied with a failed summary retry
+  ///
+  /// In en, this message translates to:
+  /// **'Additional context (optional)'**
+  String get retryWithEllaContextLabel;
+
+  /// Example context for a failed summary retry
+  ///
+  /// In en, this message translates to:
+  /// **'Example: This was a family conversation about our summer plans.'**
+  String get retryWithEllaContextHint;
+
+  /// Confirmation action for retrying a failed summary
+  ///
+  /// In en, this message translates to:
+  /// **'Retry now'**
+  String get retryNow;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

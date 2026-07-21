@@ -8652,4 +8652,26 @@ class AppLocalizationsLt extends AppLocalizations {
 
   @override
   String get ellaSummarySource => 'Ella summary';
+
+  @override
+  String get conversationNeedsProcessing => 'Needs processing';
+
+  @override
+  String get conversationNeedsProcessingDescription => 'Your transcript is safe. Ask Ella to create its summary.';
+
+  @override
+  String get retryWithElla => 'Retry with Ella';
+
+  @override
+  String get retryWithEllaDescription =>
+      'Ella will rebuild the summary from your saved transcript. Add any context that could help.';
+
+  @override
+  String get retryWithEllaContextLabel => 'Additional context (optional)';
+
+  @override
+  String get retryWithEllaContextHint => 'Example: This was a family conversation about our summer plans.';
+
+  @override
+  String get retryNow => 'Retry now';
 }

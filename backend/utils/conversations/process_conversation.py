@@ -23,7 +23,6 @@ import database.calendar_meetings as calendar_db
 from database.vector_db import find_similar_memories, upsert_memory_vector, delete_memory_vector
 from utils.llm.memories import resolve_memory_conflict
 from database.apps import record_app_usage, get_omi_personas_by_uid_db, get_app_by_id_db
-from database.vector_db import upsert_vector2, update_vector_metadata
 from models.app import App, UsageHistoryType
 from models.memories import MemoryDB, Memory
 from models.conversation import *
@@ -55,13 +54,9 @@ from utils.llm.external_integrations import summarize_experience_text
 from utils.llm.trends import trends_extractor
 from utils.llm.goals import extract_and_update_goal_progress
 from utils.llm.chat import (
-    retrieve_metadata_from_text,
-    retrieve_metadata_from_message,
-    retrieve_metadata_fields_from_transcript,
     obtain_emotional_message,
 )
 from utils.llm.external_integrations import get_message_structure
-from utils.llm.clients import generate_embedding
 from utils.notifications import send_notification
 from utils.other.hume import get_hume, HumeJobCallbackModel, HumeJobModelPredictionResponseModel
 from utils.retrieval.rag import retrieve_rag_conversation_context
@@ -76,6 +71,12 @@ except ImportError:
 from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
+from utils.conversations.failure_state import (
+    CONVERSATION_PROCESSING_FAILED,
+    apply_conversation_processing_failed,
+    clear_conversation_processing_error,
+)
+from utils.conversations.vector import save_structured_vector
 
 
 def _get_structured(
@@ -151,7 +152,10 @@ def _get_structured(
             )
 
         # Determine whether to discard the conversation based on its content (transcript and/or photos).
-        print(f"[FLOW:PROCESS] checking discard uid={uid} transcript_len={len(transcript_text) if transcript_text else 0}", flush=True)
+        print(
+            f"[FLOW:PROCESS] checking discard uid={uid} transcript_len={len(transcript_text) if transcript_text else 0}",
+            flush=True,
+        )
         discarded = should_discard_conversation(transcript_text, conversation.photos)
         if discarded:
             print(f"[FLOW:PROCESS] DISCARDED uid={uid}", flush=True)
@@ -181,8 +185,8 @@ def _get_conversation_obj(
     uid: str,
     structured: Structured,
     conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
+    discarded: bool,
 ):
-    discarded = structured.title == ''
     if isinstance(conversation, CreateConversation):
         conversation_dict = conversation.dict()
         # Store calendar context in external_data if available
@@ -225,6 +229,22 @@ def _get_conversation_obj(
         conversation.discarded = discarded
 
     return conversation
+
+
+def mark_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    error_code: str = "conversation_summary_failed",
+):
+    apply_conversation_processing_failed(conversation, error_code=error_code)
+    conversations_db.upsert_conversation(uid, conversation.dict())
+
+
+def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conversation) -> bool:
+    if conversation.status == ConversationStatus.failed and conversation.processing_error:
+        return False
+    mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+    return True
 
 
 # Function to get conversation summary apps from Redis
@@ -520,41 +540,6 @@ def _save_action_items(uid: str, conversation: Conversation):
         threading.Thread(target=_run_auto_sync, daemon=True).start()
 
 
-def save_structured_vector(uid: str, conversation: Conversation, update_only: bool = False):
-    vector = generate_embedding(str(conversation.structured)) if not update_only else None
-    tz = notification_db.get_user_time_zone(uid)
-
-    metadata = {}
-
-    # Extract metadata based on conversation source
-    if conversation.source == ConversationSource.external_integration:
-        text_source = conversation.external_data.get('text_source')
-        text_content = conversation.external_data.get('text')
-        if text_content and len(text_content) > 0 and text_content and len(text_content) > 0:
-            text_source_spec = conversation.external_data.get('text_source_spec')
-            if text_source == ExternalIntegrationConversationSource.message.value:
-                metadata = retrieve_metadata_from_message(
-                    uid, conversation.created_at, text_content, tz, text_source_spec
-                )
-            elif text_source == ExternalIntegrationConversationSource.other.value:
-                metadata = retrieve_metadata_from_text(uid, conversation.created_at, text_content, tz, text_source_spec)
-    else:
-        # For regular conversations with transcript segments
-        segments = [t.dict() for t in conversation.transcript_segments]
-        metadata = retrieve_metadata_fields_from_transcript(
-            uid, conversation.created_at, segments, tz, photos=conversation.photos
-        )
-
-    metadata['created_at'] = int(conversation.created_at.timestamp())
-
-    if not update_only:
-        print('save_structured_vector creating vector')
-        upsert_vector2(uid, conversation, vector, metadata)
-    else:
-        print('save_structured_vector updating metadata')
-        update_vector_metadata(uid, conversation.id, metadata)
-
-
 def _update_personas_async(uid: str):
     print(f"[PERSONAS] Starting persona updates in background thread for uid={uid}")
     personas = get_omi_personas_by_uid_db(uid)
@@ -597,8 +582,15 @@ def process_conversation(
         people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
         people = [Person(**p) for p in people_data]
 
-    structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
-    conversation = _get_conversation_obj(uid, structured, conversation)
+    try:
+        structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
+    except Exception:
+        if isinstance(conversation, Conversation):
+            mark_conversation_processing_failed(uid, conversation)
+        raise
+
+    conversation = _get_conversation_obj(uid, structured, conversation, discarded)
+    clear_conversation_processing_error(conversation)
 
     # AI-based folder assignment
     assigned_folder_id = None

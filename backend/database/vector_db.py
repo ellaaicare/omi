@@ -162,6 +162,32 @@ def fetch_existing_conversation_vector_ids(uid: str, conversation_ids: List[str]
         raise
 
 
+def fetch_conversation_vector_metadata(uid: str, conversation_id: str) -> Optional[dict]:
+    """Return metadata for one conversation vector, or None when it is absent."""
+    if index is None:
+        return None
+    vector_id = build_conversation_vector_id(uid, conversation_id)
+    try:
+        fetched = index.fetch(ids=[vector_id], namespace=CONVERSATIONS_NAMESPACE)
+        vectors = getattr(fetched, 'vectors', None)
+        if vectors is None and isinstance(fetched, dict):
+            vectors = fetched.get('vectors') or {}
+        vector = (vectors or {}).get(vector_id)
+        if vector is None:
+            return None
+        metadata = getattr(vector, 'metadata', None)
+        if metadata is None and isinstance(vector, dict):
+            metadata = vector.get('metadata')
+        return dict(metadata or {})
+    except Exception:
+        logger.exception(
+            'conversation_vector_metadata_fetch_failed uid=%s conversation_id=%s',
+            uid,
+            conversation_id,
+        )
+        raise
+
+
 def query_vectors_by_metadata(
     uid: str,
     vector: List[float],

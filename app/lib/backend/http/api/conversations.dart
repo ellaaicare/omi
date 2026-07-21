@@ -110,6 +110,81 @@ Future<ConversationsFetchResult> getConversationsResult({
   return ConversationsFetchResult.failure(statusCode: response.statusCode);
 }
 
+enum ConversationProcessingRetryOutcome { processing, completed, failed }
+
+enum ConversationProcessingRecoveryMode { none, full, enrichmentOnly }
+
+class ConversationProcessingRetryResult {
+  final ConversationProcessingRetryOutcome outcome;
+  final ConversationProcessingRecoveryMode recoveryMode;
+  final String? phase;
+  final String? genericStatus;
+  final String? genericVectorStatus;
+  final String? enrichmentStatus;
+  final String? vectorStatus;
+  final DateTime? leaseExpiresAt;
+  final int attemptCount;
+  final ServerConversation conversation;
+
+  const ConversationProcessingRetryResult({
+    required this.outcome,
+    this.recoveryMode = ConversationProcessingRecoveryMode.none,
+    this.phase,
+    this.genericStatus,
+    this.genericVectorStatus,
+    this.enrichmentStatus,
+    this.vectorStatus,
+    this.leaseExpiresAt,
+    this.attemptCount = 0,
+    required this.conversation,
+  });
+
+  bool get isTerminal =>
+      outcome == ConversationProcessingRetryOutcome.completed || outcome == ConversationProcessingRetryOutcome.failed;
+
+  factory ConversationProcessingRetryResult.fromJson(Map<String, dynamic> json) {
+    return ConversationProcessingRetryResult(
+      outcome: ConversationProcessingRetryOutcome.values.asNameMap()[json['outcome']] ??
+          ConversationProcessingRetryOutcome.failed,
+      recoveryMode: json['recovery_mode'] == 'enrichment_only'
+          ? ConversationProcessingRecoveryMode.enrichmentOnly
+          : ConversationProcessingRecoveryMode.values.asNameMap()[json['recovery_mode']] ??
+              ConversationProcessingRecoveryMode.none,
+      phase: json['phase'],
+      genericStatus: json['generic_status'],
+      genericVectorStatus: json['generic_vector_status'],
+      enrichmentStatus: json['enrichment_status'],
+      vectorStatus: json['vector_status'],
+      leaseExpiresAt: json['lease_expires_at'] != null ? DateTime.tryParse(json['lease_expires_at'])?.toLocal() : null,
+      attemptCount: (json['attempt_count'] as num?)?.toInt() ?? 0,
+      conversation: ServerConversation.fromJson(json['conversation']),
+    );
+  }
+}
+
+Future<ConversationProcessingRetryResult?> retryConversationProcessing(
+  String conversationId,
+  String requestId, {
+  String? correctionText,
+}) async {
+  final normalizedCorrection = correctionText?.trim();
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/conversations/$conversationId/processing-retries',
+    headers: {},
+    method: 'POST',
+    body: jsonEncode({
+      'request_id': requestId,
+      if (normalizedCorrection != null && normalizedCorrection.isNotEmpty) 'correction_text': normalizedCorrection,
+    }),
+  );
+  if (response == null) return null;
+  Logger.debug('retryConversationProcessing: ${response.statusCode}');
+  if (response.statusCode == 200 || response.statusCode == 202) {
+    return ConversationProcessingRetryResult.fromJson(jsonDecode(response.body));
+  }
+  return null;
+}
+
 Future<ServerConversation?> reProcessConversationServer(String conversationId, {String? appId}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',

@@ -10260,5 +10260,33 @@
   "ellaSummarySource": "Ella summary",
   "@ellaSummarySource": {
     "description": "Tooltip and accessibility label for Ella-generated summaries"
+  },
+  "conversationNeedsProcessing": "Needs processing",
+  "@conversationNeedsProcessing": {
+    "description": "Section and status label for a conversation whose summary failed"
+  },
+  "conversationNeedsProcessingDescription": "Your transcript is safe. Ask Ella to create its summary.",
+  "@conversationNeedsProcessingDescription": {
+    "description": "Reassurance shown for a failed conversation summary"
+  },
+  "retryWithElla": "Retry with Ella",
+  "@retryWithElla": {
+    "description": "Action to ask Ella to rebuild a failed conversation summary"
+  },
+  "retryWithEllaDescription": "Ella will rebuild the summary from your saved transcript. Add any context that could help.",
+  "@retryWithEllaDescription": {
+    "description": "Explanation shown before retrying a failed summary"
+  },
+  "retryWithEllaContextLabel": "Additional context (optional)",
+  "@retryWithEllaContextLabel": {
+    "description": "Label for optional context supplied with a failed summary retry"
+  },
+  "retryWithEllaContextHint": "Example: This was a family conversation about our summer plans.",
+  "@retryWithEllaContextHint": {
+    "description": "Example context for a failed summary retry"
+  },
+  "retryNow": "Retry now",
+  "@retryNow": {
+    "description": "Confirmation action for retrying a failed summary"
   }
 }

@@ -66,7 +66,11 @@ from utils.analytics import record_usage
 from utils.app_integrations import trigger_external_integrations, trigger_realtime_integrations
 from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
-from utils.conversations.process_conversation import process_conversation, retrieve_in_progress_conversation
+from utils.conversations.process_conversation import (
+    mark_unexpected_conversation_processing_failed,
+    process_conversation,
+    retrieve_in_progress_conversation,
+)
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -643,12 +647,16 @@ async def _stream_handler(
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             conversation = process_conversation(uid, language, conversation)
-            messages = trigger_external_integrations(uid, conversation)
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
-            conversations_db.set_conversation_as_discarded(uid, conversation.id)
-            conversation.discarded = True
+            mark_unexpected_conversation_processing_failed(uid, conversation)
             messages = []
+        else:
+            try:
+                messages = trigger_external_integrations(uid, conversation)
+            except Exception as e:
+                print(f"External integrations failed after conversation processing: {e}", uid, session_id)
+                messages = []
 
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 
@@ -2025,7 +2033,9 @@ async def _stream_handler(
     elif codec == 'lc3':
         lc3_decoder = lc3.Decoder(lc3_frame_duration_us, sample_rate)
 
-    async def receive_data(dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock):
+    async def receive_data(
+        dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock
+    ):
         nonlocal websocket_active, websocket_close_code, last_audio_received_time, last_activity_time, current_conversation_id
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
@@ -2091,6 +2101,7 @@ async def _stream_handler(
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
                 try:
                     from websockets.connection import State as _WsState
+
                     _grok_dead = grok_sock.state != _WsState.OPEN
                 except Exception:
                     _grok_dead = False
@@ -2354,7 +2365,12 @@ async def _stream_handler(
         # Tasks
         data_process_task = asyncio.create_task(
             receive_data(
-                deepgram_socket, deepgram_profile_socket, soniox_socket, soniox_profile_socket, speechmatics_socket, grok_socket
+                deepgram_socket,
+                deepgram_profile_socket,
+                soniox_socket,
+                soniox_profile_socket,
+                speechmatics_socket,
+                grok_socket,
             )
         )
         stream_transcript_task = asyncio.create_task(stream_transcript_process())

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -12,6 +13,27 @@ import 'package:omi/services/app_review_service.dart';
 import 'package:omi/services/notifications/merge_notification_handler.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
+
+typedef RetryConversationProcessingCall = Future<ConversationProcessingRetryResult?> Function(
+  String conversationId,
+  String requestId, {
+  String? correctionText,
+});
+
+class _ProcessingRetryPoll {
+  final String requestId;
+  final String? correctionText;
+  int attempts = 0;
+  Timer? timer;
+  bool cancelled = false;
+
+  _ProcessingRetryPoll({required this.requestId, this.correctionText});
+
+  void cancel() {
+    cancelled = true;
+    timer?.cancel();
+  }
+}
 
 class ConversationProvider extends ChangeNotifier {
   List<ServerConversation> conversations = [];
@@ -45,6 +67,9 @@ class ConversationProvider extends ChangeNotifier {
   static const Duration _refreshCooldown = Duration(seconds: 60); // Minimum time between refreshes
 
   List<ServerConversation> processingConversations = [];
+  List<ServerConversation> failedConversations = [];
+  final Set<String> retryingConversationIds = {};
+  final Map<String, _ProcessingRetryPoll> _processingRetryPolls = {};
 
   // Merge functionality state
   Set<String> mergingConversationIds = {};
@@ -53,10 +78,12 @@ class ConversationProvider extends ChangeNotifier {
   StreamSubscription<MergeCompletedEvent>? _mergeCompletedSubscription;
 
   final AppReviewService _appReviewService = AppReviewService();
+  final RetryConversationProcessingCall _retryConversationProcessing;
 
   bool isFetchingConversations = false;
 
-  ConversationProvider() {
+  ConversationProvider({RetryConversationProcessingCall retryConversationProcessingCall = retryConversationProcessing})
+      : _retryConversationProcessing = retryConversationProcessingCall {
     _setupMergeListener();
     _loadSettings();
   }
@@ -73,6 +100,12 @@ class ConversationProvider extends ChangeNotifier {
     searchedConversations = [];
     groupedConversations = {};
     processingConversations = [];
+    failedConversations = [];
+    retryingConversationIds.clear();
+    for (final poll in _processingRetryPolls.values) {
+      poll.cancel();
+    }
+    _processingRetryPolls.clear();
     isLoadingConversations = false;
     hasLoadedConversations = false;
     hasFreshConversations = false;
@@ -338,7 +371,8 @@ class ConversationProvider extends ChangeNotifier {
     final now = DateTime.now();
     if (_lastRefreshTime != null && now.difference(_lastRefreshTime!) < _refreshCooldown) {
       Logger.debug(
-          'Skipping conversations refresh - too soon since last refresh (${now.difference(_lastRefreshTime!).inSeconds}s ago)');
+        'Skipping conversations refresh - too soon since last refresh (${now.difference(_lastRefreshTime!).inSeconds}s ago)',
+      );
       return;
     }
 
@@ -366,46 +400,58 @@ class ConversationProvider extends ChangeNotifier {
     }
     if (isLoadingConversations) return;
     setLoadingConversations(true);
-    final result = await _getConversationsFromServer();
-    if (!result.succeeded) {
-      setLoadingConversations(false);
-      return;
-    }
-    final newConversations = result.conversations;
-    hasFreshConversations = true;
-    isShowingCachedConversations = false;
+    try {
+      final conversationsFuture = _getConversationsFromServer();
+      final failuresFuture = _getFailedConversationsFromServer();
+      final result = await conversationsFuture;
+      final retryableFailures = await failuresFuture;
+      if (!result.succeeded) return;
 
-    List<ServerConversation> upsertConvos = [];
+      final newConversations = result.conversations;
+      failedConversations = _mergeRetryableFailures(retryableFailures, [
+        ...conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+        ...newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      ]);
+      hasFreshConversations = true;
+      isShowingCachedConversations = false;
 
-    // processing convos
-    upsertConvos = newConversations
-        .where((c) =>
-            c.status == ConversationStatus.processing &&
-            processingConversations.indexWhere((cc) => cc.id == c.id) == -1)
-        .toList();
-    if (upsertConvos.isNotEmpty) {
-      processingConversations.insertAll(0, upsertConvos);
-    }
+      List<ServerConversation> upsertConvos = [];
 
-    // completed convos
-    upsertConvos = newConversations
-        .where((c) => c.status == ConversationStatus.completed && conversations.indexWhere((cc) => cc.id == c.id) == -1)
-        .toList();
-    if (upsertConvos.isNotEmpty) {
-      // Check if this is the first conversation
-      bool wasEmpty = conversations.isEmpty;
-
-      conversations.insertAll(0, upsertConvos);
-
-      // Mark first conversation for app review
-      if (wasEmpty && await _appReviewService.isFirstConversation()) {
-        await _appReviewService.markFirstConversation();
+      // processing convos
+      upsertConvos = newConversations
+          .where(
+            (c) =>
+                c.status == ConversationStatus.processing &&
+                processingConversations.indexWhere((cc) => cc.id == c.id) == -1,
+          )
+          .toList();
+      if (upsertConvos.isNotEmpty) {
+        processingConversations.insertAll(0, upsertConvos);
       }
-    }
 
-    _groupConversationsByDateWithoutNotify();
-    setLoadingConversations(false);
-    notifyListeners();
+      // completed convos
+      upsertConvos = newConversations
+          .where(
+            (c) => c.status == ConversationStatus.completed && conversations.indexWhere((cc) => cc.id == c.id) == -1,
+          )
+          .toList();
+      if (upsertConvos.isNotEmpty) {
+        // Check if this is the first conversation
+        bool wasEmpty = conversations.isEmpty;
+
+        conversations.insertAll(0, upsertConvos);
+
+        // Mark first conversation for app review
+        if (wasEmpty && await _appReviewService.isFirstConversation()) {
+          await _appReviewService.markFirstConversation();
+        }
+      }
+
+      _groupConversationsByDateWithoutNotify();
+      notifyListeners();
+    } finally {
+      setLoadingConversations(false);
+    }
   }
 
   Future fetchConversations() async {
@@ -418,10 +464,15 @@ class ConversationProvider extends ChangeNotifier {
     setLoadingConversations(true);
     try {
       late final List<ServerConversation> fetchedConversations;
+      late final List<ServerConversation> fetchedFailures;
       if (SharedPreferencesUtil().demoMode) {
         fetchedConversations = DemoFixtures.conversations();
+        fetchedFailures = [];
       } else {
-        final result = await _getConversationsFromServer();
+        final conversationsFuture = _getConversationsFromServer();
+        final failuresFuture = _getFailedConversationsFromServer();
+        final result = await conversationsFuture;
+        fetchedFailures = await failuresFuture;
         if (requestId != _fetchRequestId) return;
         if (!result.succeeded) {
           if (conversations.isEmpty && selectedFolderId == null) {
@@ -440,6 +491,10 @@ class ConversationProvider extends ChangeNotifier {
 
       if (requestId != _fetchRequestId) return;
       conversations = fetchedConversations;
+      failedConversations = _mergeRetryableFailures(
+        fetchedFailures,
+        conversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      );
       hasFreshConversations = true;
       isShowingCachedConversations = false;
 
@@ -463,6 +518,114 @@ class ConversationProvider extends ChangeNotifier {
         setLoadingConversations(false);
       }
     }
+  }
+
+  bool isConversationRetrying(String conversationId) => retryingConversationIds.contains(conversationId);
+
+  Future<bool> retryFailedConversation(String conversationId, {String? correctionText}) async {
+    if (retryingConversationIds.contains(conversationId)) return true;
+
+    retryingConversationIds.add(conversationId);
+    notifyListeners();
+
+    final requestId = const Uuid().v4();
+    final trimmedCorrection = correctionText?.trim();
+    final normalizedCorrection = trimmedCorrection?.isNotEmpty == true ? trimmedCorrection : null;
+    final result = await _retryConversationProcessing(conversationId, requestId, correctionText: normalizedCorrection);
+    if (result == null) {
+      retryingConversationIds.remove(conversationId);
+      notifyListeners();
+      return false;
+    }
+
+    _applyProcessingRetryResult(result);
+    if (!result.isTerminal) {
+      _startProcessingRetryPoll(conversationId, requestId: requestId, correctionText: normalizedCorrection);
+    }
+    return true;
+  }
+
+  void _applyProcessingRetryResult(ConversationProcessingRetryResult result) {
+    final conversation = result.conversation;
+    failedConversations.removeWhere((item) => item.id == conversation.id);
+    processingConversations.removeWhere((item) => item.id == conversation.id);
+
+    if (result.outcome == ConversationProcessingRetryOutcome.failed) {
+      failedConversations.insert(0, conversation);
+      retryingConversationIds.remove(conversation.id);
+      if (conversation.status == ConversationStatus.completed) {
+        upsertConversation(conversation);
+      } else {
+        conversations.removeWhere((item) => item.id == conversation.id);
+      }
+    } else if (result.outcome == ConversationProcessingRetryOutcome.processing) {
+      if (conversation.status == ConversationStatus.completed) {
+        upsertConversation(conversation);
+      } else {
+        conversations.removeWhere((item) => item.id == conversation.id);
+        processingConversations.insert(0, conversation);
+      }
+    } else {
+      retryingConversationIds.remove(conversation.id);
+      upsertConversation(conversation);
+    }
+    _groupConversationsByDateWithoutNotify();
+    notifyListeners();
+  }
+
+  void _startProcessingRetryPoll(String conversationId, {required String requestId, String? correctionText}) {
+    _cancelProcessingRetryPoll(conversationId);
+    final poll = _ProcessingRetryPoll(requestId: requestId, correctionText: correctionText);
+    _processingRetryPolls[conversationId] = poll;
+    Logger.debug(
+      'Starting conversation processing retry poll request=${poll.requestId} '
+      'has_context=${poll.correctionText?.isNotEmpty == true}',
+    );
+    _scheduleProcessingRetryPoll(conversationId, poll);
+  }
+
+  void _scheduleProcessingRetryPoll(String conversationId, _ProcessingRetryPoll poll) {
+    if (!_isCurrentProcessingRetryPoll(conversationId, poll)) return;
+    poll.timer = Timer(const Duration(seconds: 3), () {
+      unawaited(_runProcessingRetryPoll(conversationId, poll));
+    });
+  }
+
+  Future<void> _runProcessingRetryPoll(String conversationId, _ProcessingRetryPoll poll) async {
+    if (!_isCurrentProcessingRetryPoll(conversationId, poll)) return;
+
+    poll.attempts += 1;
+    ConversationProcessingRetryResult? result;
+    try {
+      result = await _retryConversationProcessing(conversationId, poll.requestId, correctionText: poll.correctionText);
+    } catch (error, stackTrace) {
+      Logger.error('Failed to poll conversation processing retry: $error\n$stackTrace');
+    }
+    if (!_isCurrentProcessingRetryPoll(conversationId, poll)) return;
+
+    if (result != null) {
+      _applyProcessingRetryResult(result);
+      if (result.isTerminal) {
+        _cancelProcessingRetryPoll(conversationId);
+        return;
+      }
+    }
+    if (poll.attempts >= 40) {
+      _cancelProcessingRetryPoll(conversationId);
+      retryingConversationIds.remove(conversationId);
+      notifyListeners();
+      return;
+    }
+
+    _scheduleProcessingRetryPoll(conversationId, poll);
+  }
+
+  bool _isCurrentProcessingRetryPoll(String conversationId, _ProcessingRetryPoll poll) {
+    return !poll.cancelled && identical(_processingRetryPolls[conversationId], poll);
+  }
+
+  void _cancelProcessingRetryPoll(String conversationId) {
+    _processingRetryPolls.remove(conversationId)?.cancel();
   }
 
   Future<void> _loadInitialConversations() async {
@@ -615,22 +778,56 @@ class ConversationProvider extends ChangeNotifier {
   (DateTime?, DateTime?) _getDateFilterRange() {
     if (selectedDate == null) return (null, null);
     final date = selectedDate!;
-    return (
-      DateTime(date.year, date.month, date.day, 0, 0, 0),
-      DateTime(date.year, date.month, date.day, 23, 59, 59),
-    );
+    return (DateTime(date.year, date.month, date.day, 0, 0, 0), DateTime(date.year, date.month, date.day, 23, 59, 59));
   }
 
   Future<ConversationsFetchResult> _getConversationsFromServer() async {
     final (startDate, endDate) = _getDateFilterRange();
 
     return getConversationsResult(
+      statuses: const [ConversationStatus.processing, ConversationStatus.completed],
       includeDiscarded: showDiscardedConversations,
       startDate: startDate,
       endDate: endDate,
       folderId: selectedFolderId,
       starred: showStarredOnly ? true : null,
     );
+  }
+
+  Future<List<ServerConversation>> _getFailedConversationsFromServer() async {
+    final (startDate, endDate) = _getDateFilterRange();
+    final failed = await getConversations(
+      limit: 100,
+      statuses: const [ConversationStatus.failed],
+      includeDiscarded: true,
+      startDate: startDate,
+      endDate: endDate,
+      folderId: selectedFolderId,
+      starred: showStarredOnly ? true : null,
+    );
+    failed.sort((a, b) {
+      final aDate = a.processingErrorAt ?? a.finishedAt ?? a.createdAt;
+      final bDate = b.processingErrorAt ?? b.finishedAt ?? b.createdAt;
+      return bDate.compareTo(aDate);
+    });
+    return failed.where((conversation) => conversation.isRetryableSummaryFailure).toList();
+  }
+
+  List<ServerConversation> _mergeRetryableFailures(
+    Iterable<ServerConversation> processingFailures,
+    Iterable<ServerConversation> enrichmentFailures,
+  ) {
+    final byId = <String, ServerConversation>{
+      for (final conversation in processingFailures) conversation.id: conversation,
+      for (final conversation in enrichmentFailures) conversation.id: conversation,
+    };
+    final merged = byId.values.toList();
+    merged.sort((a, b) {
+      final aDate = a.processingErrorAt ?? a.finishedAt ?? a.createdAt;
+      final bDate = b.processingErrorAt ?? b.finishedAt ?? b.createdAt;
+      return bDate.compareTo(aDate);
+    });
+    return merged;
   }
 
   void updateActionItemState(String convoId, bool state, int i, DateTime date) {
@@ -652,6 +849,7 @@ class ConversationProvider extends ChangeNotifier {
     try {
       final result = await getConversationsResult(
         offset: conversations.length,
+        statuses: const [ConversationStatus.processing, ConversationStatus.completed],
         includeDiscarded: showDiscardedConversations,
         startDate: startDate,
         endDate: endDate,
@@ -659,7 +857,12 @@ class ConversationProvider extends ChangeNotifier {
         starred: showStarredOnly ? true : null,
       );
       if (!result.succeeded) return;
-      conversations.addAll(result.conversations);
+      final newConversations = result.conversations;
+      failedConversations = _mergeRetryableFailures(
+        failedConversations,
+        newConversations.where((conversation) => conversation.isRetryableEnrichmentFailure),
+      );
+      conversations.addAll(newConversations);
       conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
       _groupConversationsByDateWithoutNotify();
     } finally {
@@ -712,8 +915,9 @@ class ConversationProvider extends ChangeNotifier {
     var memDate = DateTime(effectiveDate.year, effectiveDate.month, effectiveDate.day);
     if (groupedConversations.containsKey(memDate)) {
       var convoEffectiveDate = conversation.startedAt ?? conversation.createdAt;
-      idx = groupedConversations[memDate]!
-          .indexWhere((element) => (element.startedAt ?? element.createdAt).isBefore(convoEffectiveDate));
+      idx = groupedConversations[memDate]!.indexWhere(
+        (element) => (element.startedAt ?? element.createdAt).isBefore(convoEffectiveDate),
+      );
       if (idx == -1) {
         groupedConversations[memDate]!.insert(0, conversation);
         idx = 0;
@@ -722,8 +926,9 @@ class ConversationProvider extends ChangeNotifier {
       }
     } else {
       groupedConversations[memDate] = [conversation];
-      groupedConversations =
-          Map.fromEntries(groupedConversations.entries.toList()..sort((a, b) => b.key.compareTo(a.key)));
+      groupedConversations = Map.fromEntries(
+        groupedConversations.entries.toList()..sort((a, b) => b.key.compareTo(a.key)),
+      );
       idx = 0;
     }
     return (idx, memDate);
@@ -830,6 +1035,10 @@ class ConversationProvider extends ChangeNotifier {
   void dispose() {
     _processingConversationWatchTimer?.cancel();
     _refreshDebounceTimer?.cancel();
+    for (final poll in _processingRetryPolls.values) {
+      poll.cancel();
+    }
+    _processingRetryPolls.clear();
     _mergeCompletedSubscription?.cancel();
     super.dispose();
   }
@@ -856,16 +1065,18 @@ class ConversationProvider extends ChangeNotifier {
   }
 
   Future<void> updateGlobalActionItemState(
-      ServerConversation conversation, String actionItemDescription, bool newState) async {
+    ServerConversation conversation,
+    String actionItemDescription,
+    bool newState,
+  ) async {
     final convoId = conversation.id;
     bool conversationFoundAndUpdated = false;
 
     final originalConvoIndex = conversations.indexWhere((c) => c.id == convoId);
     if (originalConvoIndex != -1) {
-      final itemIndex = conversations[originalConvoIndex]
-          .structured
-          .actionItems
-          .indexWhere((item) => item.description == actionItemDescription);
+      final itemIndex = conversations[originalConvoIndex].structured.actionItems.indexWhere(
+            (item) => item.description == actionItemDescription,
+          );
       if (itemIndex != -1) {
         conversations[originalConvoIndex].structured.actionItems[itemIndex].completed = newState;
         conversationFoundAndUpdated = true;
@@ -877,10 +1088,9 @@ class ConversationProvider extends ChangeNotifier {
     if (groupedConversations.containsKey(dateKey)) {
       final groupIndex = groupedConversations[dateKey]!.indexWhere((c) => c.id == convoId);
       if (groupIndex != -1) {
-        final itemIndex = groupedConversations[dateKey]![groupIndex]
-            .structured
-            .actionItems
-            .indexWhere((item) => item.description == actionItemDescription);
+        final itemIndex = groupedConversations[dateKey]![groupIndex].structured.actionItems.indexWhere(
+              (item) => item.description == actionItemDescription,
+            );
         if (itemIndex != -1) {
           groupedConversations[dateKey]![groupIndex].structured.actionItems[itemIndex].completed = newState;
         }
@@ -889,8 +1099,9 @@ class ConversationProvider extends ChangeNotifier {
 
     if (conversationFoundAndUpdated) {
       // Find the item index for the server call
-      final itemIndex =
-          conversation.structured.actionItems.indexWhere((item) => item.description == actionItemDescription);
+      final itemIndex = conversation.structured.actionItems.indexWhere(
+        (item) => item.description == actionItemDescription,
+      );
       if (itemIndex != -1) {
         await setConversationActionItemState(convoId, [itemIndex], [newState]);
       }
@@ -990,10 +1201,7 @@ class ConversationProvider extends ChangeNotifier {
       // Moving to older conversation (next in list)
       if (convoIndexInDay < currentDayList.length - 1) {
         // There's a next item in the same day
-        return (
-          conversation: currentDayList[convoIndexInDay + 1],
-          date: sortedDates[dateIndex],
-        );
+        return (conversation: currentDayList[convoIndexInDay + 1], date: sortedDates[dateIndex]);
       } else {
         // Need to move to the next older day (next date index since dates are sorted newest first)
         if (dateIndex < sortedDates.length - 1) {
@@ -1008,10 +1216,7 @@ class ConversationProvider extends ChangeNotifier {
       // Moving to newer conversation (previous in list)
       if (convoIndexInDay > 0) {
         // There's a previous item in the same day
-        return (
-          conversation: currentDayList[convoIndexInDay - 1],
-          date: sortedDates[dateIndex],
-        );
+        return (conversation: currentDayList[convoIndexInDay - 1], date: sortedDates[dateIndex]);
       } else {
         // Need to move to the next newer day (previous date index since dates are sorted newest first)
         if (dateIndex > 0) {

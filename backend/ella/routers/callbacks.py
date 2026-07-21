@@ -43,11 +43,14 @@ import database.memories as memories_db
 import database.users as users_db
 from database._client import db
 from models.conversation import CategoryEnum
-
-
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
-from ella.services.summary_sanitizer import SummarySanitizationError, sanitize_summary_update
+from ella.services.summary_sanitizer import SummarySanitizationError
+from ella.services.summary_writeback import (
+    ConversationSummaryNotFoundError,
+    InvalidConversationSummaryCategoryError,
+    write_conversation_summary,
+)
 from utils.notifications import send_notification
 from utils.ella.canonical_omi import write_omi_canonical_event
 from utils.other.storage import storage_client
@@ -151,14 +154,14 @@ def _upload_audio_to_gcs(audio_bytes: bytes, uid: str) -> Optional[str]:
         return None
 
 
-
-
 # ============================================================================
 # Conversation Summary Update (for n8n pipeline write-back)
 # ============================================================================
 
+
 class ConversationSummaryUpdate(BaseModel):
     """Schema for updating conversation structured summary fields."""
+
     title: Optional[str] = None
     overview: Optional[str] = None
     emoji: Optional[str] = None
@@ -169,6 +172,7 @@ class ConversationSummaryUpdate(BaseModel):
     based_on_version_id: Optional[str] = None
     set_active: bool = True
     trace_id: Optional[str] = None
+    require_canonical: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
 
@@ -205,18 +209,6 @@ def _enrichment_candidate_reason(conversation: dict) -> Optional[str]:
     if source == "observer" and kind in {"observer_enriched", "corrected_enriched"}:
         return None
     return "active_summary_not_enriched"
-
-
-def _normalize_ella_tags(tags: List[str]) -> List[str]:
-    """Normalize bounded conversation tags for app filtering and recall ranking."""
-    normalized: list[str] = []
-    for tag in tags or []:
-        clean = str(tag).strip().lower().replace(" ", "_")
-        if not clean or len(clean) > 64:
-            continue
-        if clean not in normalized:
-            normalized.append(clean)
-    return normalized[:12]
 
 
 def _update_correction_audit(
@@ -310,6 +302,8 @@ async def _fetch_internal_assessment(uid: str, conversation_id: str) -> Optional
         )
         logger.warning(str(e))
         return None
+
+
 @router.patch("/conversation/{conversation_id}/summary")
 async def update_conversation_summary(
     conversation_id: str,
@@ -324,170 +318,41 @@ async def update_conversation_summary(
     if not uid:
         raise HTTPException(status_code=400, detail="uid query parameter required")
 
-    conversation = conversations_db.get_conversation(uid, conversation_id)
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
     try:
-        sanitized_update = sanitize_summary_update(
+        return await write_conversation_summary(
+            uid=uid,
+            conversation_id=conversation_id,
             title=update.title,
             overview=update.overview,
             emoji=update.emoji,
             category=update.category,
+            summary_source=update.summary_source,
+            summary_kind=update.summary_kind,
+            correction_id=update.correction_id,
+            based_on_version_id=update.based_on_version_id,
+            set_active=update.set_active,
+            trace_id=update.trace_id,
+            ella_tags=update.ella_tags,
+            ella_signal=update.ella_signal,
+            internal_assessment_fetcher=_fetch_internal_assessment,
+            correction_audit_updater=_update_correction_audit,
+            canonical_writer=write_omi_canonical_event,
+            require_canonical=update.require_canonical,
         )
     except SummarySanitizationError as e:
         raise HTTPException(
             status_code=422,
             detail={"message": "Unsafe conversation summary", "violations": e.violations},
         )
-
-    # Build Firestore dot-notation update dict
-    update_data = {}
-    if sanitized_update.title is not None:
-        update_data["structured.title"] = sanitized_update.title
-    if sanitized_update.overview is not None:
-        update_data["structured.overview"] = sanitized_update.overview
-    if sanitized_update.emoji is not None:
-        update_data["structured.emoji"] = sanitized_update.emoji
-    if sanitized_update.category is not None:
-        try:
-            CategoryEnum(sanitized_update.category)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid category: '{sanitized_update.category}'")
-        update_data["structured.category"] = sanitized_update.category
-
-    # Keep this internal callback in parity with the MCP tool path so the app
-    # will surface the refreshed structured overview instead of stale app output.
-    if update.overview is not None:
-        update_data["apps_results"] = []
-        update_data["plugins_results"] = []
-
-    if not update_data:
-        raise HTTPException(status_code=400, detail="No fields to update")
-
-    structured = dict((conversation.get("structured") or {}))
-    if sanitized_update.title is not None:
-        structured["title"] = sanitized_update.title
-    if sanitized_update.overview is not None:
-        structured["overview"] = sanitized_update.overview
-    if sanitized_update.emoji is not None:
-        structured["emoji"] = sanitized_update.emoji
-    if sanitized_update.category is not None:
-        structured["category"] = sanitized_update.category
-
-    version_update = conversations_db.build_summary_version_update(
-        conversation,
-        next_structured=structured,
-        source=update.summary_source,
-        kind=update.summary_kind,
-        correction_id=update.correction_id,
-        based_on_version_id=update.based_on_version_id,
-        activate=update.set_active,
-    )
-    state_updated_at = datetime.now(timezone.utc)
-    update_data["summary_versions"] = version_update["summary_versions"]
-    update_data["active_summary_version_id"] = version_update["active_summary_version_id"]
-    update_data["enrichment_state"] = {
-        "status": "writeback_applied",
-        "pending": False,
-        "source": update.summary_source,
-        "kind": update.summary_kind,
-        "trace_id": update.trace_id,
-        "updated_at": state_updated_at,
-        "error": None,
-    }
-    internal_assessment = await _fetch_internal_assessment(uid, conversation_id)
-    if internal_assessment:
-        update_data["internal_assessment"] = internal_assessment
-    ella_tags = _normalize_ella_tags(update.ella_tags)
-    if ella_tags:
-        update_data["ella_tags"] = ella_tags
-    if update.ella_signal is not None:
-        update_data["ella_signal"] = update.ella_signal
-    if update.correction_id:
-        existing_state = conversation.get("correction_state") or {}
-        update_data["correction_state"] = {
-            "correction_id": update.correction_id,
-            "status": "applied",
-            "pending": False,
-            "source": existing_state.get("source"),
-            "submitted_at": existing_state.get("submitted_at"),
-            "updated_at": state_updated_at,
-            "active_summary_version_id": version_update["active_summary_version_id"],
-        }
-
-    try:
-        conversations_db.update_conversation(uid, conversation_id, update_data)
+    except ConversationSummaryNotFoundError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    except InvalidConversationSummaryCategoryError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid category: '{e.args[0]}'")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logging.error(f"Failed to update conversation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-    canonical_base = dict(conversation) if isinstance(conversation, dict) else {}
-    canonical_conversation = {
-        **canonical_base,
-        "id": conversation_id,
-        "structured": structured,
-        "summary_versions": version_update["summary_versions"],
-        "active_summary_version_id": version_update["active_summary_version_id"],
-        "enrichment_state": update_data.get("enrichment_state"),
-        "internal_assessment": update_data.get("internal_assessment", canonical_base.get("internal_assessment")),
-        "ella_tags": update_data.get("ella_tags", canonical_base.get("ella_tags") or []),
-        "ella_signal": update_data.get("ella_signal", canonical_base.get("ella_signal")),
-    }
-    try:
-        canonical_result = await asyncio.to_thread(
-            write_omi_canonical_event,
-            uid,
-            canonical_conversation,
-            summary_source=update.summary_source,
-            summary_kind=update.summary_kind,
-            trace_id=update.trace_id,
-        )
-        logger.info(
-            "Wrote OMI summary to canonical ledger",
-            extra={
-                "uid": uid,
-                "conversation_id": conversation_id,
-                "inserted": canonical_result.get("inserted"),
-                "duplicates": canonical_result.get("duplicates"),
-            },
-        )
-    except Exception as e:
-        logger.warning(
-            "Failed to write OMI summary to canonical ledger",
-            extra={"uid": uid, "conversation_id": conversation_id},
-        )
-        logger.warning(str(e))
-
-    if update.correction_id:
-        try:
-            _update_correction_audit(
-                uid,
-                conversation_id,
-                update.correction_id,
-                {
-                    "status": "applied",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "applied_at": datetime.now(timezone.utc).isoformat(),
-                    "applied_summary_version_id": version_update["active_summary_version_id"],
-                    "summary_version_kind": update.summary_kind,
-                    "summary_version_source": update.summary_source,
-                },
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to update correction audit after summary apply",
-                extra={"uid": uid, "conversation_id": conversation_id, "correction_id": update.correction_id},
-            )
-            logger.warning(str(e))
-
-    return {
-        "status": "ok",
-        "conversation_id": conversation_id,
-        "updated_fields": list(update_data.keys()),
-        "active_summary_version_id": version_update["active_summary_version_id"],
-        "sanitizer_warnings": sanitized_update.warnings,
-    }
 
 
 @router.get("/conversations/enrichment/reconcile-candidates")
