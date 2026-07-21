@@ -58,7 +58,21 @@ class EllaProvisioningProvider extends ChangeNotifier {
       _setFailure('auth_required', blocked: true);
       return;
     }
-    if (_activeUid == uid && isOperational) return;
+    if (_activeUid == uid) {
+      final consentReceiptId = requestContext.consentReceiptId;
+      if (consentReceiptId.isNotEmpty && consentReceiptId != _requestContext?.consentReceiptId) {
+        setConsentReceiptId(consentReceiptId);
+      }
+      if (isOperational ||
+          _requestInFlight ||
+          _pollHandle != null ||
+          _shouldPoll ||
+          state == EllaProvisioningState.blocked) {
+        return;
+      }
+      await retry();
+      return;
+    }
 
     final generation = ++_generation;
     _cancelPoll();

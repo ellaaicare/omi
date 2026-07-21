@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
@@ -13,9 +16,10 @@ import 'package:omi/pages/onboarding/auth.dart';
 import 'package:omi/pages/onboarding/ella/ella_connect.dart';
 import 'package:omi/pages/onboarding/ella/ella_emergency.dart';
 import 'package:omi/pages/onboarding/ella/ella_welcome.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/services/auth_service.dart';
-import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
+import 'package:omi/utils/platform/platform_manager.dart';
 
 class EllaOnboarding extends StatefulWidget {
   const EllaOnboarding({super.key});
@@ -28,7 +32,6 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   bool _isSignedIn = false;
-  bool _checkingProvision = false;
 
   @override
   void initState() {
@@ -51,32 +54,32 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   }
 
   Future<void> _onSignedIn() async {
-    setState(() {
-      _isSignedIn = true;
-      _checkingProvision = !isHermesProvisioningGateEnabled;
-    });
-    if (isHermesProvisioningGateEnabled) return;
+    setState(() => _isSignedIn = true);
+    if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
+  }
 
-    // Check if user is pre-provisioned by admin — skip wizard if so
+  Future<void> _startHermesProvisioning() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      final timezone = await FlutterTimezone.getLocalTimezone();
-      final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
-      final result = await provisionEllaUser(
-        firebaseUid: user.uid,
-        email: user.email ?? '',
-        name: name.isNotEmpty ? name : (user.displayName ?? ''),
-        timezone: timezone,
-      );
-      if (!mounted) return;
-      if (result.isPreProvisioned) {
-        SharedPreferencesUtil().onboardingCompleted = true;
-        updateUserOnboardingState(completed: true);
-        _routeToAuthenticatedHome();
-        return;
-      }
+    if (user == null || !mounted) return;
+
+    String timezone;
+    try {
+      timezone = await FlutterTimezone.getLocalTimezone();
+    } catch (_) {
+      timezone = DateTime.now().timeZoneName;
     }
-    if (mounted) setState(() => _checkingProvision = false);
+    if (!mounted) return;
+
+    final preferences = SharedPreferencesUtil();
+    await context.read<EllaProvisioningProvider>().start(
+          uid: user.uid,
+          requestContext: EllaProvisioningRequestContext(
+            appVersion: PlatformManager.instance.appVersion,
+            locale: Localizations.localeOf(context).toLanguageTag(),
+            timezone: timezone,
+            consentReceiptId: preferences.hasAccountBoundAiConsent(user.uid) ? preferences.aiConsentReceiptId : '',
+          ),
+        );
   }
 
   void _goToPage(int page) {
@@ -92,10 +95,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      if (!isHermesProvisioningGateEnabled) {
-        // Legacy path retained until the authenticated ensure contract is live.
-        _reprovisionElla();
-      }
+      if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
     }
     _routeToAuthenticatedHome();
   }
@@ -105,19 +105,6 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       context,
       isHermesProvisioningGateEnabled ? const EllaProvisioningGatePage() : const HomePageWrapper(),
       replace: true,
-    );
-  }
-
-  void _reprovisionElla() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final timezone = await FlutterTimezone.getLocalTimezone();
-    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
-    provisionEllaUser(
-      firebaseUid: user.uid,
-      email: user.email ?? '',
-      name: name.isNotEmpty ? name : (user.displayName ?? ''),
-      timezone: timezone,
     );
   }
 
@@ -139,25 +126,6 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       );
     }
 
-    if (_checkingProvision) {
-      return Scaffold(
-        backgroundColor: EllaColors.bgPrimary,
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const CircularProgressIndicator(color: EllaColors.primary),
-              const SizedBox(height: 24),
-              Text(
-                context.l10n.settingUp,
-                style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       body: Stack(
@@ -171,7 +139,6 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
                 onNext: () => _goToPage(1),
                 onSignOut: () => setState(() {
                   _isSignedIn = false;
-                  _checkingProvision = false;
                 }),
               ),
               EllaConnect(

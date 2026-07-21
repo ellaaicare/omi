@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +15,10 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     await SharedPreferencesUtil.init();
+  });
+
+  test('authenticated provisioning gate is enabled by default', () {
+    expect(isHermesProvisioningGateEnabled, isTrue);
   });
 
   test('ensure request contains client context but no caller identity', () {
@@ -66,8 +72,11 @@ void main() {
   });
 
   test('status request uses the same canonical schema as ensure', () {
+    final ensureUri = Uri.parse(buildEllaProvisioningEnsureUrl('https://api.example.test/'));
     final uri = Uri.parse(buildEllaProvisioningStatusUrl('https://api.example.test/'));
 
+    expect(ensureUri.path, '/v1/ella/onboarding/ensure');
+    expect(ensureUri.host, 'api.example.test');
     expect(uri.path, '/v1/ella/onboarding/status');
     expect(uri.queryParameters, {'target_schema_version': 'hermes-user-v1'});
   });
@@ -138,7 +147,7 @@ void main() {
     expect(preferences.getStringList('cachedMessages'), isEmpty);
   });
 
-  test('same account still purges credentials left by an older fail-open build', () async {
+  test('same retained account preserves legacy preferences without making them provisioning authority', () async {
     SharedPreferences.setMockInitialValues({
       'ellaProvisioningAccountUid': 'uid-a',
       'ellaGatewayUrl': 'https://gateway.invalid',
@@ -153,9 +162,9 @@ void main() {
 
     await preferences.prepareEllaProvisioningAccount('uid-a');
 
-    expect(preferences.ellaGatewayUrl, isEmpty);
-    expect(preferences.ellaGatewayToken, isEmpty);
-    expect(preferences.ellaKey, isEmpty);
+    expect(preferences.ellaGatewayUrl, 'https://gateway.invalid');
+    expect(preferences.ellaGatewayToken, 'secret');
+    expect(preferences.ellaKey, 'legacy-key');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
@@ -182,6 +191,77 @@ void main() {
     expect(provider.isOperational, isTrue);
     expect(transport.ensureCalls, 1);
     expect(transport.statusCalls, 0);
+  });
+
+  test('duplicate starts for one account share a single ensure request', () async {
+    final transport = _DeferredEnsureTransport();
+    final provider = EllaProvisioningProvider(transport: transport);
+
+    final firstStart = provider.start(uid: 'uid-a', requestContext: _requestContext);
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    final duplicateStart = provider.start(
+      uid: 'uid-a',
+      requestContext: EllaProvisioningRequestContext(
+        appVersion: '1.0.524+800',
+        locale: 'en-US',
+        timezone: 'America/Los_Angeles',
+        clientRequestId: 'duplicate-request-must-not-send',
+      ),
+    );
+
+    expect(transport.ensureCalls, 1);
+    transport.complete(
+      EllaProvisioningResponse(
+        statusCode: 200,
+        receipt: EllaProvisioningReceipt.fromJson({
+          'state': 'ready',
+          'binding_state': 'active',
+          'binding_revision': 1,
+          'effective_policy_revision': 'policy-1',
+        }),
+      ),
+    );
+    await Future.wait([firstStart, duplicateStart]);
+
+    expect(provider.isOperational, isTrue);
+    expect(transport.ensureCalls, 1);
+  });
+
+  test('provisioning writes only a safe receipt and leaves retained compatibility values unchanged', () async {
+    SharedPreferences.setMockInitialValues({
+      'ellaProvisioningAccountUid': 'uid-a',
+      'ellaUserId': 'retained-user',
+      'ellaGatewayUrl': 'https://retained.invalid',
+      'ellaGatewayToken': 'retained-token',
+    });
+    await SharedPreferencesUtil.init();
+    final transport = _FakeTransport(
+      ensureResponses: [
+        EllaProvisioningResponse(
+          statusCode: 200,
+          receipt: EllaProvisioningReceipt.fromJson({
+            'state': 'ready',
+            'binding_state': 'active',
+            'binding_revision': 1,
+            'effective_policy_revision': 'policy-1',
+            'support_code': 'ELLA-SAFE',
+          }),
+        ),
+      ],
+    );
+    final provider = EllaProvisioningProvider(transport: transport);
+
+    await provider.start(uid: 'uid-a', requestContext: _requestContext);
+
+    final preferences = SharedPreferencesUtil();
+    final cachedReceipt = preferences.getEllaProvisioningReceipt('uid-a');
+    expect(preferences.ellaUserId, 'retained-user');
+    expect(preferences.ellaGatewayUrl, 'https://retained.invalid');
+    expect(preferences.ellaGatewayToken, 'retained-token');
+    expect(cachedReceipt?['support_code'], 'ELLA-SAFE');
+    expect(cachedReceipt.toString(), isNot(contains('gateway')));
+    expect(cachedReceipt.toString(), isNot(contains('token')));
   });
 
   test('provider bounds polling and surfaces timeout without entering Home', () async {
@@ -337,6 +417,22 @@ class _FakePollHandle implements EllaProvisioningPollHandle {
 
   @override
   void cancel() => canceled = true;
+}
+
+class _DeferredEnsureTransport implements EllaProvisioningTransport {
+  final Completer<EllaProvisioningResponse> _completer = Completer<EllaProvisioningResponse>();
+  int ensureCalls = 0;
+
+  @override
+  Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) {
+    ensureCalls++;
+    return _completer.future;
+  }
+
+  void complete(EllaProvisioningResponse response) => _completer.complete(response);
+
+  @override
+  Future<EllaProvisioningResponse> status() => throw StateError('status should not be called');
 }
 
 class _FakeConsentTransport implements EllaAiConsentTransport {

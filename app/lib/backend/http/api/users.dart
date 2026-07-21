@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
-import 'package:http/http.dart' as http;
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
@@ -712,75 +711,4 @@ Future<bool> setMentorNotificationSettings(int frequency) async {
 
   Logger.debug('setMentorNotificationSettings response: ${response.body}');
   return response.statusCode == 200;
-}
-
-// Ella Dashboard Provisioning
-
-const String _ellaDashboardBase = 'https://www.ella-ai-care.com';
-
-/// Result from provisionEllaUser.
-/// [isPreProvisioned] is true when the user was already set up by an admin
-/// and the iOS app should skip onboarding and go straight to chat.
-class EllaProvisionResult {
-  final bool isPreProvisioned;
-  EllaProvisionResult({required this.isPreProvisioned});
-}
-
-Future<EllaProvisionResult> provisionEllaUser({
-  required String firebaseUid,
-  required String email,
-  required String name,
-  required String timezone,
-}) async {
-  try {
-    final response = await http
-        .post(
-          Uri.parse('$_ellaDashboardBase/api/onboarding'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'firebaseUid': firebaseUid, 'email': email, 'name': name, 'timezone': timezone}),
-        )
-        .timeout(const Duration(seconds: 60));
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      final data = jsonDecode(response.body);
-      final userId = data['userId'] as String?;
-      final ellaKey = data['ellaKey'] as String?;
-      if (userId != null && userId.isNotEmpty) {
-        SharedPreferencesUtil().ellaUserId = userId;
-      }
-      if (ellaKey != null && ellaKey.isNotEmpty) {
-        SharedPreferencesUtil().ellaKey = ellaKey;
-      }
-
-      // Store OpenClaw agent config if present
-      final agents = data['agents'] as Map<String, dynamic>?;
-      if (agents != null) {
-        final gatewayUrl = agents['gatewayUrl'] as String?;
-        final userAgentId = agents['userAgentId'] as String?;
-        final gatewayToken = agents['gatewayToken'] as String?;
-        if (gatewayUrl != null && gatewayUrl.isNotEmpty) {
-          SharedPreferencesUtil().ellaGatewayUrl = gatewayUrl;
-        }
-        if (userAgentId != null && userAgentId.isNotEmpty) {
-          SharedPreferencesUtil().ellaAgentId = userAgentId;
-        }
-        if (gatewayToken != null && gatewayToken.isNotEmpty) {
-          SharedPreferencesUtil().ellaGatewayToken = gatewayToken;
-        }
-      }
-
-      // provisioned: false + agents != null → pre-provisioned by admin → skip onboarding
-      final provisioned = data['provisioned'] as bool? ?? true;
-      final isPreProvisioned = !provisioned && agents != null;
-      Logger.debug(
-        'Ella provisioning success: userId=$userId provisioned=$provisioned preProvisioned=$isPreProvisioned',
-      );
-      return EllaProvisionResult(isPreProvisioned: isPreProvisioned);
-    } else {
-      Logger.debug('Ella provisioning failed: ${response.statusCode} ${response.body}');
-    }
-  } catch (e) {
-    Logger.debug('Ella provisioning error: $e');
-  }
-  return EllaProvisionResult(isPreProvisioned: false);
 }

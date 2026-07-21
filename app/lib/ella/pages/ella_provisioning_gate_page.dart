@@ -15,7 +15,9 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 class EllaProvisioningGatePage extends StatefulWidget {
-  const EllaProvisioningGatePage({super.key});
+  const EllaProvisioningGatePage({super.key, this.startOnMount = true});
+
+  final bool startOnMount;
 
   @override
   State<EllaProvisioningGatePage> createState() => _EllaProvisioningGatePageState();
@@ -26,7 +28,9 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+    if (widget.startOnMount) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+    }
   }
 
   Future<void> _start() async {

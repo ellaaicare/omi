@@ -5,7 +5,7 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/env/env.dart';
 
-const bool isHermesProvisioningGateEnabled = bool.fromEnvironment('ELLA_HERMES_PROVISIONING_GATE', defaultValue: false);
+const bool isHermesProvisioningGateEnabled = bool.fromEnvironment('ELLA_HERMES_PROVISIONING_GATE', defaultValue: true);
 
 const String ellaProvisioningTargetSchema = 'hermes-user-v1';
 
@@ -202,7 +202,7 @@ class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
   @override
   Future<EllaProvisioningResponse> ensure(EllaProvisioningRequestContext context) async {
     final response = await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/ella/onboarding/ensure',
+      url: buildEllaProvisioningEnsureUrl(Env.apiBaseUrl),
       headers: _headers,
       body: jsonEncode(context.toJson()),
       method: 'POST',
@@ -240,6 +240,8 @@ class EllaProvisioningHttpTransport implements EllaProvisioningTransport {
     }
   }
 }
+
+String buildEllaProvisioningEnsureUrl(String? apiBaseUrl) => '${apiBaseUrl ?? ''}v1/ella/onboarding/ensure';
 
 String buildEllaProvisioningStatusUrl(String? apiBaseUrl) => Uri.parse(
       '${apiBaseUrl ?? ''}v1/ella/onboarding/status',

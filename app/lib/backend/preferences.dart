@@ -560,22 +560,22 @@ class SharedPreferencesUtil {
   Future<void> prepareEllaProvisioningAccount(String newUid) async {
     final previousUid = getString('ellaProvisioningAccountUid');
 
-    // These values are never valid authority in a gated build, even when the
-    // same user returns from an older fail-open build.
-    for (final key in const [
-      'ellaUserId',
-      'ellaKey',
-      'ellaGatewayUrl',
-      'ellaAgentId',
-      'ellaGatewayToken',
-      'ellaResolvedEndpoint',
-    ]) {
-      await remove(key);
-    }
-
     if (previousUid == newUid) return;
 
     if (previousUid.isNotEmpty) {
+      // Retained users keep compatibility preferences when returning to the
+      // same account. They are cleared only on an actual account switch and
+      // are never authority for the authenticated provisioning gate.
+      for (final key in const [
+        'ellaUserId',
+        'ellaKey',
+        'ellaGatewayUrl',
+        'ellaAgentId',
+        'ellaGatewayToken',
+        'ellaResolvedEndpoint',
+      ]) {
+        await remove(key);
+      }
       await remove(_ellaProvisioningReceiptKey(previousUid));
     }
     await remove(_ellaProvisioningReceiptKey(newUid));

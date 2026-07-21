@@ -9,9 +9,6 @@ import 'package:upgrader/upgrader.dart';
 
 import 'package:uuid/uuid.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
-
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/http/api/users.dart';
@@ -30,7 +27,6 @@ import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
-import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
@@ -394,27 +390,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _listenToMessagesFromNotification();
     _listenToFreemiumThreshold();
     _checkForAnnouncements();
-    _provisionEllaIfNeeded();
 
     super.initState();
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
-  }
-
-  void _provisionEllaIfNeeded() async {
-    if (isHermesProvisioningGateEnabled) return;
-    if (SharedPreferencesUtil().ellaUserId.isNotEmpty) return;
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final timezone = await FlutterTimezone.getLocalTimezone();
-    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
-    provisionEllaUser(
-      firebaseUid: user.uid,
-      email: user.email ?? '',
-      name: name.isNotEmpty ? name : (user.displayName ?? ''),
-      timezone: timezone,
-    );
   }
 
   void _checkForAnnouncements() {
