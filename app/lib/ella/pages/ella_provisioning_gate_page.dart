@@ -8,15 +8,15 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
-import 'package:omi/pages/home/page.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 class EllaProvisioningGatePage extends StatefulWidget {
-  const EllaProvisioningGatePage({super.key, this.startOnMount = true});
+  const EllaProvisioningGatePage({super.key, required this.readyChild, this.startOnMount = true});
 
+  final Widget readyChild;
   final bool startOnMount;
 
   @override
@@ -80,7 +80,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
     return Consumer<EllaProvisioningProvider>(
       builder: (context, provider, _) {
         if (provider.isOperational) {
-          return const HomePageWrapper();
+          return widget.readyChild;
         }
 
         final isWorking = provider.state == EllaProvisioningState.idle ||
