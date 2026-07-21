@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'package:http/http.dart' as http;
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/models/stt_response_schema.dart';
 import 'package:omi/models/stt_result.dart';
 import 'package:omi/services/custom_stt_log_service.dart';
@@ -308,6 +309,7 @@ class SchemaBasedSttProvider implements ISttProvider {
     dynamic audioData, {
     double audioOffsetSeconds = 0,
   }) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return null;
     final Uint8List audioBytes = audioData is Uint8List ? audioData : Uint8List.fromList(audioData);
     try {
       final uri = Uri.parse(apiUrl);

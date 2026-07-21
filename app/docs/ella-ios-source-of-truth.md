@@ -1,6 +1,6 @@
 # Ella iOS Source Of Truth
 
-Last verified: 2026-07-19
+Last verified: 2026-07-20
 
 ## Where The App Lives
 
@@ -122,6 +122,29 @@ Firebase project: omi-dev-ca005
 ```
 
 Do not change Firebase, auth, bundle ID, signing, provisioning, or App Store Connect configuration just to make a local build pass. If TestFlight is required, use the repo deploy scripts and the Mac Mini App Store Connect environment documented in the agent runbooks.
+
+### Design v2 TestFlight handoff
+
+The current release candidate is pinned by the `testflight/design-v2-793` tag. From any
+machine authenticated to the Ella GitHub organization, this one command queues
+Sophia's self-hosted Mac Mini runner:
+
+```bash
+gh workflow run ios-build.yml --repo ellaaicare/omi --ref testflight/design-v2-793
+```
+
+The workflow checks out that immutable tag, runs the Flutter test suite, and
+then invokes the existing `app/ios/build-and-upload.sh` TestFlight path. It does
+not change signing, bundle ID, Firebase, or App Store Connect configuration.
+
+Build 790 used stale tracked Firebase fallback files and must not be used for
+authentication testing. Build 791 restored the production `omi-dev-ca005`
+identity. Build 792 retains that identity and prevents the initial Memories
+fetch from rendering as an empty account while data is still loading. Build
+793 filters discarded cache records from Ella memory surfaces, deduplicates
+the initial and All Memories fetches, adds visible refresh progress, and fixes
+the iOS audio-session route used by Read Aloud. When no Daily Note exists, the
+inactive Read Aloud control is not shown.
 
 ## Branch Hygiene
 

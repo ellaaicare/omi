@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/message.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/string_utils.dart';
@@ -143,7 +144,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
     url: url,
     headers: headers,
     body: jsonEncode({
-      'uid': uid,
+      if (!isHermesProvisioningGateEnabled) 'uid': uid,
       'message': text,
       'conversation_id': '',
       'client_message_id': requestClientMessageId,
@@ -248,6 +249,9 @@ Future<String> transcribeVoiceMessage(
   File audioFile, {
   String? language,
 }) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw StateError('AI consent is required before audio transcription');
+  }
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v2/voice-message/transcribe',

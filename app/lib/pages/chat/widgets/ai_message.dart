@@ -10,7 +10,6 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:collection/collection.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:provider/provider.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:omi/widgets/shimmer_with_timeout.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
@@ -475,45 +474,58 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
       mainAxisSize: MainAxisSize.min,
       children: [
         FilesHandlerWidget(message: widget.message),
-        if (widget.message.fromVoice && widget.messageText.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FaIcon(FontAwesomeIcons.microphone, size: 10, color: EllaColors.textTertiary.withOpacity(0.5)),
-                const SizedBox(width: 4),
-                Text('voice', style: TextStyle(fontSize: 11, color: EllaColors.textTertiary.withOpacity(0.5))),
-              ],
-            ),
-          ),
         widget.showTypingIndicator && widget.messageText.isEmpty
             ? const EllaThinkingIndicator()
             : const SizedBox.shrink(),
         widget.messageText.isEmpty
             ? const SizedBox.shrink()
-            : Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                child: Builder(
-                  builder: (context) {
-                    String? selectedText;
-                    return SelectionArea(
-                      onSelectionChanged: (SelectedContent? selectedContent) {
-                        selectedText = selectedContent?.plainText;
-                      },
-                      contextMenuBuilder: (context, selectableRegionState) {
-                        return omiSelectionMenuBuilder(
-                          context,
-                          selectableRegionState,
-                          (text) {
-                            widget.onAskOmi?.call(text);
+            : Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: 0.78,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                    decoration: BoxDecoration(
+                      color: EllaColors.card,
+                      border: Border.all(color: EllaColors.cardDeep),
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(18),
+                        topRight: Radius.circular(18),
+                        bottomLeft: Radius.circular(4),
+                        bottomRight: Radius.circular(18),
+                      ),
+                    ),
+                    child: Builder(
+                      builder: (context) {
+                        String? selectedText;
+                        return SelectionArea(
+                          onSelectionChanged: (SelectedContent? selectedContent) {
+                            selectedText = selectedContent?.plainText;
                           },
-                          selectedText: selectedText,
+                          contextMenuBuilder: (context, selectableRegionState) {
+                            return omiSelectionMenuBuilder(
+                              context,
+                              selectableRegionState,
+                              (text) => widget.onAskOmi?.call(text),
+                              selectedText: selectedText,
+                            );
+                          },
+                          child: widget.messageText.trim() == "Good morning — I'm here."
+                              ? const Text(
+                                  "Good morning — I'm here.",
+                                  style: TextStyle(
+                                    fontFamily: EllaTextStyles.noteFont,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w400,
+                                    height: 1.45,
+                                    color: EllaColors.ink,
+                                  ),
+                                )
+                              : getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
                         );
                       },
-                      child: getMarkdownWidget(context, widget.messageText, onAskOmi: widget.onAskOmi),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
         if (widget.message.chartData != null)
@@ -523,12 +535,6 @@ class _NormalMessageWidgetState extends State<NormalMessageWidget> {
           )
         else if (widget.showTypingIndicator && widget.message.thinkings.any((t) => t.toLowerCase().contains('chart')))
           _buildChartShimmer(),
-        if (widget.messageText.isNotEmpty && !widget.showTypingIndicator)
-          MessageActionBar(
-            messageText: widget.messageText,
-            setMessageNps: widget.setMessageNps,
-            currentNps: widget.message.rating,
-          ),
       ],
     );
   }
@@ -1052,7 +1058,7 @@ Future<void> showFeedbackBottomSheet(
   );
 }
 
-class MessageActionBar extends StatefulWidget {
+class MessageActionBar extends StatelessWidget {
   final String messageText;
   final Function(int, {String? reason})? setMessageNps;
   final int? currentNps;
@@ -1065,162 +1071,9 @@ class MessageActionBar extends StatefulWidget {
   });
 
   @override
-  State<MessageActionBar> createState() => _MessageActionBarState();
-}
-
-class _MessageActionBarState extends State<MessageActionBar> {
-  int? _selectedNps;
-
-  @override
-  void initState() {
-    super.initState();
-    _selectedNps = widget.currentNps;
-  }
-
-  @override
-  void didUpdateWidget(MessageActionBar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // Update local state if the widget's currentNps changed (e.g., from server fetch)
-    if (oldWidget.currentNps != widget.currentNps) {
-      setState(() {
-        _selectedNps = widget.currentNps;
-      });
-    }
-  }
-
-  /// Show bottom sheet with thumbs down reason options and comment field
-  void _showThumbsDownReasonPicker() {
-    showFeedbackBottomSheet(
-      context,
-      onSubmit: (reason, comment) {
-        setState(() {
-          _selectedNps = -1;
-        });
-        // Combine reason and comment for the API call
-        String feedbackReason = reason;
-        if (comment != null && comment.isNotEmpty) {
-          feedbackReason = '$reason: $comment';
-        }
-        widget.setMessageNps?.call(-1, reason: feedbackReason);
-
-        // Show confirmation snackbar
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Thanks for your feedback!',
-                style: TextStyle(color: Colors.white),
-              ),
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      },
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8, left: 4),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Copy button
-          _buildActionButton(
-            icon: FontAwesomeIcons.copy,
-            onTap: () async {
-              HapticFeedback.lightImpact();
-              await Clipboard.setData(ClipboardData(text: widget.messageText));
-              MixpanelManager().track('Chat Message Copied', properties: {'message': widget.messageText});
-
-              // Implicit positive feedback - user copied the message (silent, no UI change)
-              if (_selectedNps == null) {
-                widget.setMessageNps?.call(1, reason: 'user_copied_message');
-              }
-
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      context.l10n.messageCopied,
-                      style: const TextStyle(color: Colors.white, fontSize: 12.0),
-                    ),
-                    duration: const Duration(milliseconds: 1500),
-                  ),
-                );
-              }
-            },
-          ),
-          const SizedBox(width: 20),
-          // Thumbs up button
-          _buildActionButton(
-            icon: _selectedNps == 1 ? FontAwesomeIcons.solidThumbsUp : FontAwesomeIcons.thumbsUp,
-            isSelected: _selectedNps == 1,
-            onTap: () {
-              HapticFeedback.lightImpact();
-              setState(() {
-                _selectedNps = _selectedNps == 1 ? null : 1;
-              });
-              widget.setMessageNps?.call(_selectedNps ?? 0);
-            },
-          ),
-          const SizedBox(width: 20),
-          // Thumbs down button
-          _buildActionButton(
-            icon: _selectedNps == -1 ? FontAwesomeIcons.solidThumbsDown : FontAwesomeIcons.thumbsDown,
-            isSelected: _selectedNps == -1,
-            onTap: () {
-              HapticFeedback.lightImpact();
-              if (_selectedNps == -1) {
-                // Already thumbs down, toggle off
-                setState(() {
-                  _selectedNps = null;
-                });
-                widget.setMessageNps?.call(0);
-              } else {
-                // Show reason picker for thumbs down
-                _showThumbsDownReasonPicker();
-              }
-            },
-          ),
-          const SizedBox(width: 20),
-          // Share button
-          _buildActionButton(
-            icon: FontAwesomeIcons.shareNodes,
-            onTap: () async {
-              HapticFeedback.lightImpact();
-              await Share.share(widget.messageText);
-              MixpanelManager().track('Chat Message Shared', properties: {'message': widget.messageText});
-
-              // Implicit positive feedback - user shared the message (silent, no UI change)
-              if (_selectedNps == null) {
-                widget.setMessageNps?.call(1, reason: 'user_shared_message');
-              }
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionButton({
-    required IconData icon,
-    required VoidCallback onTap,
-    bool isSelected = false,
-  }) {
-    return InkWell(
-      splashColor: Colors.transparent,
-      focusColor: Colors.transparent,
-      hoverColor: Colors.transparent,
-      highlightColor: Colors.transparent,
-      onTap: onTap,
-      child: FaIcon(
-        icon,
-        color: isSelected ? EllaColors.textPrimary : EllaColors.textTertiary,
-        size: 14,
-      ),
-    );
+    // Actions are exposed through the selection/long-press context menu in v2.
+    return const SizedBox.shrink();
   }
 }
 

@@ -28,6 +28,7 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/file.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
+import 'package:omi/utils/streaming_text_coalescer.dart';
 
 bool get _isEllaApp => true;
 
@@ -367,6 +368,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return null;
     if (files.isNotEmpty) {
       setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
       var res = await uploadFilesServer(files, appId: appId);
@@ -410,14 +412,15 @@ class MessageProvider extends ChangeNotifier {
       if (cached.isNotEmpty) {
         messages = cached;
         setHasCachedMessages(true);
-      } else {
-        // Cache empty (e.g. after logout/login) — rehydrate from server
-        final history = await fetchEllaChatHistory(limit: 50);
-        if (history.isNotEmpty) {
-          messages = history;
-          SharedPreferencesUtil().cachedMessages = messages;
-          setHasCachedMessages(true);
-        }
+      }
+
+      // Always try to rehydrate from server so a bad local/demo cache from a
+      // previous TestFlight cannot mask the real account timeline.
+      final history = await fetchEllaChatHistory(limit: 50);
+      if (history.isNotEmpty) {
+        messages = history;
+        SharedPreferencesUtil().cachedMessages = messages;
+        setHasCachedMessages(true);
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
@@ -533,6 +536,7 @@ class MessageProvider extends ChangeNotifier {
 
   Future sendVoiceMessageStreamToServer(List<List<int>> audioBytes,
       {Function? onFirstChunkRecived, BleAudioCodec? codec}) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     var file = await FileUtils.saveAudioBytesToTempFile(
       audioBytes,
       DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
@@ -556,6 +560,7 @@ class MessageProvider extends ChangeNotifier {
     var message = ServerMessage.empty();
     messages.add(message);
     var aiIndex = messages.length - 1;
+    final textCoalescer = StreamingTextCoalescer();
     notifyListeners();
 
     try {
@@ -577,21 +582,35 @@ class MessageProvider extends ChangeNotifier {
         }
 
         if (chunk.type == MessageChunkType.data) {
-          message.text += chunk.text;
+          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.done) {
-          message = chunk.message!;
-          messages[aiIndex] = message;
+          if (chunk.message != null) {
+            message = chunk.message!;
+            messages[aiIndex] = message;
+          }
+          textCoalescer.complete(chunk.messageId);
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.message) {
-          messages.insert(aiIndex, chunk.message!);
-          aiIndex++;
+          final incoming = chunk.message;
+          if (incoming != null) {
+            final existingIndex = messages.indexWhere((candidate) => candidate.id == incoming.id);
+            if (existingIndex >= 0) {
+              messages[existingIndex] = incoming;
+              if (existingIndex == aiIndex) message = incoming;
+            } else {
+              messages.insert(aiIndex, incoming);
+              aiIndex++;
+            }
+          }
           notifyListeners();
           continue;
         }
@@ -611,6 +630,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future sendMessageStreamToServer(String text) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     if (SharedPreferencesUtil().demoMode) {
       messages = DemoFixtures.chatMessages();
       setSendingMessage(false);
@@ -642,23 +662,11 @@ class MessageProvider extends ChangeNotifier {
     var message = ServerMessage.empty(appId: currentAppId);
     messages.add(message);
     final aiIndex = messages.length - 1;
+    final textCoalescer = StreamingTextCoalescer();
     notifyListeners();
     List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
     clearSelectedFiles();
     clearUploadedFiles();
-    String textBuffer = '';
-    Timer? timer;
-
-    void flushBuffer() {
-      if (textBuffer.isNotEmpty) {
-        message.text += textBuffer;
-        textBuffer = '';
-        aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
-        HapticFeedback.lightImpact();
-        notifyListeners();
-      }
-    }
-
     try {
       // Ella uses its own simple chat endpoint; OMI uses the graph chat
       final isEllaApp = _isEllaApp; // TODO: replace with flavor check
@@ -666,23 +674,20 @@ class MessageProvider extends ChangeNotifier {
           isEllaApp ? sendEllaChatStream(text) : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
       await for (var chunk in stream) {
         if (chunk.type == MessageChunkType.think) {
-          flushBuffer();
           message.thinkings.add(chunk.text);
           notifyListeners();
           continue;
         }
 
         if (chunk.type == MessageChunkType.data) {
-          textBuffer += chunk.text;
-          timer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
-            flushBuffer();
-          });
+          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
+          aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
+          HapticFeedback.lightImpact();
+          notifyListeners();
           continue;
         }
-
-        timer?.cancel();
-        timer = null;
-        flushBuffer();
 
         if (chunk.type == MessageChunkType.done) {
           // Guard: OpenAI-style done chunks may have null message
@@ -690,6 +695,7 @@ class MessageProvider extends ChangeNotifier {
             message = chunk.message!;
             messages[aiIndex] = message;
           }
+          textCoalescer.complete(chunk.messageId);
           notifyListeners();
           continue;
         }
@@ -704,8 +710,6 @@ class MessageProvider extends ChangeNotifier {
       message.text = ServerMessageChunk.failedMessage().text;
       notifyListeners();
     } finally {
-      timer?.cancel();
-      flushBuffer();
       aiStreamProgress = 1.0;
       setShowTypingIndicator(false);
       setSendingMessage(false);

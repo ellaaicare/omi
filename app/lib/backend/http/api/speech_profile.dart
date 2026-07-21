@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -34,6 +35,7 @@ Future<String?> getUserSpeechProfile() async {
 }
 
 Future<bool> uploadProfile(File file) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return false;
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v3/upload-audio',

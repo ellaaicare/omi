@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/caregiver.dart';
 import 'package:omi/ella/pages/ella_invite_sent_screen.dart';
@@ -272,21 +273,25 @@ class _EllaAddCaregiverPageState extends State<EllaAddCaregiverPage> {
             const SizedBox(height: 8),
 
             // Emergency alerts toggle (locked on)
-            EllaPermissionToggle(
-              title: context.l10n.ellaPermissionEmergencyAlerts,
-              description: context.l10n.ellaPermissionEmergencyAlertsDescription,
-              isOn: true,
-              locked: true,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
-            ),
-            const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
+            if (!SharedPreferencesUtil().publicMode) ...[
+              EllaPermissionToggle(
+                title: context.l10n.ellaPermissionEmergencyAlerts,
+                description: context.l10n.ellaPermissionEmergencyAlertsDescription,
+                isOn: true,
+                locked: true,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
+              ),
+              const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
+            ],
             // Daily summary toggle
             EllaPermissionToggle(
               title: context.l10n.ellaPermissionDailySummary,
               description: context.l10n.ellaPermissionDailySummaryDescription,
               isOn: _dailySummary,
               onChanged: (value) => setState(() => _dailySummary = value),
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(EllaSizes.radiusLarge)),
+              borderRadius: SharedPreferencesUtil().publicMode
+                  ? BorderRadius.circular(EllaSizes.radiusLarge)
+                  : const BorderRadius.vertical(bottom: Radius.circular(EllaSizes.radiusLarge)),
             ),
 
             const SizedBox(height: 32),

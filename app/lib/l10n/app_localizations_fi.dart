@@ -8356,17 +8356,17 @@ class AppLocalizationsFi extends AppLocalizations {
   String get ellaMaxConversationLengthTitle => 'Maximum Conversation Length';
 
   @override
-  String get ellaMaxConversationLengthConfig => 'Split long captures on the backend';
+  String get ellaMaxConversationLengthConfig => 'Choose when a long conversation starts a new memory';
 
   @override
   String get ellaMaxConversationLengthDescription =>
-      'Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.';
+      'Ella can automatically keep long conversations organized as separate memories while listening continues.';
 
   @override
-  String get ellaMaxConversationLengthBackendDefault => 'Backend default';
+  String get ellaMaxConversationLengthBackendDefault => 'Automatic';
 
   @override
-  String get ellaMaxConversationLengthBackendDefaultDesc => 'Use Ella\'s current default: 30 minutes.';
+  String get ellaMaxConversationLengthBackendDefaultDesc => 'Ella chooses the conversation length.';
 
   @override
   String get ellaMaxConversationLengthDisabled => 'Disabled';
@@ -8580,6 +8580,71 @@ class AppLocalizationsFi extends AppLocalizations {
   String guardianAlertsTraceDetail(String traceId) {
     return 'Trace: $traceId';
   }
+
+  @override
+  String get publicBuildPreview => 'Public Build Preview';
+
+  @override
+  String get publicBuildPreviewDescription => 'Preview the simplified public experience';
+
+  @override
+  String get dailyNoteEmpty => 'Ella\'s note about today arrives this evening 🪽';
+
+  @override
+  String get talkToElla => 'Talk to Ella';
+
+  @override
+  String get reminders => 'Reminders';
+
+  @override
+  String get readAloud => 'Read aloud';
+
+  @override
+  String get stopReading => 'Stop reading';
+
+  @override
+  String get necklaceResting => 'Ella\'s necklace is resting — tap to reconnect';
+
+  @override
+  String get aiConsentTitle => 'Ella listens to help remember.';
+
+  @override
+  String get aiConsentBodyIntro =>
+      'To turn speech into memories, audio from your device and necklace is sent securely to our processing partners: ';
+
+  @override
+  String get aiConsentDeepgram => 'Deepgram';
+
+  @override
+  String get aiConsentBodyMiddle => ' (speech-to-text) and ';
+
+  @override
+  String get aiConsentAiPartners => 'Google (Gemini), OpenAI, and Groq';
+
+  @override
+  String get aiConsentBodyEnd =>
+      ' (to write summaries and answer you). Summaries are shared only with family members you choose. You can turn listening off any time in Settings.';
+
+  @override
+  String get allowAndContinue => 'Allow and continue';
+
+  @override
+  String get notNow => 'Not now';
+
+  @override
+  String get listeningAndConsent => 'Listening & consent';
+
+  @override
+  String get ellaMoreSection => 'MORE';
+
+  @override
+  String get ellaAdvancedSettings => 'Advanced Settings';
+
+  @override
+  String get ellaAdvancedSettingsSubtitle => 'Language and app options';
+
+  @override
+  String get ellaSummarySource => 'Ella summary';
 
   @override
   String get conversationNeedsProcessing => 'Needs processing';

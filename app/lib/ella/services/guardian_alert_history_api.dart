@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/models/guardian_alert.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -26,6 +28,12 @@ class GuardianAlertHistoryApi {
   GuardianAlertHistoryApi._();
 
   static Future<GuardianAlertHistoryResult> fetch({int limit = 50}) async {
+    if (SharedPreferencesUtil().demoMode) {
+      return GuardianAlertHistoryResult(
+        records: DemoFixtures.whispers().take(limit).toList(),
+        source: GuardianAlertHistorySource.backend,
+      );
+    }
     final backend = await _fetchBackend(limit: limit);
     if (backend != null) return backend;
 

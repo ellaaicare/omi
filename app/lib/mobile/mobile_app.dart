@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/device_selection.dart';
 import 'package:omi/pages/onboarding/ella/ella_onboarding.dart';
@@ -32,7 +33,7 @@ class _MobileAppState extends State<MobileApp> {
     const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
 
     // Debug mode: bypass auth and go straight to home
-    if (debugAutoCall) {
+    if (debugAutoCall && !isHermesProvisioningGateEnabled) {
       return const HomePageWrapper();
     }
 
@@ -69,9 +70,7 @@ class _MobileAppState extends State<MobileApp> {
             }
             // Show loading while checking server — avoids flashing onboarding
             if (_restoringOnboarding) {
-              return const Scaffold(
-                body: Center(child: CircularProgressIndicator()),
-              );
+              return const Scaffold(body: Center(child: CircularProgressIndicator()));
             }
           }
 

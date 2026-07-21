@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -54,6 +55,7 @@ class V2VClient {
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
   Future<bool> connect({required String provider}) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return false;
     final uid = SharedPreferencesUtil().uid;
     if (uid.isEmpty) {
       Logger.debug('[V2V] No uid, cannot connect');
@@ -75,7 +77,7 @@ class V2VClient {
     await _configureAudioSession();
 
     // 3. Connect WebSocket
-    final wsUrl = '$endpoint&token=$token';
+    final wsUrl = _withSessionToken(endpoint, token);
     Logger.debug('[V2V] Connecting to WebSocket...');
 
     try {
@@ -176,7 +178,10 @@ class V2VClient {
       final response = await makeApiCall(
         url: '${Env.apiBaseUrl}v1/voice/session',
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'uid': uid, 'provider': provider}),
+        body: jsonEncode({
+          if (!isHermesProvisioningGateEnabled) 'uid': uid,
+          if (!isHermesProvisioningGateEnabled) 'provider': provider,
+        }),
         method: 'POST',
         timeout: const Duration(seconds: 10),
       );
@@ -193,6 +198,15 @@ class V2VClient {
       Logger.error('[V2V] Session create error: $e');
       return null;
     }
+  }
+
+  static String _withSessionToken(String endpoint, String token) {
+    final uri = Uri.parse(endpoint);
+    if (uri.queryParameters.containsKey('token')) {
+      return endpoint;
+    }
+    final separator = uri.hasQuery ? '&' : '?';
+    return '$endpoint${separator}token=$token';
   }
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
@@ -218,7 +232,7 @@ class V2VClient {
       ));
 
       _micSub = stream.listen((data) {
-        if (_isConnected && _channel != null && !_micMuted) {
+        if (_isConnected && _channel != null && !_micMuted && SharedPreferencesUtil().aiConsentAccepted) {
           _channel!.sink.add(data);
         }
       });

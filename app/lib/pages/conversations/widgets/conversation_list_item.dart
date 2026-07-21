@@ -9,12 +9,14 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/widgets/ella_source_indicator.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/settings/usage_page.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
+import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/other/time_utils.dart';
@@ -257,6 +259,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
   }
 
   Widget _buildMobileLayout(BuildContext context) {
+    final titleDisplayValue = parseEllaDisplayValue(widget.conversation.structured.title.decodeString);
     return Stack(
       children: [
         Column(
@@ -267,18 +270,29 @@ class _ConversationListItemState extends State<ConversationListItem> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (!widget.conversation.discarded)
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: EllaColors.bgTertiary,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      widget.conversation.structured.getEmoji(),
-                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500),
-                    ),
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: EllaColors.bgTertiary,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          widget.conversation.structured.getEmoji(),
+                          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                      if (titleDisplayValue.isEllaGenerated)
+                        const Positioned(
+                          right: -5,
+                          bottom: -5,
+                          child: EllaSourceBadge(),
+                        ),
+                    ],
                   ),
                 if (!widget.conversation.discarded) const SizedBox(width: 12),
                 Expanded(
@@ -288,7 +302,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
                       Text(
                         widget.conversation.discarded
                             ? widget.conversation.getTranscript(maxCount: 100)
-                            : widget.conversation.structured.title.decodeString,
+                            : titleDisplayValue.text,
                         style: Theme.of(context).textTheme.titleMedium,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -407,7 +421,7 @@ class _ConversationListItemState extends State<ConversationListItem> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        EllaSourceText(
           widget.conversation.structured.title.decodeString,
           style: Theme.of(context).textTheme.titleLarge,
         ),
@@ -456,27 +470,6 @@ class _ConversationListItemState extends State<ConversationListItem> {
                   Text(
                     widget.conversation.structured.getEmoji(),
                     style: const TextStyle(color: EllaColors.textPrimary, fontSize: 22, fontWeight: FontWeight.w500),
-                  ),
-                if (widget.conversation.structured.category.isNotEmpty && !widget.conversation.discarded)
-                  const SizedBox(width: 8),
-                if (widget.conversation.structured.category.isNotEmpty)
-                  Flexible(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: widget.conversation.getTagColor(),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      child: Text(
-                        widget.conversation.getTag(),
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodyMedium!
-                            .copyWith(color: widget.conversation.getTagTextColor()),
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 1,
-                      ),
-                    ),
                   ),
               ],
             ),

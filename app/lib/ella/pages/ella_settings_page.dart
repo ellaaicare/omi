@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -15,15 +16,20 @@ import 'package:omi/ella/pages/alert_channels_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
-import 'package:omi/ella/pages/debug_event_log_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/developer_mode_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -56,6 +62,11 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
+      if (SharedPreferencesUtil().publicMode) {
+        final caregivers = await caregiver_api.getCaregivers();
+        if (mounted) setState(() => _caregivers = caregivers);
+        return;
+      }
       final results = await Future.wait([
         caregiver_api.getCaregivers(),
         caregiver_api.getEmergencyContactId(),
@@ -151,8 +162,32 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     );
   }
 
+  Future<void> _openListeningConsent() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final accepted = await AiConsentSheet.show(
+      context,
+      onAccept: isHermesProvisioningGateEnabled
+          ? () async {
+              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
+              if (receiptId == null) return false;
+              if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+              return true;
+            }
+          : null,
+    );
+    if (!mounted) return;
+    final captureProvider = context.read<CaptureProvider>();
+    if (accepted == true) {
+      await captureProvider.streamDeviceRecording(device: context.read<DeviceProvider>().connectedDevice);
+    } else {
+      await captureProvider.stopStreamDeviceRecording();
+      await captureProvider.stopStreamRecording();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final publicMode = context.watch<DeveloperModeProvider>().publicMode;
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
@@ -192,23 +227,22 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             ),
             const SizedBox(height: 8),
 
-            // Guardian Mode row
-            EllaSettingsRow(
-              icon: Icons.shield,
-              iconColor: _guardianMode?.color ?? EllaColors.primary,
-              iconBgColor: _guardianMode?.color ?? EllaColors.primary,
-              title: 'Guardian Mode',
-              subtitle: _guardianMode != null ? _guardianMode!.displayName : 'Loading…',
-              onTap: () async {
-                final updated = await Navigator.push<GuardianModeState>(
-                  context,
-                  MaterialPageRoute(builder: (context) => const GuardianModePage(showDemo: true)),
-                );
-                if (updated != null && mounted) {
-                  _loadData(); // refresh mode display
-                }
-              },
-            ),
+            // Internal policy picker; the public label remains Whispers.
+            if (!publicMode)
+              EllaSettingsRow(
+                icon: Icons.shield,
+                iconColor: _guardianMode?.color ?? EllaColors.primary,
+                iconBgColor: _guardianMode?.color ?? EllaColors.primary,
+                title: 'Whisper settings',
+                subtitle: _guardianMode != null ? _guardianMode!.displayName : 'Loading…',
+                onTap: () async {
+                  final updated = await Navigator.push<GuardianModeState>(
+                    context,
+                    MaterialPageRoute(builder: (context) => const GuardianModePage(showDemo: true)),
+                  );
+                  if (updated != null && mounted) _loadData();
+                },
+              ),
 
             // Ella Key (for cross-device linking)
             if (SharedPreferencesUtil().ellaKey.isNotEmpty) ...[
@@ -237,35 +271,39 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 _loadData();
               },
             ),
+            if (!publicMode) ...[
+              const SizedBox(height: 8),
+              EllaSettingsRow(
+                icon: Icons.emergency,
+                iconColor: EllaColors.error,
+                iconBgColor: EllaColors.error,
+                title: context.l10n.ellaEmergencyContact,
+                subtitle: _emergencyContactSubtitle(),
+                onTap: () async {
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const EllaEmergencyContactPage()),
+                  );
+                  _loadData();
+                },
+              ),
+              const SizedBox(height: 8),
+              EllaSettingsRow(
+                icon: Icons.notifications_active,
+                title: context.l10n.ellaAlertChannels,
+                subtitle: context.l10n.ellaAlertChannelsSubtitle,
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const AlertChannelsPage()));
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+
             const SizedBox(height: 8),
             EllaSettingsRow(
-              icon: Icons.emergency,
-              iconColor: EllaColors.error,
-              iconBgColor: EllaColors.error,
-              title: context.l10n.ellaEmergencyContact,
-              subtitle: _emergencyContactSubtitle(),
-              onTap: () async {
-                await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const EllaEmergencyContactPage()),
-                );
-                _loadData();
-              },
-            ),
-            const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.notifications_active,
-              title: context.l10n.ellaAlertChannels,
-              subtitle: context.l10n.ellaAlertChannelsSubtitle,
-              onTap: () {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const AlertChannelsPage()));
-              },
-            ),
-            const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.history,
-              title: context.l10n.guardianAlertsHistoryTitle,
-              subtitle: context.l10n.guardianAlertsHistorySubtitle,
+              icon: Icons.record_voice_over_rounded,
+              title: 'Whispers',
+              subtitle: 'Things Ella has said and why',
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
               },
@@ -273,6 +311,12 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
             // CAPTURE section
             _buildSectionHeader(context.l10n.ellaCaptureSection),
+            EllaSettingsRow(
+              icon: Icons.hearing,
+              title: context.l10n.listeningAndConsent,
+              onTap: _openListeningConsent,
+            ),
+            const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.schedule,
               title: context.l10n.ellaMaxConversationLengthTitle,
@@ -296,20 +340,12 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
 
-            // DEVELOPER section
-            _buildSectionHeader('DEVELOPER'),
+            _buildSectionHeader(context.l10n.ellaMoreSection),
             EllaSettingsRow(
               icon: Icons.developer_mode,
-              title: 'Developer Settings',
-              subtitle: 'ASR, transcription, language, debug',
+              title: context.l10n.ellaAdvancedSettings,
+              subtitle: context.l10n.ellaAdvancedSettingsSubtitle,
               onTap: () => SettingsDrawer.show(context),
-            ),
-            const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.timeline,
-              title: 'Debug Event Log',
-              subtitle: 'Real-time scanner decisions and escalations',
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const DebugEventLogPage())),
             ),
             const SizedBox(height: 8),
 

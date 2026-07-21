@@ -1,7 +1,9 @@
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
+import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/models/guardian_alert.dart';
 
 class DemoFixtures {
   static const gardenConversationId = 'demo-garden-chat-with-margaret';
@@ -16,33 +18,36 @@ class DemoFixtures {
 
     return [
       _conversation(
-        id: 'demo-planning-tuesday-dinner-with-david',
-        title: '🪽 Planning Tuesday Dinner with David',
-        startedAt: day.add(const Duration(hours: 17, minutes: 40)),
+        id: 'demo-found-the-scissors',
+        title: 'Found the scissors',
+        startedAt: day.add(const Duration(hours: 11, minutes: 32)),
         duration: const Duration(minutes: 3, seconds: 12),
-        overview: 'Mom and David talked through a simple Tuesday dinner plan.',
+        overview: 'They were in the kitchen drawer, next to the tape.',
+        emoji: '✂️',
       ),
       _conversation(
         id: gardenConversationId,
-        title: '🪽 Garden Chat with Margaret',
+        title: 'A walk past the roses',
         startedAt: day.add(const Duration(hours: 14, minutes: 15)),
         duration: const Duration(minutes: 12, seconds: 4),
-        overview:
-            "A long, easy visit with Margaret out by the garden. They talked about the tomatoes coming in early this year and Margaret's granddaughter starting college in the fall. Mom told the story about the county-fair ribbon again, and it got a good laugh. She mentioned wanting to pick up more potting soil next time anyone drives to the hardware store.",
+        overview: 'The long way home along Elm — warm air, roses in bloom.',
+        emoji: '🚶',
       ),
       _conversation(
-        id: 'demo-where-did-the-scissors-go',
-        title: '🪽 Where Did the Scissors Go',
-        startedAt: day.add(const Duration(hours: 11, minutes: 32)),
+        id: 'demo-phone-call-with-david',
+        title: 'Phone call with David',
+        startedAt: day.subtract(const Duration(days: 1)).add(const Duration(hours: 17, minutes: 40)),
         duration: const Duration(minutes: 1, seconds: 8),
-        overview: 'Mom found the scissors in the kitchen drawer.',
+        overview: "Dinner set for Tuesday at six; he'll pick you up at a quarter to.",
+        emoji: '📞',
       ),
       _conversation(
-        id: 'demo-morning-crossword-and-coffee',
-        title: '🪽 Morning Crossword & Coffee',
-        startedAt: day.add(const Duration(hours: 8, minutes: 10)),
+        id: 'demo-tuesday-dinner-plans',
+        title: 'Tuesday dinner plans',
+        startedAt: day.subtract(const Duration(days: 1)).add(const Duration(hours: 15, minutes: 10)),
         duration: const Duration(minutes: 4, seconds: 21),
-        overview: 'Mom started the morning with coffee and her crossword.',
+        overview: "Roast chicken at David's — you offered to bring bread.",
+        emoji: '🍲',
       ),
     ];
   }
@@ -55,28 +60,33 @@ class DemoFixtures {
     final base = now ?? DateTime.now();
     return [
       _message(
+        id: 'demo-chat-opening',
+        createdAt: base.subtract(const Duration(minutes: 5)),
+        text: "Good morning — I'm here.",
+        sender: MessageSender.ai,
+      ),
+      _message(
         id: 'demo-chat-1',
         createdAt: base.subtract(const Duration(minutes: 4)),
-        text: "What's the word for the appointment where they take your fingerprints?",
+        text: 'When is dinner with David?',
         sender: MessageSender.human,
       ),
       _message(
         id: 'demo-chat-2',
         createdAt: base.subtract(const Duration(minutes: 3)),
-        text:
-            "That's the biometrics appointment — it's on Thursday at 10 in the morning. Want me to remind you Thursday after breakfast?",
+        text: "Tuesday at six. He said he'll pick you up at a quarter to.",
         sender: MessageSender.ai,
       ),
       _message(
         id: 'demo-chat-3',
         createdAt: base.subtract(const Duration(minutes: 2)),
-        text: 'Yes please. And where did I put my glasses?',
+        text: 'Thank you, Ella.',
         sender: MessageSender.human,
       ),
       _message(
         id: 'demo-chat-4',
         createdAt: base.subtract(const Duration(minutes: 1)),
-        text: 'Last night you set them in the front pocket of your blue backpack, by the door. 🪽',
+        text: 'Anytime, Margaret. Would you like a reminder Tuesday afternoon?',
         sender: MessageSender.ai,
       ),
     ];
@@ -90,7 +100,7 @@ class DemoFixtures {
       date: _dateString(day),
       createdAt: day.add(const Duration(hours: 19)),
       headline: '🪽 Today with Mom',
-      overview: dailyRecap,
+      overview: '[Ella] $dailyRecap',
       dayEmoji: '🪽',
       stats: DayStats(totalConversations: 4, totalDurationMinutes: 21),
       highlights: [
@@ -106,19 +116,70 @@ class DemoFixtures {
 
   static List<DailySummary> dailySummaries({DateTime? now}) => [dailySummary(now: now)];
 
+  static List<ActionItemWithMetadata> actionItems({DateTime? now}) {
+    final base = now ?? DateTime.now();
+    return [
+      ActionItemWithMetadata(
+        id: 'demo-reminder-david',
+        description: 'Dinner with David',
+        completed: false,
+        dueAt: DateTime(base.year, base.month, base.day, 18),
+      ),
+      ActionItemWithMetadata(
+        id: 'demo-reminder-prescription',
+        description: 'Pick up prescription',
+        completed: false,
+        dueAt: DateTime(base.year, base.month, base.day, 14),
+      ),
+    ];
+  }
+
+  static List<GuardianAlertRecord> whispers({DateTime? now}) {
+    final base = now ?? DateTime.now();
+    return [
+      GuardianAlertRecord(
+        id: 'demo-whisper-scissors',
+        alertText: 'You were looking for the scissors — kitchen drawer.',
+        triggerType: 'asked_where_scissors_were',
+        deliveryTarget: 'user',
+        playbackStatus: 'played',
+        createdAt: base.subtract(const Duration(hours: 1)),
+        sourceConversationId: 'demo-found-the-scissors',
+      ),
+      GuardianAlertRecord(
+        id: 'demo-whisper-biometrics',
+        alertText: 'Your biometrics appointment is Thursday at ten.',
+        triggerType: 'asked_about_biometrics_appointment',
+        deliveryTarget: 'user',
+        playbackStatus: 'played',
+        createdAt: base.subtract(const Duration(hours: 3)),
+      ),
+      GuardianAlertRecord(
+        id: 'demo-whisper-dinner',
+        alertText: "David is picking you up Tuesday at a quarter to six.",
+        triggerType: 'mentioned_tuesday_dinner',
+        deliveryTarget: 'user',
+        playbackStatus: 'queued',
+        createdAt: base.subtract(const Duration(days: 1, hours: 2)),
+        sourceConversationId: 'demo-tuesday-dinner-plans',
+      ),
+    ];
+  }
+
   static ServerConversation _conversation({
     required String id,
     required String title,
     required DateTime startedAt,
     required Duration duration,
     required String overview,
+    String emoji = '🪽',
   }) {
     return ServerConversation(
       id: id,
       createdAt: startedAt,
       startedAt: startedAt,
       finishedAt: startedAt.add(duration),
-      structured: Structured(title, overview, emoji: '🪽', category: ''),
+      structured: Structured(title, overview, emoji: emoji, category: ''),
       transcriptSegments: const [],
       status: ConversationStatus.completed,
     );

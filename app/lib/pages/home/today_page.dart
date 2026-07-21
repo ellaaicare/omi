@@ -1,0 +1,882 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+
+import 'package:omi/backend/http/api/users.dart';
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/backend/schema/daily_summary.dart';
+import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/pages/ella_daily_note_page.dart';
+import 'package:omi/ella/pages/ella_memories_page.dart';
+import 'package:omi/ella/pages/guardian_alert_history_page.dart';
+import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/conversation_capturing/page.dart';
+import 'package:omi/pages/conversation_detail/page.dart';
+import 'package:omi/providers/action_items_provider.dart';
+import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/providers/device_provider.dart';
+import 'package:omi/utils/enums.dart';
+
+typedef DailySummaryLoader = Future<List<DailySummary>> Function();
+
+String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
+
+bool shouldShowMemoriesLoading({
+  required bool hasLoaded,
+  required bool isLoading,
+  required bool hasMemories,
+}) =>
+    !hasMemories && (!hasLoaded || isLoading);
+
+bool canReadDailyNote({required bool loading, required String text}) => !loading && text.trim().isNotEmpty;
+
+String whisperStatusDetail(bool enabled) => enabled
+    ? ' — Ella will speak up when she can help. 🪽'
+    : " — Ella stays quiet, but she's still listening and remembering.";
+
+List<ActionItemWithMetadata> todayUpcomingReminders(
+  List<ActionItemWithMetadata> items,
+  DateTime now,
+) {
+  final dayStart = DateTime(now.year, now.month, now.day);
+  final tomorrow = dayStart.add(const Duration(days: 1));
+  return items.where((item) {
+    final dueAt = item.dueAt;
+    return !item.completed && dueAt != null && !dueAt.isBefore(now) && dueAt.isBefore(tomorrow);
+  }).toList()
+    ..sort((a, b) => a.dueAt!.compareTo(b.dueAt!));
+}
+
+class TodayPage extends StatefulWidget {
+  const TodayPage({super.key, this.dailySummaryLoader});
+
+  final DailySummaryLoader? dailySummaryLoader;
+
+  @override
+  State<TodayPage> createState() => TodayPageState();
+}
+
+class TodayPageState extends State<TodayPage> {
+  final ScrollController _scrollController = ScrollController();
+  DailySummary? _dailySummary;
+  bool _isLoading = true;
+  bool _isReading = false;
+  bool _whispersOn = true;
+  bool _updatingWhispers = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDailySummary();
+    _loadWhisperState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(context.read<ConversationProvider>().ensureFreshConversations());
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    ElevenLabsTts.stopOnDevice();
+    super.dispose();
+  }
+
+  Future<void> _loadDailySummary() async {
+    final summaries = await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
+    if (!mounted) return;
+    setState(() {
+      _dailySummary = summaries.isEmpty ? null : summaries.first;
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _loadWhisperState() async {
+    final info = await guardian_api.getGuardianMode();
+    if (!mounted || info == null) return;
+    setState(() {
+      _whispersOn = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+    });
+  }
+
+  void scrollToTop() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+  }
+
+  Future<void> _toggleReadAloud() async {
+    if (_isReading) {
+      await ElevenLabsTts.stopOnDevice();
+      if (mounted) setState(() => _isReading = false);
+      return;
+    }
+    final text = _noteText;
+    if (text.isEmpty) return;
+    setState(() => _isReading = true);
+    try {
+      await ElevenLabsTts.speakOnDevice(text);
+    } finally {
+      if (mounted) setState(() => _isReading = false);
+    }
+  }
+
+  Future<void> _setWhispers(bool enabled) async {
+    if (_updatingWhispers) return;
+    final previous = _whispersOn;
+    setState(() {
+      _whispersOn = enabled;
+      _updatingWhispers = true;
+    });
+    final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
+    final success = SharedPreferencesUtil().demoMode || await guardian_api.setGuardianModeTwoTier(state);
+    if (!mounted) return;
+    setState(() {
+      _updatingWhispers = false;
+      if (!success) _whispersOn = previous;
+    });
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Whispers could not be updated. Please try again.')),
+      );
+    }
+  }
+
+  String get _noteText {
+    final raw = _dailySummary?.overview.trim() ?? '';
+    return raw.replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
+  }
+
+  void _openDailyNote() {
+    final summary = _dailySummary;
+    if (summary == null) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => EllaDailyNotePage(summary: summary)),
+    );
+  }
+
+  void _openLiveView(CaptureProvider capture, ConversationProvider conversations) {
+    final topConversationId = conversations.conversations.isEmpty ? null : conversations.conversations.first.id;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ConversationCapturingPage(topConversationId: topConversationId),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final reminders = todayUpcomingReminders(
+      context.watch<ActionItemsProvider>().actionItems,
+      now,
+    );
+    final deviceConnected = context.select<DeviceProvider, bool>(
+      (provider) => provider.presentationIsConnected,
+    );
+    final capture = context.watch<CaptureProvider>();
+    final conversations = context.watch<ConversationProvider>();
+    final visibleConversations = conversations.visibleConversations;
+    final memoriesLoading = shouldShowMemoriesLoading(
+      hasLoaded: conversations.hasLoadedConversations,
+      isLoading: conversations.isLoadingConversations,
+      hasMemories: visibleConversations.isNotEmpty,
+    );
+    final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
+    final scale = MediaQuery.textScalerOf(context).scale(1);
+
+    return SafeArea(
+      bottom: false,
+      child: RefreshIndicator(
+        color: EllaColors.tealDeep,
+        backgroundColor: EllaColors.card,
+        onRefresh: () async {
+          await Future.wait([
+            _loadDailySummary(),
+            _loadWhisperState(),
+            context.read<ActionItemsProvider>().fetchActionItems(),
+            context.read<ConversationProvider>().getInitialConversations(),
+          ]);
+        },
+        child: ListView(
+          key: const Key('today-scroll'),
+          controller: _scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(
+            EllaSizes.screenPadding,
+            14,
+            EllaSizes.screenPadding,
+            120,
+          ),
+          children: [
+            _TodayHeader(now: now),
+            const SizedBox(height: EllaSizes.sectionGap),
+            _DailyNoteCard(
+              loading: _isLoading,
+              text: _noteText,
+              isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
+              isReading: _isReading,
+              enlarged: scale >= 1.45,
+              onTap: _openDailyNote,
+              onReadAloud: _toggleReadAloud,
+            ),
+            if (!deviceConnected) ...[
+              const SizedBox(height: EllaSizes.cardGap),
+              _DeviceBanner(
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ConnectDevicePage()),
+                ),
+              ),
+            ],
+            const SizedBox(height: EllaSizes.sectionGap),
+            _WhisperCard(
+              enabled: _whispersOn,
+              live: isLive,
+              updating: _updatingWhispers,
+              onChanged: _setWhispers,
+              onOpenLive: () => _openLiveView(capture, conversations),
+            ),
+            _CaptionLink(
+              label: 'See whispers',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage()),
+              ),
+            ),
+            if (reminders.isNotEmpty) ...[
+              const SizedBox(height: EllaSizes.sectionGap),
+              _RemindersSection(reminders: reminders.take(3).toList()),
+            ],
+            if (memoriesLoading || visibleConversations.isNotEmpty) ...[
+              const SizedBox(height: EllaSizes.sectionGap),
+              if (memoriesLoading)
+                const _RecentMemoriesLoading()
+              else
+                _RecentMemories(
+                  conversations: visibleConversations.take(4).toList(),
+                  refreshing: conversations.isLoadingConversations,
+                  onOpenAll: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const EllaMemoriesPage()),
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TodayHeader extends StatelessWidget {
+  const _TodayHeader({required this.now});
+
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final rawName = SharedPreferencesUtil().givenName.trim();
+    final firstName = rawName.isNotEmpty ? rawName : (SharedPreferencesUtil().demoMode ? 'Margaret' : 'there');
+    final greeting = now.hour < 12
+        ? 'Good morning'
+        : now.hour < 17
+            ? 'Good afternoon'
+            : 'Good evening';
+    final date = DateFormat('EEEE · MMMM d').format(now).toUpperCase();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(date, style: EllaTextStyles.eyebrow),
+        const SizedBox(height: 8),
+        Text('$greeting, $firstName.', style: EllaTextStyles.display),
+      ],
+    );
+  }
+}
+
+class _DailyNoteCard extends StatelessWidget {
+  const _DailyNoteCard({
+    required this.loading,
+    required this.text,
+    required this.isToday,
+    required this.isReading,
+    required this.enlarged,
+    required this.onTap,
+    required this.onReadAloud,
+  });
+
+  final bool loading;
+  final String text;
+  final bool isToday;
+  final bool isReading;
+  final bool enlarged;
+  final VoidCallback onTap;
+  final VoidCallback onReadAloud;
+
+  String get _preview {
+    if (text.isEmpty) return "Ella's first note arrives this evening 🪽";
+    final sentences = RegExp(r'.*?[.!?](?:\s|$)').allMatches(text).take(2).map((m) => m.group(0)!.trim()).toList();
+    return sentences.isEmpty ? text : sentences.join(' ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasMore = text.isNotEmpty && _preview.length < text.length;
+    return Material(
+      color: EllaColors.card,
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: InkWell(
+        key: const Key('daily-note-card'),
+        onTap: text.isEmpty ? null : onTap,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        child: Padding(
+          padding: const EdgeInsets.all(EllaSizes.notePadding),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(isToday ? "TODAY'S NOTE" : 'YESTERDAY EVENING', style: EllaTextStyles.eyebrow),
+              const SizedBox(height: 12),
+              if (loading)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                )
+              else
+                Text(
+                  _preview,
+                  style: EllaTextStyles.noteBody,
+                  maxLines: enlarged ? null : 6,
+                  overflow: enlarged ? TextOverflow.visible : TextOverflow.ellipsis,
+                ),
+              if (hasMore) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Read more',
+                  style: TextStyle(
+                    fontFamily: EllaTextStyles.uiFont,
+                    color: EllaColors.tealDeep,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                alignment: WrapAlignment.spaceBetween,
+                children: [
+                  const Text('— Ella 🪽', style: EllaTextStyles.ellaSignOff),
+                  if (canReadDailyNote(loading: loading, text: text))
+                    Semantics(
+                      button: true,
+                      label: isReading ? 'Stop reading' : 'Read aloud',
+                      child: Material(
+                        color: EllaColors.cardDeep,
+                        borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
+                        child: InkWell(
+                          onTap: onReadAloud,
+                          borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 15),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isReading ? Icons.stop_rounded : Icons.volume_up_rounded,
+                                    color: EllaColors.tealDeep,
+                                    size: 20,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    isReading ? 'Stop' : 'Read aloud',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                      color: EllaColors.tealDeep,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WhisperCard extends StatelessWidget {
+  const _WhisperCard({
+    required this.enabled,
+    required this.live,
+    required this.updating,
+    required this.onChanged,
+    required this.onOpenLive,
+  });
+
+  final bool enabled;
+  final bool live;
+  final bool updating;
+  final ValueChanged<bool> onChanged;
+  final VoidCallback onOpenLive;
+
+  @override
+  Widget build(BuildContext context) {
+    final lead = whisperStatusLead(enabled);
+    final rest = whisperStatusDetail(enabled);
+    return Material(
+      color: EllaColors.card,
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: Padding(
+        padding: const EdgeInsets.all(EllaSizes.cardPadding),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 7),
+              child: EllaBreathingDot(active: enabled, live: live),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text.rich(
+                    TextSpan(
+                      style: EllaTextStyles.body,
+                      children: [
+                        TextSpan(text: lead, style: const TextStyle(fontWeight: FontWeight.w700)),
+                        TextSpan(text: rest),
+                      ],
+                    ),
+                  ),
+                  if (live) ...[
+                    const SizedBox(height: 10),
+                    InkWell(
+                      key: const Key('live-listening-entry'),
+                      onTap: onOpenLive,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text.rich(
+                          TextSpan(
+                            style: EllaTextStyles.secondary,
+                            children: [
+                              TextSpan(text: 'Ella is listening now — '),
+                              TextSpan(
+                                text: 'tap to see',
+                                style: TextStyle(
+                                  color: EllaColors.tealDeep,
+                                  fontWeight: FontWeight.w700,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              width: EllaSizes.minTouchTarget,
+              height: EllaSizes.minTouchTarget,
+              child: updating
+                  ? const Padding(
+                      padding: EdgeInsets.all(14),
+                      child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+                    )
+                  : Switch(
+                      value: enabled,
+                      onChanged: onChanged,
+                      activeTrackColor: EllaColors.teal,
+                      activeThumbColor: EllaColors.paper,
+                      inactiveTrackColor: EllaColors.cardDeep,
+                      inactiveThumbColor: EllaColors.inkSoft,
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CaptionLink extends StatelessWidget {
+  const _CaptionLink({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: InkWell(
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: EllaTextStyles.caption.copyWith(
+                    color: EllaColors.tealDeep,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.chevron_right_rounded, size: 18, color: EllaColors.tealDeep),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceBanner extends StatelessWidget {
+  const _DeviceBanner({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: EllaColors.card,
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 64),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: EllaSizes.cardPadding, vertical: 12),
+            child: Row(
+              children: [
+                Icon(Icons.watch_outlined, color: EllaColors.tealDeep),
+                SizedBox(width: 12),
+                Expanded(child: Text("Ella's necklace is resting — tap to reconnect", style: EllaTextStyles.body)),
+                Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RemindersSection extends StatelessWidget {
+  const _RemindersSection({required this.reminders});
+
+  final List<ActionItemWithMetadata> reminders;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('TODAY', style: EllaTextStyles.eyebrow),
+        const SizedBox(height: EllaSizes.cardGap),
+        Container(
+          decoration: BoxDecoration(
+            color: EllaColors.card,
+            borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+          ),
+          child: Column(
+            children: [
+              for (var index = 0; index < reminders.length; index++) ...[
+                _ReminderRow(reminder: reminders[index]),
+                if (index < reminders.length - 1)
+                  const Divider(height: 1, indent: 20, endIndent: 20, color: EllaColors.cardDeep),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ReminderRow extends StatelessWidget {
+  const _ReminderRow({required this.reminder});
+
+  final ActionItemWithMetadata reminder;
+
+  void _showDetail(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: EllaColors.paper,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(reminder.description, style: EllaTextStyles.display),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: () async {
+                  await context.read<ActionItemsProvider>().updateActionItemState(reminder, true);
+                  if (sheetContext.mounted) Navigator.pop(sheetContext);
+                },
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('Done'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () async {
+                  final evening = DateTime.now().copyWith(hour: 18, minute: 0, second: 0, millisecond: 0);
+                  await context.read<ActionItemsProvider>().updateActionItemDueDate(reminder, evening);
+                  if (sheetContext.mounted) Navigator.pop(sheetContext);
+                },
+                icon: const Icon(Icons.schedule_rounded, color: EllaColors.tealDeep),
+                label: const Text('Snooze to evening', style: TextStyle(color: EllaColors.tealDeep)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final time = reminder.dueAt == null ? 'Anytime' : DateFormat('h:mm a').format(reminder.dueAt!);
+    return InkWell(
+      onTap: () => _showDetail(context),
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 64),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: EllaColors.cardDeep,
+                  borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                ),
+                child: Text(time, style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w700)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text(reminder.description, style: EllaTextStyles.body)),
+              const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RecentMemories extends StatelessWidget {
+  const _RecentMemories({required this.conversations, required this.refreshing, required this.onOpenAll});
+
+  final List<ServerConversation> conversations;
+  final bool refreshing;
+  final VoidCallback onOpenAll;
+
+  @override
+  Widget build(BuildContext context) {
+    final height = _memoryCarouselHeight(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Expanded(child: Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow)),
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: refreshing ? const CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep) : null,
+            ),
+          ],
+        ),
+        const SizedBox(height: EllaSizes.cardGap),
+        SizedBox(
+          height: height,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: EdgeInsets.zero,
+            itemCount: conversations.length + 1,
+            separatorBuilder: (_, __) => const SizedBox(width: EllaSizes.cardGap),
+            itemBuilder: (context, index) {
+              if (index == conversations.length) {
+                return _AllMemoriesCard(onTap: onOpenAll, height: height);
+              }
+              final conversation = conversations[index];
+              return _MemoryPreviewCard(
+                conversation: conversation,
+                height: height,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => ConversationDetailPage(conversation: conversation),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RecentMemoriesLoading extends StatelessWidget {
+  const _RecentMemoriesLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow),
+        const SizedBox(height: EllaSizes.cardGap),
+        Container(
+          height: _memoryCarouselHeight(context),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: EllaColors.card,
+            borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+          ),
+          child: const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+double _memoryCarouselHeight(BuildContext context) {
+  final scale = MediaQuery.textScalerOf(context).scale(1);
+  return scale >= 1.45
+      ? 210.0
+      : scale >= 1.15
+          ? 176.0
+          : 148.0;
+}
+
+class _MemoryPreviewCard extends StatelessWidget {
+  const _MemoryPreviewCard({required this.conversation, required this.height, required this.onTap});
+
+  final ServerConversation conversation;
+  final double height;
+  final VoidCallback onTap;
+
+  String get _title =>
+      conversation.structured.title.replaceFirst(RegExp(r'^🪽\s*'), '').replaceFirst(RegExp(r'^\[Ella\]\s*'), '');
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: EllaColors.card,
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        child: SizedBox(
+          width: 240,
+          height: height,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: EllaColors.cardDeep,
+                    borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                  ),
+                  child: Text(conversation.structured.emoji.isEmpty ? '🪽' : conversation.structured.emoji),
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: Text(
+                    _title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Text(_relativeTime(conversation.startedAt ?? conversation.createdAt), style: EllaTextStyles.caption),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AllMemoriesCard extends StatelessWidget {
+  const _AllMemoriesCard({required this.onTap, required this.height});
+
+  final VoidCallback onTap;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: EllaColors.cardDeep,
+      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        child: SizedBox(
+          width: 180,
+          height: height,
+          child: const Center(
+            child: Text(
+              'All memories →',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: EllaColors.tealDeep),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _relativeTime(DateTime value) {
+  final now = DateTime.now();
+  final local = value.toLocal();
+  if (local.year == now.year && local.month == now.month && local.day == now.day) {
+    return local.hour < 12 ? 'This morning' : 'This afternoon';
+  }
+  return DateFormat('MMM d').format(local);
+}

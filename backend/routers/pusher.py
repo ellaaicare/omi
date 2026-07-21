@@ -327,11 +327,15 @@ async def _websocket_util_trigger(
                     memory_id = res.get('memory_id')
 
                     # DEBUG: Log received transcript segments
-                    print(f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}")
+                    print(
+                        f"[TRANSCRIPT-DEBUG] Received {len(segments) if segments else 0} segments for uid={uid} memory_id={memory_id}"
+                    )
                     if segments and len(segments) > 0:
                         # Log first segment content (truncated)
                         first_seg = segments[0]
-                        text_preview = first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        text_preview = (
+                            first_seg.get("text", "")[:100] if isinstance(first_seg, dict) else str(first_seg)[:100]
+                        )
                         print(f"[TRANSCRIPT-DEBUG] First segment preview: {text_preview}")
 
                     # Update conversation_id from transcript if provided
@@ -412,11 +416,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'app',
-                            'sample_rate': sample_rate,
-                            'data': trigger_audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'app',
+                                'sample_rate': sample_rate,
+                                'data': trigger_audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         trigger_audiobuffer = bytearray()
                     if (
@@ -425,11 +431,13 @@ async def _websocket_util_trigger(
                     ):
                         if len(audio_bytes_queue) >= AUDIO_BYTES_QUEUE_WARN_SIZE:
                             print(f"Warning: audio_bytes_queue size {len(audio_bytes_queue)}", uid)
-                        audio_bytes_queue.append({
-                            'type': 'webhook',
-                            'sample_rate': sample_rate,
-                            'data': audiobuffer.copy(),
-                        })
+                        audio_bytes_queue.append(
+                            {
+                                'type': 'webhook',
+                                'sample_rate': sample_rate,
+                                'data': audiobuffer.copy(),
+                            }
+                        )
                         audio_bytes_event.set()  # Wake consumer immediately
                         audiobuffer = bytearray()
                     continue

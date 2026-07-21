@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/schema.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -13,6 +15,13 @@ Future<ActionItemsResponse> getActionItems({
   DateTime? startDate,
   DateTime? endDate,
 }) async {
+  if (SharedPreferencesUtil().demoMode) {
+    final items = DemoFixtures.actionItems();
+    return ActionItemsResponse(
+      actionItems: completed == null ? items : items.where((item) => item.completed == completed).toList(),
+      hasMore: false,
+    );
+  }
   String url = '${Env.apiBaseUrl}v1/action-items?limit=$limit&offset=$offset';
 
   if (completed != null) {

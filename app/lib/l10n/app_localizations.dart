@@ -15594,25 +15594,25 @@ abstract class AppLocalizations {
   /// No description provided for @ellaMaxConversationLengthConfig.
   ///
   /// In en, this message translates to:
-  /// **'Split long captures on the backend'**
+  /// **'Choose when a long conversation starts a new memory'**
   String get ellaMaxConversationLengthConfig;
 
   /// No description provided for @ellaMaxConversationLengthDescription.
   ///
   /// In en, this message translates to:
-  /// **'Ella can automatically split very long continuous recordings into smaller conversations so summaries stay specific and useful. This is handled by the backend while recording continues.'**
+  /// **'Ella can automatically keep long conversations organized as separate memories while listening continues.'**
   String get ellaMaxConversationLengthDescription;
 
   /// No description provided for @ellaMaxConversationLengthBackendDefault.
   ///
   /// In en, this message translates to:
-  /// **'Backend default'**
+  /// **'Automatic'**
   String get ellaMaxConversationLengthBackendDefault;
 
   /// No description provided for @ellaMaxConversationLengthBackendDefaultDesc.
   ///
   /// In en, this message translates to:
-  /// **'Use Ella\'s current default: 30 minutes.'**
+  /// **'Ella chooses the conversation length.'**
   String get ellaMaxConversationLengthBackendDefaultDesc;
 
   /// No description provided for @ellaMaxConversationLengthDisabled.
@@ -16010,6 +16010,132 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Trace: {traceId}'**
   String guardianAlertsTraceDetail(String traceId);
+
+  /// Developer setting title for previewing the public experience
+  ///
+  /// In en, this message translates to:
+  /// **'Public Build Preview'**
+  String get publicBuildPreview;
+
+  /// Developer setting description for public mode
+  ///
+  /// In en, this message translates to:
+  /// **'Preview the simplified public experience'**
+  String get publicBuildPreviewDescription;
+
+  /// Empty state shown when today's daily note has not arrived
+  ///
+  /// In en, this message translates to:
+  /// **'Ella\'s note about today arrives this evening 🪽'**
+  String get dailyNoteEmpty;
+
+  /// Primary action that opens Ella voice chat
+  ///
+  /// In en, this message translates to:
+  /// **'Talk to Ella'**
+  String get talkToElla;
+
+  /// Heading for today's upcoming reminders
+  ///
+  /// In en, this message translates to:
+  /// **'Reminders'**
+  String get reminders;
+
+  /// Accessibility label for reading a daily note aloud
+  ///
+  /// In en, this message translates to:
+  /// **'Read aloud'**
+  String get readAloud;
+
+  /// Accessibility label for stopping read-aloud playback
+  ///
+  /// In en, this message translates to:
+  /// **'Stop reading'**
+  String get stopReading;
+
+  /// Gentle device reconnection action shown on Today
+  ///
+  /// In en, this message translates to:
+  /// **'Ella\'s necklace is resting — tap to reconnect'**
+  String get necklaceResting;
+
+  /// Locked first-run listening consent title
+  ///
+  /// In en, this message translates to:
+  /// **'Ella listens to help remember.'**
+  String get aiConsentTitle;
+
+  /// Locked consent body before the Deepgram processor name
+  ///
+  /// In en, this message translates to:
+  /// **'To turn speech into memories, audio from your device and necklace is sent securely to our processing partners: '**
+  String get aiConsentBodyIntro;
+
+  /// Speech-to-text processor named in the locked consent disclosure
+  ///
+  /// In en, this message translates to:
+  /// **'Deepgram'**
+  String get aiConsentDeepgram;
+
+  /// Locked consent body between processor names
+  ///
+  /// In en, this message translates to:
+  /// **' (speech-to-text) and '**
+  String get aiConsentBodyMiddle;
+
+  /// Summary and answer processors named in the locked consent disclosure
+  ///
+  /// In en, this message translates to:
+  /// **'Google (Gemini), OpenAI, and Groq'**
+  String get aiConsentAiPartners;
+
+  /// Locked final portion of the listening consent body
+  ///
+  /// In en, this message translates to:
+  /// **' (to write summaries and answer you). Summaries are shared only with family members you choose. You can turn listening off any time in Settings.'**
+  String get aiConsentBodyEnd;
+
+  /// Accept listening consent action
+  ///
+  /// In en, this message translates to:
+  /// **'Allow and continue'**
+  String get allowAndContinue;
+
+  /// Decline or defer listening consent action
+  ///
+  /// In en, this message translates to:
+  /// **'Not now'**
+  String get notNow;
+
+  /// Settings row that opens the listening consent sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Listening & consent'**
+  String get listeningAndConsent;
+
+  /// Settings section for additional options
+  ///
+  /// In en, this message translates to:
+  /// **'MORE'**
+  String get ellaMoreSection;
+
+  /// Plain-language link to advanced app settings
+  ///
+  /// In en, this message translates to:
+  /// **'Advanced Settings'**
+  String get ellaAdvancedSettings;
+
+  /// Plain-language description of advanced settings
+  ///
+  /// In en, this message translates to:
+  /// **'Language and app options'**
+  String get ellaAdvancedSettingsSubtitle;
+
+  /// Tooltip and accessibility label for Ella-generated summaries
+  ///
+  /// In en, this message translates to:
+  /// **'Ella summary'**
+  String get ellaSummarySource;
 
   /// Section and status label for a conversation whose summary failed
   ///

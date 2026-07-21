@@ -142,6 +142,7 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   }
 
   Future start() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     bool ok = await _socket.connect();
     if (!ok) {
       Logger.debug("Can not connect to websocket");
@@ -165,11 +166,13 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
   }
 
   Future send(dynamic message) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     _socket.send(message);
     return;
   }
 
   Future sendText(String message) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     _socket.send(message);
     return;
   }

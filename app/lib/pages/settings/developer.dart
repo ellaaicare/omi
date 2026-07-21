@@ -776,12 +776,26 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                       color: const Color(0xFF1C1C1E),
                       borderRadius: BorderRadius.circular(14),
                     ),
-                    child: _buildExperimentalItem(
-                      title: 'Demo Mode',
-                      description: 'Use curated local content for screenshots',
-                      icon: FontAwesomeIcons.images,
-                      value: provider.demoMode,
-                      onChanged: provider.onDemoModeChanged,
+                    child: Column(
+                      children: [
+                        _buildExperimentalItem(
+                          title: 'Demo Mode',
+                          description: 'Use curated local content for screenshots',
+                          icon: FontAwesomeIcons.images,
+                          value: provider.demoMode,
+                          onChanged: provider.onDemoModeChanged,
+                        ),
+                        if (!SharedPreferencesUtil.isPublicBuild) ...[
+                          const Divider(height: 32, color: Color(0xFF2C2C2E)),
+                          _buildExperimentalItem(
+                            title: context.l10n.publicBuildPreview,
+                            description: context.l10n.publicBuildPreviewDescription,
+                            icon: FontAwesomeIcons.eye,
+                            value: provider.publicMode,
+                            onChanged: provider.onPublicModeChanged,
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                   const SizedBox(height: 32),

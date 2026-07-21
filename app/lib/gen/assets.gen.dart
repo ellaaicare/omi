@@ -33,9 +33,38 @@ class $AssetsDeviceAssetsGen {
 class $AssetsFontsGen {
   const $AssetsFontsGen();
 
-  /// File path: assets/fonts/Manrope-VariableFont_wght.ttf
-  String get manropeVariableFontWght =>
-      'assets/fonts/Manrope-VariableFont_wght.ttf';
+  /// File path: assets/fonts/Fraunces-Latin-Italic.ttf
+  String get frauncesLatinItalic => 'assets/fonts/Fraunces-Latin-Italic.ttf';
+
+  /// File path: assets/fonts/Fraunces-Latin-Medium.ttf
+  String get frauncesLatinMedium => 'assets/fonts/Fraunces-Latin-Medium.ttf';
+
+  /// File path: assets/fonts/Fraunces-Latin-Regular.ttf
+  String get frauncesLatinRegular => 'assets/fonts/Fraunces-Latin-Regular.ttf';
+
+  /// File path: assets/fonts/Manrope-300.ttf
+  String get manrope300 => 'assets/fonts/Manrope-300.ttf';
+
+  /// File path: assets/fonts/Manrope-400.ttf
+  String get manrope400 => 'assets/fonts/Manrope-400.ttf';
+
+  /// File path: assets/fonts/Manrope-500.ttf
+  String get manrope500 => 'assets/fonts/Manrope-500.ttf';
+
+  /// File path: assets/fonts/Manrope-600.ttf
+  String get manrope600 => 'assets/fonts/Manrope-600.ttf';
+
+  /// File path: assets/fonts/Manrope-700.ttf
+  String get manrope700 => 'assets/fonts/Manrope-700.ttf';
+
+  /// File path: assets/fonts/Manrope-800.ttf
+  String get manrope800 => 'assets/fonts/Manrope-800.ttf';
+
+  /// File path: assets/fonts/OFL-Fraunces.txt
+  String get oFLFraunces => 'assets/fonts/OFL-Fraunces.txt';
+
+  /// File path: assets/fonts/OFL-Manrope.txt
+  String get oFLManrope => 'assets/fonts/OFL-Manrope.txt';
 
   /// File path: assets/fonts/SFPRODISPLAYBLACKITALIC.OTF
   String get sfprodisplayblackitalic =>
@@ -68,7 +97,17 @@ class $AssetsFontsGen {
 
   /// List of all assets
   List<String> get values => [
-    manropeVariableFontWght,
+    frauncesLatinItalic,
+    frauncesLatinMedium,
+    frauncesLatinRegular,
+    manrope300,
+    manrope400,
+    manrope500,
+    manrope600,
+    manrope700,
+    manrope800,
+    oFLFraunces,
+    oFLManrope,
     sfprodisplayblackitalic,
     sfprodisplaybold,
     sfprodisplayheavyitalic,

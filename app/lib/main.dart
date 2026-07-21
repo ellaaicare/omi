@@ -44,6 +44,7 @@ import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/device_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/folder_provider.dart';
 import 'package:omi/providers/goals_provider.dart';
 import 'package:omi/providers/home_provider.dart';
@@ -177,6 +178,9 @@ Future _init() async {
   Logger.debug('DEBUG main: Before getIdToken - currentUser=${FirebaseAuth.instance.currentUser?.uid}');
   bool isAuth = (await AuthService.instance.getIdToken()) != null;
   Logger.debug('DEBUG main: After getIdToken - isAuth=$isAuth, currentUser=${FirebaseAuth.instance.currentUser?.uid}');
+  if (F.env == Environment.prod && !SharedPreferencesUtil.isPublicBuild) {
+    SharedPreferencesUtil().clearDemoStateForAccountBuild();
+  }
   if (isAuth) PlatformManager.instance.mixpanel.identify();
   if (PlatformService.isMobile) initOpus(await opus_flutter.load());
 
@@ -322,6 +326,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         providers: [
           ListenableProvider(create: (context) => ConnectivityProvider()),
           ChangeNotifierProvider(create: (context) => AuthenticationProvider()),
+          ChangeNotifierProvider(create: (context) => EllaProvisioningProvider()),
           ChangeNotifierProvider(create: (context) => ConversationProvider()),
           ListenableProvider(create: (context) => AppProvider()),
           ChangeNotifierProvider(create: (context) => PeopleProvider()),

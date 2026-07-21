@@ -38,7 +38,7 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
   Future<void> _refreshFromBackend() async {
     try {
       final caregivers = await caregiver_api.getCaregivers();
-      final emergencyId = await caregiver_api.getEmergencyContactId();
+      final emergencyId = SharedPreferencesUtil().publicMode ? null : await caregiver_api.getEmergencyContactId();
       final updated = caregivers.firstWhere(
         (c) => c.id == _caregiver.id,
         orElse: () => _caregiver,
@@ -333,22 +333,26 @@ class _EllaCaregiverDetailPageState extends State<EllaCaregiverDetailPage> {
 
           // NOTIFICATIONS section
           _buildSectionHeader('NOTIFICATIONS'),
-          EllaPermissionToggle(
-            title: context.l10n.ellaPermissionEmergencyAlerts,
-            description: _isEmergencyContact
-                ? '${cg.name} is your emergency contact and will receive critical alerts'
-                : 'Tap to make ${cg.name} your emergency contact for critical alerts',
-            isOn: _isEmergencyContact,
-            onChanged: _loadingEmergency ? null : _toggleEmergencyContact,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
-          ),
-          const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
+          if (!SharedPreferencesUtil().publicMode) ...[
+            EllaPermissionToggle(
+              title: context.l10n.ellaPermissionEmergencyAlerts,
+              description: _isEmergencyContact
+                  ? '${cg.name} is your emergency contact and will receive critical alerts'
+                  : 'Tap to make ${cg.name} your emergency contact for critical alerts',
+              isOn: _isEmergencyContact,
+              onChanged: _loadingEmergency ? null : _toggleEmergencyContact,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(EllaSizes.radiusLarge)),
+            ),
+            const Divider(height: 0.5, thickness: 0.5, color: EllaColors.bgTertiary, indent: 16, endIndent: 16),
+          ],
           EllaPermissionToggle(
             title: context.l10n.ellaPermissionDailySummary,
             description: context.l10n.ellaPermissionDailySummaryDescription,
             isOn: _dailySummary,
             onChanged: _toggleDailySummary,
-            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(EllaSizes.radiusLarge)),
+            borderRadius: SharedPreferencesUtil().publicMode
+                ? BorderRadius.circular(EllaSizes.radiusLarge)
+                : const BorderRadius.vertical(bottom: Radius.circular(EllaSizes.radiusLarge)),
           ),
 
           const SizedBox(height: 32),

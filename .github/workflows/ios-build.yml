@@ -35,6 +35,7 @@ jobs:
         working-directory: app/ios
         run: |
           export SKIP_PULL=1
+          export RUN_TESTS=1
           export ASC_ISSUER_ID="${{ secrets.ASC_ISSUER_ID }}"
           ./build-and-upload.sh
         env:

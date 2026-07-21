@@ -686,6 +686,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   }
 
   _sendMessageUtil(String text) {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     String? currentContext = _selectedContext;
     setState(() {
       _selectedContext = null;
@@ -922,15 +923,20 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       actions: const [], // Chat apps panel hidden — single-app Ella setup
       bottom: provider.isLoadingMessages
           ? PreferredSize(
-              preferredSize: const Size.fromHeight(32),
-              child: Container(
-                width: double.infinity,
-                height: 32,
-                color: Colors.green,
-                child: Center(
+              preferredSize: const Size.fromHeight(30),
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: EllaColors.bgTertiary,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: Text(
                     context.l10n.syncingMessages,
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                      style: const TextStyle(color: EllaColors.textSecondary, fontSize: 12),
+                    ),
                   ),
                 ),
               ),

@@ -180,6 +180,7 @@ class SpeechProfileProvider extends ChangeNotifier
   }
 
   Future<void> _initiateWebsocket({required BleAudioCodec codec, int? sampleRate, bool force = false}) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     String language =
         SharedPreferencesUtil().hasSetPrimaryLanguage ? SharedPreferencesUtil().userPrimaryLanguage : "multi";
     int rate = sampleRate ?? (codec.isOpusSupported() ? 16000 : 8000);
@@ -195,6 +196,7 @@ class SpeechProfileProvider extends ChangeNotifier
 
   /// Start phone microphone streaming (alternative to BLE device streaming)
   Future<void> _initiatePhoneMicStreaming() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     Logger.debug('Starting phone mic streaming for speech profile...');
 
     // Request mic permission
@@ -244,6 +246,7 @@ class SpeechProfileProvider extends ChangeNotifier
   }
 
   Future finalize() async {
+    if (!SharedPreferencesUtil().aiConsentAccepted) return;
     try {
       if (uploadingProfile || profileCompleted) return;
 

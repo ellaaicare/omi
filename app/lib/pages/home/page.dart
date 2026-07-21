@@ -1,19 +1,13 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'package:flutter/services.dart';
 
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:provider/provider.dart';
 import 'package:upgrader/upgrader.dart';
 
 import 'package:uuid/uuid.dart';
-
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/schema/message.dart';
@@ -22,11 +16,12 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/geolocation.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/chat/page.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
-import 'package:omi/pages/conversations/conversations_page.dart';
 import 'package:omi/pages/memories/page.dart';
 import 'package:omi/pages/settings/daily_summary_detail_page.dart';
 import 'package:omi/pages/settings/data_privacy_page.dart';
@@ -47,7 +42,6 @@ import 'package:omi/services/notifications.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/audio/foreground.dart';
-import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -55,14 +49,21 @@ import 'package:omi/widgets/freemium_switch_dialog.dart';
 import 'package:omi/widgets/upgrade_alert.dart';
 import 'package:omi/widgets/bottom_nav_bar.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/ella/widgets/ella_emergency_button.dart';
-import 'package:omi/ella/widgets/guardian_mode_button.dart';
-import 'widgets/battery_info_widget.dart';
+import 'today_page.dart';
 
 class HomePageWrapper extends StatefulWidget {
   final String? navigateToRoute;
   final String? autoMessage;
-  const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage});
+  final bool provisioningGateStartOnMount;
+
+  const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage, this.provisioningGateStartOnMount = true})
+      : _provisioningVerified = false;
+
+  const HomePageWrapper._provisioned({this.navigateToRoute, this.autoMessage})
+      : provisioningGateStartOnMount = true,
+        _provisioningVerified = true;
+
+  final bool _provisioningVerified;
 
   @override
   State<HomePageWrapper> createState() => _HomePageWrapperState();
@@ -74,28 +75,38 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
 
   @override
   void initState() {
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (mounted) {
-        context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper', boundDeviceOnly: true);
-      }
-      if (SharedPreferencesUtil().notificationsEnabled) {
-        NotificationService.instance.register();
-        NotificationService.instance.saveNotificationToken();
-
-        // Schedule daily reflection notification if enabled
-        if (SharedPreferencesUtil().dailyReflectionEnabled) {
-          DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+    if (!_requiresProvisioningGate) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (mounted) {
+          context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper', boundDeviceOnly: true);
         }
-      }
-    });
+        if (SharedPreferencesUtil().notificationsEnabled) {
+          NotificationService.instance.register();
+          NotificationService.instance.saveNotificationToken();
+
+          // Schedule daily reflection notification if enabled
+          if (SharedPreferencesUtil().dailyReflectionEnabled) {
+            DailyReflectionNotification.scheduleDailyNotification(channelKey: 'channel');
+          }
+        }
+      });
+    }
     _navigateToRoute = widget.navigateToRoute;
     _autoMessage = widget.autoMessage;
 
     super.initState();
   }
 
+  bool get _requiresProvisioningGate => isHermesProvisioningGateEnabled && !widget._provisioningVerified;
+
   @override
   Widget build(BuildContext context) {
+    if (_requiresProvisioningGate) {
+      return EllaProvisioningGatePage(
+        startOnMount: widget.provisioningGateStartOnMount,
+        readyChild: HomePageWrapper._provisioned(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage),
+      );
+    }
     return HomePage(navigateToRoute: _navigateToRoute, autoMessage: _autoMessage);
   }
 }
@@ -117,7 +128,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   bool scriptsInProgress = false;
   StreamSubscription? _notificationStreamSubscription;
 
-  final GlobalKey<State<ConversationsPage>> _conversationsPageKey = GlobalKey<State<ConversationsPage>>();
+  final GlobalKey<TodayPageState> _todayPageKey = GlobalKey<TodayPageState>();
   late final List<Widget> _pages;
 
   // Freemium switch handler for auto-switch dialogs
@@ -132,10 +143,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   void _scrollToTop(int pageIndex) {
     if (pageIndex == 0) {
-      final conversationsState = _conversationsPageKey.currentState;
-      if (conversationsState != null) {
-        (conversationsState as dynamic).scrollToTop();
-      }
+      _todayPageKey.currentState?.scrollToTop();
     }
   }
 
@@ -165,9 +173,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   }
 
   ///Screens with respect to subpage
-  final Map<String, Widget> screensWithRespectToPath = {
-    '/facts': const MemoriesPage(),
-  };
+  final Map<String, Widget> screensWithRespectToPath = {'/facts': const MemoriesPage()};
   bool? previousConnection;
 
   void _onReceiveTaskData(dynamic data) async {
@@ -187,7 +193,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   @override
   void initState() {
     _pages = [
-      ConversationsPage(key: _conversationsPageKey),
+      TodayPage(key: _todayPageKey),
       const ChatPage(isPivotBottom: true),
       const EllaVoiceChatPage(),
       const EllaSettingsPage(),
@@ -241,8 +247,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
       }
       if (mounted) {
-        await Provider.of<CaptureProvider>(context, listen: false)
-            .streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        await Provider.of<CaptureProvider>(
+          context,
+          listen: false,
+        ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
       }
 
       // Navigate
@@ -253,12 +261,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             final appProvider = context.read<AppProvider>();
             var app = await appProvider.getAppFromId(detailPageId);
             if (app != null && mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => AppDetailPage(app: app),
-                ),
-              );
+              Navigator.push(context, MaterialPageRoute(builder: (context) => AppDetailPage(app: app)));
             }
           }
           break;
@@ -322,19 +325,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             }
           });
           if (detailPageId == 'data-privacy') {
-            MyApp.navigatorKey.currentState?.push(
-              MaterialPageRoute(
-                builder: (context) => const DataPrivacyPage(),
-              ),
-            );
+            MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const DataPrivacyPage()));
           }
           break;
         case "facts":
-          MyApp.navigatorKey.currentState?.push(
-            MaterialPageRoute(
-              builder: (context) => const MemoriesPage(),
-            ),
-          );
+          MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const MemoriesPage()));
           break;
         case "conversation":
           // Handle conversation deep link: /conversation/{id}?share=1
@@ -352,10 +347,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => ConversationDetailPage(
-                      conversation: conversation,
-                      openShareToContactsOnLoad: shouldOpenShare,
-                    ),
+                    builder: (context) =>
+                        ConversationDetailPage(conversation: conversation, openShareToContactsOnLoad: shouldOpenShare),
                   ),
                 );
               } else {
@@ -376,9 +369,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
               if (mounted) {
                 Navigator.push(
                   context,
-                  MaterialPageRoute(
-                    builder: (context) => DailySummaryDetailPage(summaryId: detailPageId!),
-                  ),
+                  MaterialPageRoute(builder: (context) => DailySummaryDetailPage(summaryId: detailPageId!)),
                 );
               }
             });
@@ -387,12 +378,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
         case "wrapped":
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const Wrapped2025Page(),
-                ),
-              );
+              Navigator.push(context, MaterialPageRoute(builder: (context) => const Wrapped2025Page()));
             }
           });
           break;
@@ -403,26 +389,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     _listenToMessagesFromNotification();
     _listenToFreemiumThreshold();
     _checkForAnnouncements();
-    _provisionEllaIfNeeded();
 
     super.initState();
 
     // After init
     FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
-  }
-
-  void _provisionEllaIfNeeded() async {
-    if (SharedPreferencesUtil().ellaUserId.isNotEmpty) return;
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final timezone = await FlutterTimezone.getLocalTimezone();
-    final name = '${SharedPreferencesUtil().givenName} ${SharedPreferencesUtil().familyName}'.trim();
-    provisionEllaUser(
-      firebaseUid: user.uid,
-      email: user.email ?? '',
-      name: name.isNotEmpty ? name : (user.displayName ?? ''),
-      timezone: timezone,
-    );
   }
 
   void _checkForAnnouncements() {
@@ -590,7 +561,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             return Scaffold(
               backgroundColor: Theme.of(context).colorScheme.primary,
               resizeToAvoidBottomInset: false,
-              appBar: homeProvider.selectedIndex == 0 ? _buildAppBar(context) : null,
+              appBar: null,
               body: DefaultTabController(
                 length: 4,
                 initialIndex: homeProvider.selectedIndex,
@@ -605,52 +576,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
                       Column(
                         children: [
                           Expanded(
-                            child: IndexedStack(
-                              index: context.watch<HomeProvider>().selectedIndex,
-                              children: _pages,
-                            ),
+                            child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
                           ),
-                          // Bottom padding to account for emergency button + BottomNavBar overlay
-                          // Only needed on home (index 0) where Guardian + Emergency buttons are shown.
-                          // Chat (1), voice (2), and settings (3) handle their own padding.
-                          if (context.watch<HomeProvider>().selectedIndex == 0)
-                            SizedBox(
-                                height: EllaSizes.guardianButtonHeight +
-                                    EllaSizes.emergencyButtonHeight +
-                                    EllaSizes.navBarHeight +
-                                    (EllaSizes.buttonStackSpacing * 2) +
-                                    MediaQuery.of(context).padding.bottom),
                           // Settings and other non-home tabs just need nav bar clearance
                           if (context.watch<HomeProvider>().selectedIndex == 3)
                             SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
                         ],
-                      ),
-                      // Action buttons stack (Guardian + Emergency) - consolidated for self-adjusting layout
-                      Positioned(
-                        bottom: 0,
-                        left: 0,
-                        right: 0,
-                        child: Consumer<HomeProvider>(
-                          builder: (context, home, _) {
-                            return Padding(
-                              padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // Action buttons (only on home screen)
-                                  if (home.selectedIndex == 0) ...[
-                                    const GuardianModeButton(),
-                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
-                                    const EllaEmergencyButton(),
-                                    const SizedBox(height: EllaSizes.buttonStackSpacing),
-                                  ],
-                                  // Always reserve space for nav bar
-                                  SizedBox(height: EllaSizes.navBarHeight),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
                       ),
                       Consumer<HomeProvider>(
                         builder: (context, home, child) {
@@ -677,59 +608,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           },
         ),
       ),
-    );
-  }
-
-  PreferredSizeWidget _buildAppBar(BuildContext context) {
-    return AppBar(
-      automaticallyImplyLeading: false,
-      backgroundColor: Theme.of(context).colorScheme.primary,
-      leading: const Padding(
-        padding: EdgeInsets.only(left: 8),
-        child: Center(child: BatteryInfoWidget()),
-      ),
-      leadingWidth: 140,
-      title: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0xFF7AB5A8), Color(0xFF5A9E8F)],
-              ),
-            ),
-            child: const Center(
-              child: Text(
-                'e',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w300,
-                  color: Colors.white,
-                  fontFamily: 'Manrope',
-                  height: 1.1,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          const Text(
-            'ella',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.w600,
-              fontFamily: 'Manrope',
-              letterSpacing: 1,
-            ),
-          ),
-        ],
-      ),
-      centerTitle: true,
-      elevation: 0,
     );
   }
 

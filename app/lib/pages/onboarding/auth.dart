@@ -119,7 +119,7 @@ class _AuthComponentState extends State<AuthComponent> {
 
                     // Welcome text
                     const Text(
-                      'Your AI companion\nfor daily life',
+                      'The companion who remembers.',
                       style: TextStyle(
                         color: EllaColors.textSecondary,
                         fontSize: 22,
