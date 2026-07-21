@@ -66,6 +66,10 @@ else
   CONFIG="Release-dev"
 fi
 
+# The live OMI backend verifies Firebase tokens against this project. A stale
+# upstream config can still complete Google sign-in, then fail every API call.
+EXPECTED_FIREBASE_PROJECT_ID="omi-dev-ca005"
+
 log() { echo "=== $(date '+%H:%M:%S') $1 ==="; }
 
 SENSITIVE_BUILD_ENV_VARS=(
@@ -165,7 +169,9 @@ fi
 # ── Step 3: Ensure Firebase/env configs exist ─────────────────
 log "Checking configs"
 mkdir -p ios/Config/Dev/ ios/Config/Prod/ ios/Runner/
-if [ ! -f ios/Config/Prod/GoogleService-Info.plist ]; then
+if [ "$FLAVOR" = "prod" ]; then
+  cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/
+elif [ ! -f ios/Config/Prod/GoogleService-Info.plist ]; then
   cp setup/prebuilt/GoogleService-Info.plist ios/Config/Prod/
 fi
 if [ ! -f ios/Config/Dev/GoogleService-Info.plist ]; then
@@ -174,8 +180,9 @@ fi
 if [ ! -f ios/Runner/GoogleService-Info.plist ]; then
   cp setup/prebuilt/GoogleService-Info.plist ios/Runner/
 fi
-# Ensure firebase_options_*.dart exist (tracked in git; defensive fallback from prebuilt)
-if [ ! -f lib/firebase_options_prod.dart ]; then
+# The tracked prebuilt file is the release source of truth. Always refresh the
+# generated prod options so persistent build hosts cannot silently drift.
+if [ "$FLAVOR" = "prod" ]; then
   cp setup/prebuilt/firebase_options.dart lib/firebase_options_prod.dart
 fi
 if [ ! -f lib/firebase_options_dev.dart ]; then
@@ -193,6 +200,9 @@ if [ ! -f "$PLIST_PATH" ]; then
   echo "ERROR: $PLIST_PATH not found for FLAVOR=$FLAVOR"
   exit 1
 fi
+
+# Runner must use the same flavor-specific Firebase config selected above.
+cp "$PLIST_PATH" ios/Runner/GoogleService-Info.plist
 bash scripts/generate_ios_custom_config.sh "$PLIST_PATH" ios/Flutter
 echo "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" >> ios/Flutter/Custom.xcconfig
 
@@ -204,6 +214,28 @@ if ! grep -q "APP_BUNDLE_IDENTIFIER=$BUNDLE_ID" "$XCCONFIG" 2>/dev/null; then
 fi
 PLIST_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :BUNDLE_ID' "$PLIST_PATH" 2>/dev/null || true)"
 PLIST_PROJECT_ID="$(/usr/libexec/PlistBuddy -c 'Print :PROJECT_ID' "$PLIST_PATH" 2>/dev/null || true)"
+FIREBASE_OPTIONS_FILE="lib/firebase_options_${FLAVOR}.dart"
+
+if [ "$PLIST_PROJECT_ID" != "$EXPECTED_FIREBASE_PROJECT_ID" ]; then
+  echo "ERROR: Firebase project mismatch in $PLIST_PATH (expected $EXPECTED_FIREBASE_PROJECT_ID, got ${PLIST_PROJECT_ID:-missing})."
+  exit 1
+fi
+if [ "$FLAVOR" = "prod" ] && [ "$PLIST_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+  echo "ERROR: Firebase bundle mismatch in $PLIST_PATH (expected $BUNDLE_ID, got ${PLIST_BUNDLE_ID:-missing})."
+  exit 1
+fi
+if [ ! -f "$FIREBASE_OPTIONS_FILE" ]; then
+  echo "ERROR: Missing $FIREBASE_OPTIONS_FILE"
+  exit 1
+fi
+if ! grep -q "projectId: '$EXPECTED_FIREBASE_PROJECT_ID'" "$FIREBASE_OPTIONS_FILE"; then
+  echo "ERROR: $FIREBASE_OPTIONS_FILE does not target $EXPECTED_FIREBASE_PROJECT_ID."
+  exit 1
+fi
+if grep -E "projectId:" "$FIREBASE_OPTIONS_FILE" | grep -Fv "projectId: '$EXPECTED_FIREBASE_PROJECT_ID'" >/dev/null; then
+  echo "ERROR: $FIREBASE_OPTIONS_FILE contains a conflicting Firebase project."
+  exit 1
+fi
 log "Config OK: flavor=$FLAVOR plist=$PLIST_FLAVOR bundle=$BUNDLE_ID project=$PLIST_PROJECT_ID"
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
