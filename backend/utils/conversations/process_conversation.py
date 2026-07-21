@@ -23,7 +23,6 @@ import database.calendar_meetings as calendar_db
 from database.vector_db import find_similar_memories, upsert_memory_vector, delete_memory_vector
 from utils.llm.memories import resolve_memory_conflict
 from database.apps import record_app_usage, get_omi_personas_by_uid_db, get_app_by_id_db
-from database.vector_db import upsert_vector2, update_vector_metadata
 from models.app import App, UsageHistoryType
 from models.memories import MemoryDB, Memory
 from models.conversation import *
@@ -55,13 +54,9 @@ from utils.llm.external_integrations import summarize_experience_text
 from utils.llm.trends import trends_extractor
 from utils.llm.goals import extract_and_update_goal_progress
 from utils.llm.chat import (
-    retrieve_metadata_from_text,
-    retrieve_metadata_from_message,
-    retrieve_metadata_fields_from_transcript,
     obtain_emotional_message,
 )
 from utils.llm.external_integrations import get_message_structure
-from utils.llm.clients import generate_embedding
 from utils.notifications import send_notification
 from utils.other.hume import get_hume, HumeJobCallbackModel, HumeJobModelPredictionResponseModel
 from utils.retrieval.rag import retrieve_rag_conversation_context
@@ -81,6 +76,7 @@ from utils.conversations.failure_state import (
     apply_conversation_processing_failed,
     clear_conversation_processing_error,
 )
+from utils.conversations.vector import save_structured_vector
 
 
 def _get_structured(
@@ -156,7 +152,10 @@ def _get_structured(
             )
 
         # Determine whether to discard the conversation based on its content (transcript and/or photos).
-        print(f"[FLOW:PROCESS] checking discard uid={uid} transcript_len={len(transcript_text) if transcript_text else 0}", flush=True)
+        print(
+            f"[FLOW:PROCESS] checking discard uid={uid} transcript_len={len(transcript_text) if transcript_text else 0}",
+            flush=True,
+        )
         discarded = should_discard_conversation(transcript_text, conversation.photos)
         if discarded:
             print(f"[FLOW:PROCESS] DISCARDED uid={uid}", flush=True)
@@ -539,41 +538,6 @@ def _save_action_items(uid: str, conversation: Conversation):
             asyncio.run(auto_sync_action_items_batch(uid, created_items))
 
         threading.Thread(target=_run_auto_sync, daemon=True).start()
-
-
-def save_structured_vector(uid: str, conversation: Conversation, update_only: bool = False):
-    vector = generate_embedding(str(conversation.structured)) if not update_only else None
-    tz = notification_db.get_user_time_zone(uid)
-
-    metadata = {}
-
-    # Extract metadata based on conversation source
-    if conversation.source == ConversationSource.external_integration:
-        text_source = conversation.external_data.get('text_source')
-        text_content = conversation.external_data.get('text')
-        if text_content and len(text_content) > 0 and text_content and len(text_content) > 0:
-            text_source_spec = conversation.external_data.get('text_source_spec')
-            if text_source == ExternalIntegrationConversationSource.message.value:
-                metadata = retrieve_metadata_from_message(
-                    uid, conversation.created_at, text_content, tz, text_source_spec
-                )
-            elif text_source == ExternalIntegrationConversationSource.other.value:
-                metadata = retrieve_metadata_from_text(uid, conversation.created_at, text_content, tz, text_source_spec)
-    else:
-        # For regular conversations with transcript segments
-        segments = [t.dict() for t in conversation.transcript_segments]
-        metadata = retrieve_metadata_fields_from_transcript(
-            uid, conversation.created_at, segments, tz, photos=conversation.photos
-        )
-
-    metadata['created_at'] = int(conversation.created_at.timestamp())
-
-    if not update_only:
-        print('save_structured_vector creating vector')
-        upsert_vector2(uid, conversation, vector, metadata)
-    else:
-        print('save_structured_vector updating metadata')
-        update_vector_metadata(uid, conversation.id, metadata)
 
 
 def _update_personas_async(uid: str):

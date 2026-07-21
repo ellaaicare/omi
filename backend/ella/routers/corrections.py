@@ -9,9 +9,9 @@ carry this custom app contract as a core patch.
 import json
 import logging
 import os
-import re
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Optional
 
 import httpx
@@ -24,7 +24,16 @@ from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from ella.services.summary_recovery import (
+    SummaryProviderConfig,
+    apply_summary_update,
+    extract_json_object,
+    generate_summary_from_prompt,
+    normalize_summary,
+    recover_failed_conversation_summary,
+)
 from ella.services import proposal_ingest
+from models.conversation import Conversation
 from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
@@ -52,7 +61,6 @@ HERMES_CORRECTION_MODEL = os.getenv(
 )
 DIRECT_CORRECTION_API_URL = os.getenv("ELLA_CORRECTION_API_URL", "https://api.x.ai/v1/chat/completions")
 DIRECT_CORRECTION_MODEL = os.getenv("ELLA_CORRECTION_MODEL", "grok-4.3")
-DIRECT_CORRECTION_INTERNAL_BASE_URL = os.getenv("ELLA_INTERNAL_BASE_URL", "http://127.0.0.1:8000")
 DIRECT_CORRECTION_TIMEOUT_SECONDS = float(os.getenv("ELLA_CORRECTION_TIMEOUT_SECONDS", "45"))
 N8N_CORRECTION_FALLBACK_ENABLED = os.getenv("ELLA_CORRECTION_N8N_FALLBACK_ENABLED", "false").lower() in {
     "1",
@@ -79,7 +87,6 @@ CORRECTION_OBSERVER_WORK_INLINE_WITHOUT_BACKGROUND = os.getenv(
     "false",
     "no",
 }
-JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _canonical_event_store = PostgresCanonicalEventStore()
 
 
@@ -116,6 +123,27 @@ class ConversationCorrectionResponse(BaseModel):
     status: str
     queued: bool
     proposal_id: Optional[str] = None
+
+
+class ConversationProcessingRetryOutcome(str, Enum):
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+
+
+class RetryConversationProcessingRequest(BaseModel):
+    request_id: uuid.UUID
+    correction_text: Optional[str] = Field(
+        default=None,
+        max_length=4000,
+        validation_alias=AliasChoices("correction_text", "context"),
+        serialization_alias="correction_text",
+    )
+
+
+class RetryConversationProcessingResponse(BaseModel):
+    outcome: ConversationProcessingRetryOutcome
+    conversation: Conversation
 
 
 def _now_iso() -> str:
@@ -174,16 +202,7 @@ def _compact_text(value: str, limit: int) -> str:
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        match = JSON_OBJECT_RE.search(content)
-        if not match:
-            raise
-        parsed = json.loads(match.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError("Correction model response was not a JSON object")
-    return parsed
+    return extract_json_object(content)
 
 
 def _legacy_correction_api_key() -> str:
@@ -276,43 +295,7 @@ Return exactly:
 
 
 def _normalize_direct_summary(result: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
-    title = str(result.get("title") or fallback.get("title") or "Corrected Conversation").strip()
-    overview = str(result.get("overview") or fallback.get("overview") or "").strip()
-    if not overview:
-        raise ValueError("Correction model response missing overview")
-    if not overview.startswith("[Ella] "):
-        overview = "[Ella] " + overview.removeprefix("[Ella]").strip()
-
-    emoji = str(result.get("emoji") or fallback.get("emoji") or "🪽").strip()[:4] or "🪽"
-    category = str(result.get("category") or fallback.get("category") or "other").strip().lower()
-    tags = result.get("ella_tags")
-    if not isinstance(tags, list):
-        tags = ["omi"]
-    tags = [str(tag).strip().lower() for tag in tags if str(tag or "").strip()]
-    if "omi" not in tags:
-        tags.insert(0, "omi")
-    if "correction" not in tags:
-        tags.append("correction")
-
-    signal = result.get("ella_signal")
-    if not isinstance(signal, dict):
-        signal = {}
-
-    return {
-        "title": title,
-        "overview": overview,
-        "emoji": emoji,
-        "category": category,
-        "ella_tags": tags[:12],
-        "ella_signal": {
-            "salience": str(signal.get("salience") or "medium"),
-            "memory_promotion": str(signal.get("memory_promotion") or "none"),
-            "noise_level": str(signal.get("noise_level") or "low"),
-            "contains_media": bool(signal.get("contains_media", False)),
-            "contains_user_speech": bool(signal.get("contains_user_speech", True)),
-            "guardian_relevant": bool(signal.get("guardian_relevant", False)),
-        },
-    }
+    return normalize_summary(result, fallback, required_tags=("omi", "correction"))
 
 
 async def _generate_corrected_summary(
@@ -332,52 +315,25 @@ async def _generate_corrected_summary(
         transcript=transcript,
         segment_count=segment_count,
     )
-    provider = CORRECTION_PROVIDER
-    if provider == "hermes-api":
-        api_key = _hermes_correction_api_key()
-        if not api_key:
-            raise RuntimeError("No Hermes correction API key configured")
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "X-Hermes-Session-Id": _correction_session_id(uid, conversation_id, correction_id),
-            "X-Hermes-Session-Key": _correction_session_key(uid),
-            "X-Trace-Id": trace_id,
-        }
-        async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                HERMES_CORRECTION_API_URL,
-                headers=headers,
-                json={
-                    "model": HERMES_CORRECTION_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 900,
-                },
-            )
-        response.raise_for_status()
-        body = response.json()
-        content = body["choices"][0]["message"]["content"]
-        return _normalize_direct_summary(_extract_json_object(content), structured)
-
-    api_key = _legacy_correction_api_key()
-    if not api_key:
-        raise RuntimeError("No legacy correction model API key configured")
-    async with httpx.AsyncClient(timeout=DIRECT_CORRECTION_TIMEOUT_SECONDS) as client:
-        response = await client.post(
-            DIRECT_CORRECTION_API_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": DIRECT_CORRECTION_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 800,
-            },
-        )
-    response.raise_for_status()
-    body = response.json()
-    content = body["choices"][0]["message"]["content"]
-    return _normalize_direct_summary(_extract_json_object(content), structured)
+    return await generate_summary_from_prompt(
+        prompt=prompt,
+        fallback=structured,
+        session_id=_correction_session_id(uid, conversation_id, correction_id),
+        session_key=_correction_session_key(uid),
+        trace_id=trace_id,
+        required_tags=("omi", "correction"),
+        config=SummaryProviderConfig(
+            provider=CORRECTION_PROVIDER,
+            hermes_url=HERMES_CORRECTION_API_URL,
+            hermes_model=HERMES_CORRECTION_MODEL,
+            hermes_api_key=_hermes_correction_api_key(),
+            legacy_url=DIRECT_CORRECTION_API_URL,
+            legacy_model=DIRECT_CORRECTION_MODEL,
+            legacy_api_key=_legacy_correction_api_key(),
+            timeout_seconds=DIRECT_CORRECTION_TIMEOUT_SECONDS,
+        ),
+        async_client_factory=httpx.AsyncClient,
+    )
 
 
 async def _apply_corrected_summary(
@@ -389,28 +345,15 @@ async def _apply_corrected_summary(
     active_summary_version_id: Optional[str],
     corrected: dict[str, Any],
 ) -> dict[str, Any]:
-    url = (
-        f"{DIRECT_CORRECTION_INTERNAL_BASE_URL.rstrip('/')}"
-        f"/v1/ella/conversation/{conversation_id}/summary?uid={uid}"
+    return await apply_summary_update(
+        uid=uid,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        active_summary_version_id=active_summary_version_id,
+        summary=corrected,
+        summary_kind="corrected_enriched",
+        correction_id=correction_id,
     )
-    payload = {
-        "title": corrected["title"],
-        "overview": corrected["overview"],
-        "emoji": corrected["emoji"],
-        "category": corrected["category"],
-        "summary_source": "observer",
-        "summary_kind": "corrected_enriched",
-        "correction_id": correction_id,
-        "based_on_version_id": active_summary_version_id,
-        "set_active": True,
-        "trace_id": trace_id,
-        "ella_tags": corrected.get("ella_tags") or ["omi", "correction"],
-        "ella_signal": corrected.get("ella_signal") or {},
-    }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.patch(url, json=payload)
-    response.raise_for_status()
-    return response.json()
 
 
 def _audit_ref(uid: str, conversation_id: str, correction_id: str):
@@ -1268,6 +1211,51 @@ async def _submit_conversation_correction(
         queued=True,
         proposal_id=proposal_id,
     )
+
+
+@router.post(
+    "/v1/conversations/{conversation_id}/processing-retries",
+    response_model=RetryConversationProcessingResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_failed_conversation_processing(
+    conversation_id: str,
+    request: RetryConversationProcessingRequest,
+    background_tasks: BackgroundTasks,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> RetryConversationProcessingResponse:
+    """Atomically queue generic recovery followed by canonical Hermes enrichment."""
+
+    request_id = str(request.request_id)
+    claim = conversations_db.claim_conversation_processing_retry(uid, conversation_id, request_id)
+    outcome = claim["outcome"]
+    conversation_data = claim["conversation"]
+
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if outcome == "locked":
+        raise HTTPException(status_code=402, detail="Conversation locked")
+    if outcome == "not_retryable":
+        raise HTTPException(status_code=409, detail="Conversation processing cannot be retried safely")
+    if outcome == "invalid_state":
+        raise HTTPException(status_code=409, detail="Conversation is not in a retryable state")
+    if outcome == "busy":
+        raise HTTPException(status_code=409, detail="Another conversation processing retry is already active")
+
+    conversation = Conversation(**conversation_data)
+    if outcome == "claimed":
+        background_tasks.add_task(
+            recover_failed_conversation_summary,
+            uid=uid,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            client_context=request.correction_text,
+        )
+        outcome = ConversationProcessingRetryOutcome.processing
+    else:
+        outcome = ConversationProcessingRetryOutcome(outcome)
+
+    return RetryConversationProcessingResponse(outcome=outcome, conversation=conversation)
 
 
 @router.post(

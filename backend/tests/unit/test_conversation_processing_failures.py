@@ -4,6 +4,8 @@ import sys
 import types
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from models.conversation import Conversation, ConversationStatus, Structured
 from models.transcript_segment import TranscriptSegment
@@ -66,6 +68,8 @@ _stub_module(
     delete_memory_vector=_noop,
     upsert_vector2=_noop,
     update_vector_metadata=_noop,
+    delete_vector=_noop,
+    query_vectors_by_metadata=lambda *args, **kwargs: [],
 )
 _stub_module(
     "database.apps",
@@ -78,6 +82,7 @@ _stub_module(
     resolve_memory_conflict=_noop,
     extract_memories_from_text=lambda *args, **kwargs: [],
     new_memories_extractor=lambda *args, **kwargs: [],
+    identify_category_for_memory=lambda *args, **kwargs: "other",
 )
 _stub_module(
     "utils.llm.conversation_processing",
@@ -88,6 +93,7 @@ _stub_module(
     get_suggested_apps_for_conversation=lambda *args, **kwargs: [],
     get_reprocess_transcript_structure=_noop,
     assign_conversation_to_folder=lambda *args, **kwargs: (None, 0.0, ""),
+    generate_summary_with_prompt=lambda *args, **kwargs: "",
 )
 _stub_module(
     "utils.llm.external_integrations",
@@ -105,7 +111,17 @@ _stub_module(
 )
 _stub_module("utils.llm.clients", generate_embedding=lambda *args, **kwargs: [0.1, 0.2])
 _stub_module("utils.retrieval.rag", retrieve_rag_conversation_context=lambda *args, **kwargs: "")
-_stub_module("utils.other.storage", list_audio_chunks=lambda *args, **kwargs: [], precache_conversation_audio=_noop)
+_stub_module("utils.conversations.search", search_conversations=lambda *args, **kwargs: [])
+_stub_module("utils.speaker_identification", extract_speaker_samples=_noop)
+_stub_module("utils.app_integrations", trigger_external_integrations=lambda *args, **kwargs: [])
+_stub_module("utils.conversations.location", get_google_maps_location=lambda *args, **kwargs: None)
+_stub_module(
+    "utils.other.storage",
+    list_audio_chunks=lambda *args, **kwargs: [],
+    precache_conversation_audio=_noop,
+    get_conversation_recording_if_exists=lambda *args, **kwargs: None,
+    storage_client=types.SimpleNamespace(),
+)
 _stub_module(
     "utils.notifications",
     send_important_conversation_message=_noop,
@@ -150,6 +166,7 @@ from utils.conversations.failure_state import (
     apply_conversation_processing_failed,
     clear_conversation_processing_error,
 )
+from routers import conversations as conversations_router
 
 
 def _long_conversation() -> Conversation:
@@ -271,3 +288,124 @@ def test_process_conversation_intentional_discard_stays_completed_discarded(monk
     assert writes[-1][1]["discarded"] is True
     assert writes[-1][1]["status"] == ConversationStatus.completed
     assert writes[-1][1].get("processing_error") is None
+
+
+class _FakeSnapshot:
+    def __init__(self, data=None):
+        self._data = data
+        self.exists = data is not None
+
+    def to_dict(self):
+        return self._data
+
+
+class _FakeDocumentRef:
+    def __init__(self, data=None):
+        self.snapshot = _FakeSnapshot(data)
+
+    def get(self, transaction=None):
+        return self.snapshot
+
+
+class _FakeTransaction:
+    def __init__(self):
+        self.updates = []
+        self.sets = []
+
+    def update(self, ref, data):
+        self.updates.append((ref, data))
+
+    def set(self, ref, data):
+        self.sets.append((ref, data))
+
+
+def _claim_retry(conversation_data, request_id, retry_data=None):
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef(conversation_data)
+    retry_ref = _FakeDocumentRef(retry_data)
+    requested_at = datetime(2026, 7, 21, 3, 0, tzinfo=timezone.utc)
+    result = conversation_processor.conversations_db._claim_conversation_processing_retry_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        requested_at,
+    )
+    return result, transaction
+
+
+def test_retry_claim_is_atomic_and_preserves_failed_error_provenance():
+    conversation = _long_conversation()
+    apply_conversation_processing_failed(conversation)
+
+    result, transaction = _claim_retry(conversation.dict(), "request-a")
+
+    assert result["outcome"] == "claimed"
+    assert result["conversation"]["status"] == ConversationStatus.processing.value
+    assert result["conversation"]["processing_error"] == CONVERSATION_SUMMARY_FAILED
+    assert len(transaction.updates) == 1
+    assert transaction.updates[0][1]["processing_retry_id"] == "request-a"
+    assert len(transaction.sets) == 1
+    assert transaction.sets[0][1]["outcome"] == ConversationStatus.processing.value
+
+
+@pytest.mark.parametrize("stored_outcome", ["processing", "completed", "failed"])
+def test_retry_claim_reuses_durable_request_receipt_without_enqueuing(stored_outcome):
+    conversation = _long_conversation()
+    conversation.status = ConversationStatus.processing
+    conversation.processing_retry_id = "newer-request"
+
+    result, transaction = _claim_retry(
+        conversation.dict(),
+        "older-request",
+        retry_data={"request_id": "older-request", "outcome": stored_outcome},
+    )
+
+    assert result["outcome"] == stored_outcome
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def test_retry_claim_rejects_a_different_request_while_processing():
+    conversation = _long_conversation()
+    conversation.status = ConversationStatus.processing
+    conversation.processing_retry_id = "active-request"
+
+    result, transaction = _claim_retry(conversation.dict(), "other-request")
+
+    assert result["outcome"] == "busy"
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def _conversation_api_client():
+    app = FastAPI()
+    app.include_router(conversations_router.router)
+    app.dependency_overrides[conversations_router.auth.get_current_user_uid] = lambda: "authenticated-user"
+    return app, TestClient(app)
+
+
+def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(monkeypatch):
+    conversation = _long_conversation()
+    apply_conversation_processing_failed(conversation)
+    calls = []
+
+    def fake_get_conversations(uid, limit, offset, **kwargs):
+        calls.append((uid, limit, offset, kwargs))
+        return [conversation.dict()]
+
+    monkeypatch.setattr(conversations_router.conversations_db, "get_conversations", fake_get_conversations)
+    app, client = _conversation_api_client()
+    try:
+        response = client.get("/v1/conversations?statuses=failed&include_discarded=true")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert calls[0][0] == "authenticated-user"
+    assert calls[0][3]["statuses"] == ["failed"]
+    payload = response.json()[0]
+    assert payload["status"] == "failed"
+    assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
+    assert payload["processing_error_at"] is not None
+    assert len(payload["transcript_segments"][0]["text"]) > 25_000

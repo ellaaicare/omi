@@ -6,12 +6,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
 sys.modules.setdefault("database.conversations", MagicMock())
 sys.modules.setdefault("httpx", MagicMock())
 sys.modules.setdefault("utils.other.endpoints", MagicMock())
+sys.modules.setdefault("utils.conversations.vector", MagicMock(save_structured_vector=MagicMock()))
+sys.modules.setdefault(
+    "utils.conversations.generic_summary",
+    MagicMock(generate_stock_conversation_summary=MagicMock()),
+)
 sys.modules.pop("ella.config", None)
 
 _backend_path = Path(__file__).resolve().parents[2]
@@ -24,6 +30,7 @@ corrections = importlib.util.module_from_spec(_corrections_spec)
 assert _corrections_spec is not None and _corrections_spec.loader is not None
 _corrections_spec.loader.exec_module(corrections)
 corrections.ELLA_CONFIG = SimpleNamespace(n8n_base_url="https://n8n.test")
+from ella.services import summary_recovery
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +58,41 @@ def _conversation():
             "category": "health",
         },
     }
+
+
+def _retry_conversation(status="processing", request_id="84eb13fa-31d9-40ba-a742-c4de4757dc10"):
+    return {
+        "id": "conversation-1",
+        "created_at": "2026-07-20T08:00:00+00:00",
+        "started_at": "2026-07-20T08:00:00+00:00",
+        "finished_at": "2026-07-20T08:30:00+00:00",
+        "structured": {
+            "title": "",
+            "overview": "",
+            "emoji": "brain",
+            "category": "other",
+        },
+        "transcript_segments": [
+            {
+                "is_user": True,
+                "speaker": "SPEAKER_00",
+                "text": "Important retained transcript.",
+                "start": 0,
+                "end": 10,
+            }
+        ],
+        "status": status,
+        "discarded": False,
+        "processing_error": "conversation_summary_failed" if status == "failed" else None,
+        "processing_retry_id": request_id,
+    }
+
+
+def _retry_api_client():
+    app = FastAPI()
+    app.include_router(corrections.router)
+    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: "authenticated-user"
+    return app, TestClient(app)
 
 
 def test_submit_correction_accepts_ios_payload_and_queues(monkeypatch):
@@ -360,6 +402,46 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
     assert audits[-1]["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
     assert events[-1]["stage"] == "direct_apply_succeeded"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
+
+
+def test_apply_corrected_summary_uses_shared_direct_writeback_service(monkeypatch):
+    captured = {}
+
+    async def fake_apply(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ok", "active_summary_version_id": "corrected-v1"}
+
+    monkeypatch.setattr(corrections, "apply_summary_update", fake_apply)
+    corrected = {
+        "title": "Corrected",
+        "overview": "[Ella] Corrected summary.",
+        "emoji": "brain",
+        "category": "other",
+        "ella_tags": ["omi", "correction"],
+        "ella_signal": {},
+    }
+
+    result = asyncio.run(
+        corrections._apply_corrected_summary(
+            uid="user-123",
+            conversation_id="conv-123",
+            correction_id="corr-123",
+            trace_id="correction:conv-123:corr-123",
+            active_summary_version_id="legacy-v1",
+            corrected=corrected,
+        )
+    )
+
+    assert result["active_summary_version_id"] == "corrected-v1"
+    assert captured == {
+        "uid": "user-123",
+        "conversation_id": "conv-123",
+        "trace_id": "correction:conv-123:corr-123",
+        "active_summary_version_id": "legacy-v1",
+        "summary": corrected,
+        "summary_kind": "corrected_enriched",
+        "correction_id": "corr-123",
+    }
 
 
 def test_submit_correction_queues_background_direct_apply_without_waiting(monkeypatch):
@@ -869,3 +951,402 @@ def test_submit_to_n8n_accepts_async_success_body_even_with_bad_http_status(monk
         "n8n_status_code": 500,
         "n8n_response": {"status": "processing", "queued": True, "trace_id": "trace-123"},
     }
+
+
+def test_retry_api_cannot_claim_outside_authenticated_uid(monkeypatch):
+    calls = []
+
+    def fake_claim(uid, conversation_id, request_id):
+        calls.append((uid, conversation_id, request_id))
+        return {"outcome": "not_found", "conversation": None}
+
+    monkeypatch.setattr(corrections.conversations_db, "claim_conversation_processing_retry", fake_claim)
+    app, client = _retry_api_client()
+    try:
+        response = client.post(
+            "/v1/conversations/another-users-conversation/processing-retries",
+            json={"request_id": "5bd3c697-7aa6-4fc0-aab2-a7eb6cf333e8"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert calls == [
+        (
+            "authenticated-user",
+            "another-users-conversation",
+            "5bd3c697-7aa6-4fc0-aab2-a7eb6cf333e8",
+        )
+    ]
+
+
+def test_retry_api_claims_once_and_queues_two_stage_recovery(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    worker_calls = []
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "claim_conversation_processing_retry",
+        lambda uid, conversation_id, claimed_request_id: {
+            "outcome": "claimed",
+            "conversation": _retry_conversation(request_id=claimed_request_id),
+        },
+    )
+
+    async def fake_recover(**kwargs):
+        worker_calls.append(kwargs)
+        return "completed"
+
+    monkeypatch.setattr(corrections, "recover_failed_conversation_summary", fake_recover)
+    app, client = _retry_api_client()
+    try:
+        response = client.post(
+            "/v1/conversations/conversation-1/processing-retries",
+            json={"request_id": request_id, "correction_text": "This was the morning cafe conversation."},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["outcome"] == "processing"
+    assert worker_calls == [
+        {
+            "uid": "authenticated-user",
+            "conversation_id": "conversation-1",
+            "request_id": request_id,
+            "client_context": "This was the morning cafe conversation.",
+        }
+    ]
+
+
+@pytest.mark.parametrize("stored_outcome", ["processing", "completed", "failed"])
+def test_retry_api_repeated_request_returns_receipt_without_new_work(monkeypatch, stored_outcome):
+    request_id = "45cc793c-b030-4e94-8f93-44c248488d50"
+    worker_calls = []
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "claim_conversation_processing_retry",
+        lambda uid, conversation_id, claimed_request_id: {
+            "outcome": stored_outcome,
+            "conversation": _retry_conversation(status=stored_outcome, request_id=claimed_request_id),
+        },
+    )
+    monkeypatch.setattr(
+        corrections, "recover_failed_conversation_summary", lambda **kwargs: worker_calls.append(kwargs)
+    )
+    app, client = _retry_api_client()
+    try:
+        response = client.post(
+            "/v1/conversations/conversation-1/processing-retries",
+            json={"request_id": request_id},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 202
+    assert response.json()["outcome"] == stored_outcome
+    assert worker_calls == []
+
+
+def test_retry_api_requires_uuid_request_id(monkeypatch):
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "claim_conversation_processing_retry",
+        lambda *args: pytest.fail("invalid request must not reach the claim"),
+    )
+    app, client = _retry_api_client()
+    try:
+        response = client.post(
+            "/v1/conversations/conversation-1/processing-retries",
+            json={"request_id": "not-a-uuid"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+
+
+def test_summary_recovery_preserves_full_25k_transcript_in_hermes_prompt():
+    transcript = "start " + ("important " * 3000) + "tail-marker"
+    conversation = _retry_conversation(status="failed")
+    conversation["transcript_segments"] = [{"is_user": True, "text": transcript}]
+
+    prompt = summary_recovery._build_recovery_prompt(conversation, None)
+
+    assert len(transcript) > 25_000
+    assert "tail-marker" in prompt
+    assert "[truncated]" not in prompt
+
+
+def test_summary_recovery_persists_generic_before_hermes_enrichment(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    conversation = _retry_conversation(request_id=request_id)
+    generic = {
+        **conversation,
+        "active_summary_version_id": "generic-v1",
+        "processing_retry_summary_version_id": "generic-v1",
+        "structured": {
+            "title": "Generic",
+            "overview": "[Ella] Generic summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    }
+    completed_generic = {**generic, "status": "completed", "processing_error": None}
+    enriched = {
+        **completed_generic,
+        "active_summary_version_id": "enriched-v2",
+        "enrichment_state": {"status": "writeback_applied", "kind": "recovered_enriched"},
+        "structured": {
+            "title": "Enriched",
+            "overview": "[Ella] Enriched summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    }
+    reads = [conversation, generic, completed_generic, enriched]
+    events = []
+
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda uid, conv: events.append("generic_generate")
+        or {
+            "title": "Generic",
+            "overview": "Generic summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    )
+
+    async def fake_generate(**kwargs):
+        events.append("hermes_generate")
+        return {
+            "title": "Enriched",
+            "overview": "[Ella] Enriched summary.",
+            "emoji": "brain",
+            "category": "other",
+            "ella_tags": ["omi", "recovery"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply(**kwargs):
+        events.append(f"apply:{kwargs['summary_kind']}")
+        version_id = "generic-v1" if kwargs["summary_kind"] == "generic_recovered" else "enriched-v2"
+        return {"status": "ok", "active_summary_version_id": version_id}
+
+    monkeypatch.setattr(summary_recovery, "generate_summary_from_prompt", fake_generate)
+    monkeypatch.setattr(summary_recovery, "apply_summary_update", fake_apply)
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_summary_applied",
+        lambda *args: events.append("generic_receipt") or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery,
+        "save_structured_vector",
+        lambda uid, conv: events.append(f"vector:{conv.structured.title}"),
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "finish_conversation_processing_retry",
+        lambda *args, **kwargs: events.append(f"finish:{args[3]}") or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_enrichment",
+        lambda *args, **kwargs: events.append(f"enrichment:{args[3]}") or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "completed"
+    assert events == [
+        "generic_generate",
+        "apply:generic_recovered",
+        "generic_receipt",
+        "vector:Generic",
+        "finish:completed",
+        "hermes_generate",
+        "apply:recovered_enriched",
+        "vector:Enriched",
+        "enrichment:completed",
+    ]
+
+
+def test_summary_recovery_hermes_failure_retains_completed_generic_summary(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    conversation = _retry_conversation(request_id=request_id)
+    generic = {
+        **conversation,
+        "active_summary_version_id": "generic-v1",
+        "processing_retry_summary_version_id": "generic-v1",
+        "structured": {
+            "title": "Generic",
+            "overview": "[Ella] Generic summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    }
+    reads = [conversation, generic, {**generic, "status": "completed", "processing_error": None}]
+    events = []
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda uid, conv: {
+            "title": "Generic",
+            "overview": "Generic summary.",
+            "emoji": "brain",
+            "category": "other",
+        },
+    )
+
+    async def fake_generate(**kwargs):
+        raise RuntimeError("private Hermes provider detail")
+
+    async def fake_apply(**kwargs):
+        assert kwargs["summary_kind"] == "generic_recovered"
+        return {"status": "ok", "active_summary_version_id": "generic-v1"}
+
+    monkeypatch.setattr(summary_recovery, "generate_summary_from_prompt", fake_generate)
+    monkeypatch.setattr(summary_recovery, "apply_summary_update", fake_apply)
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_summary_applied",
+        lambda *args: True,
+    )
+    monkeypatch.setattr(summary_recovery, "save_structured_vector", lambda uid, conv: events.append("vector"))
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "finish_conversation_processing_retry",
+        lambda *args, **kwargs: events.append(("finish", args[3], kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_enrichment",
+        lambda *args, **kwargs: events.append(("enrichment", args[3], kwargs)) or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "completed"
+    assert events == [
+        "vector",
+        ("finish", "completed", {}),
+        ("enrichment", "failed", {}),
+    ]
+    assert "private Hermes provider detail" not in str(events)
+
+
+def test_summary_recovery_resumes_hermes_after_generic_phase_completed(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    generic = {
+        **_retry_conversation(status="completed", request_id=request_id),
+        "active_summary_version_id": "generic-v1",
+        "processing_retry_summary_version_id": "generic-v1",
+    }
+    enriched = {
+        **generic,
+        "active_summary_version_id": "enriched-v2",
+        "processing_retry_enriched_version_id": "enriched-v2",
+    }
+    reads = [generic, generic, generic, enriched]
+    events = []
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: reads.pop(0))
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda *args: pytest.fail("generic provider must not rerun after its durable receipt"),
+    )
+
+    async def fake_generate(**kwargs):
+        events.append("hermes_generate")
+        return {
+            "title": "Enriched",
+            "overview": "[Ella] Enriched summary.",
+            "emoji": "brain",
+            "category": "other",
+            "ella_tags": ["omi", "recovery"],
+            "ella_signal": {},
+        }
+
+    async def fake_apply(**kwargs):
+        events.append("hermes_apply")
+        return {"status": "ok", "active_summary_version_id": "enriched-v2"}
+
+    monkeypatch.setattr(summary_recovery, "generate_summary_from_prompt", fake_generate)
+    monkeypatch.setattr(summary_recovery, "apply_summary_update", fake_apply)
+    monkeypatch.setattr(summary_recovery, "save_structured_vector", lambda uid, conv: events.append("vector"))
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "finish_conversation_processing_retry",
+        lambda *args, **kwargs: events.append("finish") or True,
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "record_conversation_processing_retry_enrichment",
+        lambda *args, **kwargs: events.append(f"enrichment:{args[3]}") or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "completed"
+    assert events == ["vector", "finish", "hermes_generate", "hermes_apply", "vector", "enrichment:completed"]
+
+
+def test_summary_recovery_vector_failure_remains_retryable_without_raw_error(monkeypatch):
+    request_id = "84eb13fa-31d9-40ba-a742-c4de4757dc10"
+    conversation = {
+        **_retry_conversation(request_id=request_id),
+        "active_summary_version_id": "recovered-v1",
+        "processing_retry_summary_version_id": "recovered-v1",
+    }
+    finish_calls = []
+    monkeypatch.setattr(summary_recovery.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_recovery,
+        "generate_stock_conversation_summary",
+        lambda *args: pytest.fail("receipted generic summary must not be regenerated"),
+    )
+    monkeypatch.setattr(
+        summary_recovery,
+        "save_structured_vector",
+        lambda uid, conv: (_ for _ in ()).throw(RuntimeError("secret provider detail")),
+    )
+    monkeypatch.setattr(
+        summary_recovery.conversations_db,
+        "finish_conversation_processing_retry",
+        lambda *args, **kwargs: finish_calls.append((args, kwargs)) or True,
+    )
+
+    outcome = asyncio.run(
+        summary_recovery.recover_failed_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            request_id=request_id,
+        )
+    )
+
+    assert outcome == "failed"
+    assert finish_calls[0][0][3] == "failed"
+    assert finish_calls[0][1]["error_code"] == "conversation_summary_recovery_failed"
+    assert "secret provider detail" not in str(finish_calls[0])

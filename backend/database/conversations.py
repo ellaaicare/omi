@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Tuple, Optional, Dict, Any
 
 from google.cloud import firestore
-from google.cloud.firestore_v1 import FieldFilter
+from google.cloud.firestore_v1 import FieldFilter, transactional
 
 import utils.other.hume as hume
 from database import users as users_db
@@ -24,6 +24,11 @@ from .helpers import set_data_protection_level, prepare_for_write, prepare_for_r
 from utils.other.storage import list_audio_chunks
 
 conversations_collection = 'conversations'
+conversation_processing_retries_collection = 'processing_retries'
+conversation_summary_retryable_errors = {
+    'conversation_summary_failed',
+    'conversation_summary_recovery_failed',
+}
 
 
 def _ensure_timezone_aware(dt: datetime) -> datetime:
@@ -35,6 +40,7 @@ def _ensure_timezone_aware(dt: datetime) -> datetime:
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+
 def _category_value(value: Any) -> str:
     if value is None:
         return 'other'
@@ -44,10 +50,7 @@ def _category_value(value: Any) -> str:
 
 def _has_summary_content(structured: Optional[Dict[str, Any]]) -> bool:
     structured = structured or {}
-    return any(
-        str(structured.get(field) or '').strip()
-        for field in ('title', 'overview', 'emoji', 'category')
-    )
+    return any(str(structured.get(field) or '').strip() for field in ('title', 'overview', 'emoji', 'category'))
 
 
 def _build_summary_version_payload(
@@ -112,9 +115,11 @@ def build_summary_version_update(
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     bootstrap_update = bootstrap_summary_versioning_update(conversation_data)
-    versions = copy.deepcopy(conversation_data.get('summary_versions') or bootstrap_update.get('summary_versions') or [])
-    active_summary_version_id = (
-        conversation_data.get('active_summary_version_id') or bootstrap_update.get('active_summary_version_id')
+    versions = copy.deepcopy(
+        conversation_data.get('summary_versions') or bootstrap_update.get('summary_versions') or []
+    )
+    active_summary_version_id = conversation_data.get('active_summary_version_id') or bootstrap_update.get(
+        'active_summary_version_id'
     )
 
     if activate:
@@ -142,7 +147,6 @@ def build_summary_version_update(
     }
 
 
-
 def _category_value(value: Any) -> str:
     if value is None:
         return 'other'
@@ -152,10 +156,7 @@ def _category_value(value: Any) -> str:
 
 def _has_summary_content(structured: Optional[Dict[str, Any]]) -> bool:
     structured = structured or {}
-    return any(
-        str(structured.get(field) or '').strip()
-        for field in ('title', 'overview', 'emoji', 'category')
-    )
+    return any(str(structured.get(field) or '').strip() for field in ('title', 'overview', 'emoji', 'category'))
 
 
 def _build_summary_version_payload(
@@ -218,9 +219,11 @@ def build_summary_version_update(
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     bootstrap_update = bootstrap_summary_versioning_update(conversation_data)
-    versions = copy.deepcopy(conversation_data.get('summary_versions') or bootstrap_update.get('summary_versions') or [])
-    active_summary_version_id = (
-        conversation_data.get('active_summary_version_id') or bootstrap_update.get('active_summary_version_id')
+    versions = copy.deepcopy(
+        conversation_data.get('summary_versions') or bootstrap_update.get('summary_versions') or []
+    )
+    active_summary_version_id = conversation_data.get('active_summary_version_id') or bootstrap_update.get(
+        'active_summary_version_id'
     )
 
     if activate:
@@ -888,6 +891,380 @@ def update_conversation_status(uid: str, conversation_id: str, status: str):
     user_ref = db.collection('users').document(uid)
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
     conversation_ref.update({'status': status})
+
+
+def _claim_conversation_processing_retry_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    requested_at: datetime,
+):
+    snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'outcome': 'not_found', 'conversation': None}
+
+    conversation = snapshot.to_dict()
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+
+    if conversation.get('is_locked', False):
+        return {'outcome': 'locked', 'conversation': conversation}
+
+    if retry_snapshot.exists:
+        retry_outcome = retry_snapshot.to_dict().get('outcome')
+        if retry_outcome in {'processing', 'completed', 'failed'}:
+            return {'outcome': retry_outcome, 'conversation': conversation}
+        return {'outcome': 'invalid_state', 'conversation': conversation}
+
+    if status == ConversationStatus.completed.value:
+        transaction.set(
+            retry_ref,
+            {
+                'request_id': request_id,
+                'outcome': ConversationStatus.completed.value,
+                'requested_at': requested_at,
+                'updated_at': requested_at,
+            },
+        )
+        return {'outcome': 'completed', 'conversation': conversation}
+    if status == ConversationStatus.processing.value:
+        return {'outcome': 'busy', 'conversation': conversation}
+    if status != ConversationStatus.failed.value:
+        return {'outcome': 'invalid_state', 'conversation': conversation}
+    if conversation.get('processing_error') not in conversation_summary_retryable_errors:
+        return {'outcome': 'not_retryable', 'conversation': conversation}
+
+    update_data = {
+        'status': ConversationStatus.processing.value,
+        'processing_retry_id': request_id,
+        'processing_retry_started_at': requested_at,
+        'processing_retry_completed_at': None,
+    }
+    transaction.update(conversation_ref, update_data)
+    transaction.set(
+        retry_ref,
+        {
+            'request_id': request_id,
+            'outcome': ConversationStatus.processing.value,
+            'requested_at': requested_at,
+            'updated_at': requested_at,
+        },
+    )
+    conversation.update(update_data)
+    return {'outcome': 'claimed', 'conversation': conversation}
+
+
+@transactional
+def _claim_conversation_processing_retry(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    requested_at: datetime,
+):
+    return _claim_conversation_processing_retry_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        requested_at,
+    )
+
+
+def claim_conversation_processing_retry(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    requested_at: Optional[datetime] = None,
+):
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    transaction = db.transaction()
+    return _claim_conversation_processing_retry(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        requested_at or datetime.now(timezone.utc),
+    )
+
+
+def _record_conversation_processing_retry_summary_applied_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    summary_version_id: str,
+    applied_at: datetime,
+):
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists or not retry_snapshot.exists:
+        return False
+
+    conversation = conversation_snapshot.to_dict()
+    retry_data = retry_snapshot.to_dict()
+    if conversation.get('processing_retry_id') != request_id or retry_data.get('request_id') != request_id:
+        return False
+
+    transaction.update(
+        conversation_ref,
+        {'processing_retry_summary_version_id': summary_version_id},
+    )
+    transaction.update(
+        retry_ref,
+        {
+            'phase': 'summary_applied',
+            'summary_version_id': summary_version_id,
+            'updated_at': applied_at,
+        },
+    )
+    return True
+
+
+@transactional
+def _record_conversation_processing_retry_summary_applied(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    summary_version_id: str,
+    applied_at: datetime,
+):
+    return _record_conversation_processing_retry_summary_applied_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        summary_version_id,
+        applied_at,
+    )
+
+
+def record_conversation_processing_retry_summary_applied(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    summary_version_id: str,
+    applied_at: Optional[datetime] = None,
+):
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    transaction = db.transaction()
+    return _record_conversation_processing_retry_summary_applied(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        summary_version_id,
+        applied_at or datetime.now(timezone.utc),
+    )
+
+
+def _finish_conversation_processing_retry_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    outcome: str,
+    finished_at: datetime,
+    error_code: Optional[str],
+):
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists or not retry_snapshot.exists:
+        return False
+
+    retry_data = retry_snapshot.to_dict()
+    if retry_data.get('request_id') != request_id:
+        return False
+
+    retry_update = {'outcome': outcome, 'updated_at': finished_at}
+    if error_code:
+        retry_update['error_code'] = error_code
+    transaction.update(retry_ref, retry_update)
+    conversation = conversation_snapshot.to_dict()
+    if conversation.get('processing_retry_id') != request_id:
+        return True
+
+    if outcome == ConversationStatus.completed.value:
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.completed.value,
+                'discarded': False,
+                'processing_error': None,
+                'processing_error_at': None,
+                'processing_retry_completed_at': finished_at,
+            },
+        )
+    else:
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.failed.value,
+                'discarded': False,
+                'processing_error': error_code or 'conversation_summary_failed',
+                'processing_error_at': finished_at,
+            },
+        )
+    return True
+
+
+@transactional
+def _finish_conversation_processing_retry(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    outcome: str,
+    finished_at: datetime,
+    error_code: Optional[str],
+):
+    return _finish_conversation_processing_retry_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        outcome,
+        finished_at,
+        error_code,
+    )
+
+
+def finish_conversation_processing_retry(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    outcome: str,
+    finished_at: Optional[datetime] = None,
+    error_code: Optional[str] = None,
+):
+    if outcome not in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
+        raise ValueError(f'Unsupported conversation processing retry outcome: {outcome}')
+
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    transaction = db.transaction()
+    return _finish_conversation_processing_retry(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        outcome,
+        finished_at or datetime.now(timezone.utc),
+        error_code,
+    )
+
+
+def _record_conversation_processing_retry_enrichment_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    conversation_id: str,
+    request_id: str,
+    status: str,
+    updated_at: datetime,
+    summary_version_id: Optional[str],
+):
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists or not retry_snapshot.exists:
+        return False
+
+    conversation = conversation_snapshot.to_dict()
+    retry_data = retry_snapshot.to_dict()
+    if retry_data.get('request_id') != request_id:
+        return False
+
+    retry_update = {
+        'enrichment_status': status,
+        'updated_at': updated_at,
+    }
+    if summary_version_id:
+        retry_update['enriched_summary_version_id'] = summary_version_id
+    transaction.update(retry_ref, retry_update)
+
+    if conversation.get('processing_retry_id') != request_id:
+        return True
+    if status == 'completed' and summary_version_id:
+        transaction.update(
+            conversation_ref,
+            {'processing_retry_enriched_version_id': summary_version_id},
+        )
+    elif status == 'failed':
+        transaction.update(
+            conversation_ref,
+            {
+                'enrichment_state': {
+                    'status': 'failed',
+                    'pending': True,
+                    'source': 'observer',
+                    'kind': 'recovered_enriched',
+                    'trace_id': f'summary-retry:{conversation_id}:{request_id}:hermes',
+                    'updated_at': updated_at,
+                    'error': 'hermes_temporarily_unavailable',
+                }
+            },
+        )
+    return True
+
+
+@transactional
+def _record_conversation_processing_retry_enrichment(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    conversation_id: str,
+    request_id: str,
+    status: str,
+    updated_at: datetime,
+    summary_version_id: Optional[str],
+):
+    return _record_conversation_processing_retry_enrichment_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        conversation_id,
+        request_id,
+        status,
+        updated_at,
+        summary_version_id,
+    )
+
+
+def record_conversation_processing_retry_enrichment(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    status: str,
+    summary_version_id: Optional[str] = None,
+    updated_at: Optional[datetime] = None,
+):
+    if status not in {'completed', 'failed'}:
+        raise ValueError(f'Unsupported conversation processing retry enrichment status: {status}')
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    transaction = db.transaction()
+    return _record_conversation_processing_retry_enrichment(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        conversation_id,
+        request_id,
+        status,
+        updated_at or datetime.now(timezone.utc),
+        summary_version_id,
+    )
 
 
 def set_conversation_as_discarded(uid: str, conversation_id: str):
