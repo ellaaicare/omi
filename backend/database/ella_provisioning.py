@@ -135,7 +135,7 @@ class EllaProvisioningRepository:
                         SET name = $2,
                             timezone = $3,
                             identities = COALESCE(identities, '{}'::jsonb)
-                                || jsonb_build_object('omi_uid', $1, 'email', email),
+                                || jsonb_build_object('omi_uid', $1::text, 'email', email),
                             updated_at = CURRENT_TIMESTAMP
                         WHERE omi_uid = $1
                         RETURNING id, omi_uid, email, name, timezone, status
@@ -166,7 +166,7 @@ class EllaProvisioningRepository:
                             name = $3,
                             timezone = $4,
                             identities = COALESCE(identities, '{}'::jsonb)
-                                || jsonb_build_object('omi_uid', $2, 'email', email),
+                                || jsonb_build_object('omi_uid', $2::text, 'email', email),
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = $5
                         RETURNING id, omi_uid, email, name, timezone, status
@@ -188,7 +188,7 @@ class EllaProvisioningRepository:
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, 'PENDING',
-                        jsonb_build_object('omi_uid', $5, 'email', $2),
+                        jsonb_build_object('omi_uid', $5::text, 'email', $2::text),
                         '{}'::jsonb, ARRAY[]::text[], CURRENT_TIMESTAMP
                     )
                     RETURNING id, omi_uid, email, name, timezone, status
