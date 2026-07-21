@@ -27,7 +27,44 @@ Future<CreateConversationResponse?> processInProgressConversation() async {
   return null;
 }
 
+class ConversationsFetchResult {
+  const ConversationsFetchResult.success(this.conversations)
+      : succeeded = true,
+        statusCode = 200;
+
+  const ConversationsFetchResult.failure({this.statusCode})
+      : succeeded = false,
+        conversations = const [];
+
+  final bool succeeded;
+  final int? statusCode;
+  final List<ServerConversation> conversations;
+}
+
 Future<List<ServerConversation>> getConversations({
+  int limit = 50,
+  int offset = 0,
+  List<ConversationStatus> statuses = const [],
+  bool includeDiscarded = true,
+  DateTime? startDate,
+  DateTime? endDate,
+  String? folderId,
+  bool? starred,
+}) async {
+  final result = await getConversationsResult(
+    limit: limit,
+    offset: offset,
+    statuses: statuses,
+    includeDiscarded: includeDiscarded,
+    startDate: startDate,
+    endDate: endDate,
+    folderId: folderId,
+    starred: starred,
+  );
+  return result.conversations;
+}
+
+Future<ConversationsFetchResult> getConversationsResult({
   int limit = 50,
   int offset = 0,
   List<ConversationStatus> statuses = const [],
@@ -55,18 +92,22 @@ Future<List<ServerConversation>> getConversations({
   }
 
   var response = await makeApiCall(url: url, headers: {}, method: 'GET', body: '');
-  if (response == null) return [];
+  if (response == null) return const ConversationsFetchResult.failure();
   if (response.statusCode == 200) {
-    // decode body bytes to utf8 string and then parse json so as to avoid utf8 char issues
-    var body = utf8.decode(response.bodyBytes);
-    var memories =
-        (jsonDecode(body) as List<dynamic>).map((conversation) => ServerConversation.fromJson(conversation)).toList();
-    Logger.debug('getConversations length: ${memories.length}');
-    return memories;
-  } else {
-    Logger.debug('getConversations error ${response.statusCode}');
+    try {
+      // Decode body bytes explicitly so transcript text is always interpreted as UTF-8.
+      final body = utf8.decode(response.bodyBytes);
+      final conversations =
+          (jsonDecode(body) as List<dynamic>).map((conversation) => ServerConversation.fromJson(conversation)).toList();
+      Logger.debug('getConversations length: ${conversations.length}');
+      return ConversationsFetchResult.success(conversations);
+    } catch (error, stackTrace) {
+      Logger.error('getConversations decode error: $error\n$stackTrace');
+      return ConversationsFetchResult.failure(statusCode: response.statusCode);
+    }
   }
-  return [];
+  Logger.debug('getConversations error ${response.statusCode}');
+  return ConversationsFetchResult.failure(statusCode: response.statusCode);
 }
 
 Future<ServerConversation?> reProcessConversationServer(String conversationId, {String? appId}) async {

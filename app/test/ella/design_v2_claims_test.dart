@@ -33,4 +33,11 @@ void main() {
     expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: false, hasMemories: false), isFalse);
     expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: true), isFalse);
   });
+
+  test('read aloud is offered only for a loaded daily note', () {
+    expect(canReadDailyNote(loading: true, text: 'A real note'), isFalse);
+    expect(canReadDailyNote(loading: false, text: ''), isFalse);
+    expect(canReadDailyNote(loading: false, text: '   '), isFalse);
+    expect(canReadDailyNote(loading: false, text: 'A real note'), isTrue);
+  });
 }

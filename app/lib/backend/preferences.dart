@@ -456,8 +456,8 @@ class SharedPreferencesUtil {
   List<ServerConversation> get cachedConversations {
     // Only return cache if it belongs to the current user
     final cachedUid = getString('cachedConversationsUid');
-    if (cachedUid.isNotEmpty && cachedUid != uid) {
-      // Stale cache from a different user — wipe it
+    if (uid.isEmpty || cachedUid != uid) {
+      // Unowned legacy cache and cache from another account are both unsafe.
       saveStringList('cachedConversations', []);
       saveString('cachedConversationsUid', '');
       return [];
@@ -483,7 +483,7 @@ class SharedPreferencesUtil {
   List<ServerMessage> get cachedMessages {
     // Only return cache if it belongs to the current user
     final cachedUid = getString('cachedMessagesUid');
-    if (cachedUid.isNotEmpty && cachedUid != uid) {
+    if (uid.isEmpty || cachedUid != uid) {
       saveStringList('cachedMessages', []);
       saveString('cachedMessagesUid', '');
       return [];

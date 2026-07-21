@@ -23,7 +23,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) context.read<ConversationProvider>().getInitialConversations();
+      if (mounted) context.read<ConversationProvider>().ensureFreshConversations();
     });
   }
 
@@ -32,7 +32,7 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
     final conversationProvider = context.watch<ConversationProvider>();
     final capture = context.watch<CaptureProvider>();
     final live = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
-    final groups = _group(conversationProvider.conversations);
+    final groups = _group(conversationProvider.visibleConversations);
     final loading =
         groups.isEmpty && (!conversationProvider.hasLoadedConversations || conversationProvider.isLoadingConversations);
     return Scaffold(
@@ -49,6 +49,17 @@ class _EllaMemoriesPageState extends State<EllaMemoriesPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
           children: [
+            SizedBox(
+              height: 3,
+              child: conversationProvider.isLoadingConversations && groups.isNotEmpty
+                  ? const LinearProgressIndicator(
+                      key: Key('memories-refresh-indicator'),
+                      color: EllaColors.tealDeep,
+                      backgroundColor: EllaColors.cardDeep,
+                    )
+                  : null,
+            ),
+            const SizedBox(height: 5),
             if (live) ...[
               _LiveMemoryCard(
                 onTap: () => Navigator.of(context).push(

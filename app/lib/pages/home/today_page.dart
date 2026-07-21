@@ -35,6 +35,8 @@ bool shouldShowMemoriesLoading({
 }) =>
     !hasMemories && (!hasLoaded || isLoading);
 
+bool canReadDailyNote({required bool loading, required String text}) => !loading && text.trim().isNotEmpty;
+
 String whisperStatusDetail(bool enabled) => enabled
     ? ' — Ella will speak up when she can help. 🪽'
     : " — Ella stays quiet, but she's still listening and remembering.";
@@ -114,8 +116,11 @@ class TodayPageState extends State<TodayPage> {
     final text = _noteText;
     if (text.isEmpty) return;
     setState(() => _isReading = true);
-    await ElevenLabsTts.speakOnDevice(text);
-    if (mounted) setState(() => _isReading = false);
+    try {
+      await ElevenLabsTts.speakOnDevice(text);
+    } finally {
+      if (mounted) setState(() => _isReading = false);
+    }
   }
 
   Future<void> _setWhispers(bool enabled) async {
@@ -173,10 +178,11 @@ class TodayPageState extends State<TodayPage> {
     );
     final capture = context.watch<CaptureProvider>();
     final conversations = context.watch<ConversationProvider>();
+    final visibleConversations = conversations.visibleConversations;
     final memoriesLoading = shouldShowMemoriesLoading(
       hasLoaded: conversations.hasLoadedConversations,
       isLoading: conversations.isLoadingConversations,
-      hasMemories: conversations.conversations.isNotEmpty,
+      hasMemories: visibleConversations.isNotEmpty,
     );
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
@@ -242,13 +248,14 @@ class TodayPageState extends State<TodayPage> {
               const SizedBox(height: EllaSizes.sectionGap),
               _RemindersSection(reminders: reminders.take(3).toList()),
             ],
-            if (memoriesLoading || conversations.conversations.isNotEmpty) ...[
+            if (memoriesLoading || visibleConversations.isNotEmpty) ...[
               const SizedBox(height: EllaSizes.sectionGap),
               if (memoriesLoading)
                 const _RecentMemoriesLoading()
               else
                 _RecentMemories(
-                  conversations: conversations.conversations.take(4).toList(),
+                  conversations: visibleConversations.take(4).toList(),
+                  refreshing: conversations.isLoadingConversations,
                   onOpenAll: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const EllaMemoriesPage()),
                   ),
@@ -362,43 +369,44 @@ class _DailyNoteCard extends StatelessWidget {
                 alignment: WrapAlignment.spaceBetween,
                 children: [
                   const Text('— Ella 🪽', style: EllaTextStyles.ellaSignOff),
-                  Semantics(
-                    button: true,
-                    label: isReading ? 'Stop reading' : 'Read aloud',
-                    child: Material(
-                      color: EllaColors.cardDeep,
-                      borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                      child: InkWell(
-                        onTap: text.isEmpty ? null : onReadAloud,
+                  if (canReadDailyNote(loading: loading, text: text))
+                    Semantics(
+                      button: true,
+                      label: isReading ? 'Stop reading' : 'Read aloud',
+                      child: Material(
+                        color: EllaColors.cardDeep,
                         borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 15),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  isReading ? Icons.stop_rounded : Icons.volume_up_rounded,
-                                  color: EllaColors.tealDeep,
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 8),
-                                Text(
-                                  isReading ? 'Stop' : 'Read aloud',
-                                  style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w700,
+                        child: InkWell(
+                          onTap: onReadAloud,
+                          borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 15),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    isReading ? Icons.stop_rounded : Icons.volume_up_rounded,
                                     color: EllaColors.tealDeep,
+                                    size: 20,
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    isReading ? 'Stop' : 'Read aloud',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                      color: EllaColors.tealDeep,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ],
@@ -685,9 +693,10 @@ class _ReminderRow extends StatelessWidget {
 }
 
 class _RecentMemories extends StatelessWidget {
-  const _RecentMemories({required this.conversations, required this.onOpenAll});
+  const _RecentMemories({required this.conversations, required this.refreshing, required this.onOpenAll});
 
   final List<ServerConversation> conversations;
+  final bool refreshing;
   final VoidCallback onOpenAll;
 
   @override
@@ -696,7 +705,16 @@ class _RecentMemories extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow),
+        Row(
+          children: [
+            const Expanded(child: Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow)),
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: refreshing ? const CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep) : null,
+            ),
+          ],
+        ),
         const SizedBox(height: EllaSizes.cardGap),
         SizedBox(
           height: height,

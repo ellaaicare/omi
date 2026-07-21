@@ -113,13 +113,29 @@ class ElevenLabsTts {
   /// Speak [text] using on-device iOS TTS. Returns a Future that completes
   /// when speech finishes. Used as fallback when the backend is unavailable.
   static Future<void> speakOnDevice(String text) async {
+    if (text.trim().isEmpty) return;
     _flutterTts ??= FlutterTts();
     final tts = _flutterTts!;
 
+    if (Platform.isIOS) {
+      await tts.setSharedInstance(true);
+      await tts.autoStopSharedSession(false);
+      await tts.setIosAudioCategory(
+        IosTextToSpeechAudioCategory.playAndRecord,
+        const [
+          IosTextToSpeechAudioCategoryOptions.defaultToSpeaker,
+          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+          IosTextToSpeechAudioCategoryOptions.allowAirPlay,
+        ],
+        IosTextToSpeechAudioMode.voicePrompt,
+      );
+    }
     await tts.setLanguage('en-US');
     await tts.setSpeechRate(0.48);
     await tts.setPitch(1.0);
     await tts.setVolume(1.0);
+    await tts.awaitSpeakCompletion(false);
 
     final completer = Completer<void>();
     tts.setCompletionHandler(() {
@@ -133,7 +149,11 @@ class ElevenLabsTts {
       if (!completer.isCompleted) completer.complete();
     });
 
-    await tts.speak(text);
+    final result = await tts.speak(text);
+    if (result != 1) {
+      Logger.debug('[TTS] On-device speak did not start: $result');
+      if (!completer.isCompleted) completer.complete();
+    }
     await completer.future;
   }
 

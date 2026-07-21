@@ -20,6 +20,8 @@ class ConversationProvider extends ChangeNotifier {
 
   bool isLoadingConversations = false;
   bool hasLoadedConversations = false;
+  bool hasFreshConversations = false;
+  bool isShowingCachedConversations = false;
   bool showDiscardedConversations = false;
   bool showShortConversations = false;
   int shortConversationThreshold = 0; // in seconds
@@ -34,6 +36,8 @@ class ConversationProvider extends ChangeNotifier {
   int currentSearchPage = 1;
 
   Timer? _processingConversationWatchTimer;
+  Future<void>? _initialConversationsRequest;
+  int _fetchRequestId = 0;
 
   // Add debounce mechanism for refresh
   Timer? _refreshDebounceTimer;
@@ -71,7 +75,11 @@ class ConversationProvider extends ChangeNotifier {
     processingConversations = [];
     isLoadingConversations = false;
     hasLoadedConversations = false;
+    hasFreshConversations = false;
+    isShowingCachedConversations = false;
     isFetchingConversations = false;
+    _initialConversationsRequest = null;
+    _fetchRequestId++;
     previousQuery = '';
     totalSearchPages = 1;
     currentSearchPage = 1;
@@ -356,9 +364,16 @@ class ConversationProvider extends ChangeNotifier {
       await fetchConversations();
       return;
     }
+    if (isLoadingConversations) return;
     setLoadingConversations(true);
-    List<ServerConversation> newConversations = await _getConversationsFromServer();
-    setLoadingConversations(false);
+    final result = await _getConversationsFromServer();
+    if (!result.succeeded) {
+      setLoadingConversations(false);
+      return;
+    }
+    final newConversations = result.conversations;
+    hasFreshConversations = true;
+    isShowingCachedConversations = false;
 
     List<ServerConversation> upsertConvos = [];
 
@@ -389,6 +404,7 @@ class ConversationProvider extends ChangeNotifier {
     }
 
     _groupConversationsByDateWithoutNotify();
+    setLoadingConversations(false);
     notifyListeners();
   }
 
@@ -398,10 +414,34 @@ class ConversationProvider extends ChangeNotifier {
     totalSearchPages = 0;
     searchedConversations = [];
 
+    final requestId = ++_fetchRequestId;
     setLoadingConversations(true);
     try {
-      conversations =
-          SharedPreferencesUtil().demoMode ? DemoFixtures.conversations() : await _getConversationsFromServer();
+      late final List<ServerConversation> fetchedConversations;
+      if (SharedPreferencesUtil().demoMode) {
+        fetchedConversations = DemoFixtures.conversations();
+      } else {
+        final result = await _getConversationsFromServer();
+        if (requestId != _fetchRequestId) return;
+        if (!result.succeeded) {
+          if (conversations.isEmpty && selectedFolderId == null) {
+            conversations = SharedPreferencesUtil()
+                .cachedConversations
+                .where((conversation) => conversation.status == ConversationStatus.completed)
+                .toList();
+          }
+          isShowingCachedConversations = conversations.isNotEmpty;
+          if (searchedConversations.isEmpty) searchedConversations = conversations;
+          _groupConversationsByDateWithoutNotify();
+          return;
+        }
+        fetchedConversations = result.conversations;
+      }
+
+      if (requestId != _fetchRequestId) return;
+      conversations = fetchedConversations;
+      hasFreshConversations = true;
+      isShowingCachedConversations = false;
 
       // processing convos
       processingConversations = conversations.where((m) => m.status == ConversationStatus.processing).toList();
@@ -409,11 +449,8 @@ class ConversationProvider extends ChangeNotifier {
       // completed convos
       conversations = conversations.where((m) => m.status == ConversationStatus.completed).toList();
 
-      // Only use cache when no folder filter is applied
-      if (conversations.isEmpty && selectedFolderId == null) {
-        conversations = SharedPreferencesUtil().cachedConversations;
-      } else if (selectedFolderId == null) {
-        // Only cache when viewing all folders
+      if (selectedFolderId == null) {
+        // A successful empty response is authoritative and clears stale cache.
         SharedPreferencesUtil().cachedConversations = conversations;
       }
       if (searchedConversations.isEmpty) {
@@ -421,15 +458,38 @@ class ConversationProvider extends ChangeNotifier {
       }
       _groupConversationsByDateWithoutNotify();
     } finally {
-      hasLoadedConversations = true;
-      setLoadingConversations(false);
+      if (requestId == _fetchRequestId) {
+        hasLoadedConversations = true;
+        setLoadingConversations(false);
+      }
     }
   }
 
-  Future getInitialConversations() async {
+  Future<void> _loadInitialConversations() async {
     await fetchConversations();
     await checkHasDailySummaries();
   }
+
+  Future<void> getInitialConversations() {
+    final pending = _initialConversationsRequest;
+    if (pending != null) return pending;
+
+    late final Future<void> request;
+    request = _loadInitialConversations().whenComplete(() {
+      if (identical(_initialConversationsRequest, request)) {
+        _initialConversationsRequest = null;
+      }
+    });
+    _initialConversationsRequest = request;
+    return request;
+  }
+
+  Future<void> ensureFreshConversations() {
+    if (hasFreshConversations) return Future<void>.value();
+    return getInitialConversations();
+  }
+
+  List<ServerConversation> get visibleConversations => _filterOutConvos(conversations);
 
   List<ServerConversation> _filterOutConvos(List<ServerConversation> convos) {
     return convos.where((convo) {
@@ -561,10 +621,10 @@ class ConversationProvider extends ChangeNotifier {
     );
   }
 
-  Future _getConversationsFromServer() async {
+  Future<ConversationsFetchResult> _getConversationsFromServer() async {
     final (startDate, endDate) = _getDateFilterRange();
 
-    return await getConversations(
+    return getConversationsResult(
       includeDiscarded: showDiscardedConversations,
       startDate: startDate,
       endDate: endDate,
@@ -589,19 +649,23 @@ class ConversationProvider extends ChangeNotifier {
     // Date filter if selected
     final (startDate, endDate) = _getDateFilterRange();
 
-    var newConversations = await getConversations(
-      offset: conversations.length,
-      includeDiscarded: showDiscardedConversations,
-      startDate: startDate,
-      endDate: endDate,
-      folderId: selectedFolderId,
-      starred: showStarredOnly ? true : null,
-    );
-    conversations.addAll(newConversations);
-    conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
-    _groupConversationsByDateWithoutNotify();
-    setLoadingConversations(false);
-    notifyListeners();
+    try {
+      final result = await getConversationsResult(
+        offset: conversations.length,
+        includeDiscarded: showDiscardedConversations,
+        startDate: startDate,
+        endDate: endDate,
+        folderId: selectedFolderId,
+        starred: showStarredOnly ? true : null,
+      );
+      if (!result.succeeded) return;
+      conversations.addAll(result.conversations);
+      conversations.sort((a, b) => (b.startedAt ?? b.createdAt).compareTo(a.startedAt ?? a.createdAt));
+      _groupConversationsByDateWithoutNotify();
+    } finally {
+      setLoadingConversations(false);
+      notifyListeners();
+    }
   }
 
   Future<void> addConversation(ServerConversation conversation) async {
