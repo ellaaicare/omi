@@ -150,13 +150,13 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
     assert error.value.detail == {"code": "hermes_not_provisioned"}
 
 
-def test_voice_session_cannot_fall_back_to_openclaw_before_isolated_proxy_cutover(monkeypatch):
+def test_voice_session_stays_closed_even_when_isolated_voice_flag_is_enabled(monkeypatch):
     async def ready_runtime(uid):
         return object()
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "true")
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(

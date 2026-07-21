@@ -344,6 +344,23 @@ def test_runtime_receipt_requires_owned_workspace_port_and_honcho():
         )
 
 
+@pytest.mark.parametrize("invalid_value", [False, "false", "0", 0, 1, None])
+def test_runtime_receipt_requires_strict_boolean_smoke_evidence(invalid_value):
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"]["smokePassed"] = invalid_value
+
+    with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
+        extract_runtime_binding(receipt, "user-a")
+
+
+def test_runtime_receipt_rejects_conflicting_smoke_evidence():
+    receipt = _runtime_receipt()
+    receipt["runtimeBinding"]["healthReceipt"]["smoke_passed"] = False
+
+    with pytest.raises(ProvisioningError, match="runtime_smoke_incomplete"):
+        extract_runtime_binding(receipt, "user-a")
+
+
 def test_runtime_resolver_enforces_owner_health_and_credential(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_GATEWAY_KEY_USER_A", "secret-value")
     binding = extract_runtime_binding(_runtime_receipt(), "user-a")

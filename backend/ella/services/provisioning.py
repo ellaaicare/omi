@@ -227,7 +227,15 @@ def extract_runtime_binding(
     health_receipt = raw.get("healthReceipt") or raw.get("health_receipt") or {}
     if not isinstance(health_receipt, dict):
         raise ProvisioningError("invalid_health_receipt", retryable=True)
-    smoke_passed = bool(raw.get("smokePassed") or raw.get("smoke_passed") or health_receipt.get("smoke_passed"))
+    smoke_values = []
+    for source, key in (
+        (raw, "smokePassed"),
+        (raw, "smoke_passed"),
+        (health_receipt, "smoke_passed"),
+    ):
+        if key in source:
+            smoke_values.append(source[key])
+    smoke_passed = bool(smoke_values) and all(value is True for value in smoke_values)
 
     if provider != "hermes":
         raise ProvisioningError("invalid_runtime_provider", retryable=False)
