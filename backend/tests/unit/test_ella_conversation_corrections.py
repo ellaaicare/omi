@@ -1468,6 +1468,7 @@ def test_hermes_recovery_uses_lossless_source_and_canonical_uid_session(monkeypa
     assert summary_recovery.build_hermes_recovery_source(conversation)[1] in prompt
     assert captured["apply"]["summary"]["category"] == "entertainment"
     assert captured["apply"]["require_canonical"] is True
+    assert captured["apply"]["preserve_generated_results"] is True
     assert result == {
         "active_summary_version_id": "enriched-v2",
         "canonical_confirmed": True,
@@ -2117,6 +2118,8 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
         **_retry_conversation(status="completed", request_id=None),
         "active_summary_version_id": "generic-v1",
         "summary_versions": [],
+        "apps_results": [{"app_id": "preserve-me"}],
+        "plugins_results": [{"plugin_id": "preserve-me"}],
     }
     updates = []
     canonical_calls = []
@@ -2150,11 +2153,14 @@ def test_strict_summary_writeback_confirms_canonical_before_success(monkeypatch)
             trace_id="trace-1",
             canonical_writer=canonical_writer,
             require_canonical=True,
+            preserve_generated_results=True,
         )
     )
 
     assert result["canonical_confirmed"] is True
     assert updates[0]["enrichment_state"]["status"] == "writeback_pending_canonical"
+    assert "apps_results" not in updates[0]
+    assert "plugins_results" not in updates[0]
     assert updates[1]["enrichment_state"]["status"] == "writeback_applied"
     assert updates[1]["enrichment_state"]["canonical_status"] == "completed"
     assert canonical_calls[0][1]["enrichment_state"]["canonical_status"] == "completed"
