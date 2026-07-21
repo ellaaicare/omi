@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from ella.services.observer import ObserverCandidate, structured_candidate_extractor
+from ella.services import runtime_resolver
 
 MAX_EXTRACTOR_EVENTS = 60
 MAX_EVENT_TEXT_CHARS = 1800
@@ -421,10 +422,8 @@ async def build_extraction_result(
     heuristic = _heuristic_extraction_result(events)
     hermes_kwargs: dict[str, str] = {}
     if uid:
-        from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
-
-        if runtime_bindings_enabled(uid):
-            runtime = await resolve_isolated_runtime(uid)
+        if runtime_resolver.runtime_bindings_enabled(uid):
+            runtime = await runtime_resolver.resolve_isolated_runtime(uid)
             if runtime is None:
                 return ExtractionResult(
                     candidates_by_event_id=heuristic.candidates_by_event_id,

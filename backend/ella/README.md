@@ -265,7 +265,10 @@ New-user Hermes provisioning is disabled by default and has two separate rollout
 - `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, voice, and `/v4/listen` require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never create/fall back to OpenClaw or a shared Plato profile.
 - `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. Until the voice proxy sends authenticated, UID-bound Hermes context/tool requests and removes its OpenClaw fallback, isolated users receive `isolated_voice_not_ready` instead of a V2V session.
 
-Apply the `ella_provisioning_jobs` and `ella_runtime_bindings` database migration before enabling either flag. Enable provisioning first for synthetic users; enable runtime dispatch only after distinct profile, workspace, gateway, Honcho, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
+Apply the shared Prisma migration from `ellaaicare/ella-ai` first:
+`packages/database/prisma/migrations/20260721000000_add_ella_provisioning_runtime/migration.sql` (merged in ella-ai PR #1066). OMI intentionally does not duplicate this schema. Both onboarding endpoints preflight the two tables and every required isolation index; an incomplete deployment returns retryable `503 provisioning_schema_not_ready` before any identity write.
+
+Enable provisioning first for two synthetic Firebase users; enable runtime dispatch only after distinct profile, workspace, gateway, Honcho, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
 
 The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Missing cloud-sync and raw-recording permissions are initialized to `false`; iOS must enable the appropriate setting only after the account-bound consent flow completes.
 

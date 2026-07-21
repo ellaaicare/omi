@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 
 import httpx
 
-from database.ella_provisioning import EllaProvisioningRepository
+from database.ella_provisioning import (
+    EllaProvisioningRepository,
+    ProvisioningSchemaNotReadyError,
+)
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
 DEFAULT_TEMPLATE_VERSION = "hermes-user-v1"
@@ -303,6 +306,12 @@ class ProvisioningCoordinator:
         client_request_id: Optional[str],
         request_payload: dict[str, Any],
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
+        try:
+            await self.repository.assert_schema_ready()
+        except ProvisioningSchemaNotReadyError as exc:
+            logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
+            raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+
         await self.repository.ensure_user_identity(
             uid=identity.uid,
             email=identity.email,

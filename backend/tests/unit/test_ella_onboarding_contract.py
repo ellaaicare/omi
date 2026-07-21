@@ -6,6 +6,7 @@ from fastapi import BackgroundTasks, Response
 from pydantic import ValidationError
 
 from ella.routers import onboarding
+from ella.services.provisioning import ProvisioningError
 
 
 def test_ensure_contract_forbids_caller_supplied_identity():
@@ -150,3 +151,33 @@ def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
 
     assert result["state"] == "provisioning"
     assert captured["identity"].uid == "canary-user"
+
+
+def test_schema_not_ready_returns_retryable_service_unavailable(monkeypatch):
+    class FakeCoordinator:
+        async def ensure_job(self, **_kwargs):
+            raise ProvisioningError("provisioning_schema_not_ready", retryable=True)
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
+    monkeypatch.setattr(
+        onboarding.auth,
+        "get_user",
+        lambda uid: SimpleNamespace(email="canary@example.com", display_name="Canary"),
+    )
+
+    async def fake_coordinator():
+        return FakeCoordinator()
+
+    monkeypatch.setattr(onboarding, "_coordinator", fake_coordinator)
+    with pytest.raises(onboarding.HTTPException) as error:
+        asyncio.run(
+            onboarding.ensure_onboarding(
+                onboarding.OnboardingEnsureRequest(),
+                BackgroundTasks(),
+                Response(),
+                uid="canary-user",
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {"code": "provisioning_schema_not_ready"}

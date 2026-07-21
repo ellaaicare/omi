@@ -9,10 +9,15 @@ from typing import Any, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from database.ella_provisioning import EllaProvisioningRepository, IdentityConflictError
+from database.ella_provisioning import (
+    EllaProvisioningRepository,
+    IdentityConflictError,
+    ProvisioningSchemaNotReadyError,
+)
 from ella.services.provisioning import (
     DEFAULT_TARGET_SCHEMA_VERSION,
     ProvisioningCoordinator,
+    ProvisioningError,
     VerifiedIdentity,
     provisioning_enabled,
     public_receipt,
@@ -22,6 +27,13 @@ from utils.other import endpoints as auth
 logger = logging.getLogger("ella.onboarding")
 router = APIRouter(prefix="/v1/ella/onboarding", tags=["ella-onboarding"])
 SCHEMA_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+_firestore_db: Any = None
+
+
+def configure_firestore_db(firestore_db: Any) -> None:
+    """Inject the already-initialized OMI Firestore client at app startup."""
+    global _firestore_db
+    _firestore_db = firestore_db
 
 
 class OnboardingClient(BaseModel):
@@ -62,7 +74,7 @@ def _verified_identity(uid: str, payload: OnboardingEnsureRequest) -> VerifiedId
 
 
 async def _coordinator() -> ProvisioningCoordinator:
-    return ProvisioningCoordinator(await EllaProvisioningRepository.create())
+    return ProvisioningCoordinator(await EllaProvisioningRepository.create(firestore_db=_firestore_db))
 
 
 def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
@@ -93,6 +105,11 @@ async def ensure_onboarding(
         )
     except IdentityConflictError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
+    except ProvisioningError as exc:
+        raise HTTPException(
+            status_code=503 if exc.retryable else 409,
+            detail={"code": exc.code},
+        ) from exc
 
     receipt = public_receipt(job, binding)
     if claimed:
@@ -115,6 +132,11 @@ async def onboarding_status(
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
     repository = await EllaProvisioningRepository.create()
+    try:
+        await repository.assert_schema_ready()
+    except ProvisioningSchemaNotReadyError as exc:
+        logger.error("Ella provisioning status schema is incomplete: %s", ", ".join(exc.missing))
+        raise HTTPException(status_code=503, detail={"code": "provisioning_schema_not_ready"}) from exc
     job = await repository.get_job(uid, target_schema_version)
     if not job:
         raise HTTPException(status_code=404, detail={"code": "setup_not_started"})

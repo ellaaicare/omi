@@ -96,6 +96,13 @@ from utils.translation import TranslationService
 from utils.translation_cache import TranscriptSegmentLanguageCache
 from utils.webhooks import get_audio_bytes_webhook_seconds
 from utils.onboarding import OnboardingHandler
+from ella.routers.auto_provision import (
+    auto_provision_user,
+    ensure_firestore_user_document,
+    get_agent_cluster,
+    validate_isolated_listen_runtime,
+)
+from ella.services.runtime_resolver import runtime_bindings_enabled
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -2033,7 +2040,9 @@ async def _stream_handler(
     elif codec == 'lc3':
         lc3_decoder = lc3.Decoder(lc3_frame_duration_us, sample_rate)
 
-    async def receive_data(dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock):
+    async def receive_data(
+        dg_socket, dg_profile_socket, soniox_sock, soniox_profile_sock, speechmatics_sock, grok_sock
+    ):
         nonlocal websocket_active, websocket_close_code, last_audio_received_time, last_activity_time, current_conversation_id
         nonlocal realtime_photo_buffers, speaker_to_person_map, first_audio_byte_timestamp, last_usage_record_timestamp
         nonlocal soniox_profile_socket, deepgram_profile_socket, audio_ring_buffer
@@ -2099,6 +2108,7 @@ async def _stream_handler(
                 # Proactively reconnect if Grok closed the connection (internal error, timeout, etc.)
                 try:
                     from websockets.connection import State as _WsState
+
                     _grok_dead = grok_sock.state != _WsState.OPEN
                 except Exception:
                     _grok_dead = False
@@ -2362,7 +2372,12 @@ async def _stream_handler(
         # Tasks
         data_process_task = asyncio.create_task(
             receive_data(
-                deepgram_socket, deepgram_profile_socket, soniox_socket, soniox_profile_socket, speechmatics_socket, grok_socket
+                deepgram_socket,
+                deepgram_profile_socket,
+                soniox_socket,
+                soniox_profile_socket,
+                speechmatics_socket,
+                grok_socket,
             )
         )
         stream_transcript_task = asyncio.create_task(stream_transcript_process())
@@ -2525,12 +2540,8 @@ async def listen_handler(
     # Ella sidecar: require isolated Hermes when the runtime cutover flag is on.
     isolated_runtime_cutover = False
     try:
-        from ella.services.runtime_resolver import runtime_bindings_enabled
-
         isolated_runtime_cutover = runtime_bindings_enabled(uid)
         if isolated_runtime_cutover:
-            from ella.routers.auto_provision import validate_isolated_listen_runtime
-
             result = await validate_isolated_listen_runtime(uid, user_db.is_exists_user)
             if not result.get("success"):
                 logging.getLogger(__name__).warning(
@@ -2541,13 +2552,7 @@ async def listen_handler(
                 await websocket.close(code=1013, reason="Ella setup incomplete")
                 return
         else:
-            from ella.routers.auto_provision import (
-                auto_provision_user,
-                ensure_firestore_user_document,
-                get_agent_cluster,
-            )
-
-            await ensure_firestore_user_document(uid)
+            await ensure_firestore_user_document(uid, user_db.db)
             cluster = await get_agent_cluster(uid)
             if not cluster:
                 logger = logging.getLogger(__name__)

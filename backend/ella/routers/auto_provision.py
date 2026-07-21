@@ -13,10 +13,16 @@ Two-phase flow:
 import json
 import logging
 import os
+import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
 import httpx
+
+from database.ella_provisioning import EllaProvisioningRepository
+from ella.services import runtime_resolver
+from ella.services.provisioning import ProvisioningError
 
 logger = logging.getLogger("ella.auto_provision")
 
@@ -31,7 +37,6 @@ OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 def _slugify(s: str) -> str:
     """Create a safe ID slug from a string."""
-    import re
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')[:40]
 
 
@@ -81,9 +86,7 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
 
         # A cluster without userAgentId is incomplete — treat as missing
         if not agents.get("userAgentId"):
-            logger.warning(
-                f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision"
-            )
+            logger.warning(f"Cluster for uid={uid} exists but missing userAgentId — needs re-provision")
             return None
 
         return {
@@ -97,7 +100,7 @@ async def get_agent_cluster(uid: str) -> Optional[dict]:
         return None
 
 
-async def ensure_firestore_user_document(uid: str) -> bool:
+async def ensure_firestore_user_document(uid: str, firestore_db=None) -> bool:
     """Create the minimal upstream OMI Firestore user doc for a known Ella user.
 
     The websocket transcription path still gates on database/users.py, which
@@ -117,10 +120,11 @@ async def ensure_firestore_user_document(uid: str) -> bool:
         )
         if not row:
             return False
+        if firestore_db is None:
+            logger.error("Cannot initialize OMI identity without an injected Firestore client")
+            return False
 
-        from database.ella_provisioning import EllaProvisioningRepository
-
-        await EllaProvisioningRepository(pool).ensure_omi_user_document(
+        await EllaProvisioningRepository(pool, firestore_db=firestore_db).ensure_omi_user_document(
             uid=uid,
             name=row["name"] or "User",
             email=row["email"],
@@ -135,17 +139,12 @@ async def ensure_firestore_user_document(uid: str) -> bool:
 
 async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> dict:
     """Fail closed before listen; never provision OpenClaw in isolated mode."""
-    from ella.services.provisioning import ProvisioningError
-    from ella.services.runtime_resolver import resolve_isolated_runtime
-
     try:
-        runtime = await resolve_isolated_runtime(uid)
+        runtime = await runtime_resolver.resolve_isolated_runtime(uid)
         if runtime is None:
             return {"success": False, "error": "runtime_bindings_disabled"}
         if omi_user_exists is None:
-            from database import users as user_db
-
-            omi_user_exists = user_db.is_exists_user
+            return {"success": False, "error": "omi_identity_checker_unavailable"}
         if not omi_user_exists(uid):
             return {"success": False, "error": "omi_identity_unavailable"}
         return {"success": True, "provider": "hermes"}
@@ -276,8 +275,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             "scannerGatewayUrl": scanner_gateway_url,
             "workspace": provision_result.get("workspace", ""),
             "userId": openclaw_user_id,
-            "provisionedAt": provision_result.get("provisionedAt")
-                or __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "provisionedAt": provision_result.get("provisionedAt") or datetime.now(timezone.utc).isoformat(),
         }
         for field, fallback in [
             ("userAgentId", f"ella-{openclaw_user_id}"),
@@ -286,9 +284,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             ("summarizerAgentId", "summarizer"),
         ]:
             cluster_agents_dict[field] = provision_result.get(field) or fallback
-        cluster_agents_dict["gatewayToken"] = (
-            provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
-        )
+        cluster_agents_dict["gatewayToken"] = provision_result.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN
         cluster_agents = json.dumps(cluster_agents_dict)
 
         if user_db_id:

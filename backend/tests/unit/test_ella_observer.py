@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import sys
 import types
@@ -299,8 +300,6 @@ def test_observer_router_runs_against_in_memory_test_ledger(monkeypatch):
     event_store = canonical_module.InMemoryCanonicalEventStore()
     log_store = logs_module.InMemoryObserverRunLogStore()
 
-    import asyncio
-
     asyncio.run(
         event_store.write_batch(
             [
@@ -371,8 +370,6 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
     event_store = canonical_module.InMemoryCanonicalEventStore()
     log_store = logs_module.InMemoryObserverRunLogStore()
 
-    import asyncio
-
     asyncio.run(
         event_store.write_batch(
             [
@@ -424,11 +421,8 @@ def test_observer_router_can_use_extraction_result(monkeypatch):
 
 
 def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
-    import asyncio
-
     sys.modules.pop("ella.services.observer_extractor", None)
     extractor_module = importlib.import_module("ella.services.observer_extractor")
-    runtime_module = types.ModuleType("ella.services.runtime_resolver")
     captured = {}
 
     async def fake_runtime(uid):
@@ -443,9 +437,12 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
         captured.update(kwargs)
         return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
 
-    runtime_module.runtime_bindings_enabled = lambda uid=None: uid == "uid-isolated"
-    runtime_module.resolve_isolated_runtime = fake_runtime
-    monkeypatch.setitem(sys.modules, "ella.services.runtime_resolver", runtime_module)
+    monkeypatch.setattr(
+        extractor_module.runtime_resolver,
+        "runtime_bindings_enabled",
+        lambda uid=None: uid == "uid-isolated",
+    )
+    monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
 
     asyncio.run(
@@ -539,8 +536,6 @@ def test_observer_apply_pending_writes_safe_memory_event(monkeypatch):
     assert body["decisions"][0]["action"] == "applied"
     proposals_db.update_proposal_status.assert_called_once()
 
-    import asyncio
-
     events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
     assert len(events) == 1
     assert events[0]["channel"] == "observer_memory"
@@ -595,8 +590,6 @@ def test_observer_apply_pending_accepts_trusted_mcp_memory_proposal(monkeypatch)
     assert body["applied_count"] == 1
     assert body["decisions"][0]["action"] == "applied"
     assert body["decisions"][0]["confidence"] == 0.92
-
-    import asyncio
 
     events = asyncio.run(event_store.timeline(uid="user-1", since=None, limit=10, channels=["observer_memory"]))
     assert len(events) == 1

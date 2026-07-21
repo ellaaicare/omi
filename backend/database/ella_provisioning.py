@@ -12,10 +12,32 @@ from typing import Any, Optional
 import asyncpg
 
 _pool: Optional[asyncpg.Pool] = None
+REQUIRED_PROVISIONING_INDEXES = (
+    "ella_provisioning_jobs_user_schema_key",
+    "ella_provisioning_jobs_state_updated_idx",
+    "ella_runtime_bindings_profile_name_key",
+    "ella_runtime_bindings_gateway_port_key",
+    "ella_runtime_bindings_service_label_key",
+    "ella_runtime_bindings_honcho_workspace_key",
+    "ella_runtime_bindings_observed_peer_key",
+    "ella_runtime_bindings_observer_peer_key",
+    "ella_runtime_bindings_user_role_provider_key",
+    "ella_runtime_bindings_one_active_role_key",
+    "ella_runtime_bindings_user_role_active_idx",
+    "ella_runtime_bindings_health_updated_idx",
+)
 
 
 class IdentityConflictError(RuntimeError):
     """The verified Firebase identity conflicts with an existing Ella user."""
+
+
+class ProvisioningSchemaNotReadyError(RuntimeError):
+    """The shared Ella provisioning migration has not been fully applied."""
+
+    def __init__(self, missing: list[str]):
+        self.missing = tuple(missing)
+        super().__init__("provisioning_schema_not_ready")
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -40,12 +62,44 @@ def _row_dict(row: Any) -> Optional[dict[str, Any]]:
 
 
 class EllaProvisioningRepository:
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(self, pool: asyncpg.Pool, *, firestore_db: Any = None):
         self.pool = pool
+        self.firestore_db = firestore_db
 
     @classmethod
-    async def create(cls) -> "EllaProvisioningRepository":
-        return cls(await get_pool())
+    async def create(cls, *, firestore_db: Any = None) -> "EllaProvisioningRepository":
+        return cls(await get_pool(), firestore_db=firestore_db)
+
+    async def assert_schema_ready(self) -> None:
+        """Fail before identity writes when the shared Prisma migration is absent."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                to_regclass('public.ella_provisioning_jobs') IS NOT NULL AS jobs_table,
+                to_regclass('public.ella_runtime_bindings') IS NOT NULL AS bindings_table,
+                ARRAY(
+                    SELECT required.index_name
+                    FROM unnest($1::text[]) AS required(index_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND indexname = required.index_name
+                    )
+                    ORDER BY required.index_name
+                ) AS missing_indexes
+            """,
+            list(REQUIRED_PROVISIONING_INDEXES),
+        )
+        missing = []
+        if not row or not row["jobs_table"]:
+            missing.append("table:ella_provisioning_jobs")
+        if not row or not row["bindings_table"]:
+            missing.append("table:ella_runtime_bindings")
+        if row:
+            missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
+        if missing:
+            raise ProvisioningSchemaNotReadyError(missing)
 
     async def ensure_user_identity(
         self,
@@ -168,10 +222,11 @@ class EllaProvisioningRepository:
     ) -> bool:
         """Create the upstream OMI identity without granting data permissions."""
 
-        def _ensure() -> bool:
-            from database._client import db
+        if self.firestore_db is None:
+            raise RuntimeError("firestore_client_unavailable")
 
-            user_ref = db.collection("users").document(uid)
+        def _ensure() -> bool:
+            user_ref = self.firestore_db.collection("users").document(uid)
             snapshot = user_ref.get()
             if snapshot.exists:
                 data = snapshot.to_dict() or {}

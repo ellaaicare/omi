@@ -1,10 +1,12 @@
 import asyncio
-import sys
 import uuid
-from types import ModuleType
 
 import pytest
 
+from database.ella_provisioning import (
+    EllaProvisioningRepository,
+    ProvisioningSchemaNotReadyError,
+)
 from ella.services.provisioning import (
     ProvisioningCoordinator,
     ProvisioningError,
@@ -61,14 +63,21 @@ def _runtime_receipt(profile_name="omi-user-a"):
 
 
 class FakeRepository:
-    def __init__(self, *, binding=None, omi_identity_error=None):
+    def __init__(self, *, binding=None, omi_identity_error=None, schema_error=None):
         self.job = _job()
         self.binding = binding
         self.omi_identity_error = omi_identity_error
+        self.schema_error = schema_error
         self.staged = None
         self.identity_calls = []
         self.omi_identity_calls = []
         self.user_active = False
+        self.schema_checks = 0
+
+    async def assert_schema_ready(self):
+        self.schema_checks += 1
+        if self.schema_error:
+            raise self.schema_error
 
     async def ensure_user_identity(self, **kwargs):
         self.identity_calls.append(kwargs)
@@ -154,6 +163,16 @@ class _FakeFirestore:
         return self.document_ref
 
 
+class _FakeSchemaPool:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        return self.result
+
+
 def test_payload_hash_is_stable_and_sensitive_to_values():
     assert stable_payload_hash({"b": 2, "a": 1}) == stable_payload_hash({"a": 1, "b": 2})
     assert stable_payload_hash({"a": 1}) != stable_payload_hash({"a": 2})
@@ -183,14 +202,9 @@ def test_provisioning_and_runtime_canary_allowlists_are_independent(monkeypatch)
     assert runtime_bindings_enabled("provision-user") is False
 
 
-def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission(monkeypatch):
-    from database.ella_provisioning import EllaProvisioningRepository
-
+def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():
     document = _FakeDocument(exists=True, data={"onboarding": {"completed": True}})
-    client_module = ModuleType("database._client")
-    client_module.db = _FakeFirestore(document)
-    monkeypatch.setitem(sys.modules, "database._client", client_module)
-    repository = EllaProvisioningRepository(pool=None)
+    repository = EllaProvisioningRepository(pool=None, firestore_db=_FakeFirestore(document))
 
     changed = asyncio.run(
         repository.ensure_omi_user_document(
@@ -206,6 +220,46 @@ def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission(monkey
     assert merge is True
     assert payload["private_cloud_sync_enabled"] is False
     assert payload["store_recording_permission"] is False
+
+
+def test_repository_schema_preflight_reports_missing_objects():
+    pool = _FakeSchemaPool(
+        {
+            "jobs_table": True,
+            "bindings_table": False,
+            "missing_indexes": ["ella_runtime_bindings_one_active_role_key"],
+        }
+    )
+    repository = EllaProvisioningRepository(pool)
+
+    with pytest.raises(ProvisioningSchemaNotReadyError) as error:
+        asyncio.run(repository.assert_schema_ready())
+
+    assert error.value.missing == (
+        "table:ella_runtime_bindings",
+        "index:ella_runtime_bindings_one_active_role_key",
+    )
+    assert len(pool.calls) == 1
+
+
+def test_schema_preflight_runs_before_identity_mutation():
+    repository = FakeRepository(schema_error=ProvisioningSchemaNotReadyError(["table:ella_provisioning_jobs"]))
+    coordinator = ProvisioningCoordinator(repository, FakeProvisionClient(_runtime_receipt()))
+    identity = VerifiedIdentity("user-a", "a@example.com", "A", "America/Los_Angeles")
+
+    with pytest.raises(ProvisioningError, match="provisioning_schema_not_ready") as error:
+        asyncio.run(
+            coordinator.ensure_job(
+                identity=identity,
+                target_schema_version="hermes-user-v1",
+                client_request_id="request-a",
+                request_payload={"client": "ios"},
+            )
+        )
+
+    assert error.value.retryable is True
+    assert repository.schema_checks == 1
+    assert repository.identity_calls == []
 
 
 def test_public_receipt_does_not_expose_runtime_secrets():

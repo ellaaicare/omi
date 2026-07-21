@@ -5,6 +5,7 @@ import firebase_admin
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from database._client import db as firestore_db
 from modal import Image, App, asgi_app, Secret
 from routers import (
     workflow,
@@ -156,6 +157,7 @@ for path in paths:
 # ============================================================================
 try:
     from ella import register_ella_extensions
-    register_ella_extensions(app)
+
+    register_ella_extensions(app, firestore_db=firestore_db)
 except ImportError:
     pass  # Running vanilla OMI
