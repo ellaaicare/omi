@@ -66,7 +66,11 @@ from utils.analytics import record_usage
 from utils.app_integrations import trigger_external_integrations, trigger_realtime_integrations
 from utils.apps import is_audio_bytes_app_enabled
 from utils.conversations.location import get_google_maps_location
-from utils.conversations.process_conversation import process_conversation, retrieve_in_progress_conversation
+from utils.conversations.process_conversation import (
+    mark_unexpected_conversation_processing_failed,
+    process_conversation,
+    retrieve_in_progress_conversation,
+)
 from utils.ella.scanner_keyterms import cache_status as scanner_keyterm_cache_status
 from utils.ella.scanner_keyterms import combine_deepgram_keyterms, get_scanner_keyterms
 from utils.notifications import send_credit_limit_notification, send_silent_user_notification
@@ -643,12 +647,16 @@ async def _stream_handler(
                 conversation.geolocation = get_google_maps_location(geolocation.latitude, geolocation.longitude)
 
             conversation = process_conversation(uid, language, conversation)
-            messages = trigger_external_integrations(uid, conversation)
         except Exception as e:
             print(f"Error processing conversation: {e}", uid, session_id)
-            conversations_db.set_conversation_as_discarded(uid, conversation.id)
-            conversation.discarded = True
+            mark_unexpected_conversation_processing_failed(uid, conversation)
             messages = []
+        else:
+            try:
+                messages = trigger_external_integrations(uid, conversation)
+            except Exception as e:
+                print(f"External integrations failed after conversation processing: {e}", uid, session_id)
+                messages = []
 
         _send_message_event(ConversationEvent(event_type="memory_created", memory=conversation, messages=messages))
 

@@ -76,6 +76,11 @@ except ImportError:
 from utils.notifications import send_action_item_data_message
 from utils.task_sync import auto_sync_action_items_batch
 from utils.other.storage import precache_conversation_audio
+from utils.conversations.failure_state import (
+    CONVERSATION_PROCESSING_FAILED,
+    apply_conversation_processing_failed,
+    clear_conversation_processing_error,
+)
 
 
 def _get_structured(
@@ -181,8 +186,8 @@ def _get_conversation_obj(
     uid: str,
     structured: Structured,
     conversation: Union[Conversation, CreateConversation, ExternalIntegrationCreateConversation],
+    discarded: bool,
 ):
-    discarded = structured.title == ''
     if isinstance(conversation, CreateConversation):
         conversation_dict = conversation.dict()
         # Store calendar context in external_data if available
@@ -225,6 +230,22 @@ def _get_conversation_obj(
         conversation.discarded = discarded
 
     return conversation
+
+
+def mark_conversation_processing_failed(
+    uid: str,
+    conversation: Conversation,
+    error_code: str = "conversation_summary_failed",
+):
+    apply_conversation_processing_failed(conversation, error_code=error_code)
+    conversations_db.upsert_conversation(uid, conversation.dict())
+
+
+def mark_unexpected_conversation_processing_failed(uid: str, conversation: Conversation) -> bool:
+    if conversation.status == ConversationStatus.failed and conversation.processing_error:
+        return False
+    mark_conversation_processing_failed(uid, conversation, error_code=CONVERSATION_PROCESSING_FAILED)
+    return True
 
 
 # Function to get conversation summary apps from Redis
@@ -597,8 +618,15 @@ def process_conversation(
         people_data = users_db.get_people_by_ids(uid, list(set(person_ids)))
         people = [Person(**p) for p in people_data]
 
-    structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
-    conversation = _get_conversation_obj(uid, structured, conversation)
+    try:
+        structured, discarded = _get_structured(uid, language_code, conversation, force_process, people=people)
+    except Exception:
+        if isinstance(conversation, Conversation):
+            mark_conversation_processing_failed(uid, conversation)
+        raise
+
+    conversation = _get_conversation_obj(uid, structured, conversation, discarded)
+    clear_conversation_processing_error(conversation)
 
     # AI-based folder assignment
     assigned_folder_id = None
