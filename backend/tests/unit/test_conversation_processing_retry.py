@@ -1,7 +1,7 @@
 import os
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project")
@@ -89,55 +89,194 @@ def _claim(data, request_id='request-123', retry_data=None):
     return result, transaction
 
 
-def test_failed_summary_is_atomically_claimed_without_transcript_loss():
+def test_failed_summary_is_atomically_claimed_without_returning_protected_transcript():
     result, transaction = _claim(_failed_conversation())
 
     assert result['outcome'] == 'claimed'
-    assert result['conversation']['status'] == ConversationStatus.processing.value
-    assert result['conversation']['processing_error'] == 'conversation_summary_failed'
-    assert result['conversation']['processing_retry_id'] == 'request-123'
-    assert result['conversation']['transcript_segments'] == [{'text': 'important transcript'}]
+    assert 'conversation' not in result
     assert transaction.updates[0][1] == {
         'status': ConversationStatus.processing.value,
         'processing_retry_id': 'request-123',
+        'processing_retry_mode': 'full',
         'processing_retry_started_at': datetime(2026, 7, 20, 8, 5, tzinfo=timezone.utc),
+        'processing_retry_lease_expires_at': datetime(2026, 7, 20, 8, 20, tzinfo=timezone.utc),
         'processing_retry_completed_at': None,
+        'processing_retry_attempt_count': 1,
     }
     assert transaction.sets[0][1]['outcome'] == ConversationStatus.processing.value
 
 
-def test_repeated_failed_request_id_does_not_start_duplicate_work():
+def test_repeated_failed_request_id_reclaims_retryable_work():
     result, transaction = _claim(
         _failed_conversation(request_id='newer-request'),
-        retry_data={'request_id': 'request-123', 'outcome': ConversationStatus.failed.value},
+        retry_data={
+            'request_id': 'request-123',
+            'outcome': ConversationStatus.failed.value,
+            'mode': 'full',
+            'phase': 'enrichment_failed',
+            'attempt_count': 1,
+        },
     )
 
-    assert result['outcome'] == 'failed'
-    assert transaction.updates == []
+    assert result['outcome'] == 'claimed'
+    assert result['reason'] == 'lease_reclaimed'
+    assert result['attempt_count'] == 2
+    assert len(transaction.updates) == 2
     assert transaction.sets == []
 
 
 def test_concurrent_request_observes_processing_without_reclaiming():
     conversation = _failed_conversation(request_id='request-first')
     conversation['status'] = ConversationStatus.processing.value
+    conversation['processing_retry_lease_expires_at'] = datetime(2026, 7, 20, 8, 10, tzinfo=timezone.utc)
 
     result, transaction = _claim(conversation, request_id='request-second')
 
     assert result['outcome'] == 'busy'
-    assert result['conversation']['processing_retry_id'] == 'request-first'
+    assert 'conversation' not in result
     assert transaction.updates == []
     assert transaction.sets == []
 
 
-def test_completed_conversation_is_idempotent_for_any_retry_id():
-    conversation = _failed_conversation(request_id='request-first')
-    conversation['status'] = ConversationStatus.completed.value
+def test_expired_same_request_lease_is_reclaimed_and_requeued():
+    requested_at = datetime(2026, 7, 20, 8, 5, tzinfo=timezone.utc)
+    conversation = _failed_conversation(request_id='request-123')
+    conversation.update(
+        {
+            'status': ConversationStatus.processing.value,
+            'processing_retry_lease_expires_at': requested_at - timedelta(seconds=1),
+        }
+    )
+    retry_data = {
+        'request_id': 'request-123',
+        'outcome': ConversationStatus.processing.value,
+        'mode': 'full',
+        'phase': 'claimed',
+        'attempt_count': 1,
+        'lease_expires_at': requested_at - timedelta(seconds=1),
+    }
+
+    result, transaction = _claim(conversation, retry_data=retry_data)
+
+    assert result['outcome'] == 'claimed'
+    assert result['reason'] == 'lease_reclaimed'
+    assert result['attempt_count'] == 2
+    assert transaction.updates[1][1]['outcome'] == 'processing'
+    assert transaction.updates[1][1]['lease_expires_at'] > requested_at
+
+
+def test_active_same_request_lease_returns_processing_without_duplicate_work():
+    requested_at = datetime(2026, 7, 20, 8, 5, tzinfo=timezone.utc)
+    retry_data = {
+        'request_id': 'request-123',
+        'outcome': ConversationStatus.processing.value,
+        'mode': 'full',
+        'phase': 'claimed',
+        'attempt_count': 1,
+        'lease_expires_at': requested_at + timedelta(minutes=5),
+    }
+
+    result, transaction = _claim(_failed_conversation(request_id='request-123'), retry_data=retry_data)
+
+    assert result['outcome'] == 'processing'
+    assert result['attempt_count'] == 1
+    assert transaction.updates == []
+    assert transaction.sets == []
+
+
+def test_old_failed_receipt_cannot_supersede_newer_active_lease():
+    conversation = _failed_conversation(request_id='newer-request')
+    conversation.update(
+        {
+            'status': ConversationStatus.processing.value,
+            'processing_retry_lease_expires_at': datetime(2026, 7, 20, 8, 10, tzinfo=timezone.utc),
+        }
+    )
+    retry_data = {
+        'request_id': 'request-123',
+        'outcome': ConversationStatus.failed.value,
+        'mode': 'full',
+        'attempt_count': 1,
+    }
+
+    result, transaction = _claim(conversation, retry_data=retry_data)
+
+    assert result['outcome'] == 'busy'
+    assert transaction.updates == []
+
+
+def test_completed_enriched_conversation_is_idempotent_for_any_retry_id():
+    conversation = _failed_conversation()
+    conversation.update(
+        {
+            'status': ConversationStatus.completed.value,
+            'structured': {'title': 'Enriched', 'overview': '[Ella] Complete.'},
+            'active_summary_version_id': 'enriched-v2',
+            'summary_versions': [
+                {'id': 'enriched-v2', 'kind': 'observer_enriched', 'source': 'observer', 'is_active': True}
+            ],
+            'enrichment_state': {'status': 'writeback_applied', 'kind': 'observer_enriched'},
+        }
+    )
 
     result, transaction = _claim(conversation, request_id='request-second')
 
     assert result['outcome'] == 'completed'
     assert transaction.updates == []
     assert transaction.sets[0][1]['outcome'] == ConversationStatus.completed.value
+
+
+def test_enriched_conversation_with_unconfirmed_vector_remains_stage_two_retryable():
+    conversation = _failed_conversation()
+    conversation.update(
+        {
+            'status': ConversationStatus.completed.value,
+            'structured': {'title': 'Enriched', 'overview': '[Ella] Complete.'},
+            'active_summary_version_id': 'enriched-v2',
+            'summary_versions': [
+                {'id': 'enriched-v2', 'kind': 'recovered_enriched', 'source': 'observer', 'is_active': True}
+            ],
+            'enrichment_state': {'status': 'writeback_applied', 'kind': 'recovered_enriched'},
+            'processing_retry_enrichment_vector_status': 'failed',
+        }
+    )
+
+    result, transaction = _claim(conversation)
+
+    assert result['outcome'] == 'claimed'
+    assert result['mode'] == 'enrichment_only'
+    assert result['reason'] == 'enriched_summary_without_confirmed_vector'
+    assert 'status' not in transaction.updates[0][1]
+
+
+def test_completed_generic_conversation_claims_enrichment_only_without_changing_visibility():
+    conversation = _failed_conversation()
+    conversation.update(
+        {
+            'status': ConversationStatus.completed.value,
+            'processing_error': None,
+            'structured': {'title': 'Generic', 'overview': '[Ella] Generic summary.'},
+            'active_summary_version_id': 'generic-v1',
+            'summary_versions': [{'id': 'generic-v1', 'kind': 'generic_recovered', 'source': 'omi', 'is_active': True}],
+        }
+    )
+
+    result, transaction = _claim(conversation)
+
+    assert result['outcome'] == 'claimed'
+    assert result['mode'] == 'enrichment_only'
+    assert 'conversation' not in result
+    assert transaction.updates[0][1] == {
+        'processing_retry_id': 'request-123',
+        'processing_retry_mode': 'enrichment_only',
+        'processing_retry_started_at': datetime(2026, 7, 20, 8, 5, tzinfo=timezone.utc),
+        'processing_retry_lease_expires_at': datetime(2026, 7, 20, 8, 20, tzinfo=timezone.utc),
+        'processing_retry_completed_at': None,
+        'processing_retry_attempt_count': 1,
+    }
+    assert transaction.sets[0][1]['generic_status'] == 'completed'
+    assert transaction.sets[0][1]['generic_vector_status'] == 'unknown'
+    assert transaction.sets[0][1]['enrichment_status'] == 'pending'
 
 
 def test_generic_processing_failure_is_visible_but_not_automatically_retried():
@@ -151,12 +290,51 @@ def test_generic_processing_failure_is_visible_but_not_automatically_retried():
 def test_missing_conversation_is_not_claimed():
     result, transaction = _claim(None)
 
-    assert result == {'outcome': 'not_found', 'conversation': None}
+    assert result['outcome'] == 'not_found'
+    assert 'conversation' not in result
     assert transaction.updates == []
     assert transaction.sets == []
 
 
-def test_summary_writeback_phase_is_receipted_before_vector_completion():
+def test_decrypted_source_hash_is_receipted_without_transcript_content():
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef(
+        {
+            'processing_retry_id': 'request-123',
+            'transcript_segments': 'encrypted-payload-must-not-be-copied',
+        }
+    )
+    retry_ref = _FakeDocumentRef({'request_id': 'request-123', 'outcome': 'processing'})
+    updated_at = datetime(2026, 7, 20, 8, 6, tzinfo=timezone.utc)
+    lease_expires_at = updated_at + timedelta(minutes=15)
+
+    result = conversations_db._record_conversation_processing_retry_source_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        'request-123',
+        'a' * 64,
+        99,
+        updated_at,
+        lease_expires_at,
+    )
+
+    assert result is True
+    assert transaction.updates[0][1] == {
+        'processing_retry_lease_expires_at': lease_expires_at,
+        'processing_retry_transcript_sha256': 'a' * 64,
+        'processing_retry_source_request_id': 'request-123',
+    }
+    assert transaction.updates[1][1] == {
+        'transcript_sha256': 'a' * 64,
+        'transcript_segment_count': 99,
+        'lease_expires_at': lease_expires_at,
+        'updated_at': updated_at,
+    }
+    assert 'transcript_segments' not in transaction.updates[1][1]
+
+
+def test_generic_completion_keeps_overall_receipt_processing_for_hermes():
     transaction = _FakeTransaction()
     conversation_ref = _FakeDocumentRef(
         {
@@ -177,9 +355,20 @@ def test_summary_writeback_phase_is_receipted_before_vector_completion():
     )
 
     assert result is True
-    assert transaction.updates[0][1] == {"processing_retry_summary_version_id": "recovered-v1"}
+    assert transaction.updates[0][1] == {
+        "status": "completed",
+        "discarded": False,
+        "processing_error": None,
+        "processing_error_at": None,
+        "processing_retry_summary_version_id": "recovered-v1",
+        "processing_retry_generic_vector_status": "pending",
+    }
     assert transaction.updates[1][1] == {
-        "phase": "summary_applied",
+        "outcome": "processing",
+        "phase": "generic_writeback_applied",
+        "generic_status": "writeback_applied",
+        "generic_vector_status": "pending",
+        "enrichment_status": "pending",
         "summary_version_id": "recovered-v1",
         "updated_at": applied_at,
     }
@@ -209,7 +398,11 @@ def test_completed_retry_atomically_clears_failure_and_discarded_state():
     )
 
     assert result is True
-    assert transaction.updates[0][1] == {"outcome": "completed", "updated_at": finished_at}
+    assert transaction.updates[0][1] == {
+        "outcome": "completed",
+        "phase": "completed",
+        "updated_at": finished_at,
+    }
     assert transaction.updates[1][1] == {
         "status": "completed",
         "discarded": False,
@@ -243,6 +436,7 @@ def test_failed_vector_completion_stays_retryable_with_stable_error_code():
 
     assert result is True
     assert transaction.updates[0][1]["error_code"] == "conversation_summary_recovery_failed"
+    assert transaction.updates[0][1]["phase"] == "failed"
     assert transaction.updates[1][1] == {
         "status": "failed",
         "discarded": False,
@@ -258,6 +452,7 @@ def test_hermes_failure_keeps_completed_generic_summary_and_marks_enrichment_ret
             "status": "completed",
             "processing_retry_id": "request-123",
             "processing_retry_summary_version_id": "generic-v1",
+            "active_summary_version_id": "enriched-v2",
         }
     )
     retry_ref = _FakeDocumentRef({"request_id": "request-123", "outcome": "completed"})
@@ -277,9 +472,13 @@ def test_hermes_failure_keeps_completed_generic_summary_and_marks_enrichment_ret
     assert result is True
     assert transaction.updates[0][1] == {
         "enrichment_status": "failed",
+        "outcome": "failed",
+        "phase": "enrichment_failed",
         "updated_at": failed_at,
     }
     assert transaction.updates[1][1] == {
+        "status": "completed",
+        "processing_retry_completed_at": failed_at,
         "enrichment_state": {
             "status": "failed",
             "pending": True,
@@ -288,7 +487,7 @@ def test_hermes_failure_keeps_completed_generic_summary_and_marks_enrichment_ret
             "trace_id": "summary-retry:conversation-1:request-123:hermes",
             "updated_at": failed_at,
             "error": "hermes_temporarily_unavailable",
-        }
+        },
     }
 
 
@@ -299,6 +498,7 @@ def test_hermes_success_records_enriched_version_without_changing_completed_stat
             "status": "completed",
             "processing_retry_id": "request-123",
             "processing_retry_summary_version_id": "generic-v1",
+            "active_summary_version_id": "enriched-v2",
         }
     )
     retry_ref = _FakeDocumentRef({"request_id": "request-123", "outcome": "completed"})
@@ -313,14 +513,81 @@ def test_hermes_success_records_enriched_version_without_changing_completed_stat
         "completed",
         completed_at,
         "enriched-v2",
+        "e" * 64,
     )
 
     assert result is True
     assert transaction.updates[0][1] == {
         "enrichment_status": "completed",
+        "vector_status": "completed",
+        "outcome": "completed",
+        "phase": "completed",
         "updated_at": completed_at,
         "enriched_summary_version_id": "enriched-v2",
+        "vector_summary_version_id": "enriched-v2",
+        "vector_content_sha256": "e" * 64,
     }
     assert transaction.updates[1][1] == {
+        "status": "completed",
         "processing_retry_enriched_version_id": "enriched-v2",
+        "processing_retry_enrichment_vector_status": "completed",
+        "processing_retry_enrichment_vector_version_id": "enriched-v2",
+        "processing_retry_enrichment_vector_sha256": "e" * 64,
+        "processing_retry_completed_at": completed_at,
     }
+
+
+def test_stale_attempt_cannot_mark_reclaimed_enrichment_complete():
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef(
+        {
+            'status': 'completed',
+            'processing_retry_id': 'request-123',
+            'processing_retry_attempt_count': 2,
+        }
+    )
+    retry_ref = _FakeDocumentRef({'request_id': 'request-123', 'outcome': 'processing', 'attempt_count': 2})
+
+    result = conversations_db._record_conversation_processing_retry_enrichment_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        'conversation-1',
+        'request-123',
+        'completed',
+        datetime(2026, 7, 20, 8, 9, tzinfo=timezone.utc),
+        'enriched-v2',
+        attempt_count=1,
+    )
+
+    assert result is False
+    assert transaction.updates == []
+
+
+def test_changed_active_summary_cannot_mark_enriched_vector_complete():
+    transaction = _FakeTransaction()
+    conversation_ref = _FakeDocumentRef(
+        {
+            'status': 'completed',
+            'processing_retry_id': 'request-123',
+            'processing_retry_attempt_count': 2,
+            'active_summary_version_id': 'manual-v3',
+        }
+    )
+    retry_ref = _FakeDocumentRef({'request_id': 'request-123', 'outcome': 'processing', 'attempt_count': 2})
+
+    result = conversations_db._record_conversation_processing_retry_enrichment_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        'conversation-1',
+        'request-123',
+        'completed',
+        datetime(2026, 7, 20, 8, 9, tzinfo=timezone.utc),
+        'enriched-v2',
+        'e' * 64,
+        attempt_count=2,
+    )
+
+    assert result is False
+    assert transaction.updates == []

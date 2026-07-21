@@ -11,7 +11,14 @@ from utils.llm.chat import (
 from utils.llm.clients import generate_embedding
 
 
-def save_structured_vector(uid: str, conversation: Conversation, update_only: bool = False):
+def save_structured_vector(
+    uid: str,
+    conversation: Conversation,
+    update_only: bool = False,
+    *,
+    summary_version_id: str | None = None,
+    summary_content_sha256: str | None = None,
+):
     vector = generate_embedding(str(conversation.structured)) if not update_only else None
     timezone = notification_db.get_user_time_zone(uid)
     metadata = {}
@@ -49,9 +56,13 @@ def save_structured_vector(uid: str, conversation: Conversation, update_only: bo
         )
 
     metadata['created_at'] = int(conversation.created_at.timestamp())
+    if summary_version_id:
+        metadata['active_summary_version_id'] = summary_version_id
+    if summary_content_sha256:
+        metadata['summary_content_sha256'] = summary_content_sha256
     if not update_only:
         print('save_structured_vector creating vector')
-        upsert_vector2(uid, conversation, vector, metadata)
+        return upsert_vector2(uid, conversation, vector, metadata)
     else:
         print('save_structured_vector updating metadata')
-        update_vector_metadata(uid, conversation.id, metadata)
+        return update_vector_metadata(uid, conversation.id, metadata)

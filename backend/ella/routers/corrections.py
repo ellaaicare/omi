@@ -27,13 +27,14 @@ from ella.services.hermes_session import canonical_omi_session_key, safe_session
 from ella.services.summary_recovery import (
     SummaryProviderConfig,
     apply_summary_update,
+    build_conversation_processing_retry_plan,
     extract_json_object,
     generate_summary_from_prompt,
     normalize_summary,
     recover_failed_conversation_summary,
 )
 from ella.services import proposal_ingest
-from models.conversation import Conversation
+from models.conversation import Conversation, ConversationStatus
 from utils.other import endpoints as auth
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,12 @@ class ConversationProcessingRetryOutcome(str, Enum):
     failed = "failed"
 
 
+class ConversationProcessingRecoveryMode(str, Enum):
+    none = "none"
+    full = "full"
+    enrichment_only = "enrichment_only"
+
+
 class RetryConversationProcessingRequest(BaseModel):
     request_id: uuid.UUID
     correction_text: Optional[str] = Field(
@@ -143,7 +150,44 @@ class RetryConversationProcessingRequest(BaseModel):
 
 class RetryConversationProcessingResponse(BaseModel):
     outcome: ConversationProcessingRetryOutcome
+    recovery_mode: ConversationProcessingRecoveryMode = ConversationProcessingRecoveryMode.none
+    phase: Optional[str] = None
+    generic_status: Optional[str] = None
+    generic_vector_status: Optional[str] = None
+    enrichment_status: Optional[str] = None
+    vector_status: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    attempt_count: int = 0
     conversation: Conversation
+
+
+class ConversationProcessingRetryPlan(BaseModel):
+    conversation_id: str
+    status: str
+    discarded: bool
+    processing_error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    transcript_segment_count: int
+    transcript_character_count: int
+    transcript_sha256: str
+    structured_summary_present: bool
+    active_summary_version_id: Optional[str] = None
+    active_summary_source: Optional[str] = None
+    active_summary_kind: Optional[str] = None
+    enriched_summary_present: bool
+    canonical_provenance_confirmed: bool
+    vector_present: bool
+    vector_active_summary_version_id: Optional[str] = None
+    vector_content_sha256: Optional[str] = None
+    vector_matches_active_summary: bool
+    recovery_mode: ConversationProcessingRecoveryMode
+    retryable: bool
+    reason: str
+    profile_scope_sha256: str
+    canonical_session_scope_sha256: str
+    provider_path: list[str]
+    zero_writes: bool
 
 
 def _now_iso() -> str:
@@ -1213,6 +1257,20 @@ async def _submit_conversation_correction(
     )
 
 
+@router.get(
+    "/v1/conversations/{conversation_id}/processing-retry-plan",
+    response_model=ConversationProcessingRetryPlan,
+)
+def get_conversation_processing_retry_plan(
+    conversation_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationProcessingRetryPlan:
+    plan = build_conversation_processing_retry_plan(uid, conversation_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationProcessingRetryPlan(**plan)
+
+
 @router.post(
     "/v1/conversations/{conversation_id}/processing-retries",
     response_model=RetryConversationProcessingResponse,
@@ -1229,8 +1287,6 @@ def retry_failed_conversation_processing(
     request_id = str(request.request_id)
     claim = conversations_db.claim_conversation_processing_retry(uid, conversation_id, request_id)
     outcome = claim["outcome"]
-    conversation_data = claim["conversation"]
-
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail="Conversation not found")
     if outcome == "locked":
@@ -1242,7 +1298,26 @@ def retry_failed_conversation_processing(
     if outcome == "busy":
         raise HTTPException(status_code=409, detail="Another conversation processing retry is already active")
 
-    conversation = Conversation(**conversation_data)
+    conversation_data = conversations_db.get_conversation(uid, conversation_id)
+    if conversation_data is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        conversation = Conversation(**conversation_data)
+    except Exception as error:
+        logger.exception(
+            "Failed to decode claimed conversation processing retry",
+            extra={"uid": uid, "conversation_id": conversation_id, "request_id": request_id},
+        )
+        if outcome == "claimed":
+            conversations_db.finish_conversation_processing_retry(
+                uid,
+                conversation_id,
+                request_id,
+                ConversationStatus.failed.value,
+                error_code="conversation_transcript_decode_failed",
+                attempt_count=claim.get("attempt_count") or 1,
+            )
+        raise HTTPException(status_code=500, detail="Conversation could not be loaded safely") from error
     if outcome == "claimed":
         background_tasks.add_task(
             recover_failed_conversation_summary,
@@ -1250,12 +1325,24 @@ def retry_failed_conversation_processing(
             conversation_id=conversation_id,
             request_id=request_id,
             client_context=request.correction_text,
+            attempt_count=claim.get("attempt_count") or 1,
         )
         outcome = ConversationProcessingRetryOutcome.processing
     else:
         outcome = ConversationProcessingRetryOutcome(outcome)
 
-    return RetryConversationProcessingResponse(outcome=outcome, conversation=conversation)
+    return RetryConversationProcessingResponse(
+        outcome=outcome,
+        recovery_mode=ConversationProcessingRecoveryMode(claim.get("mode") or "none"),
+        phase=claim.get("phase"),
+        generic_status=claim.get("generic_status"),
+        generic_vector_status=claim.get("generic_vector_status"),
+        enrichment_status=claim.get("enrichment_status"),
+        vector_status=claim.get("vector_status"),
+        lease_expires_at=claim.get("lease_expires_at"),
+        attempt_count=claim.get("attempt_count") or 0,
+        conversation=conversation,
+    )
 
 
 @router.post(

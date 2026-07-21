@@ -1,6 +1,7 @@
 """Shared Hermes summary generation and failed-conversation recovery."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -12,9 +13,9 @@ from typing import Any, Optional
 import httpx
 
 import database.conversations as conversations_db
-from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
-from ella.services.summary_writeback import write_conversation_summary
-from models.conversation import Conversation, ConversationStatus
+from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.summary_writeback import CanonicalSummaryWriteUnconfirmedError, write_conversation_summary
+from models.conversation import CategoryEnum, Conversation, ConversationStatus
 from utils.conversations.generic_summary import generate_stock_conversation_summary
 from utils.conversations.vector import save_structured_vector
 
@@ -22,6 +23,100 @@ logger = logging.getLogger(__name__)
 
 JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 SUMMARY_RECOVERY_FAILED = 'conversation_summary_recovery_failed'
+
+
+def _transcript_metadata(conversation: dict[str, Any]) -> tuple[int, int]:
+    segments = conversation.get('transcript_segments') or []
+    return len(segments), sum(len(str(segment.get('text') or '')) for segment in segments)
+
+
+def _active_summary_version(conversation: dict[str, Any]) -> dict[str, Any]:
+    versions = conversation.get('summary_versions') or []
+    active_id = conversation.get('active_summary_version_id')
+    if active_id:
+        for version in versions:
+            if str(version.get('id') or '') == str(active_id):
+                return version
+    return next((version for version in reversed(versions) if version.get('is_active')), {})
+
+
+def _conversation_vector_present(uid: str, conversation_id: str) -> bool:
+    from database import vector_db
+
+    return conversation_id in vector_db.fetch_existing_conversation_vector_ids(uid, [conversation_id])
+
+
+def _conversation_vector_metadata(uid: str, conversation_id: str) -> Optional[dict[str, Any]]:
+    from database import vector_db
+
+    return vector_db.fetch_conversation_vector_metadata(uid, conversation_id)
+
+
+def _summary_content_sha256(conversation: dict[str, Any]) -> str:
+    payload = json.dumps(
+        conversation.get('structured') or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def build_conversation_processing_retry_plan(uid: str, conversation_id: str) -> Optional[dict[str, Any]]:
+    """Inspect one UID-owned record without writing or returning transcript content."""
+
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        return None
+    mode, reason = conversations_db.conversation_processing_recovery_mode(conversation)
+    segment_count, transcript_character_count = _transcript_metadata(conversation)
+    _, transcript_sha256 = build_hermes_recovery_source(conversation)
+    active_version = _active_summary_version(conversation)
+    vector_present = _conversation_vector_present(uid, conversation_id)
+    vector_metadata = _conversation_vector_metadata(uid, conversation_id) if vector_present else None
+    active_summary_version_id = conversation.get('active_summary_version_id')
+    active_summary_sha256 = _summary_content_sha256(conversation) if active_summary_version_id else None
+    enrichment_state = conversation.get('enrichment_state') or {}
+    canonical_session = canonical_omi_session_key(uid)
+    provider_path = ['hermes_api_canonical_session', 'omi_enriched_summary_writeback', 'canonical_ledger', 'vector']
+    if mode == 'full':
+        provider_path.insert(0, 'omi_stock_summary_provider')
+
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    return {
+        'conversation_id': conversation_id,
+        'status': status,
+        'discarded': bool(conversation.get('discarded')),
+        'processing_error': conversation.get('processing_error'),
+        'started_at': conversation.get('started_at'),
+        'finished_at': conversation.get('finished_at'),
+        'transcript_segment_count': segment_count,
+        'transcript_character_count': transcript_character_count,
+        'transcript_sha256': transcript_sha256,
+        'structured_summary_present': conversations_db.has_usable_conversation_summary(conversation),
+        'active_summary_version_id': active_summary_version_id,
+        'active_summary_source': active_version.get('source'),
+        'active_summary_kind': active_version.get('kind'),
+        'enriched_summary_present': conversations_db.has_enriched_conversation_summary(conversation),
+        'canonical_provenance_confirmed': enrichment_state.get('canonical_status') == 'completed',
+        'vector_present': vector_present,
+        'vector_active_summary_version_id': (vector_metadata or {}).get('active_summary_version_id'),
+        'vector_content_sha256': (vector_metadata or {}).get('summary_content_sha256'),
+        'vector_matches_active_summary': bool(
+            vector_metadata
+            and active_summary_version_id
+            and (vector_metadata or {}).get('active_summary_version_id') == active_summary_version_id
+            and (vector_metadata or {}).get('summary_content_sha256') == active_summary_sha256
+        ),
+        'recovery_mode': mode or 'none',
+        'retryable': mode is not None,
+        'reason': reason,
+        'profile_scope_sha256': hashlib.sha256(uid.encode('utf-8')).hexdigest(),
+        'canonical_session_scope_sha256': hashlib.sha256(canonical_session.encode('utf-8')).hexdigest(),
+        'provider_path': provider_path,
+        'zero_writes': True,
+    }
 
 
 @dataclass(frozen=True)
@@ -34,6 +129,10 @@ class SummaryProviderConfig:
     legacy_model: str
     legacy_api_key: str
     timeout_seconds: float
+
+
+class ConcurrentConversationRecoveryChangeError(RuntimeError):
+    pass
 
 
 def default_summary_provider_config() -> SummaryProviderConfig:
@@ -62,11 +161,19 @@ def default_summary_provider_config() -> SummaryProviderConfig:
     )
 
 
-def compact_text(value: str, limit: int) -> str:
-    text = (value or '').strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + '\n\n[truncated]'
+def build_hermes_recovery_source(
+    conversation: dict[str, Any],
+) -> tuple[str, str]:
+    """Return a lossless canonical transcript payload and its SHA-256."""
+
+    source_document = json.dumps(
+        conversation.get('transcript_segments') or [],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+        default=str,
+    )
+    return source_document, hashlib.sha256(source_document.encode('utf-8')).hexdigest()
 
 
 def extract_json_object(content: str) -> dict[str, Any]:
@@ -96,6 +203,12 @@ def normalize_summary(
 
     emoji = str(result.get('emoji') or fallback.get('emoji') or '\U0001fab6').strip()[:4] or '\U0001fab6'
     category = str(result.get('category') or fallback.get('category') or 'other').strip().lower()
+    category = {'media': CategoryEnum.entertainment.value, 'romance': CategoryEnum.romance.value}.get(
+        category,
+        category,
+    )
+    if category not in {item.value for item in CategoryEnum}:
+        category = CategoryEnum.other.value
     tags = result.get('ella_tags')
     if not isinstance(tags, list):
         tags = []
@@ -184,14 +297,16 @@ async def apply_summary_update(
     summary_kind: str,
     summary_source: str = 'observer',
     correction_id: Optional[str] = None,
+    require_canonical: bool = False,
+    require_based_on_match: bool = False,
 ) -> dict[str, Any]:
     return await write_conversation_summary(
         uid=uid,
         conversation_id=conversation_id,
-        title=summary['title'],
-        overview=summary['overview'],
-        emoji=summary['emoji'],
-        category=summary['category'],
+        title=summary.get('title'),
+        overview=summary.get('overview'),
+        emoji=summary.get('emoji'),
+        category=summary.get('category'),
         summary_source=summary_source,
         summary_kind=summary_kind,
         correction_id=correction_id,
@@ -200,6 +315,8 @@ async def apply_summary_update(
         trace_id=trace_id,
         ella_tags=summary.get('ella_tags') or ['omi'],
         ella_signal=summary.get('ella_signal') or {},
+        require_canonical=require_canonical,
+        require_based_on_match=require_based_on_match,
     )
 
 
@@ -213,22 +330,9 @@ def _structured_summary(conversation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _format_transcript(conversation: dict[str, Any]) -> str:
-    lines = []
-    for segment in conversation.get('transcript_segments') or []:
-        text = str(segment.get('text') or '').strip()
-        if not text:
-            continue
-        speaker = segment.get('speaker') or segment.get('speaker_name')
-        if not speaker:
-            speaker = 'User' if segment.get('is_user') else 'Speaker'
-        lines.append(f'{speaker}: {text}')
-    return '\n\n'.join(lines)
-
-
 def _build_recovery_prompt(conversation: dict[str, Any], client_context: Optional[str]) -> str:
     structured = _structured_summary(conversation)
-    transcript = _format_transcript(conversation)
+    transcript_source, transcript_sha256 = build_hermes_recovery_source(conversation)
     return f"""You are Ella, the user's companion summary writer.
 
 Recover an OMI conversation whose first summary attempt failed. Use the complete transcript and durable companion context available in this Hermes session. Return JSON only.
@@ -238,7 +342,7 @@ Rules:
 - overview must start with "[Ella] ".
 - Do not invent details or expose raw speaker labels when a natural description is available.
 - title must be short and contain no markdown.
-- category should be one of: personal, family, education, health, technology, work, business, finance, legal, media, music, news, travel, other.
+- category should be one of: personal, education, health, finance, legal, philosophy, spiritual, science, entrepreneurship, parenting, romantic, travel, inspiration, technology, business, social, work, sports, politics, literature, history, architecture, music, weather, news, entertainment, psychology, real, design, family, economics, environment, other.
 - Include ella_tags and ella_signal for downstream ranking.
 
 Optional user context:
@@ -247,8 +351,10 @@ Optional user context:
 Existing partial summary:
 {json.dumps(structured, ensure_ascii=False, indent=2)}
 
-Transcript:
-{compact_text(transcript, 60000)}
+Authoritative transcript SHA-256: {transcript_sha256}
+
+Authoritative transcript segments (lossless JSON):
+{transcript_source}
 
 Return exactly:
 {{
@@ -269,12 +375,75 @@ Return exactly:
 """
 
 
+async def invoke_hermes_recovery(
+    *,
+    uid: str,
+    conversation: dict[str, Any],
+    request_id: str,
+    attempt_count: Optional[int] = None,
+    client_context: Optional[str] = None,
+    config: Optional[SummaryProviderConfig] = None,
+    async_client_factory: Any = httpx.AsyncClient,
+) -> dict[str, Any]:
+    """Generate and strictly apply enrichment through the canonical Hermes API session."""
+
+    config = config or default_summary_provider_config()
+    if config.provider != 'hermes-api':
+        raise RuntimeError('Hermes API is required for historical enrichment recovery')
+    conversation_id = str(conversation['id'])
+    _, source_sha256 = build_hermes_recovery_source(conversation)
+    trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
+    summary = await generate_summary_from_prompt(
+        prompt=_build_recovery_prompt(conversation, client_context),
+        fallback=_structured_summary(conversation),
+        session_id=f'summary-recovery:{conversation_id}:{request_id}',
+        session_key=canonical_omi_session_key(uid),
+        trace_id=trace_id,
+        required_tags=('omi', 'recovery'),
+        config=config,
+        async_client_factory=async_client_factory,
+    )
+    current = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
+    if current is None:
+        raise ConcurrentConversationRecoveryChangeError('conversation_removed_before_recovery_apply')
+    _, current_source_sha256 = build_hermes_recovery_source(current)
+    if current_source_sha256 != source_sha256:
+        raise ConcurrentConversationRecoveryChangeError('conversation_transcript_changed_before_recovery_apply')
+    if not _is_current_retry(current, request_id, attempt_count):
+        raise ConcurrentConversationRecoveryChangeError('conversation_recovery_attempt_superseded')
+    if current.get('active_summary_version_id') != conversation.get('active_summary_version_id'):
+        raise ConcurrentConversationRecoveryChangeError('conversation_summary_changed_before_recovery_apply')
+    apply_result = await apply_summary_update(
+        uid=uid,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        active_summary_version_id=current.get('active_summary_version_id'),
+        summary=summary,
+        summary_kind='recovered_enriched',
+        require_canonical=True,
+        require_based_on_match=True,
+    )
+    version_id = apply_result.get('active_summary_version_id')
+    if not version_id or apply_result.get('canonical_confirmed') is not True:
+        raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed')
+    return {
+        'active_summary_version_id': version_id,
+        'canonical_confirmed': True,
+        'source_sha256': source_sha256,
+        'session_scope_sha256': hashlib.sha256(canonical_omi_session_key(uid).encode('utf-8')).hexdigest(),
+    }
+
+
 def _existing_recovered_version_id(conversation: dict[str, Any]) -> Optional[str]:
     retry_version_id = conversation.get('processing_retry_enriched_version_id')
-    if retry_version_id:
+    if retry_version_id and str(conversation.get('active_summary_version_id') or '') == str(retry_version_id):
         return str(retry_version_id)
     enrichment_state = conversation.get('enrichment_state') or {}
-    if enrichment_state.get('status') == 'writeback_applied' and enrichment_state.get('kind') == 'recovered_enriched':
+    if (
+        enrichment_state.get('status') == 'writeback_applied'
+        and enrichment_state.get('kind') == 'recovered_enriched'
+        and enrichment_state.get('canonical_status') == 'completed'
+    ):
         active_version_id = conversation.get('active_summary_version_id')
         return str(active_version_id) if active_version_id else None
     return None
@@ -284,6 +453,9 @@ def _existing_generic_version_id(conversation: dict[str, Any]) -> Optional[str]:
     retry_version_id = conversation.get('processing_retry_summary_version_id')
     if retry_version_id:
         return str(retry_version_id)
+    if conversation.get('processing_retry_mode') == 'enrichment_only':
+        active_version_id = conversation.get('active_summary_version_id')
+        return str(active_version_id) if active_version_id else 'existing-generic-summary'
     enrichment_state = conversation.get('enrichment_state') or {}
     if enrichment_state.get('status') == 'writeback_applied' and enrichment_state.get('kind') in {
         'generic_recovered',
@@ -304,8 +476,100 @@ def _stock_summary_payload(structured: Any) -> dict[str, Any]:
     return normalize_summary(payload, payload, required_tags=('omi', 'recovery', 'generic'))
 
 
-def _is_current_retry(conversation: Optional[dict[str, Any]], request_id: str) -> bool:
-    return bool(conversation and conversation.get('processing_retry_id') == request_id)
+def _is_current_retry(
+    conversation: Optional[dict[str, Any]],
+    request_id: str,
+    attempt_count: Optional[int] = None,
+) -> bool:
+    if not conversation or conversation.get('processing_retry_id') != request_id:
+        return False
+    return attempt_count is None or conversation.get('processing_retry_attempt_count') == attempt_count
+
+
+async def _ensure_conversation_vector(uid: str, conversation: dict[str, Any]) -> None:
+    conversation_id = str(conversation['id'])
+    summary_version_id = str(conversation.get('active_summary_version_id') or '')
+    if not summary_version_id:
+        if await asyncio.to_thread(_conversation_vector_present, uid, conversation_id):
+            return
+        await asyncio.to_thread(save_structured_vector, uid, Conversation(**conversation))
+        for delay_seconds in (0, 0.2, 0.5):
+            if delay_seconds:
+                await asyncio.sleep(delay_seconds)
+            if await asyncio.to_thread(_conversation_vector_present, uid, conversation_id):
+                return
+        raise RuntimeError('conversation_vector_write_unconfirmed')
+
+    content_sha256 = _summary_content_sha256(conversation)
+    metadata = await asyncio.to_thread(_conversation_vector_metadata, uid, conversation_id)
+    if (
+        metadata
+        and metadata.get('active_summary_version_id') == summary_version_id
+        and metadata.get('summary_content_sha256') == content_sha256
+    ):
+        return
+    write_result = await asyncio.to_thread(
+        save_structured_vector,
+        uid,
+        Conversation(**conversation),
+        summary_version_id=summary_version_id,
+        summary_content_sha256=content_sha256,
+    )
+    if write_result is None:
+        raise RuntimeError('conversation_vector_write_unconfirmed')
+    for delay_seconds in (0, 0.2, 0.5):
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        metadata = await asyncio.to_thread(_conversation_vector_metadata, uid, conversation_id)
+        if (
+            metadata
+            and metadata.get('active_summary_version_id') == summary_version_id
+            and metadata.get('summary_content_sha256') == content_sha256
+        ):
+            return
+    raise RuntimeError('conversation_vector_metadata_unconfirmed')
+
+
+async def _write_and_confirm_enriched_vector(
+    uid: str,
+    conversation: dict[str, Any],
+    summary_version_id: str,
+) -> str:
+    current = await asyncio.to_thread(
+        conversations_db.get_conversation,
+        uid,
+        str(conversation['id']),
+    )
+    if not current or str(current.get('active_summary_version_id') or '') != str(summary_version_id):
+        raise ConcurrentConversationRecoveryChangeError('active_summary_changed_before_vector_write')
+    content_sha256 = _summary_content_sha256(current)
+    write_result = await asyncio.to_thread(
+        save_structured_vector,
+        uid,
+        Conversation(**current),
+        summary_version_id=summary_version_id,
+        summary_content_sha256=content_sha256,
+    )
+    if write_result is None:
+        raise RuntimeError('conversation_vector_write_unconfirmed')
+    for delay_seconds in (0, 0.2, 0.5):
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        metadata = await asyncio.to_thread(_conversation_vector_metadata, uid, str(conversation['id']))
+        if (
+            metadata
+            and metadata.get('active_summary_version_id') == summary_version_id
+            and metadata.get('summary_content_sha256') == content_sha256
+        ):
+            current = await asyncio.to_thread(
+                conversations_db.get_conversation,
+                uid,
+                str(conversation['id']),
+            )
+            if not current or str(current.get('active_summary_version_id') or '') != str(summary_version_id):
+                raise ConcurrentConversationRecoveryChangeError('active_summary_changed_after_vector_write')
+            return content_sha256
+    raise RuntimeError('conversation_enriched_vector_metadata_unconfirmed')
 
 
 async def recover_failed_conversation_summary(
@@ -314,13 +578,43 @@ async def recover_failed_conversation_summary(
     conversation_id: str,
     request_id: str,
     client_context: Optional[str] = None,
+    attempt_count: Optional[int] = None,
 ) -> str:
     conversation = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
-    if not _is_current_retry(conversation, request_id):
+    if not _is_current_retry(conversation, request_id, attempt_count):
         return 'superseded'
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
     if status not in {ConversationStatus.processing.value, ConversationStatus.completed.value}:
         return status or 'superseded'
+
+    _, transcript_sha256 = build_hermes_recovery_source(conversation)
+    if (
+        conversation.get('processing_retry_source_request_id') == request_id
+        and conversation.get('processing_retry_transcript_sha256')
+        and conversation.get('processing_retry_transcript_sha256') != transcript_sha256
+    ):
+        await asyncio.to_thread(
+            conversations_db.finish_conversation_processing_retry,
+            uid,
+            conversation_id,
+            request_id,
+            ConversationStatus.failed.value,
+            error_code='conversation_transcript_changed',
+            preserve_completed_summary=conversations_db.has_usable_conversation_summary(conversation),
+            attempt_count=attempt_count,
+        )
+        return ConversationStatus.failed.value
+    source_recorded = await asyncio.to_thread(
+        conversations_db.record_conversation_processing_retry_source,
+        uid,
+        conversation_id,
+        request_id,
+        transcript_sha256,
+        len(conversation.get('transcript_segments') or []),
+        attempt_count=attempt_count,
+    )
+    if not source_recorded:
+        return 'superseded'
 
     generic_version_id = _existing_generic_version_id(conversation)
     generic_applied = generic_version_id is not None
@@ -331,6 +625,17 @@ async def recover_failed_conversation_summary(
                 uid,
                 Conversation(**conversation),
             )
+            current_before_generic_apply = await asyncio.to_thread(
+                conversations_db.get_conversation,
+                uid,
+                conversation_id,
+            )
+            if not _is_current_retry(current_before_generic_apply, request_id, attempt_count):
+                return 'superseded'
+            if current_before_generic_apply.get('active_summary_version_id') != conversation.get(
+                'active_summary_version_id'
+            ):
+                raise ConcurrentConversationRecoveryChangeError('conversation_summary_changed_before_generic_apply')
             generic_summary = _stock_summary_payload(stock_structured)
             generic_trace_id = f'summary-retry:{conversation_id}:{request_id}:generic'
             apply_result = await apply_summary_update(
@@ -341,33 +646,37 @@ async def recover_failed_conversation_summary(
                 summary=generic_summary,
                 summary_kind='generic_recovered',
                 summary_source='omi',
+                require_based_on_match=True,
             )
             generic_version_id = apply_result.get('active_summary_version_id')
             if not generic_version_id:
                 raise RuntimeError('Generic summary recovery did not return an active version')
             generic_applied = True
+
             recorded = await asyncio.to_thread(
                 conversations_db.record_conversation_processing_retry_summary_applied,
                 uid,
                 conversation_id,
                 request_id,
                 generic_version_id,
+                attempt_count=attempt_count,
             )
             if not recorded:
                 return 'superseded'
 
         latest = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
-        if not _is_current_retry(latest, request_id):
+        if not _is_current_retry(latest, request_id, attempt_count):
             return 'superseded'
-        await asyncio.to_thread(save_structured_vector, uid, Conversation(**latest))
-        finished = await asyncio.to_thread(
-            conversations_db.finish_conversation_processing_retry,
+        await _ensure_conversation_vector(uid, latest)
+        recorded = await asyncio.to_thread(
+            conversations_db.record_conversation_processing_retry_generic_vector,
             uid,
             conversation_id,
             request_id,
-            ConversationStatus.completed.value,
+            'completed',
+            attempt_count=attempt_count,
         )
-        if not finished:
+        if not recorded:
             return 'superseded'
     except Exception as error:
         error_code = SUMMARY_RECOVERY_FAILED if generic_applied else 'conversation_summary_failed'
@@ -380,73 +689,107 @@ async def recover_failed_conversation_summary(
                 'error_type': type(error).__name__,
             },
         )
+        if generic_applied:
+            await asyncio.to_thread(
+                conversations_db.record_conversation_processing_retry_generic_vector,
+                uid,
+                conversation_id,
+                request_id,
+                'failed',
+                attempt_count=attempt_count,
+            )
+        else:
+            await asyncio.to_thread(
+                conversations_db.finish_conversation_processing_retry,
+                uid,
+                conversation_id,
+                request_id,
+                ConversationStatus.failed.value,
+                error_code=error_code,
+                attempt_count=attempt_count,
+            )
+        return ConversationStatus.failed.value
+
+    latest = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
+    if not _is_current_retry(latest, request_id, attempt_count):
+        return 'superseded'
+    _, latest_transcript_sha256 = build_hermes_recovery_source(latest)
+    if latest_transcript_sha256 != transcript_sha256:
         await asyncio.to_thread(
             conversations_db.finish_conversation_processing_retry,
             uid,
             conversation_id,
             request_id,
             ConversationStatus.failed.value,
-            error_code=error_code,
+            error_code='conversation_transcript_changed',
+            preserve_completed_summary=conversations_db.has_usable_conversation_summary(latest),
+            attempt_count=attempt_count,
         )
         return ConversationStatus.failed.value
-
-    latest = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
-    if not _is_current_retry(latest, request_id):
+    lease_renewed = await asyncio.to_thread(
+        conversations_db.record_conversation_processing_retry_source,
+        uid,
+        conversation_id,
+        request_id,
+        transcript_sha256,
+        len(latest.get('transcript_segments') or []),
+        attempt_count=attempt_count,
+    )
+    if not lease_renewed:
         return 'superseded'
-    existing_enriched_version_id = _existing_recovered_version_id(latest)
-    if existing_enriched_version_id:
+    latest_enrichment_state = latest.get('enrichment_state') or {}
+    if (
+        generic_version_id
+        and str(latest.get('active_summary_version_id') or '') != str(generic_version_id)
+        and latest_enrichment_state.get('kind') != 'recovered_enriched'
+    ):
         await asyncio.to_thread(
-            conversations_db.record_conversation_processing_retry_enrichment,
+            conversations_db.finish_conversation_processing_retry,
             uid,
             conversation_id,
             request_id,
-            'completed',
-            summary_version_id=existing_enriched_version_id,
+            ConversationStatus.failed.value,
+            error_code='conversation_summary_changed',
+            preserve_completed_summary=True,
+            attempt_count=attempt_count,
         )
-        return ConversationStatus.completed.value
-
-    hermes_trace_id = f'summary-retry:{conversation_id}:{request_id}:hermes'
+        return ConversationStatus.failed.value
+    enriched_version_id = _existing_recovered_version_id(latest)
     try:
-        summary = await generate_summary_from_prompt(
-            prompt=_build_recovery_prompt(latest, client_context),
-            fallback=_structured_summary(latest),
-            session_id=':'.join(
-                [
-                    'summary-recovery',
-                    safe_session_component(uid),
-                    safe_session_component(conversation_id),
-                    safe_session_component(request_id),
-                ]
-            ),
-            session_key=canonical_omi_session_key(uid),
-            trace_id=hermes_trace_id,
-            required_tags=('omi', 'recovery'),
-            config=default_summary_provider_config(),
-        )
-        apply_result = await apply_summary_update(
-            uid=uid,
-            conversation_id=conversation_id,
-            trace_id=hermes_trace_id,
-            active_summary_version_id=latest.get('active_summary_version_id'),
-            summary=summary,
-            summary_kind='recovered_enriched',
-        )
-        enriched_version_id = apply_result.get('active_summary_version_id')
-        if not enriched_version_id:
-            raise RuntimeError('Hermes summary recovery did not return an active version')
-
-        enriched = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
-        if not _is_current_retry(enriched, request_id):
-            return 'superseded'
-        await asyncio.to_thread(save_structured_vector, uid, Conversation(**enriched))
-        await asyncio.to_thread(
-            conversations_db.record_conversation_processing_retry_enrichment,
-            uid,
-            conversation_id,
-            request_id,
-            'completed',
-            summary_version_id=enriched_version_id,
-        )
+        pending_state = latest.get('enrichment_state') or {}
+        if enriched_version_id:
+            pass
+        elif (
+            pending_state.get('status') == 'writeback_pending_canonical'
+            and pending_state.get('kind') == 'recovered_enriched'
+            and pending_state.get('trace_id')
+            and latest.get('active_summary_version_id')
+        ):
+            apply_result = await apply_summary_update(
+                uid=uid,
+                conversation_id=conversation_id,
+                trace_id=str(pending_state['trace_id']),
+                active_summary_version_id=latest.get('active_summary_version_id'),
+                summary={},
+                summary_kind='recovered_enriched',
+                require_canonical=True,
+            )
+            enriched_version_id = apply_result.get('active_summary_version_id')
+            if not enriched_version_id or apply_result.get('canonical_confirmed') is not True:
+                raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed')
+        else:
+            apply_result = await invoke_hermes_recovery(
+                uid=uid,
+                conversation=latest,
+                request_id=request_id,
+                attempt_count=attempt_count,
+                client_context=client_context,
+            )
+            enriched_version_id = apply_result.get('active_summary_version_id')
+            if not enriched_version_id:
+                raise RuntimeError('Hermes summary recovery did not return an active version')
+            if apply_result.get('canonical_confirmed') is not True:
+                raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed')
     except Exception as error:
         logger.exception(
             'Hermes enrichment failed after generic summary recovery',
@@ -458,17 +801,89 @@ async def recover_failed_conversation_summary(
             },
         )
         try:
-            await asyncio.to_thread(
-                conversations_db.record_conversation_processing_retry_enrichment,
-                uid,
-                conversation_id,
-                request_id,
-                'failed',
-            )
+            after_error = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
+            enriched_version_id = _existing_recovered_version_id(after_error or {})
+            if not _is_current_retry(after_error, request_id, attempt_count):
+                return 'superseded'
+            if not enriched_version_id:
+                after_error_state = (after_error or {}).get('enrichment_state') or {}
+                canonical_pending = bool(
+                    after_error_state.get('status') == 'writeback_pending_canonical'
+                    and after_error_state.get('kind') == 'recovered_enriched'
+                )
+                await asyncio.to_thread(
+                    conversations_db.record_conversation_processing_retry_enrichment,
+                    uid,
+                    conversation_id,
+                    request_id,
+                    (
+                        'canonical_failed'
+                        if isinstance(error, CanonicalSummaryWriteUnconfirmedError) or canonical_pending
+                        else 'failed'
+                    ),
+                    attempt_count=attempt_count,
+                )
+                return ConversationStatus.failed.value
         except Exception:
             logger.exception(
                 'Failed to persist retryable Hermes enrichment state',
                 extra={'uid': uid, 'conversation_id': conversation_id, 'request_id': request_id},
             )
+            return ConversationStatus.failed.value
 
+    enriched = await asyncio.to_thread(conversations_db.get_conversation, uid, conversation_id)
+    if not _is_current_retry(enriched, request_id, attempt_count):
+        return 'superseded'
+    recorded = await asyncio.to_thread(
+        conversations_db.record_conversation_processing_retry_enrichment,
+        uid,
+        conversation_id,
+        request_id,
+        'canonical_completed',
+        summary_version_id=enriched_version_id,
+        attempt_count=attempt_count,
+    )
+    if not recorded:
+        return 'superseded'
+
+    try:
+        enriched_vector_sha256 = await _write_and_confirm_enriched_vector(
+            uid,
+            enriched,
+            str(enriched_version_id),
+        )
+    except Exception as error:
+        logger.exception(
+            'Failed to confirm enriched conversation vector',
+            extra={
+                'uid': uid,
+                'conversation_id': conversation_id,
+                'request_id': request_id,
+                'error_type': type(error).__name__,
+            },
+        )
+        await asyncio.to_thread(
+            conversations_db.record_conversation_processing_retry_enrichment,
+            uid,
+            conversation_id,
+            request_id,
+            'vector_failed',
+            summary_version_id=enriched_version_id,
+            vector_content_sha256=_summary_content_sha256(enriched),
+            attempt_count=attempt_count,
+        )
+        return ConversationStatus.failed.value
+
+    recorded = await asyncio.to_thread(
+        conversations_db.record_conversation_processing_retry_enrichment,
+        uid,
+        conversation_id,
+        request_id,
+        'completed',
+        summary_version_id=enriched_version_id,
+        vector_content_sha256=enriched_vector_sha256,
+        attempt_count=attempt_count,
+    )
+    if not recorded:
+        return 'superseded'
     return ConversationStatus.completed.value

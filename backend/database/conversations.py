@@ -29,6 +29,88 @@ conversation_summary_retryable_errors = {
     'conversation_summary_failed',
     'conversation_summary_recovery_failed',
 }
+conversation_enriched_summary_kinds = {
+    'observer_enriched',
+    'corrected_enriched',
+    'hermes_enriched',
+    'recovered_enriched',
+}
+conversation_processing_retry_lease_seconds = 900
+
+
+def _active_summary_version(conversation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    versions = conversation.get('summary_versions') or []
+    active_id = conversation.get('active_summary_version_id')
+    if active_id:
+        for version in versions:
+            if str(version.get('id') or '') == str(active_id):
+                return version
+    return next((version for version in reversed(versions) if version.get('is_active')), None)
+
+
+def has_usable_conversation_summary(conversation: Dict[str, Any]) -> bool:
+    structured = conversation.get('structured') or {}
+    return bool(str(structured.get('title') or '').strip() and str(structured.get('overview') or '').strip())
+
+
+def has_enriched_conversation_summary(conversation: Dict[str, Any]) -> bool:
+    active_version = _active_summary_version(conversation) or {}
+    enrichment_state = conversation.get('enrichment_state') or {}
+    return bool(
+        active_version.get('kind') in conversation_enriched_summary_kinds
+        and enrichment_state.get('status') == 'writeback_applied'
+        and enrichment_state.get('kind') in conversation_enriched_summary_kinds
+    )
+
+
+def conversation_processing_recovery_mode(conversation: Dict[str, Any]) -> tuple[Optional[str], str]:
+    status = getattr(conversation.get('status'), 'value', conversation.get('status'))
+    if conversation.get('discarded'):
+        return None, 'intentional_discard'
+    if status == ConversationStatus.processing.value:
+        return None, 'active_processing'
+    if status == ConversationStatus.failed.value:
+        if conversation.get('processing_error') in conversation_summary_retryable_errors:
+            return 'full', 'retryable_summary_failure'
+        return None, 'non_retryable_failure'
+    if status == ConversationStatus.completed.value:
+        if has_enriched_conversation_summary(conversation):
+            if conversation.get('processing_retry_enrichment_vector_status') in {'pending', 'failed'}:
+                return 'enrichment_only', 'enriched_summary_without_confirmed_vector'
+            return None, 'already_enriched'
+        if has_usable_conversation_summary(conversation):
+            return 'enrichment_only', 'generic_summary_without_enrichment'
+        return None, 'completed_without_usable_summary'
+    return None, 'invalid_state'
+
+
+def _processing_retry_lease_expired(conversation: Dict[str, Any], now: datetime) -> bool:
+    lease_expires_at = conversation.get('processing_retry_lease_expires_at')
+    if not isinstance(lease_expires_at, datetime):
+        return True
+    return _ensure_timezone_aware(lease_expires_at) <= _ensure_timezone_aware(now)
+
+
+def _retry_claim_metadata(
+    outcome: str,
+    *,
+    retry_data: Optional[Dict[str, Any]] = None,
+    mode: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    retry_data = retry_data or {}
+    return {
+        'outcome': outcome,
+        'mode': mode if mode is not None else retry_data.get('mode'),
+        'reason': reason,
+        'phase': retry_data.get('phase'),
+        'generic_status': retry_data.get('generic_status'),
+        'generic_vector_status': retry_data.get('generic_vector_status'),
+        'enrichment_status': retry_data.get('enrichment_status'),
+        'vector_status': retry_data.get('vector_status'),
+        'lease_expires_at': retry_data.get('lease_expires_at'),
+        'attempt_count': int(retry_data.get('attempt_count') or 0),
+    }
 
 
 def _ensure_timezone_aware(dt: datetime) -> datetime:
@@ -899,60 +981,146 @@ def _claim_conversation_processing_retry_transaction(
     retry_ref,
     request_id: str,
     requested_at: datetime,
+    lease_seconds: int = conversation_processing_retry_lease_seconds,
 ):
     snapshot = conversation_ref.get(transaction=transaction)
     retry_snapshot = retry_ref.get(transaction=transaction)
     if not snapshot.exists:
-        return {'outcome': 'not_found', 'conversation': None}
+        return _retry_claim_metadata('not_found')
 
     conversation = snapshot.to_dict()
     status = getattr(conversation.get('status'), 'value', conversation.get('status'))
 
     if conversation.get('is_locked', False):
-        return {'outcome': 'locked', 'conversation': conversation}
+        return _retry_claim_metadata('locked')
+
+    lease_expires_at = requested_at + timedelta(seconds=max(1, lease_seconds))
+    retry_data = retry_snapshot.to_dict() if retry_snapshot.exists else None
+    if retry_data and retry_data.get('outcome') == ConversationStatus.completed.value:
+        return _retry_claim_metadata(ConversationStatus.completed.value, retry_data=retry_data)
+    current_retry_id = conversation.get('processing_retry_id')
+    stale_active_retry = bool(
+        current_retry_id
+        and not conversation.get('processing_retry_completed_at')
+        and _processing_retry_lease_expired(conversation, requested_at)
+    )
+    if (
+        current_retry_id
+        and current_retry_id != request_id
+        and not conversation.get('processing_retry_completed_at')
+        and not stale_active_retry
+    ):
+        return _retry_claim_metadata('busy')
 
     if retry_snapshot.exists:
-        retry_outcome = retry_snapshot.to_dict().get('outcome')
-        if retry_outcome in {'processing', 'completed', 'failed'}:
-            return {'outcome': retry_outcome, 'conversation': conversation}
-        return {'outcome': 'invalid_state', 'conversation': conversation}
-
-    if status == ConversationStatus.completed.value:
-        transaction.set(
-            retry_ref,
-            {
-                'request_id': request_id,
-                'outcome': ConversationStatus.completed.value,
-                'requested_at': requested_at,
-                'updated_at': requested_at,
-            },
+        retry_data = retry_data or {}
+        retry_outcome = retry_data.get('outcome')
+        retry_lease_expires_at = retry_data.get('lease_expires_at')
+        retry_lease_active = bool(
+            retry_outcome == ConversationStatus.processing.value
+            and isinstance(retry_lease_expires_at, datetime)
+            and _ensure_timezone_aware(retry_lease_expires_at) > _ensure_timezone_aware(requested_at)
         )
-        return {'outcome': 'completed', 'conversation': conversation}
-    if status == ConversationStatus.processing.value:
-        return {'outcome': 'busy', 'conversation': conversation}
-    if status != ConversationStatus.failed.value:
-        return {'outcome': 'invalid_state', 'conversation': conversation}
-    if conversation.get('processing_error') not in conversation_summary_retryable_errors:
-        return {'outcome': 'not_retryable', 'conversation': conversation}
+        if retry_lease_active:
+            return _retry_claim_metadata(retry_outcome, retry_data=retry_data)
+        if retry_outcome not in {ConversationStatus.processing.value, ConversationStatus.failed.value}:
+            return _retry_claim_metadata('invalid_state', retry_data=retry_data)
 
-    update_data = {
-        'status': ConversationStatus.processing.value,
-        'processing_retry_id': request_id,
-        'processing_retry_started_at': requested_at,
-        'processing_retry_completed_at': None,
-    }
-    transaction.update(conversation_ref, update_data)
-    transaction.set(
-        retry_ref,
-        {
-            'request_id': request_id,
+        current_mode, _ = conversation_processing_recovery_mode(conversation)
+        mode = current_mode or retry_data.get('mode')
+        if mode not in {'full', 'enrichment_only'}:
+            return _retry_claim_metadata('invalid_state', retry_data=retry_data)
+
+        attempt_count = int(retry_data.get('attempt_count') or 1) + 1
+        conversation_update = {
+            'processing_retry_id': request_id,
+            'processing_retry_mode': mode,
+            'processing_retry_started_at': requested_at,
+            'processing_retry_lease_expires_at': lease_expires_at,
+            'processing_retry_completed_at': None,
+            'processing_retry_attempt_count': attempt_count,
+        }
+        if mode == 'full' and not has_usable_conversation_summary(conversation):
+            conversation_update['status'] = ConversationStatus.processing.value
+        retry_update = {
             'outcome': ConversationStatus.processing.value,
+            'mode': mode,
+            'lease_expires_at': lease_expires_at,
+            'attempt_count': attempt_count,
+            'updated_at': requested_at,
+            'last_reclaimed_at': requested_at,
+        }
+        transaction.update(conversation_ref, conversation_update)
+        transaction.update(retry_ref, retry_update)
+        return _retry_claim_metadata(
+            'claimed',
+            retry_data={**retry_data, **retry_update},
+            mode=mode,
+            reason='lease_reclaimed',
+        )
+
+    if stale_active_retry and status == ConversationStatus.processing.value:
+        if has_usable_conversation_summary(conversation):
+            mode, reason = 'enrichment_only', 'stale_worker_after_generic'
+        elif conversation.get('processing_error') in conversation_summary_retryable_errors:
+            mode, reason = 'full', 'stale_worker_before_generic'
+        else:
+            mode, reason = None, 'active_processing'
+    else:
+        mode, reason = conversation_processing_recovery_mode(conversation)
+    if reason == 'already_enriched':
+        receipt = {
+            'request_id': request_id,
+            'outcome': ConversationStatus.completed.value,
+            'mode': None,
+            'phase': 'completed',
+            'generic_status': 'completed',
+            'generic_vector_status': 'completed',
+            'enrichment_status': 'completed',
+            'vector_status': 'completed',
+            'attempt_count': 0,
             'requested_at': requested_at,
             'updated_at': requested_at,
-        },
-    )
-    conversation.update(update_data)
-    return {'outcome': 'claimed', 'conversation': conversation}
+        }
+        transaction.set(
+            retry_ref,
+            receipt,
+        )
+        return _retry_claim_metadata('completed', retry_data=receipt)
+    if reason == 'active_processing':
+        return _retry_claim_metadata('busy', reason=reason)
+    if reason in {'intentional_discard', 'non_retryable_failure'}:
+        return _retry_claim_metadata('not_retryable', reason=reason)
+    if mode is None:
+        return _retry_claim_metadata('invalid_state', reason=reason)
+
+    update_data = {
+        'processing_retry_id': request_id,
+        'processing_retry_mode': mode,
+        'processing_retry_started_at': requested_at,
+        'processing_retry_lease_expires_at': lease_expires_at,
+        'processing_retry_completed_at': None,
+        'processing_retry_attempt_count': 1,
+    }
+    if mode == 'full':
+        update_data['status'] = ConversationStatus.processing.value
+    transaction.update(conversation_ref, update_data)
+    receipt = {
+        'request_id': request_id,
+        'outcome': ConversationStatus.processing.value,
+        'mode': mode,
+        'phase': 'claimed',
+        'generic_status': 'completed' if mode == 'enrichment_only' else 'pending',
+        'generic_vector_status': 'unknown' if mode == 'enrichment_only' else 'pending',
+        'enrichment_status': 'pending',
+        'vector_status': 'pending',
+        'lease_expires_at': lease_expires_at,
+        'attempt_count': 1,
+        'requested_at': requested_at,
+        'updated_at': requested_at,
+    }
+    transaction.set(retry_ref, receipt)
+    return _retry_claim_metadata('claimed', retry_data=receipt, mode=mode, reason=reason)
 
 
 @transactional
@@ -962,6 +1130,7 @@ def _claim_conversation_processing_retry(
     retry_ref,
     request_id: str,
     requested_at: datetime,
+    lease_seconds: int,
 ):
     return _claim_conversation_processing_retry_transaction(
         transaction,
@@ -969,6 +1138,7 @@ def _claim_conversation_processing_retry(
         retry_ref,
         request_id,
         requested_at,
+        lease_seconds,
     )
 
 
@@ -977,6 +1147,7 @@ def claim_conversation_processing_retry(
     conversation_id: str,
     request_id: str,
     requested_at: Optional[datetime] = None,
+    lease_seconds: int = conversation_processing_retry_lease_seconds,
 ):
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -989,6 +1160,106 @@ def claim_conversation_processing_retry(
         retry_ref,
         request_id,
         requested_at or datetime.now(timezone.utc),
+        lease_seconds,
+    )
+
+
+def _record_conversation_processing_retry_source_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    transcript_sha256: str,
+    segment_count: int,
+    updated_at: datetime,
+    lease_expires_at: datetime,
+    attempt_count: Optional[int] = None,
+):
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists or not retry_snapshot.exists:
+        return False
+    conversation = conversation_snapshot.to_dict()
+    retry_data = retry_snapshot.to_dict()
+    if conversation.get('processing_retry_id') != request_id or retry_data.get('request_id') != request_id:
+        return False
+    if attempt_count is not None and (
+        conversation.get('processing_retry_attempt_count') != attempt_count
+        or retry_data.get('attempt_count') != attempt_count
+    ):
+        return False
+    if retry_data.get('outcome') != ConversationStatus.processing.value:
+        return False
+    transaction.update(
+        conversation_ref,
+        {
+            'processing_retry_lease_expires_at': lease_expires_at,
+            'processing_retry_transcript_sha256': transcript_sha256,
+            'processing_retry_source_request_id': request_id,
+        },
+    )
+    transaction.update(
+        retry_ref,
+        {
+            'transcript_sha256': transcript_sha256,
+            'transcript_segment_count': segment_count,
+            'lease_expires_at': lease_expires_at,
+            'updated_at': updated_at,
+        },
+    )
+    return True
+
+
+@transactional
+def _record_conversation_processing_retry_source(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    transcript_sha256: str,
+    segment_count: int,
+    updated_at: datetime,
+    lease_expires_at: datetime,
+    attempt_count: Optional[int],
+):
+    return _record_conversation_processing_retry_source_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        transcript_sha256,
+        segment_count,
+        updated_at,
+        lease_expires_at,
+        attempt_count,
+    )
+
+
+def record_conversation_processing_retry_source(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    transcript_sha256: str,
+    segment_count: int,
+    updated_at: Optional[datetime] = None,
+    lease_seconds: int = conversation_processing_retry_lease_seconds,
+    attempt_count: Optional[int] = None,
+):
+    now = updated_at or datetime.now(timezone.utc)
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    return _record_conversation_processing_retry_source(
+        db.transaction(),
+        conversation_ref,
+        retry_ref,
+        request_id,
+        transcript_sha256,
+        segment_count,
+        now,
+        now + timedelta(seconds=max(1, lease_seconds)),
+        attempt_count,
     )
 
 
@@ -999,6 +1270,7 @@ def _record_conversation_processing_retry_summary_applied_transaction(
     request_id: str,
     summary_version_id: str,
     applied_at: datetime,
+    attempt_count: Optional[int] = None,
 ):
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     retry_snapshot = retry_ref.get(transaction=transaction)
@@ -1009,20 +1281,125 @@ def _record_conversation_processing_retry_summary_applied_transaction(
     retry_data = retry_snapshot.to_dict()
     if conversation.get('processing_retry_id') != request_id or retry_data.get('request_id') != request_id:
         return False
+    if attempt_count is not None and retry_data.get('attempt_count') != attempt_count:
+        return False
 
     transaction.update(
         conversation_ref,
-        {'processing_retry_summary_version_id': summary_version_id},
+        {
+            'status': ConversationStatus.completed.value,
+            'discarded': False,
+            'processing_error': None,
+            'processing_error_at': None,
+            'processing_retry_summary_version_id': summary_version_id,
+            'processing_retry_generic_vector_status': 'pending',
+        },
     )
     transaction.update(
         retry_ref,
         {
-            'phase': 'summary_applied',
+            'outcome': ConversationStatus.processing.value,
+            'phase': 'generic_writeback_applied',
+            'generic_status': 'writeback_applied',
+            'generic_vector_status': 'pending',
+            'enrichment_status': 'pending',
             'summary_version_id': summary_version_id,
             'updated_at': applied_at,
         },
     )
     return True
+
+
+def _record_conversation_processing_retry_generic_vector_transaction(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    status: str,
+    updated_at: datetime,
+    attempt_count: Optional[int] = None,
+):
+    conversation_snapshot = conversation_ref.get(transaction=transaction)
+    retry_snapshot = retry_ref.get(transaction=transaction)
+    if not conversation_snapshot.exists or not retry_snapshot.exists:
+        return False
+
+    conversation = conversation_snapshot.to_dict()
+    retry_data = retry_snapshot.to_dict()
+    if conversation.get('processing_retry_id') != request_id or retry_data.get('request_id') != request_id:
+        return False
+    if attempt_count is not None and retry_data.get('attempt_count') != attempt_count:
+        return False
+
+    completed = status == 'completed'
+    transaction.update(
+        conversation_ref,
+        {
+            'status': ConversationStatus.completed.value,
+            'discarded': False,
+            'processing_error': None,
+            'processing_error_at': None,
+            'processing_retry_generic_vector_status': status,
+            **({'processing_retry_completed_at': updated_at} if not completed else {}),
+        },
+    )
+    transaction.update(
+        retry_ref,
+        {
+            'outcome': ConversationStatus.processing.value if completed else ConversationStatus.failed.value,
+            'phase': 'generic_completed' if completed else 'generic_vector_failed',
+            'generic_status': 'completed' if completed else 'writeback_applied',
+            'generic_vector_status': status,
+            'updated_at': updated_at,
+        },
+    )
+    return True
+
+
+@transactional
+def _record_conversation_processing_retry_generic_vector(
+    transaction,
+    conversation_ref,
+    retry_ref,
+    request_id: str,
+    status: str,
+    updated_at: datetime,
+    attempt_count: Optional[int],
+):
+    return _record_conversation_processing_retry_generic_vector_transaction(
+        transaction,
+        conversation_ref,
+        retry_ref,
+        request_id,
+        status,
+        updated_at,
+        attempt_count,
+    )
+
+
+def record_conversation_processing_retry_generic_vector(
+    uid: str,
+    conversation_id: str,
+    request_id: str,
+    status: str,
+    updated_at: Optional[datetime] = None,
+    attempt_count: Optional[int] = None,
+):
+    if status not in {'completed', 'failed'}:
+        raise ValueError(f'Unsupported generic vector status: {status}')
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    retry_ref = conversation_ref.collection(conversation_processing_retries_collection).document(request_id)
+    return _record_conversation_processing_retry_generic_vector(
+        db.transaction(),
+        conversation_ref,
+        retry_ref,
+        request_id,
+        status,
+        updated_at or datetime.now(timezone.utc),
+        attempt_count,
+    )
 
 
 @transactional
@@ -1033,6 +1410,7 @@ def _record_conversation_processing_retry_summary_applied(
     request_id: str,
     summary_version_id: str,
     applied_at: datetime,
+    attempt_count: Optional[int],
 ):
     return _record_conversation_processing_retry_summary_applied_transaction(
         transaction,
@@ -1041,6 +1419,7 @@ def _record_conversation_processing_retry_summary_applied(
         request_id,
         summary_version_id,
         applied_at,
+        attempt_count,
     )
 
 
@@ -1050,6 +1429,7 @@ def record_conversation_processing_retry_summary_applied(
     request_id: str,
     summary_version_id: str,
     applied_at: Optional[datetime] = None,
+    attempt_count: Optional[int] = None,
 ):
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -1063,6 +1443,7 @@ def record_conversation_processing_retry_summary_applied(
         request_id,
         summary_version_id,
         applied_at or datetime.now(timezone.utc),
+        attempt_count,
     )
 
 
@@ -1074,6 +1455,8 @@ def _finish_conversation_processing_retry_transaction(
     outcome: str,
     finished_at: datetime,
     error_code: Optional[str],
+    preserve_completed_summary: bool = False,
+    attempt_count: Optional[int] = None,
 ):
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     retry_snapshot = retry_ref.get(transaction=transaction)
@@ -1083,8 +1466,14 @@ def _finish_conversation_processing_retry_transaction(
     retry_data = retry_snapshot.to_dict()
     if retry_data.get('request_id') != request_id:
         return False
+    if attempt_count is not None and retry_data.get('attempt_count') != attempt_count:
+        return False
 
-    retry_update = {'outcome': outcome, 'updated_at': finished_at}
+    retry_update = {
+        'outcome': outcome,
+        'phase': 'completed' if outcome == ConversationStatus.completed.value else 'failed',
+        'updated_at': finished_at,
+    }
     if error_code:
         retry_update['error_code'] = error_code
     transaction.update(retry_ref, retry_update)
@@ -1100,6 +1489,15 @@ def _finish_conversation_processing_retry_transaction(
                 'discarded': False,
                 'processing_error': None,
                 'processing_error_at': None,
+                'processing_retry_completed_at': finished_at,
+            },
+        )
+    elif preserve_completed_summary:
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.completed.value,
+                'discarded': False,
                 'processing_retry_completed_at': finished_at,
             },
         )
@@ -1125,6 +1523,8 @@ def _finish_conversation_processing_retry(
     outcome: str,
     finished_at: datetime,
     error_code: Optional[str],
+    preserve_completed_summary: bool,
+    attempt_count: Optional[int],
 ):
     return _finish_conversation_processing_retry_transaction(
         transaction,
@@ -1134,6 +1534,8 @@ def _finish_conversation_processing_retry(
         outcome,
         finished_at,
         error_code,
+        preserve_completed_summary,
+        attempt_count,
     )
 
 
@@ -1144,6 +1546,8 @@ def finish_conversation_processing_retry(
     outcome: str,
     finished_at: Optional[datetime] = None,
     error_code: Optional[str] = None,
+    preserve_completed_summary: bool = False,
+    attempt_count: Optional[int] = None,
 ):
     if outcome not in {ConversationStatus.completed.value, ConversationStatus.failed.value}:
         raise ValueError(f'Unsupported conversation processing retry outcome: {outcome}')
@@ -1161,6 +1565,8 @@ def finish_conversation_processing_retry(
         outcome,
         finished_at or datetime.now(timezone.utc),
         error_code,
+        preserve_completed_summary,
+        attempt_count,
     )
 
 
@@ -1173,6 +1579,8 @@ def _record_conversation_processing_retry_enrichment_transaction(
     status: str,
     updated_at: datetime,
     summary_version_id: Optional[str],
+    vector_content_sha256: Optional[str] = None,
+    attempt_count: Optional[int] = None,
 ):
     conversation_snapshot = conversation_ref.get(transaction=transaction)
     retry_snapshot = retry_ref.get(transaction=transaction)
@@ -1183,26 +1591,111 @@ def _record_conversation_processing_retry_enrichment_transaction(
     retry_data = retry_snapshot.to_dict()
     if retry_data.get('request_id') != request_id:
         return False
+    if attempt_count is not None and retry_data.get('attempt_count') != attempt_count:
+        return False
+    if (
+        summary_version_id
+        and status in {'canonical_completed', 'completed', 'vector_failed'}
+        and str(conversation.get('active_summary_version_id') or '') != str(summary_version_id)
+    ):
+        return False
 
-    retry_update = {
-        'enrichment_status': status,
-        'updated_at': updated_at,
-    }
+    if status == 'canonical_completed':
+        retry_update = {
+            'enrichment_status': 'canonical_completed',
+            'vector_status': 'pending',
+            'outcome': ConversationStatus.processing.value,
+            'phase': 'enrichment_canonical_completed',
+            'updated_at': updated_at,
+        }
+    elif status == 'completed':
+        retry_update = {
+            'enrichment_status': 'completed',
+            'vector_status': 'completed',
+            'outcome': ConversationStatus.completed.value,
+            'phase': 'completed',
+            'updated_at': updated_at,
+        }
+    elif status == 'canonical_failed':
+        retry_update = {
+            'enrichment_status': 'writeback_pending_canonical',
+            'vector_status': 'pending',
+            'outcome': ConversationStatus.failed.value,
+            'phase': 'enrichment_canonical_failed',
+            'updated_at': updated_at,
+        }
+    elif status == 'vector_failed':
+        retry_update = {
+            'enrichment_status': 'canonical_completed',
+            'vector_status': 'failed',
+            'outcome': ConversationStatus.failed.value,
+            'phase': 'enrichment_vector_failed',
+            'updated_at': updated_at,
+        }
+    else:
+        retry_update = {
+            'enrichment_status': 'failed',
+            'outcome': ConversationStatus.failed.value,
+            'phase': 'enrichment_failed',
+            'updated_at': updated_at,
+        }
     if summary_version_id:
         retry_update['enriched_summary_version_id'] = summary_version_id
+    if status in {'completed', 'vector_failed'} and summary_version_id:
+        retry_update['vector_summary_version_id'] = summary_version_id
+    if status in {'completed', 'vector_failed'} and vector_content_sha256:
+        retry_update['vector_content_sha256'] = vector_content_sha256
     transaction.update(retry_ref, retry_update)
 
     if conversation.get('processing_retry_id') != request_id:
         return True
-    if status == 'completed' and summary_version_id:
+    if status == 'canonical_completed' and summary_version_id:
         transaction.update(
             conversation_ref,
-            {'processing_retry_enriched_version_id': summary_version_id},
+            {
+                'status': ConversationStatus.completed.value,
+                'processing_retry_enriched_version_id': summary_version_id,
+                'processing_retry_enrichment_vector_status': 'pending',
+            },
+        )
+    elif status == 'completed' and summary_version_id:
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.completed.value,
+                'processing_retry_enriched_version_id': summary_version_id,
+                'processing_retry_enrichment_vector_status': 'completed',
+                'processing_retry_enrichment_vector_version_id': summary_version_id,
+                'processing_retry_enrichment_vector_sha256': vector_content_sha256,
+                'processing_retry_completed_at': updated_at,
+            },
+        )
+    elif status == 'canonical_failed':
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.completed.value,
+                'processing_retry_enrichment_vector_status': 'pending',
+                'processing_retry_completed_at': updated_at,
+            },
+        )
+    elif status == 'vector_failed':
+        transaction.update(
+            conversation_ref,
+            {
+                'status': ConversationStatus.completed.value,
+                'processing_retry_enrichment_vector_status': 'failed',
+                'processing_retry_enrichment_vector_version_id': summary_version_id,
+                'processing_retry_enrichment_vector_sha256': vector_content_sha256,
+                'processing_retry_completed_at': updated_at,
+            },
         )
     elif status == 'failed':
         transaction.update(
             conversation_ref,
             {
+                'status': ConversationStatus.completed.value,
+                'processing_retry_completed_at': updated_at,
                 'enrichment_state': {
                     'status': 'failed',
                     'pending': True,
@@ -1211,7 +1704,7 @@ def _record_conversation_processing_retry_enrichment_transaction(
                     'trace_id': f'summary-retry:{conversation_id}:{request_id}:hermes',
                     'updated_at': updated_at,
                     'error': 'hermes_temporarily_unavailable',
-                }
+                },
             },
         )
     return True
@@ -1227,6 +1720,8 @@ def _record_conversation_processing_retry_enrichment(
     status: str,
     updated_at: datetime,
     summary_version_id: Optional[str],
+    vector_content_sha256: Optional[str],
+    attempt_count: Optional[int],
 ):
     return _record_conversation_processing_retry_enrichment_transaction(
         transaction,
@@ -1237,6 +1732,8 @@ def _record_conversation_processing_retry_enrichment(
         status,
         updated_at,
         summary_version_id,
+        vector_content_sha256,
+        attempt_count,
     )
 
 
@@ -1247,8 +1744,10 @@ def record_conversation_processing_retry_enrichment(
     status: str,
     summary_version_id: Optional[str] = None,
     updated_at: Optional[datetime] = None,
+    vector_content_sha256: Optional[str] = None,
+    attempt_count: Optional[int] = None,
 ):
-    if status not in {'completed', 'failed'}:
+    if status not in {'canonical_completed', 'canonical_failed', 'completed', 'vector_failed', 'failed'}:
         raise ValueError(f'Unsupported conversation processing retry enrichment status: {status}')
     conversation_ref = (
         db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
@@ -1264,6 +1763,8 @@ def record_conversation_processing_retry_enrichment(
         status,
         updated_at or datetime.now(timezone.utc),
         summary_version_id,
+        vector_content_sha256,
+        attempt_count,
     )
 
 

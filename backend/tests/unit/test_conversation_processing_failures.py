@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import types
@@ -341,16 +341,16 @@ def test_retry_claim_is_atomic_and_preserves_failed_error_provenance():
     result, transaction = _claim_retry(conversation.dict(), "request-a")
 
     assert result["outcome"] == "claimed"
-    assert result["conversation"]["status"] == ConversationStatus.processing.value
-    assert result["conversation"]["processing_error"] == CONVERSATION_SUMMARY_FAILED
+    assert "conversation" not in result
     assert len(transaction.updates) == 1
+    assert transaction.updates[0][1]["status"] == ConversationStatus.processing.value
     assert transaction.updates[0][1]["processing_retry_id"] == "request-a"
+    assert conversation.processing_error == CONVERSATION_SUMMARY_FAILED
     assert len(transaction.sets) == 1
     assert transaction.sets[0][1]["outcome"] == ConversationStatus.processing.value
 
 
-@pytest.mark.parametrize("stored_outcome", ["processing", "completed", "failed"])
-def test_retry_claim_reuses_durable_request_receipt_without_enqueuing(stored_outcome):
+def test_retry_claim_reuses_completed_durable_request_receipt_without_enqueuing():
     conversation = _long_conversation()
     conversation.status = ConversationStatus.processing
     conversation.processing_retry_id = "newer-request"
@@ -358,10 +358,10 @@ def test_retry_claim_reuses_durable_request_receipt_without_enqueuing(stored_out
     result, transaction = _claim_retry(
         conversation.dict(),
         "older-request",
-        retry_data={"request_id": "older-request", "outcome": stored_outcome},
+        retry_data={"request_id": "older-request", "outcome": "completed"},
     )
 
-    assert result["outcome"] == stored_outcome
+    assert result["outcome"] == "completed"
     assert transaction.updates == []
     assert transaction.sets == []
 
@@ -370,6 +370,9 @@ def test_retry_claim_rejects_a_different_request_while_processing():
     conversation = _long_conversation()
     conversation.status = ConversationStatus.processing
     conversation.processing_retry_id = "active-request"
+    conversation.processing_retry_lease_expires_at = datetime(2026, 7, 21, 3, 0, tzinfo=timezone.utc) + timedelta(
+        minutes=5
+    )
 
     result, transaction = _claim_retry(conversation.dict(), "other-request")
 

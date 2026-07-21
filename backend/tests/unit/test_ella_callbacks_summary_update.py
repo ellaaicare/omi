@@ -410,7 +410,7 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
         or {"ok": True, "inserted": 1, "duplicates": 0},
     )
 
-    asyncio.run(
+    result = asyncio.run(
         callbacks.update_conversation_summary(
             "cafe-123",
             callbacks.ConversationSummaryUpdate(
@@ -419,10 +419,13 @@ def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatc
                 summary_source="observer",
                 summary_kind="observer_enriched",
                 trace_id="trace-cafe",
+                require_canonical=True,
             ),
             uid="user-123",
         )
     )
+
+    assert result["canonical_confirmed"] is True
 
     assert canonical_writes[0]["uid"] == "user-123"
     assert canonical_writes[0]["conversation"]["id"] == "cafe-123"

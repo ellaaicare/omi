@@ -21,6 +21,14 @@ class InvalidConversationSummaryCategoryError(Exception):
     pass
 
 
+class CanonicalSummaryWriteUnconfirmedError(RuntimeError):
+    pass
+
+
+class ConcurrentConversationSummaryChangeError(RuntimeError):
+    pass
+
+
 async def write_conversation_summary(
     *,
     uid: str,
@@ -40,16 +48,21 @@ async def write_conversation_summary(
     internal_assessment_fetcher: Optional[Callable[[str, str], Awaitable[Optional[dict]]]] = None,
     correction_audit_updater: Optional[Callable[[str, str, str, dict], None]] = None,
     canonical_writer: Callable[..., dict] = write_omi_canonical_event,
+    require_canonical: bool = False,
+    require_based_on_match: bool = False,
 ) -> dict[str, Any]:
     conversation = conversations_db.get_conversation(uid, conversation_id)
     if conversation is None:
         raise ConversationSummaryNotFoundError(conversation_id)
+    if require_based_on_match and conversation.get('active_summary_version_id') != based_on_version_id:
+        raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
 
     enrichment_state = conversation.get('enrichment_state') or {}
+    same_trace = bool(trace_id and enrichment_state.get('trace_id') == trace_id)
     if (
-        trace_id
+        same_trace
         and enrichment_state.get('status') == 'writeback_applied'
-        and enrichment_state.get('trace_id') == trace_id
+        and (not require_canonical or enrichment_state.get('canonical_status') == 'completed')
     ):
         return {
             'status': 'ok',
@@ -58,6 +71,49 @@ async def write_conversation_summary(
             'active_summary_version_id': conversation.get('active_summary_version_id'),
             'sanitizer_warnings': [],
             'idempotent_replay': True,
+            'canonical_confirmed': enrichment_state.get('canonical_status') == 'completed',
+        }
+
+    if same_trace and require_canonical and enrichment_state.get('status') == 'writeback_pending_canonical':
+        confirmed_state = {
+            **enrichment_state,
+            'status': 'writeback_applied',
+            'pending': False,
+            'canonical_status': 'completed',
+            'error': None,
+            'updated_at': datetime.now(timezone.utc),
+        }
+        canonical_conversation = {
+            **conversation,
+            'id': conversation_id,
+            'enrichment_state': confirmed_state,
+        }
+        try:
+            canonical_result = await asyncio.to_thread(
+                canonical_writer,
+                uid,
+                canonical_conversation,
+                summary_source=summary_source,
+                summary_kind=summary_kind,
+                trace_id=trace_id,
+            )
+            if not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True:
+                raise RuntimeError('canonical_write_unconfirmed')
+        except Exception as error:
+            logger.exception(
+                'Failed to confirm pending conversation summary in canonical ledger',
+                extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
+            )
+            raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from error
+        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
+        return {
+            'status': 'ok',
+            'conversation_id': conversation_id,
+            'updated_fields': ['enrichment_state'],
+            'active_summary_version_id': conversation.get('active_summary_version_id'),
+            'sanitizer_warnings': [],
+            'idempotent_replay': True,
+            'canonical_confirmed': True,
         }
 
     sanitized = sanitize_summary_update(title=title, overview=overview, emoji=emoji, category=category)
@@ -102,13 +158,14 @@ async def write_conversation_summary(
     update_data['summary_versions'] = version_update['summary_versions']
     update_data['active_summary_version_id'] = version_update['active_summary_version_id']
     update_data['enrichment_state'] = {
-        'status': 'writeback_applied',
-        'pending': False,
+        'status': 'writeback_pending_canonical' if require_canonical else 'writeback_applied',
+        'pending': require_canonical,
         'source': summary_source,
         'kind': summary_kind,
         'trace_id': trace_id,
         'updated_at': state_updated_at,
         'error': None,
+        'canonical_status': 'pending' if require_canonical else 'unconfirmed',
     }
 
     if internal_assessment_fetcher:
@@ -150,8 +207,18 @@ async def write_conversation_summary(
         'ella_tags': update_data.get('ella_tags', canonical_base.get('ella_tags') or []),
         'ella_signal': update_data.get('ella_signal', canonical_base.get('ella_signal')),
     }
+    confirmed_state = {
+        **update_data['enrichment_state'],
+        'status': 'writeback_applied',
+        'pending': False,
+        'canonical_status': 'completed',
+        'error': None,
+    }
+    canonical_conversation['enrichment_state'] = confirmed_state
+    canonical_result: Optional[dict[str, Any]] = None
+    canonical_error: Optional[Exception] = None
     try:
-        await asyncio.to_thread(
+        canonical_result = await asyncio.to_thread(
             canonical_writer,
             uid,
             canonical_conversation,
@@ -159,11 +226,26 @@ async def write_conversation_summary(
             summary_kind=summary_kind,
             trace_id=trace_id,
         )
-    except Exception:
+        if require_canonical and (not isinstance(canonical_result, dict) or canonical_result.get('ok') is not True):
+            raise RuntimeError('canonical_write_unconfirmed')
+    except Exception as error:
+        canonical_error = error
         logger.exception(
             'Failed to write conversation summary to canonical ledger',
             extra={'uid': uid, 'conversation_id': conversation_id, 'trace_id': trace_id},
         )
+
+    if require_canonical:
+        if canonical_error is not None:
+            failed_state = {
+                **update_data['enrichment_state'],
+                'canonical_status': 'failed',
+                'error': 'canonical_write_unconfirmed',
+                'updated_at': datetime.now(timezone.utc),
+            }
+            conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': failed_state})
+            raise CanonicalSummaryWriteUnconfirmedError('canonical_write_unconfirmed') from canonical_error
+        conversations_db.update_conversation(uid, conversation_id, {'enrichment_state': confirmed_state})
 
     if correction_id and correction_audit_updater:
         try:
@@ -192,4 +274,5 @@ async def write_conversation_summary(
         'updated_fields': list(update_data.keys()),
         'active_summary_version_id': version_update['active_summary_version_id'],
         'sanitizer_warnings': sanitized.warnings,
+        'canonical_confirmed': bool(isinstance(canonical_result, dict) and canonical_result.get('ok') is True),
     }

@@ -172,6 +172,7 @@ class ConversationSummaryUpdate(BaseModel):
     based_on_version_id: Optional[str] = None
     set_active: bool = True
     trace_id: Optional[str] = None
+    require_canonical: bool = False
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[Dict[str, Any]] = None
 
@@ -336,6 +337,7 @@ async def update_conversation_summary(
             internal_assessment_fetcher=_fetch_internal_assessment,
             correction_audit_updater=_update_correction_audit,
             canonical_writer=write_omi_canonical_event,
+            require_canonical=update.require_canonical,
         )
     except SummarySanitizationError as e:
         raise HTTPException(
