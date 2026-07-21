@@ -257,6 +257,15 @@ print('Adapters:', list(get_all_adapters().keys()))
 | `ELLA_TESTING_ENABLED` | `false` | E2E testing endpoints |
 | `GROK_V2V_PROXY_URL` | `wss://voice.ella-ai-care.com/ws` | Grok proxy WebSocket URL |
 
+### Isolated Hermes onboarding
+
+New-user Hermes provisioning is disabled by default and has two separate rollout controls:
+
+- `ELLA_HERMES_PROVISIONING_ENABLED` allows authenticated, idempotent `/v1/ella/onboarding/ensure` jobs to call the Hermes-only 8210 provisioner.
+- `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, and voice require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never fall back to OpenClaw or a shared Plato profile.
+
+Apply the `ella_provisioning_jobs` and `ella_runtime_bindings` database migration before enabling either flag. Enable provisioning first for synthetic users; enable runtime dispatch only after distinct profile, workspace, gateway, Honcho, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
+
 Upstream-managed patch points are tracked in `docs/POST_MERGE_PATCHES.md`. Review that file after every Basehardware upstream sync.
 
 ---

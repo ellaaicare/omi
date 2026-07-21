@@ -365,6 +365,15 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
 
+    # Authenticated, idempotent per-user Hermes onboarding
+    try:
+        from ella.routers.onboarding import router as onboarding_router
+
+        app.include_router(onboarding_router, tags=["Ella Onboarding"])
+        print("  🌐 /v1/ella/onboarding/* - Isolated Hermes onboarding", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella onboarding not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
