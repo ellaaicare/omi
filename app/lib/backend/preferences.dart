@@ -518,6 +518,74 @@ class SharedPreferencesUtil {
     }
   }
 
+  String _ellaProvisioningReceiptKey(String uid) => 'ellaProvisioningReceipt:$uid';
+
+  Map<String, dynamic>? getEllaProvisioningReceipt(String uid) {
+    final encoded = getString(_ellaProvisioningReceiptKey(uid));
+    if (encoded.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(encoded);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveEllaProvisioningReceipt(String uid, Map<String, dynamic> receipt) async {
+    await saveString(_ellaProvisioningReceiptKey(uid), jsonEncode(receipt));
+  }
+
+  String get ellaProvisionedVoiceMode {
+    final receipt = getEllaProvisioningReceipt(uid);
+    final value = receipt?['effective_voice_mode'];
+    return value is String ? value : '';
+  }
+
+  /// Clears account-scoped state before the authenticated provisioning gate
+  /// evaluates a different Firebase user. A cached receipt is never authority;
+  /// the gate still requires a fresh server-confirmed ready response.
+  Future<void> prepareEllaProvisioningAccount(String newUid) async {
+    final previousUid = getString('ellaProvisioningAccountUid');
+
+    // These values are never valid authority in a gated build, even when the
+    // same user returns from an older fail-open build.
+    for (final key in const [
+      'ellaUserId',
+      'ellaKey',
+      'ellaGatewayUrl',
+      'ellaAgentId',
+      'ellaGatewayToken',
+      'ellaResolvedEndpoint',
+    ]) {
+      await remove(key);
+    }
+
+    if (previousUid == newUid) return;
+
+    if (previousUid.isNotEmpty) {
+      await remove(_ellaProvisioningReceiptKey(previousUid));
+    }
+    await remove(_ellaProvisioningReceiptKey(newUid));
+
+    for (final key in const [
+      'devTtsProvider',
+      'ellaSettingsVoiceModeDirty',
+      'ellaSettingsPendingVoiceMode',
+      'ellaSettingsLastSyncedVoiceMode',
+      'ellaSettingsLastSyncedAt',
+      'ellaSettingsLastSyncError',
+      'aiConsentAccepted',
+      'aiConsentAcceptedAt',
+    ]) {
+      await remove(key);
+    }
+
+    demoMode = false;
+    publicMode = false;
+    clearUserCaches();
+    await saveString('ellaProvisioningAccountUid', newUid);
+  }
+
   // Pending memories - memories created offline that need to be synced
   List<Memory> get pendingMemories {
     final memories = getStringList('pendingMemories');

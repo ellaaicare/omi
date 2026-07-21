@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/device_selection.dart';
 import 'package:omi/pages/onboarding/ella/ella_onboarding.dart';
@@ -32,7 +34,7 @@ class _MobileAppState extends State<MobileApp> {
     const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
 
     // Debug mode: bypass auth and go straight to home
-    if (debugAutoCall) {
+    if (debugAutoCall && !isHermesProvisioningGateEnabled) {
       return const HomePageWrapper();
     }
 
@@ -41,7 +43,7 @@ class _MobileAppState extends State<MobileApp> {
       return Consumer<AuthenticationProvider>(
         builder: (context, authProvider, child) {
           if (authProvider.isSignedIn() && SharedPreferencesUtil().onboardingCompleted) {
-            return const HomePageWrapper();
+            return isHermesProvisioningGateEnabled ? const EllaProvisioningGatePage() : const HomePageWrapper();
           }
 
           // Self-healing: if signed in but onboardingCompleted is false,

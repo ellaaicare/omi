@@ -6,12 +6,15 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/auth.dart';
 import 'package:omi/pages/onboarding/ella/ella_connect.dart';
 import 'package:omi/pages/onboarding/ella/ella_emergency.dart';
 import 'package:omi/pages/onboarding/ella/ella_welcome.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 
 class EllaOnboarding extends StatefulWidget {
@@ -33,7 +36,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (AuthService.instance.isSignedIn()) {
         if (SharedPreferencesUtil().onboardingCompleted) {
-          routeToPage(context, const HomePageWrapper(), replace: true);
+          _routeToAuthenticatedHome();
         } else {
           _onSignedIn();
         }
@@ -50,8 +53,10 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   Future<void> _onSignedIn() async {
     setState(() {
       _isSignedIn = true;
-      _checkingProvision = true;
+      _checkingProvision = !isHermesProvisioningGateEnabled;
     });
+    if (isHermesProvisioningGateEnabled) return;
+
     // Check if user is pre-provisioned by admin — skip wizard if so
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
@@ -67,7 +72,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       if (result.isPreProvisioned) {
         SharedPreferencesUtil().onboardingCompleted = true;
         updateUserOnboardingState(completed: true);
-        routeToPage(context, const HomePageWrapper(), replace: true);
+        _routeToAuthenticatedHome();
         return;
       }
     }
@@ -87,11 +92,20 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      // Provision is already called at sign-in; call again to ensure
-      // new users are provisioned after completing the wizard
-      _reprovisionElla();
+      if (!isHermesProvisioningGateEnabled) {
+        // Legacy path retained until the authenticated ensure contract is live.
+        _reprovisionElla();
+      }
     }
-    routeToPage(context, const HomePageWrapper(), replace: true);
+    _routeToAuthenticatedHome();
+  }
+
+  void _routeToAuthenticatedHome() {
+    routeToPage(
+      context,
+      isHermesProvisioningGateEnabled ? const EllaProvisioningGatePage() : const HomePageWrapper(),
+      replace: true,
+    );
   }
 
   void _reprovisionElla() async {
@@ -116,7 +130,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
         body: AuthComponent(
           onSignIn: () {
             if (SharedPreferencesUtil().onboardingCompleted) {
-              routeToPage(context, const HomePageWrapper(), replace: true);
+              _routeToAuthenticatedHome();
             } else {
               _onSignedIn();
             }
@@ -132,11 +146,11 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              CircularProgressIndicator(color: EllaColors.primary),
+              const CircularProgressIndicator(color: EllaColors.primary),
               const SizedBox(height: 24),
               Text(
-                'Setting up your account...',
-                style: TextStyle(color: EllaColors.textSecondary, fontSize: 16),
+                context.l10n.settingUp,
+                style: const TextStyle(color: EllaColors.textSecondary, fontSize: 16),
               ),
             ],
           ),

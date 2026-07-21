@@ -30,6 +30,7 @@ import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/pages/settings/wrapped_2025_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
@@ -402,6 +403,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   }
 
   void _provisionEllaIfNeeded() async {
+    if (isHermesProvisioningGateEnabled) return;
     if (SharedPreferencesUtil().ellaUserId.isNotEmpty) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;

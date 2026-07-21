@@ -18,6 +18,7 @@ import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
@@ -94,6 +95,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// Check if current TTS provider is a V2V provider.
   static bool _isV2VProvider(String provider) => provider == 'grok-voice' || provider == 'gemini-live';
 
+  String get _effectiveVoiceProvider => isHermesProvisioningGateEnabled
+      ? SharedPreferencesUtil().ellaProvisionedVoiceMode
+      : SharedPreferencesUtil().ttsProvider;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -126,7 +131,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       if (isOnVoiceTab && !_wasOnVoiceTab && !_voiceModeActive) {
         debugPrint('[VoiceChat] Voice tab became active, auto-starting');
         _voiceModeActive = true;
-        final provider = SharedPreferencesUtil().ttsProvider;
+        final provider = _effectiveVoiceProvider;
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && _orbState == VoiceOrbState.idle) {
             if (_isV2VProvider(provider)) {
@@ -220,7 +225,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (!_voiceModeActive) {
       // Resume voice mode — check if V2V provider is selected
       _voiceModeActive = true;
-      final provider = SharedPreferencesUtil().ttsProvider;
+      final provider = _effectiveVoiceProvider;
       if (_isV2VProvider(provider)) {
         await _startV2V(provider);
       } else {
