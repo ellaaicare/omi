@@ -136,4 +136,42 @@ void main() {
     expect(provider.isLoadingConversations, isFalse);
     expect(provider.hasFreshConversations, isFalse);
   });
+
+  test('stale background refresh cannot clear a newer primary loading state', () async {
+    final staleRequest = Completer<ConversationsFetchResult>();
+    final currentRequest = Completer<ConversationsFetchResult>();
+    var requestCount = 0;
+    final provider = ConversationProvider(
+      conversationsFetchCall: () {
+        requestCount += 1;
+        return requestCount == 1 ? staleRequest.future : currentRequest.future;
+      },
+      failedConversationsFetchCall: () async => const ConversationsFetchResult.success([]),
+    );
+    addTearDown(() {
+      if (!staleRequest.isCompleted) {
+        staleRequest.complete(const ConversationsFetchResult.failure());
+      }
+      if (!currentRequest.isCompleted) {
+        currentRequest.complete(const ConversationsFetchResult.failure());
+      }
+      provider.dispose();
+    });
+
+    final staleRefresh = provider.forceRefreshConversations();
+    final currentRefresh = provider.fetchConversations();
+    expect(provider.isLoadingConversations, isTrue);
+
+    staleRequest.complete(ConversationsFetchResult.success([conversation('stale')]));
+    await staleRefresh;
+
+    expect(provider.isLoadingConversations, isTrue);
+    expect(provider.visibleConversations, isEmpty);
+
+    currentRequest.complete(ConversationsFetchResult.success([conversation('current')]));
+    await currentRefresh;
+
+    expect(provider.isLoadingConversations, isFalse);
+    expect(provider.visibleConversations.map((item) => item.id), ['current']);
+  });
 }
