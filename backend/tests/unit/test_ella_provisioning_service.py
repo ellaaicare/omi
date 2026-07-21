@@ -222,6 +222,27 @@ def test_omi_identity_defaults_do_not_grant_cloud_or_recording_permission():
     assert payload["store_recording_permission"] is False
 
 
+def test_legacy_omi_identity_repair_preserves_cloud_sync_default():
+    document = _FakeDocument(exists=True, data={"onboarding": {"completed": True}})
+    repository = EllaProvisioningRepository(pool=None, firestore_db=_FakeFirestore(document))
+
+    changed = asyncio.run(
+        repository.ensure_omi_user_document(
+            uid="legacy-user",
+            email="legacy@example.com",
+            name="Legacy",
+            timezone_name="America/Los_Angeles",
+            private_cloud_sync_default=True,
+        )
+    )
+
+    assert changed is True
+    payload, merge = document.writes[0]
+    assert merge is True
+    assert payload["private_cloud_sync_enabled"] is True
+    assert payload["store_recording_permission"] is False
+
+
 def test_repository_schema_preflight_reports_missing_objects():
     pool = _FakeSchemaPool(
         {

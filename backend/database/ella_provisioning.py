@@ -219,8 +219,9 @@ class EllaProvisioningRepository:
         email: str,
         name: str,
         timezone_name: str,
+        private_cloud_sync_default: bool = False,
     ) -> bool:
-        """Create the upstream OMI identity without granting data permissions."""
+        """Create or repair the upstream OMI identity with explicit consent defaults."""
 
         if self.firestore_db is None:
             raise RuntimeError("firestore_client_unavailable")
@@ -237,7 +238,7 @@ class EllaProvisioningRepository:
                         "email": email,
                         "name": name,
                         "time_zone": timezone_name,
-                        "private_cloud_sync_enabled": False,
+                        "private_cloud_sync_enabled": private_cloud_sync_default,
                         "store_recording_permission": False,
                     }.items()
                     if key not in data
@@ -256,7 +257,7 @@ class EllaProvisioningRepository:
                     "time_zone": timezone_name,
                     "created_at": now,
                     "updated_at": now,
-                    "private_cloud_sync_enabled": False,
+                    "private_cloud_sync_enabled": private_cloud_sync_default,
                     "store_recording_permission": False,
                 },
                 merge=False,

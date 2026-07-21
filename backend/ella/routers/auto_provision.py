@@ -129,6 +129,7 @@ async def ensure_firestore_user_document(uid: str, firestore_db=None) -> bool:
             name=row["name"] or "User",
             email=row["email"],
             timezone_name=row["timezone"] or "America/Los_Angeles",
+            private_cloud_sync_default=True,
         )
         logger.info(f"Created Firestore OMI user document for uid={uid}")
         return True

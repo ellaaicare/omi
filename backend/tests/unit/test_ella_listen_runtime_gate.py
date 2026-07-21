@@ -71,3 +71,36 @@ def test_listen_runtime_gate_fails_closed_for_isolated_users(monkeypatch):
         "success": False,
         "error": "hermes_not_provisioned",
     }
+
+
+def test_legacy_firestore_repair_requests_historical_cloud_sync_default(monkeypatch):
+    captured = {}
+
+    class FakePool:
+        async def fetchrow(self, _query, uid):
+            assert uid == "legacy-user"
+            return {
+                "name": "Legacy User",
+                "email": "legacy@example.com",
+                "timezone": "America/Los_Angeles",
+            }
+
+    class FakeRepository:
+        def __init__(self, pool, *, firestore_db):
+            assert isinstance(pool, FakePool)
+            assert firestore_db == "firestore"
+
+        async def ensure_omi_user_document(self, **kwargs):
+            captured.update(kwargs)
+            return True
+
+    async def get_pool():
+        return FakePool()
+
+    monkeypatch.setattr(auto_provision, "_get_pool", get_pool)
+    monkeypatch.setattr(auto_provision, "EllaProvisioningRepository", FakeRepository)
+
+    result = asyncio.run(auto_provision.ensure_firestore_user_document("legacy-user", "firestore"))
+
+    assert result is True
+    assert captured["private_cloud_sync_default"] is True
