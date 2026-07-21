@@ -56,6 +56,7 @@ async def get_oauth_protected_resource():
             "scopes_supported": [
                 "context:read",
                 "memory:read",
+                "observations:write",
                 "profile:read",
                 "startup:read",
                 "timeline:read",
@@ -89,6 +90,7 @@ async def get_oauth_authorization_server():
             "scopes_supported": [
                 "context:read",
                 "memory:read",
+                "observations:write",
                 "profile:read",
                 "startup:read",
                 "timeline:read",
