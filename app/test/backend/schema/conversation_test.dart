@@ -47,4 +47,31 @@ void main() {
       });
     });
   });
+
+  test('parses and serializes retryable processing failure metadata', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'failed-conversation',
+      'created_at': '2026-07-20T08:00:00Z',
+      'structured': {
+        'title': '',
+        'overview': '',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'transcript_segments': [],
+      'apps_results': [],
+      'audio_files': [],
+      'status': 'failed',
+      'processing_error': 'conversation_summary_failed',
+      'processing_error_at': '2026-07-20T08:05:00Z',
+    });
+
+    expect(conversation.status, ConversationStatus.failed);
+    expect(conversation.processingError, 'conversation_summary_failed');
+    expect(conversation.processingErrorAt, isNotNull);
+    expect(conversation.toJson()['processing_error'], 'conversation_summary_failed');
+    expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
+  });
 }

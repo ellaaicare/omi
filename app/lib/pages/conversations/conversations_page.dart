@@ -10,6 +10,7 @@ import 'package:omi/pages/capture/widgets/widgets.dart';
 import 'package:omi/pages/conversations/widgets/daily_score_widget.dart';
 import 'package:omi/pages/conversations/widgets/daily_summaries_list.dart';
 import 'package:omi/pages/conversations/widgets/folder_tabs.dart';
+import 'package:omi/pages/conversations/widgets/failed_conversations_section.dart';
 import 'package:omi/pages/conversations/widgets/goals_widget.dart';
 import 'package:omi/pages/conversations/widgets/processing_capture.dart';
 import 'package:omi/pages/conversations/widgets/search_result_header_widget.dart';
@@ -214,6 +215,13 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
               },
             ),
             const SliverToBoxAdapter(child: SearchResultHeaderWidget()),
+            SliverToBoxAdapter(
+              child: FailedConversationsSection(
+                conversations: convoProvider.failedConversations,
+                isRetrying: convoProvider.isConversationRetrying,
+                onRetry: convoProvider.retryFailedConversation,
+              ),
+            ),
             getProcessingConversationsWidget(convoProvider.processingConversations),
 
             // Daily Score, Today's Tasks, and Goals Widgets - hide when showing daily recaps, search bar is active, or calendar filter is active
@@ -283,6 +291,7 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             if (convoProvider.showDailySummaries)
               const DailySummariesList()
             else if (convoProvider.groupedConversations.isEmpty &&
+                convoProvider.failedConversations.isEmpty &&
                 !convoProvider.isLoadingConversations &&
                 !convoProvider.isFetchingConversations)
               SliverToBoxAdapter(
@@ -298,6 +307,8 @@ class _ConversationsPageState extends State<ConversationsPage> with AutomaticKee
             else if (convoProvider.groupedConversations.isEmpty &&
                 (convoProvider.isLoadingConversations || convoProvider.isFetchingConversations))
               _buildLoadingShimmer()
+            else if (convoProvider.groupedConversations.isEmpty)
+              const SliverToBoxAdapter(child: SizedBox.shrink())
             else
               SliverList(
                 delegate: SliverChildBuilderDelegate(

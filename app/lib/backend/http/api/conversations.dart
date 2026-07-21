@@ -68,6 +68,46 @@ Future<List<ServerConversation>> getConversations({
   return [];
 }
 
+enum ConversationProcessingRetryOutcome { processing, completed, failed }
+
+class ConversationProcessingRetryResult {
+  final ConversationProcessingRetryOutcome outcome;
+  final ServerConversation conversation;
+
+  const ConversationProcessingRetryResult({required this.outcome, required this.conversation});
+
+  factory ConversationProcessingRetryResult.fromJson(Map<String, dynamic> json) {
+    return ConversationProcessingRetryResult(
+      outcome: ConversationProcessingRetryOutcome.values.asNameMap()[json['outcome']] ??
+          ConversationProcessingRetryOutcome.failed,
+      conversation: ServerConversation.fromJson(json['conversation']),
+    );
+  }
+}
+
+Future<ConversationProcessingRetryResult?> retryConversationProcessing(
+  String conversationId,
+  String requestId, {
+  String? correctionText,
+}) async {
+  final normalizedCorrection = correctionText?.trim();
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/conversations/$conversationId/processing-retries',
+    headers: {},
+    method: 'POST',
+    body: jsonEncode({
+      'request_id': requestId,
+      if (normalizedCorrection != null && normalizedCorrection.isNotEmpty) 'correction_text': normalizedCorrection,
+    }),
+  );
+  if (response == null) return null;
+  Logger.debug('retryConversationProcessing: ${response.statusCode}');
+  if (response.statusCode == 200 || response.statusCode == 202) {
+    return ConversationProcessingRetryResult.fromJson(jsonDecode(response.body));
+  }
+  return null;
+}
+
 Future<ServerConversation?> reProcessConversationServer(String conversationId, {String? appId}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',

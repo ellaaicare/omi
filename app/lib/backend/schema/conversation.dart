@@ -192,6 +192,8 @@ class ServerConversation {
   final Object? internalAssessment;
   final List<String> ellaTags;
   final Map<String, dynamic>? ellaSignal;
+  final String? processingError;
+  final DateTime? processingErrorAt;
 
   ConversationStatus status;
   bool discarded;
@@ -223,6 +225,8 @@ class ServerConversation {
     this.internalAssessment,
     this.ellaTags = const [],
     this.ellaSignal,
+    this.processingError,
+    this.processingErrorAt,
     this.status = ConversationStatus.completed,
     this.isLocked = false,
     this.starred = false,
@@ -257,6 +261,9 @@ class ServerConversation {
       internalAssessment: json['internal_assessment'],
       ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
+      processingError: json['processing_error'],
+      processingErrorAt:
+          json['processing_error_at'] != null ? DateTime.parse(json['processing_error_at']).toLocal() : null,
       status: json['status'] != null
           ? ConversationStatus.values.asNameMap()[json['status']] ?? ConversationStatus.completed
           : ConversationStatus.completed,
@@ -286,6 +293,8 @@ class ServerConversation {
       'internal_assessment': internalAssessment,
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
+      'processing_error': processingError,
+      'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),
       'status': status.toString().split('.').last,
       'is_locked': isLocked,
       'starred': starred,
