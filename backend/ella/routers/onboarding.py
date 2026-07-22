@@ -80,6 +80,8 @@ async def _coordinator() -> ProvisioningCoordinator:
 
 async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[dict[str, Any]]:
     """Return a public receipt only for an already-routed retained account."""
+    if target_schema_version != DEFAULT_TARGET_SCHEMA_VERSION:
+        return None
     try:
         repository = await EllaProvisioningRepository.create()
         if await repository.has_active_retained_runtime(uid):
