@@ -22,7 +22,7 @@ class ElevenLabsTts {
   /// Synthesize [text] to speech via the backend TTS proxy.
   /// Returns the path to a temporary audio file, or null on failure.
   static Future<String?> synthesize(String text) async {
-    if (text.trim().isEmpty) return null;
+    if (text.trim().isEmpty || !SharedPreferencesUtil().aiConsentAccepted) return null;
 
     final url = '${Env.apiBaseUrl}v1/voice/tts';
 

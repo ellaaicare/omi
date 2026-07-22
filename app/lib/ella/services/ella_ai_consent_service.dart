@@ -41,7 +41,7 @@ class EllaAiConsentService {
     final confirmed = await _transport.getPrivateCloudSyncEnabled();
     if (!confirmed) return null;
 
-    final receiptId = 'ios-private-cloud-sync:${_receiptIdFactory()}';
+    final receiptId = '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}${_receiptIdFactory()}';
     _preferences.acceptAiConsent(receiptId: receiptId, uid: uid);
     return receiptId;
   }

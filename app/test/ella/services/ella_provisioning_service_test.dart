@@ -120,7 +120,7 @@ void main() {
       'ellaSettingsVoiceModeDirty': true,
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentReceiptId': 'consent-a',
+      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
       'aiConsentReceiptUid': 'uid-a',
       'demoMode': true,
       'publicMode': true,
@@ -147,15 +147,17 @@ void main() {
     expect(preferences.getStringList('cachedMessages'), isEmpty);
   });
 
-  test('same retained account preserves legacy preferences without making them provisioning authority', () async {
+  test('same retained account preserves current consent and legacy preferences without making them authority',
+      () async {
     SharedPreferences.setMockInitialValues({
       'ellaProvisioningAccountUid': 'uid-a',
       'ellaGatewayUrl': 'https://gateway.invalid',
       'ellaGatewayToken': 'secret',
       'ellaKey': 'legacy-key',
       'aiConsentAccepted': true,
-      'aiConsentReceiptId': 'consent-a',
+      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
       'aiConsentReceiptUid': 'uid-a',
+      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
     });
     await SharedPreferencesUtil.init();
     final preferences = SharedPreferencesUtil();
@@ -354,11 +356,15 @@ void main() {
 
     final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
 
-    expect(receiptId, 'ios-private-cloud-sync:receipt-1');
+    expect(receiptId, 'ios-private-cloud-sync:voice-ai-processors-v2:receipt-1');
     expect(transport.values, [true]);
     expect(transport.getCalls, 1);
     expect(SharedPreferencesUtil().hasAccountBoundAiConsent('uid-a'), isTrue);
     expect(SharedPreferencesUtil().aiConsentReceiptId, receiptId);
+    expect(
+      SharedPreferencesUtil().aiConsentContractVersion,
+      SharedPreferencesUtil.currentAiConsentContractVersion,
+    );
   });
 
   test('AI consent stays disabled when private cloud sync cannot be confirmed', () async {

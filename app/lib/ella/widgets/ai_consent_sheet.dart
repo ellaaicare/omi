@@ -88,6 +88,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                   TextSpan(text: context.l10n.aiConsentDeepgram, style: const TextStyle(fontWeight: FontWeight.w700)),
                   TextSpan(text: context.l10n.aiConsentBodyMiddle),
                   TextSpan(text: context.l10n.aiConsentAiPartners, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  TextSpan(text: context.l10n.aiConsentBodyBeforeElevenLabs),
+                  TextSpan(text: context.l10n.aiConsentElevenLabs, style: const TextStyle(fontWeight: FontWeight.w700)),
                   TextSpan(text: context.l10n.aiConsentBodyEnd),
                 ],
               ),
