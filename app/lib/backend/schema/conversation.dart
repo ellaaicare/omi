@@ -171,6 +171,38 @@ class AudioFile {
       };
 }
 
+class ConversationSummaryVersion {
+  final String id;
+  final String source;
+  final String kind;
+  final bool isActive;
+  final Map<String, dynamic> _payload;
+
+  ConversationSummaryVersion({
+    required this.id,
+    required this.source,
+    required this.kind,
+    this.isActive = false,
+    Map<String, dynamic> payload = const {},
+  }) : _payload = payload;
+
+  factory ConversationSummaryVersion.fromJson(Map<String, dynamic> json) => ConversationSummaryVersion(
+        id: json['id']?.toString() ?? '',
+        source: json['source']?.toString() ?? '',
+        kind: json['kind']?.toString() ?? '',
+        isActive: json['is_active'] == true,
+        payload: json,
+      );
+
+  Map<String, dynamic> toJson() => {
+        ..._payload,
+        'id': id,
+        'source': source,
+        'kind': kind,
+        'is_active': isActive,
+      };
+}
+
 class ServerConversation {
   final String id;
   final DateTime createdAt;
@@ -193,6 +225,8 @@ class ServerConversation {
   final List<String> ellaTags;
   final Map<String, dynamic>? ellaSignal;
   final Map<String, dynamic>? enrichmentState;
+  final List<ConversationSummaryVersion> summaryVersions;
+  final String? activeSummaryVersionId;
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
@@ -212,6 +246,23 @@ class ServerConversation {
       (enrichmentState?['status'] == 'failed' ||
           enrichmentState?['canonical_status'] == 'failed' ||
           processingRetryEnrichmentVectorStatus == 'failed');
+
+  ConversationSummaryVersion? get activeSummaryVersion {
+    final activeId = activeSummaryVersionId;
+    if (activeId != null && activeId.isNotEmpty) {
+      return summaryVersions.firstWhereOrNull((version) => version.id == activeId);
+    }
+    return summaryVersions.lastWhereOrNull((version) => version.isActive);
+  }
+
+  bool get isEllaEnriched {
+    final version = activeSummaryVersion;
+    final state = enrichmentState;
+    return version?.kind == 'hermes_enriched' &&
+        version?.source == 'hermes_parallel' &&
+        state?['status'] == 'writeback_applied' &&
+        state?['pending'] != true;
+  }
 
   String? folderId;
 
@@ -239,6 +290,8 @@ class ServerConversation {
     this.ellaTags = const [],
     this.ellaSignal,
     this.enrichmentState,
+    this.summaryVersions = const [],
+    this.activeSummaryVersionId,
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
@@ -249,6 +302,7 @@ class ServerConversation {
   });
 
   factory ServerConversation.fromJson(Map<String, dynamic> json) {
+    final summaryVersions = json['summary_versions'];
     return ServerConversation(
       id: json['id'],
       createdAt: DateTime.parse(json['created_at']).toLocal(),
@@ -277,6 +331,13 @@ class ServerConversation {
       ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
       enrichmentState: json['enrichment_state'] is Map ? Map<String, dynamic>.from(json['enrichment_state']) : null,
+      summaryVersions: summaryVersions is List
+          ? summaryVersions
+              .whereType<Map>()
+              .map((version) => ConversationSummaryVersion.fromJson(Map<String, dynamic>.from(version)))
+              .toList()
+          : const [],
+      activeSummaryVersionId: json['active_summary_version_id']?.toString(),
       processingRetryEnrichmentVectorStatus: json['processing_retry_enrichment_vector_status'],
       processingError: json['processing_error'],
       processingErrorAt:
@@ -311,6 +372,8 @@ class ServerConversation {
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
       'enrichment_state': enrichmentState,
+      'summary_versions': summaryVersions.map((version) => version.toJson()).toList(),
+      'active_summary_version_id': activeSummaryVersionId,
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),

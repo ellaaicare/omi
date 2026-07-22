@@ -16052,6 +16052,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Retry now'**
   String get retryNow;
+
+  /// Compact badge text for a memory summary enriched by Ella
+  ///
+  /// In en, this message translates to:
+  /// **'Ella'**
+  String get conversationEllaEnrichedBadge;
+
+  /// Accessible label and tooltip for the Ella-enriched memory badge
+  ///
+  /// In en, this message translates to:
+  /// **'Summary enriched by Ella'**
+  String get conversationEllaEnrichedLabel;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

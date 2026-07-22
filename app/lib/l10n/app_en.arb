@@ -10204,5 +10204,13 @@
   "retryNow": "Retry now",
   "@retryNow": {
     "description": "Confirmation action for retrying a failed summary"
+  },
+  "conversationEllaEnrichedBadge": "Ella",
+  "@conversationEllaEnrichedBadge": {
+    "description": "Compact badge text for a memory summary enriched by Ella"
+  },
+  "conversationEllaEnrichedLabel": "Summary enriched by Ella",
+  "@conversationEllaEnrichedLabel": {
+    "description": "Accessible label and tooltip for the Ella-enriched memory badge"
   }
 }
