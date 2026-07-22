@@ -20,12 +20,14 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 
 /// Voice-to-voice chat page for Ella.
 ///
@@ -71,6 +73,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
   bool _isV2VMode = false;
+  String _activeV2VProvider = '';
+  bool _usingElevenLabsFallback = false;
 
   /// Track whether we've injected chat messages for the current V2V turn
   bool _v2vTurnInjected = false;
@@ -93,11 +97,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   );
 
   /// Check if current TTS provider is a V2V provider.
-  static bool _isV2VProvider(String provider) => provider == 'grok-voice' || provider == 'gemini-live';
+  static bool _isV2VProvider(String provider) => V2VClient.isSessionProvider(provider);
 
-  String get _effectiveVoiceProvider => isHermesProvisioningGateEnabled
-      ? SharedPreferencesUtil().ellaProvisionedVoiceMode
-      : SharedPreferencesUtil().ttsProvider;
+  String get _effectiveVoiceProvider => V2VClient.resolveEffectiveProvider(
+        provisionedProvider: isHermesProvisioningGateEnabled ? SharedPreferencesUtil().ellaProvisionedVoiceMode : '',
+        selectedProvider: SharedPreferencesUtil().ttsProvider,
+      );
 
   @override
   bool get wantKeepAlive => true;
@@ -471,8 +476,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _startV2V(String provider) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    provider = V2VClient.normalizeProvider(provider);
+    final providerName = localizedV2VProviderName(context, provider);
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
     _isV2VMode = true;
+    _usingElevenLabsFallback = false;
 
     // Stop any existing mic recording from CaptureProvider
     if (mounted) {
@@ -488,7 +496,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     setState(() {
       _orbState = VoiceOrbState.processing;
-      _statusText = 'Connecting...';
+      _statusText = context.l10n.voiceV2vConnecting(providerName);
       _audioLevel = 0.0;
     });
 
@@ -513,21 +521,53 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       },
     );
 
-    final success = await _v2vClient!.connect(provider: provider);
+    final receipt = await _v2vClient!.connect(provider: provider);
     if (!mounted) return;
 
-    if (!success) {
-      debugPrint('[VoiceChat] V2V connect failed, falling back to STT mode');
+    if (!receipt.connected) {
+      debugPrint('[VoiceChat] V2V connect failed: ${receipt.toDebugFields()}');
+      await _v2vClient?.disconnect();
+      if (!mounted) return;
       _isV2VMode = false;
       _v2vClient = null;
-      // Fall back to standard STT→LLM→TTS
-      _startListening();
+      _voiceModeActive = false;
+      setState(() {
+        _orbState = VoiceOrbState.idle;
+        _statusText = receipt.safeDetail;
+        _audioLevel = 0.0;
+      });
+
+      final choice = await showV2VFallbackDialog(context, receipt);
+      if (!mounted) return;
+      switch (choice) {
+        case V2VFailureChoice.retry:
+          _voiceModeActive = true;
+          await _startV2V(provider);
+          break;
+        case V2VFailureChoice.useElevenLabs:
+          _usingElevenLabsFallback = true;
+          _voiceModeActive = true;
+          setState(() {
+            _statusText = context.l10n.voiceElevenLabsFallbackActive;
+          });
+          await _startListening();
+          break;
+        case V2VFailureChoice.stop:
+          _usingElevenLabsFallback = false;
+          _activeV2VProvider = '';
+          setState(() {
+            _statusText = context.l10n.voiceTapToTalk;
+          });
+          break;
+      }
       return;
     }
 
+    _activeV2VProvider = providerName;
+    _usingElevenLabsFallback = false;
     setState(() {
       _orbState = VoiceOrbState.listening;
-      _statusText = 'V2V Active — Tap to Stop';
+      _statusText = context.l10n.voiceV2vActive(providerName);
     });
   }
 
@@ -535,6 +575,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     debugPrint('[VoiceChat] Stopping V2V mode');
     await _v2vClient?.disconnect();
     _v2vClient = null;
+    _activeV2VProvider = '';
     _pauseVoiceMode();
   }
 
@@ -578,7 +619,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         if (_isV2VMode) {
           setState(() {
             _orbState = VoiceOrbState.listening;
-            _statusText = 'V2V Active — Tap to Stop';
+            _statusText = context.l10n.voiceV2vActive(_activeV2VProvider);
           });
         }
         break;
@@ -608,6 +649,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         setState(() {
           _statusText = event.text ?? '';
         });
+        break;
+      case 'connection_receipt':
+        // The connect caller owns the explicit success/failure UI.
         break;
       case 'error':
         debugPrint('[VoiceChat] V2V error: ${event.text}');
@@ -912,7 +956,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                       const SizedBox(width: 10),
                     ],
                     Text(
-                      _orbState == VoiceOrbState.listening ? 'Listening' : _statusText,
+                      _orbState == VoiceOrbState.listening
+                          ? _usingElevenLabsFallback
+                              ? context.l10n.voiceElevenLabsFallbackActive
+                              : _isV2VMode && _activeV2VProvider.isNotEmpty
+                                  ? context.l10n.voiceV2vActive(_activeV2VProvider)
+                                  : context.l10n.voiceListening
+                          : _statusText,
                       style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
                       textAlign: TextAlign.center,
                     ),

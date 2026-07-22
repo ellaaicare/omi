@@ -15729,6 +15729,66 @@ abstract class AppLocalizations {
   /// **'Microphone permission is required for voice chat'**
   String get voiceMicPermissionRequired;
 
+  /// Title shown when a native realtime voice provider cannot connect
+  ///
+  /// In en, this message translates to:
+  /// **'{provider} couldn\'t connect'**
+  String voiceV2vUnavailableTitle(String provider);
+
+  /// Redacted V2V connection failure and explicit fallback explanation
+  ///
+  /// In en, this message translates to:
+  /// **'The live voice session failed at {stage} ({detail}). Retry it, use ElevenLabs standard voice for this call, or stop.'**
+  String voiceV2vUnavailableBody(String stage, String detail);
+
+  /// Button to explicitly use standard ElevenLabs voice after V2V fails
+  ///
+  /// In en, this message translates to:
+  /// **'Use ElevenLabs'**
+  String get voiceUseElevenLabs;
+
+  /// Voice status after the user explicitly chooses ElevenLabs fallback
+  ///
+  /// In en, this message translates to:
+  /// **'Listening with ElevenLabs standard voice'**
+  String get voiceElevenLabsFallbackActive;
+
+  /// V2V provider connection status
+  ///
+  /// In en, this message translates to:
+  /// **'Connecting to {provider}...'**
+  String voiceV2vConnecting(String provider);
+
+  /// Connected V2V provider status
+  ///
+  /// In en, this message translates to:
+  /// **'{provider} active - Tap to stop'**
+  String voiceV2vActive(String provider);
+
+  /// Grok native realtime provider label
+  ///
+  /// In en, this message translates to:
+  /// **'Grok Native Realtime'**
+  String get voiceProviderGrokNative;
+
+  /// Gemini native live provider label
+  ///
+  /// In en, this message translates to:
+  /// **'Gemini Native Live'**
+  String get voiceProviderGeminiNative;
+
+  /// OpenAI native realtime provider label
+  ///
+  /// In en, this message translates to:
+  /// **'OpenAI Native Realtime'**
+  String get voiceProviderOpenAiNative;
+
+  /// OpenClaw direct provider label
+  ///
+  /// In en, this message translates to:
+  /// **'OpenClaw Direct'**
+  String get voiceProviderOpenClawDirect;
+
   /// No description provided for @ellaAddCaregiverErrorNameRequired.
   ///
   /// In en, this message translates to:
