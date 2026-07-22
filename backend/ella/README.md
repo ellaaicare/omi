@@ -264,7 +264,7 @@ New-user Hermes provisioning is disabled by default and has two separate rollout
 - `ELLA_HERMES_PROVISIONING_ENABLED` allows authenticated, idempotent `/v1/ella/onboarding/ensure` jobs to call the Hermes-only 8210 provisioner.
 - `ELLA_HERMES_PROVISION_API_TIMEOUT_SECONDS` bounds the cold-start request to 30-300 seconds and defaults to 180 seconds.
 - `ELLA_RUNTIME_BINDINGS_ENABLED` makes chat, history, resolver, voice, and `/v4/listen` require the authenticated user's active healthy Hermes binding. In this mode those routes fail closed and never create/fall back to OpenClaw or a shared Plato profile.
-- `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. Until the voice proxy sends authenticated, UID-bound Hermes context/tool requests and removes its OpenClaw fallback, isolated users receive `isolated_voice_not_ready` instead of a V2V session.
+- `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. The voice proxy and OMI backend use a short-lived, Firebase-subject-bound JWT plus the independent `ELLA_VOICE_PROXY_SERVICE_TOKEN` for context/search/tool calls; isolated failures do not fall back to OpenClaw. Keep this gate off until the coordinated proxy/OMI/8210 deployment and two-UID canary pass.
 
 Apply the shared Prisma migration from `ellaaicare/ella-ai` first:
 `packages/database/prisma/migrations/20260721000000_add_ella_provisioning_runtime/migration.sql` (merged in ella-ai PR #1066). OMI intentionally does not duplicate this schema. Both onboarding endpoints preflight the two tables and every required isolation index; an incomplete deployment returns retryable `503 provisioning_schema_not_ready` before any identity write.

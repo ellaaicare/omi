@@ -150,13 +150,13 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
     assert error.value.detail == {"code": "hermes_not_provisioned"}
 
 
-def test_voice_session_stays_closed_even_when_isolated_voice_flag_is_enabled(monkeypatch):
+def test_voice_session_stays_closed_while_isolated_voice_flag_is_disabled(monkeypatch):
     async def ready_runtime(uid):
         return object()
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
-    monkeypatch.setenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "true")
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(
@@ -167,3 +167,59 @@ def test_voice_session_stays_closed_even_when_isolated_voice_flag_is_enabled(mon
         )
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "isolated_voice_not_ready"}
+
+
+def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch):
+    async def ready_runtime(uid):
+        assert uid == "user-a"
+        return object()
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: uid == "user-a")
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: uid == "user-a")
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(uid="user-a", provider="grok-voice"),
+            authenticated_uid="user-a",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.voice_endpoint.endswith("?mode=v4")
+    assert claims["sub"] == "user-a"
+    assert claims["uid"] == "user-a"
+    assert claims["voice_mode"] == "v4"
+    assert claims["provider"] == "grok-voice"
+    assert claims["isolated_runtime"] is True
+
+
+def test_voice_session_rejects_voice_canary_without_runtime_binding(monkeypatch):
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: uid == "user-a")
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(uid="user-a", provider="grok-voice"),
+                authenticated_uid="user-a",
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {"code": "isolated_voice_runtime_required"}
