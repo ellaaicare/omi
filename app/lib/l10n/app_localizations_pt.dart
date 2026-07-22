@@ -8604,4 +8604,10 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get retryNow => 'Retry now';
+
+  @override
+  String get conversationEllaEnrichedBadge => 'Ella';
+
+  @override
+  String get conversationEllaEnrichedLabel => 'Summary enriched by Ella';
 }

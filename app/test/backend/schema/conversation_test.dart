@@ -153,4 +153,76 @@ void main() {
     expect(vectorFailure.isRetryableEnrichmentFailure, isTrue);
     expect(activeWrite.isRetryableEnrichmentFailure, isFalse);
   });
+
+  group('structured Ella enrichment', () {
+    ServerConversation conversation({
+      required String activeKind,
+      required String activeSource,
+      required Map<String, dynamic> enrichmentState,
+      String title = 'A structured title',
+    }) {
+      return ServerConversation.fromJson({
+        'id': 'enrichment-conversation',
+        'created_at': '2026-07-21T08:00:00Z',
+        'structured': {
+          'title': title,
+          'overview': 'Overview',
+          'emoji': '',
+          'category': 'other',
+          'action_items': [],
+          'events': [],
+        },
+        'summary_versions': [
+          {'id': 'generic-v1', 'source': 'omi', 'kind': 'generic', 'is_active': false},
+          {
+            'id': 'active-v2',
+            'source': activeSource,
+            'kind': activeKind,
+            'is_active': true,
+            'title': 'Preserved version title',
+          },
+        ],
+        'active_summary_version_id': 'active-v2',
+        'enrichment_state': enrichmentState,
+      });
+    }
+
+    test('uses the active Hermes version and applied state instead of title decoration', () {
+      final enriched = conversation(
+        activeKind: 'hermes_enriched',
+        activeSource: 'hermes_parallel',
+        enrichmentState: {'status': 'writeback_applied', 'pending': false, 'canonical_status': 'unconfirmed'},
+      );
+      final wingOnly = conversation(
+        activeKind: 'generic',
+        activeSource: 'omi',
+        enrichmentState: const {},
+        title: '\u{1FABD} Legacy title marker',
+      );
+
+      expect(enriched.isEllaEnriched, isTrue);
+      expect(enriched.activeSummaryVersion?.id, 'active-v2');
+      expect(wingOnly.isEllaEnriched, isFalse);
+      expect(enriched.toJson()['active_summary_version_id'], 'active-v2');
+      expect(enriched.toJson()['summary_versions'][1]['title'], 'Preserved version title');
+    });
+
+    test('does not badge generic, pending, or failed enrichment', () {
+      final generic = conversation(activeKind: 'generic', activeSource: 'omi', enrichmentState: const {});
+      final pending = conversation(
+        activeKind: 'hermes_enriched',
+        activeSource: 'hermes_parallel',
+        enrichmentState: {'status': 'writeback_pending_canonical', 'pending': true},
+      );
+      final failed = conversation(
+        activeKind: 'hermes_enriched',
+        activeSource: 'hermes_parallel',
+        enrichmentState: {'status': 'failed', 'pending': false},
+      );
+
+      expect(generic.isEllaEnriched, isFalse);
+      expect(pending.isEllaEnriched, isFalse);
+      expect(failed.isEllaEnriched, isFalse);
+    });
+  });
 }

@@ -9,8 +9,10 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
+import 'package:omi/pages/conversations/widgets/ella_enriched_badge.dart';
 import 'package:omi/pages/settings/usage_page.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -21,7 +23,6 @@ import 'package:omi/utils/other/time_utils.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/widgets/dialog.dart';
 import 'package:omi/widgets/extensions/string.dart';
-import 'package:omi/ella/ella_theme.dart';
 
 class ConversationListItem extends StatefulWidget {
   final bool isFromOnboarding;
@@ -285,14 +286,21 @@ class _ConversationListItemState extends State<ConversationListItem> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        widget.conversation.discarded
-                            ? widget.conversation.getTranscript(maxCount: 100)
-                            : widget.conversation.structured.title.decodeString,
-                        style: Theme.of(context).textTheme.titleMedium,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      if (widget.conversation.discarded)
+                        Text(
+                          widget.conversation.getTranscript(maxCount: 100),
+                          style: Theme.of(context).textTheme.titleMedium,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        )
+                      else
+                        ConversationTitleWithEllaBadge(
+                          conversation: widget.conversation,
+                          title: widget.conversation.structured.title.decodeString,
+                          style: Theme.of(context).textTheme.titleMedium,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       const SizedBox(height: 8),
                       // Duration and time below title (or New status)
                       isNew
@@ -407,8 +415,9 @@ class _ConversationListItemState extends State<ConversationListItem> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          widget.conversation.structured.title.decodeString,
+        ConversationTitleWithEllaBadge(
+          conversation: widget.conversation,
+          title: widget.conversation.structured.title.decodeString,
           style: Theme.of(context).textTheme.titleLarge,
         ),
       ],
