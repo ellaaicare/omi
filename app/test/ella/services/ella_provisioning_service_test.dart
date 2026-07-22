@@ -120,7 +120,7 @@ void main() {
       'ellaSettingsVoiceModeDirty': true,
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentReceiptId': 'consent-a',
+      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
       'aiConsentReceiptUid': 'uid-a',
       'demoMode': true,
       'publicMode': true,
@@ -155,7 +155,7 @@ void main() {
       'ellaGatewayToken': 'secret',
       'ellaKey': 'legacy-key',
       'aiConsentAccepted': true,
-      'aiConsentReceiptId': 'consent-a',
+      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
       'aiConsentReceiptUid': 'uid-a',
       'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
     });

@@ -19,6 +19,7 @@ class SharedPreferencesUtil {
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const String currentAiConsentContractVersion = 'voice-ai-processors-v2';
+  static const String currentAiConsentReceiptPrefix = 'ios-private-cloud-sync:$currentAiConsentContractVersion:';
 
   factory SharedPreferencesUtil() {
     return _instance;
@@ -210,15 +211,21 @@ class SharedPreferencesUtil {
   String get aiConsentContractVersion => getString('aiConsentContractVersion');
 
   bool hasAccountBoundAiConsent(String uid) =>
-      uid.isNotEmpty && aiConsentAccepted && aiConsentReceiptId.isNotEmpty && aiConsentReceiptUid == uid;
+      uid.isNotEmpty &&
+      aiConsentAccepted &&
+      aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) &&
+      aiConsentReceiptUid == uid;
 
   void acceptAiConsent({String receiptId = '', String uid = ''}) {
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);
-    if (receiptId.isNotEmpty && uid.isNotEmpty) {
+    if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
       saveString('aiConsentReceiptId', receiptId);
       saveString('aiConsentReceiptUid', uid);
+    } else {
+      remove('aiConsentReceiptId');
+      remove('aiConsentReceiptUid');
     }
   }
 
