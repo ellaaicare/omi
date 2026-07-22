@@ -60,12 +60,28 @@ def _token(uid: str, *, isolated: bool = True, expired: bool = False) -> str:
     )
 
 
+def _legacy_token(uid: str) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "uid": uid,
+            "firebase_uid": uid,
+            "iss": "omi-backend",
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+        },
+        voice.ELLA_SESSION_SECRET,
+        algorithm="HS256",
+    )
+
+
 @pytest.fixture(autouse=True)
 def voice_auth(monkeypatch):
     monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
     monkeypatch.setattr(voice, "VOICE_PROXY_SERVICE_TOKEN", "test-proxy-secret")
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_URL", "http://hermes-8210")
     monkeypatch.setattr(voice, "HERMES_PROVISION_API_TOKEN", "test-hermes-secret")
+    monkeypatch.setattr(voice, "ALLOW_LEGACY_VOICE_SESSION_TOKENS", True)
 
 
 def test_voice_session_token_has_firebase_subject_and_proxy_audience():
@@ -135,6 +151,55 @@ def test_voice_proxy_requires_service_secret_and_unexpired_session():
         )
     assert expired.value.status_code == 401
     assert expired.value.detail == {"code": "voice_session_expired"}
+
+
+def test_voice_proxy_legacy_bridge_is_bounded_to_nonisolated_tokens(monkeypatch):
+    legacy = voice.authenticate_voice_proxy_request(
+        _request(
+            {"uid": "uid-a"},
+            token=_legacy_token("uid-a"),
+            service_token="test-proxy-secret",
+        ),
+        "uid-a",
+    )
+    assert legacy.uid == "uid-a"
+    assert legacy.isolated_runtime is False
+
+    monkeypatch.setattr(voice, "ALLOW_LEGACY_VOICE_SESSION_TOKENS", False)
+    with pytest.raises(HTTPException) as disabled:
+        voice.authenticate_voice_proxy_request(
+            _request(
+                {"uid": "uid-a"},
+                token=_legacy_token("uid-a"),
+                service_token="test-proxy-secret",
+            ),
+            "uid-a",
+        )
+    assert disabled.value.status_code == 401
+
+    now = datetime.now(timezone.utc)
+    partial_modern = jwt.encode(
+        {
+            "uid": "uid-a",
+            "sub": "uid-a",
+            "iss": "omi-backend",
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+        },
+        voice.ELLA_SESSION_SECRET,
+        algorithm="HS256",
+    )
+    monkeypatch.setattr(voice, "ALLOW_LEGACY_VOICE_SESSION_TOKENS", True)
+    with pytest.raises(HTTPException) as incomplete:
+        voice.authenticate_voice_proxy_request(
+            _request(
+                {"uid": "uid-a"},
+                token=partial_modern,
+                service_token="test-proxy-secret",
+            ),
+            "uid-a",
+        )
+    assert incomplete.value.status_code == 401
 
 
 @pytest.mark.parametrize(

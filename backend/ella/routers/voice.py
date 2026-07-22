@@ -78,6 +78,12 @@ HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").st
 VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
+ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
@@ -120,14 +126,56 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     if not jwt or not ELLA_SESSION_SECRET:
         raise HTTPException(status_code=503, detail={"code": "voice_session_auth_not_configured"})
 
+    session_token = _voice_proxy_bearer(request)
     try:
         claims = jwt.decode(
-            _voice_proxy_bearer(request),
+            session_token,
             ELLA_SESSION_SECRET,
             algorithms=["HS256"],
             issuer="omi-backend",
             audience=VOICE_SESSION_AUDIENCE,
-            options={"require": ["exp", "iat", "iss", "aud", "sub", "uid"]},
+            options={
+                "require": [
+                    "exp",
+                    "iat",
+                    "iss",
+                    "aud",
+                    "sub",
+                    "uid",
+                    "jti",
+                    "voice_mode",
+                    "provider",
+                    "isolated_runtime",
+                ]
+            },
+        )
+    except jwt.MissingRequiredClaimError as exc:
+        if not ALLOW_LEGACY_VOICE_SESSION_TOKENS:
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"}) from exc
+        try:
+            claims = jwt.decode(
+                session_token,
+                ELLA_SESSION_SECRET,
+                algorithms=["HS256"],
+                options={"require": ["exp", "uid"], "verify_aud": False},
+            )
+        except jwt.ExpiredSignatureError as legacy_exc:
+            raise HTTPException(status_code=401, detail={"code": "voice_session_expired"}) from legacy_exc
+        except jwt.InvalidTokenError as legacy_exc:
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"}) from legacy_exc
+        if any(key in claims for key in ("sub", "aud", "isolated_runtime")):
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"}) from exc
+        if claims.get("iss") and claims["iss"] != "omi-backend":
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"}) from exc
+        subject = str(claims.get("uid") or "").strip()
+        if not subject or str(requested_uid or "").strip() != subject:
+            raise HTTPException(status_code=403, detail={"code": "voice_session_ownership_mismatch"})
+        return VoiceProxyPrincipal(
+            uid=subject,
+            session_id=str(claims.get("jti") or ""),
+            provider=str(claims.get("provider") or ""),
+            voice_mode=str(claims.get("voice_mode") or ""),
+            isolated_runtime=False,
         )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail={"code": "voice_session_expired"}) from exc
@@ -139,6 +187,13 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     requested_uid = str(requested_uid or "").strip()
     if not subject or claim_uid != subject or requested_uid != subject:
         raise HTTPException(status_code=403, detail={"code": "voice_session_ownership_mismatch"})
+    if (
+        not str(claims.get("jti") or "").strip()
+        or not str(claims.get("provider") or "").strip()
+        or not str(claims.get("voice_mode") or "").strip()
+        or not isinstance(claims.get("isolated_runtime"), bool)
+    ):
+        raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
     return VoiceProxyPrincipal(
         uid=subject,

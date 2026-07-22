@@ -25,6 +25,7 @@ OMI backend:
 ```text
 ELLA_SESSION_SECRET=<shared session signing secret>
 ELLA_VOICE_PROXY_SERVICE_TOKEN=<new independent proxy service secret>
+ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS=true
 ELLA_HERMES_PROVISION_API_URL=http://<mac-mini-tailscale-ip>:8210
 ELLA_HERMES_PROVISION_API_TOKEN=<8210 internal service token>
 ```
@@ -34,6 +35,7 @@ Voice proxy:
 ```text
 ELLA_SESSION_SECRET=<same session signing secret>
 ELLA_VOICE_PROXY_SERVICE_TOKEN=<same independent proxy service secret>
+ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS=true
 ```
 
 Hermes 8210 keeps its runtime gateway key server-side. Native clients receive
@@ -41,13 +43,13 @@ only the short-lived session JWT and public WebSocket URL.
 
 ## Rollout And Rollback
 
-1. Deploy/configure the voice proxy first so dual headers are present. Keep its
-   bounded legacy-token bridge enabled only for already-issued non-isolated
-   sessions.
+1. Deploy/configure the voice proxy first so dual headers are present. Keep the
+   bounded legacy-token bridge enabled on both proxy and OMI only for
+   already-issued non-isolated sessions.
 2. Deploy the 8210 owner-bound runtime route, then OMI token
    issuance/authentication.
-3. After the previous one-hour token window expires, disable the proxy legacy
-   token bridge.
+3. After the previous one-hour token window expires, set
+   `ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS=false` on both services.
 4. Keep `ELLA_RUNTIME_BINDINGS_ENABLED`, `ELLA_ISOLATED_VOICE_ROUTING_ENABLED`,
    and UID allowlists unchanged/off globally.
 5. Canary one disposable UID and prove context/search/tool success plus UID-B
