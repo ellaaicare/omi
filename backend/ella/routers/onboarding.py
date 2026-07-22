@@ -23,6 +23,7 @@ from ella.services.provisioning import (
     public_receipt,
     retained_compatibility_receipt,
 )
+from ella.services.runtime_resolver import runtime_bindings_enabled
 from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.onboarding")
@@ -80,7 +81,7 @@ async def _coordinator() -> ProvisioningCoordinator:
 
 async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[dict[str, Any]]:
     """Return a public receipt only for an already-routed retained account."""
-    if target_schema_version != DEFAULT_TARGET_SCHEMA_VERSION:
+    if target_schema_version != DEFAULT_TARGET_SCHEMA_VERSION or runtime_bindings_enabled(uid):
         return None
     try:
         repository = await EllaProvisioningRepository.create()

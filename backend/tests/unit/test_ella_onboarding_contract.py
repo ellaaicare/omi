@@ -177,6 +177,7 @@ def test_retained_receipt_uses_authenticated_uid_and_public_contract(monkeypatch
     async def fake_create(**_kwargs):
         return FakeRepository()
 
+    monkeypatch.setattr(onboarding, "runtime_bindings_enabled", lambda _uid: False)
     monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", fake_create)
 
     result = asyncio.run(onboarding._retained_receipt("retained-user", "hermes-user-v1"))
@@ -194,6 +195,18 @@ def test_retained_receipt_rejects_unknown_schema_without_database_lookup(monkeyp
     monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
 
     result = asyncio.run(onboarding._retained_receipt("retained-user", "hermes-user-v2"))
+
+    assert result is None
+
+
+def test_retained_receipt_rejects_uid_in_isolated_runtime_cutover(monkeypatch):
+    async def forbidden_create(**_kwargs):
+        raise AssertionError("isolated runtime cutover must not use retained compatibility")
+
+    monkeypatch.setattr(onboarding, "runtime_bindings_enabled", lambda uid: uid == "cutover-user")
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
+
+    result = asyncio.run(onboarding._retained_receipt("cutover-user", "hermes-user-v1"))
 
     assert result is None
 
