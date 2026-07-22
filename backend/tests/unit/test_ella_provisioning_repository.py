@@ -47,6 +47,16 @@ class _Pool:
         return _AsyncContext(self.connection)
 
 
+class _LookupPool:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        return self.result
+
+
 def test_fresh_identity_insert_casts_jsonb_parameters():
     connection = _Connection()
     repository = EllaProvisioningRepository(_Pool(connection))
@@ -70,3 +80,21 @@ def test_fresh_identity_insert_casts_jsonb_parameters():
     }
     assert isinstance(result["id"], uuid.UUID)
     assert len(connection.queries) == 3
+
+
+def test_retained_runtime_requires_active_owned_cluster_with_agent_id():
+    pool = _LookupPool({"eligible": True})
+    repository = EllaProvisioningRepository(pool)
+
+    assert asyncio.run(repository.has_active_retained_runtime("firebase-user-1")) is True
+    query, args = pool.calls[0]
+    assert "u.status = 'ACTIVE'" in query
+    assert "ac.status = 'ACTIVE'" in query
+    assert "ac.agents->>'userAgentId'" in query
+    assert args == ("firebase-user-1",)
+
+
+def test_retained_runtime_rejects_unknown_or_inactive_account():
+    repository = EllaProvisioningRepository(_LookupPool({"eligible": False}))
+
+    assert asyncio.run(repository.has_active_retained_runtime("unknown-user")) is False

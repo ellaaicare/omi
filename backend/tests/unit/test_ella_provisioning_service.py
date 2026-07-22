@@ -15,6 +15,7 @@ from ella.services.provisioning import (
     provision_timeout_seconds,
     public_receipt,
     provisioning_enabled,
+    retained_compatibility_receipt,
     resolve_gateway_credential,
     rollout_enabled,
     stable_payload_hash,
@@ -325,6 +326,19 @@ def test_public_receipt_does_not_expose_runtime_secrets():
     assert "TOP_SECRET" not in serialized
     assert "100.76.138.56" not in serialized
     assert "/private/workspace" not in serialized
+
+
+def test_retained_compatibility_receipt_is_operational_and_credential_free():
+    receipt = retained_compatibility_receipt("hermes-user-v1")
+
+    assert receipt["state"] == "ready"
+    assert receipt["binding_state"] == "active"
+    assert receipt["binding_revision"] > 0
+    assert receipt["effective_policy_revision"]
+    assert receipt["compatibility_mode"] == "retained"
+    serialized = str(receipt).lower()
+    for forbidden in ("credential", "token", "gateway", "workspace", "http"):
+        assert forbidden not in serialized
 
 
 def test_gateway_credentials_are_server_env_references_only(monkeypatch):

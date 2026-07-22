@@ -33,6 +33,7 @@ TRUE_VALUES = {"1", "true", "yes", "on"}
 DEFAULT_PROVISION_TIMEOUT_SECONDS = 180.0
 MIN_PROVISION_TIMEOUT_SECONDS = 30.0
 MAX_PROVISION_TIMEOUT_SECONDS = 300.0
+RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
 
 
 class ProvisioningError(RuntimeError):
@@ -133,6 +134,23 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
     if job.get("error_code"):
         result["error_code"] = job["error_code"]
     return result
+
+
+def retained_compatibility_receipt(target_schema_version: str) -> dict[str, Any]:
+    """Describe an existing routed account without exposing legacy runtime details."""
+    return {
+        "job_id": "retained-compatibility",
+        "state": "ready",
+        "stage": "ready",
+        "retryable": False,
+        "retry_after_ms": None,
+        "support_code": "",
+        "target_schema_version": target_schema_version,
+        "binding_state": "active",
+        "binding_revision": 1,
+        "effective_policy_revision": RETAINED_COMPATIBILITY_POLICY_REVISION,
+        "compatibility_mode": "retained",
+    }
 
 
 def validate_gateway_credential_ref(credential_ref: Optional[str]) -> str:

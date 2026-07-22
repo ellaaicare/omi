@@ -97,6 +97,11 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
     monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
 
+    async def no_retained_receipt(_uid, _target_schema_version):
+        return None
+
+    monkeypatch.setattr(onboarding, "_retained_receipt", no_retained_receipt)
+
     with pytest.raises(onboarding.HTTPException) as error:
         asyncio.run(
             onboarding.ensure_onboarding(
@@ -106,6 +111,124 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
                 uid="firebase-subject",
             )
         )
+    assert error.value.status_code == 503
+    assert error.value.detail == {"code": "provisioning_disabled"}
+
+
+def test_disabled_endpoint_allows_existing_retained_account_without_provisioning(monkeypatch):
+    async def forbidden_coordinator():
+        raise AssertionError("retained onboarding must not start Hermes provisioning")
+
+    async def retained_receipt(uid, target_schema_version):
+        assert uid == "retained-user"
+        assert target_schema_version == "hermes-user-v1"
+        return {
+            "state": "ready",
+            "stage": "ready",
+            "binding_state": "active",
+            "binding_revision": 1,
+            "effective_policy_revision": "retained-compatibility-v1",
+        }
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
+    monkeypatch.setattr(onboarding, "_retained_receipt", retained_receipt)
+    monkeypatch.setattr(
+        onboarding.auth,
+        "get_user",
+        lambda _uid: (_ for _ in ()).throw(AssertionError("retained compatibility must not query Firebase")),
+    )
+
+    result = asyncio.run(
+        onboarding.ensure_onboarding(
+            onboarding.OnboardingEnsureRequest(),
+            BackgroundTasks(),
+            Response(),
+            uid="retained-user",
+        )
+    )
+
+    assert result["state"] == "ready"
+    assert result["binding_state"] == "active"
+
+
+def test_disabled_status_allows_existing_retained_account(monkeypatch):
+    async def retained_receipt(uid, target_schema_version):
+        assert uid == "retained-user"
+        assert target_schema_version == "hermes-user-v1"
+        return {"state": "ready", "binding_state": "active", "binding_revision": 1}
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.setattr(onboarding, "_retained_receipt", retained_receipt)
+
+    result = asyncio.run(onboarding.onboarding_status(uid="retained-user"))
+
+    assert result == {"state": "ready", "binding_state": "active", "binding_revision": 1}
+
+
+def test_retained_receipt_uses_authenticated_uid_and_public_contract(monkeypatch):
+    class FakeRepository:
+        async def has_active_retained_runtime(self, uid):
+            assert uid == "retained-user"
+            return True
+
+    async def fake_create(**_kwargs):
+        return FakeRepository()
+
+    monkeypatch.setattr(onboarding, "runtime_bindings_enabled", lambda _uid: False)
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", fake_create)
+
+    result = asyncio.run(onboarding._retained_receipt("retained-user", "hermes-user-v1"))
+
+    assert result["state"] == "ready"
+    assert result["binding_state"] == "active"
+    assert result["binding_revision"] > 0
+    assert result["effective_policy_revision"] == "retained-compatibility-v1"
+
+
+def test_retained_receipt_rejects_unknown_schema_without_database_lookup(monkeypatch):
+    async def forbidden_create(**_kwargs):
+        raise AssertionError("future schemas must not use retained compatibility")
+
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
+
+    result = asyncio.run(onboarding._retained_receipt("retained-user", "hermes-user-v2"))
+
+    assert result is None
+
+
+def test_retained_receipt_rejects_uid_in_isolated_runtime_cutover(monkeypatch):
+    async def forbidden_create(**_kwargs):
+        raise AssertionError("isolated runtime cutover must not use retained compatibility")
+
+    monkeypatch.setattr(onboarding, "runtime_bindings_enabled", lambda uid: uid == "cutover-user")
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
+
+    result = asyncio.run(onboarding._retained_receipt("cutover-user", "hermes-user-v1"))
+
+    assert result is None
+
+
+def test_disabled_endpoint_does_not_claim_future_schema_for_retained_account(monkeypatch):
+    async def forbidden_create(**_kwargs):
+        raise AssertionError("future schemas must not use retained compatibility")
+
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
+
+    with pytest.raises(onboarding.HTTPException) as error:
+        asyncio.run(
+            onboarding.ensure_onboarding(
+                onboarding.OnboardingEnsureRequest(target_schema_version="hermes-user-v2"),
+                BackgroundTasks(),
+                Response(),
+                uid="retained-user",
+            )
+        )
+
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "provisioning_disabled"}
 
