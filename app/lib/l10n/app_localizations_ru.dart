@@ -8682,14 +8682,21 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get aiConsentBodyMiddle =>
-      ' for speech-to-text. Depending on the voice feature you choose, live audio and transcripts may also be sent to ';
+      ' for speech-to-text. To create summaries or answers, transcript and derived text may be sent to ';
 
   @override
-  String get aiConsentAiPartners => 'Google (Gemini), OpenAI, xAI (Grok), and ElevenLabs';
+  String get aiConsentAiPartners => 'OpenRouter, Google (Gemini), OpenAI, Groq, and xAI (Grok)';
+
+  @override
+  String get aiConsentBodyBeforeElevenLabs =>
+      '. OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to ';
+
+  @override
+  String get aiConsentElevenLabs => 'ElevenLabs';
 
   @override
   String get aiConsentBodyEnd =>
-      '. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you; ElevenLabs receives response text and returns generated voice audio. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.';
+      ' and receives generated voice audio. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.';
 
   @override
   String get allowAndContinue => 'Allow and continue';

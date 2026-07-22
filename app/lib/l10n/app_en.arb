@@ -10284,15 +10284,23 @@
   "@aiConsentDeepgram": {
     "description": "Speech-to-text processor named in the locked consent disclosure"
   },
-  "aiConsentBodyMiddle": " for speech-to-text. Depending on the voice feature you choose, live audio and transcripts may also be sent to ",
+  "aiConsentBodyMiddle": " for speech-to-text. To create summaries or answers, transcript and derived text may be sent to ",
   "@aiConsentBodyMiddle": {
     "description": "Locked consent body between processor names"
   },
-  "aiConsentAiPartners": "Google (Gemini), OpenAI, xAI (Grok), and ElevenLabs",
+  "aiConsentAiPartners": "OpenRouter, Google (Gemini), OpenAI, Groq, and xAI (Grok)",
   "@aiConsentAiPartners": {
-    "description": "Voice, summary, answer, and generated speech processors named in the locked consent disclosure"
+    "description": "Text routing, summary, answer, and native voice processors named in the locked consent disclosure"
   },
-  "aiConsentBodyEnd": ". Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you; ElevenLabs receives response text and returns generated voice audio. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.",
+  "aiConsentBodyBeforeElevenLabs": ". OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to ",
+  "@aiConsentBodyBeforeElevenLabs": {
+    "description": "Locked consent body explaining model routing and live voice before naming the TTS processor"
+  },
+  "aiConsentElevenLabs": "ElevenLabs",
+  "@aiConsentElevenLabs": {
+    "description": "Generated voice processor named in the locked consent disclosure"
+  },
+  "aiConsentBodyEnd": " and receives generated voice audio. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.",
   "@aiConsentBodyEnd": {
     "description": "Locked final portion of the listening consent body"
   },

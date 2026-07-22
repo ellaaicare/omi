@@ -29,9 +29,13 @@ void main() {
     expect(disclosure, contains("Ella's secure backend"));
     expect(disclosure, contains('live microphone audio'));
     expect(disclosure, contains('Deepgram'));
+    expect(disclosure, contains('OpenRouter'));
+    expect(disclosure, contains('selected model provider'));
     expect(disclosure, contains('Google (Gemini)'));
     expect(disclosure, contains('OpenAI'));
+    expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI (Grok)'));
+    expect(disclosure, contains('OpenAI, Groq, and xAI (Grok)'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('response text'));
     expect(find.text('Not now'), findsOneWidget);
@@ -41,6 +45,8 @@ void main() {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(find.text('Allow and continue'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Allow and continue'));
     await tester.pumpAndSettle();
 

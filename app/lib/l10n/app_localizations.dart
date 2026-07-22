@@ -16140,19 +16140,31 @@ abstract class AppLocalizations {
   /// Locked consent body between processor names
   ///
   /// In en, this message translates to:
-  /// **' for speech-to-text. Depending on the voice feature you choose, live audio and transcripts may also be sent to '**
+  /// **' for speech-to-text. To create summaries or answers, transcript and derived text may be sent to '**
   String get aiConsentBodyMiddle;
 
-  /// Voice, summary, answer, and generated speech processors named in the locked consent disclosure
+  /// Text routing, summary, answer, and native voice processors named in the locked consent disclosure
   ///
   /// In en, this message translates to:
-  /// **'Google (Gemini), OpenAI, xAI (Grok), and ElevenLabs'**
+  /// **'OpenRouter, Google (Gemini), OpenAI, Groq, and xAI (Grok)'**
   String get aiConsentAiPartners;
+
+  /// Locked consent body explaining model routing and live voice before naming the TTS processor
+  ///
+  /// In en, this message translates to:
+  /// **'. OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to '**
+  String get aiConsentBodyBeforeElevenLabs;
+
+  /// Generated voice processor named in the locked consent disclosure
+  ///
+  /// In en, this message translates to:
+  /// **'ElevenLabs'**
+  String get aiConsentElevenLabs;
 
   /// Locked final portion of the listening consent body
   ///
   /// In en, this message translates to:
-  /// **'. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you; ElevenLabs receives response text and returns generated voice audio. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.'**
+  /// **' and receives generated voice audio. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.'**
   String get aiConsentBodyEnd;
 
   /// Accept listening consent action
