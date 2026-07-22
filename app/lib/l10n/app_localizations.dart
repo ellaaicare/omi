@@ -16125,10 +16125,10 @@ abstract class AppLocalizations {
   /// **'Ella listens to help remember.'**
   String get aiConsentTitle;
 
-  /// Locked consent body before the Deepgram processor name
+  /// Locked consent body naming Ella routing and the data sent before the Deepgram processor name
   ///
   /// In en, this message translates to:
-  /// **'To turn speech into memories, audio from your device and necklace is sent securely to our processing partners: '**
+  /// **'When you enable listening or voice, live microphone audio from your iPhone or necklace is sent through Ella\'s secure backend to '**
   String get aiConsentBodyIntro;
 
   /// Speech-to-text processor named in the locked consent disclosure
@@ -16140,19 +16140,19 @@ abstract class AppLocalizations {
   /// Locked consent body between processor names
   ///
   /// In en, this message translates to:
-  /// **' (speech-to-text) and '**
+  /// **' for speech-to-text. Depending on the voice feature you choose, live audio and transcripts may also be sent to '**
   String get aiConsentBodyMiddle;
 
-  /// Summary and answer processors named in the locked consent disclosure
+  /// Voice, summary, answer, and generated speech processors named in the locked consent disclosure
   ///
   /// In en, this message translates to:
-  /// **'Google (Gemini), OpenAI, and Groq'**
+  /// **'Google (Gemini), OpenAI, xAI (Grok), and ElevenLabs'**
   String get aiConsentAiPartners;
 
   /// Locked final portion of the listening consent body
   ///
   /// In en, this message translates to:
-  /// **' (to write summaries and answer you). Summaries are shared only with family members you choose. You can turn listening off any time in Settings.'**
+  /// **'. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you; ElevenLabs receives response text and returns generated voice audio. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.'**
   String get aiConsentBodyEnd;
 
   /// Accept listening consent action

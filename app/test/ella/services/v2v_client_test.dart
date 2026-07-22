@@ -1,7 +1,17 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferencesUtil.init();
+  });
+
   group('V2VClient provider contract', () {
     test('normalizes legacy provider ids and recognizes canonical session providers', () {
       expect(V2VClient.normalizeProvider('gemini-live'), 'gemini-native-live');
@@ -83,6 +93,24 @@ void main() {
         V2VClient.safeErrorCode('{"detail":"Provider grok-voice is not configured (missing API key)"}'),
         'provider_not_configured',
       );
+    });
+
+    test('legacy consent receipt blocks before V2V provider or session requests', () async {
+      SharedPreferences.setMockInitialValues({
+        'aiConsentAccepted': true,
+        'aiConsentReceiptId': 'legacy-receipt',
+        'aiConsentReceiptUid': 'uid-a',
+        'uid': 'uid-a',
+      });
+      await SharedPreferencesUtil.init();
+      final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
+
+      final receipt = await client.connect(provider: 'grok-voice');
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.consent);
+      expect(receipt.errorCode, 'ai_consent_required');
+      await client.disconnect();
     });
   });
 

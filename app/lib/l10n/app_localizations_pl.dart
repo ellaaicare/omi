@@ -8668,20 +8668,21 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get aiConsentBodyIntro =>
-      'To turn speech into memories, audio from your device and necklace is sent securely to our processing partners: ';
+      'When you enable listening or voice, live microphone audio from your iPhone or necklace is sent through Ella\'s secure backend to ';
 
   @override
   String get aiConsentDeepgram => 'Deepgram';
 
   @override
-  String get aiConsentBodyMiddle => ' (speech-to-text) and ';
+  String get aiConsentBodyMiddle =>
+      ' for speech-to-text. Depending on the voice feature you choose, live audio and transcripts may also be sent to ';
 
   @override
-  String get aiConsentAiPartners => 'Google (Gemini), OpenAI, and Groq';
+  String get aiConsentAiPartners => 'Google (Gemini), OpenAI, xAI (Grok), and ElevenLabs';
 
   @override
   String get aiConsentBodyEnd =>
-      ' (to write summaries and answer you). Summaries are shared only with family members you choose. You can turn listening off any time in Settings.';
+      '. Ella sends data only to the provider needed for the feature you choose. These processors use it to transcribe, answer, and speak to you; ElevenLabs receives response text and returns generated voice audio. Summaries are shared only with family members you choose. You can choose Not now or turn listening off any time in Settings.';
 
   @override
   String get allowAndContinue => 'Allow and continue';

@@ -18,6 +18,7 @@ class SharedPreferencesUtil {
   static SharedPreferences? _preferences;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
+  static const String currentAiConsentContractVersion = 'voice-ai-processors-v2';
 
   factory SharedPreferencesUtil() {
     return _instance;
@@ -195,7 +196,8 @@ class SharedPreferencesUtil {
 
   set aiConsentAccepted(bool value) => saveBool('aiConsentAccepted', value);
 
-  bool get aiConsentAccepted => getBool('aiConsentAccepted', defaultValue: false);
+  bool get aiConsentAccepted =>
+      getBool('aiConsentAccepted', defaultValue: false) && aiConsentContractVersion == currentAiConsentContractVersion;
 
   set aiConsentAcceptedAt(String value) => saveString('aiConsentAcceptedAt', value);
 
@@ -205,12 +207,15 @@ class SharedPreferencesUtil {
 
   String get aiConsentReceiptUid => getString('aiConsentReceiptUid');
 
+  String get aiConsentContractVersion => getString('aiConsentContractVersion');
+
   bool hasAccountBoundAiConsent(String uid) =>
       uid.isNotEmpty && aiConsentAccepted && aiConsentReceiptId.isNotEmpty && aiConsentReceiptUid == uid;
 
   void acceptAiConsent({String receiptId = '', String uid = ''}) {
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
+    saveString('aiConsentContractVersion', currentAiConsentContractVersion);
     if (receiptId.isNotEmpty && uid.isNotEmpty) {
       saveString('aiConsentReceiptId', receiptId);
       saveString('aiConsentReceiptUid', uid);
@@ -222,6 +227,7 @@ class SharedPreferencesUtil {
     remove('aiConsentAcceptedAt');
     remove('aiConsentReceiptId');
     remove('aiConsentReceiptUid');
+    remove('aiConsentContractVersion');
   }
 
   // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
@@ -591,6 +597,7 @@ class SharedPreferencesUtil {
       'aiConsentAcceptedAt',
       'aiConsentReceiptId',
       'aiConsentReceiptUid',
+      'aiConsentContractVersion',
     ]) {
       await remove(key);
     }
