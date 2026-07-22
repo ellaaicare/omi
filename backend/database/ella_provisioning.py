@@ -501,6 +501,25 @@ class EllaProvisioningRepository:
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
 
+    async def has_active_retained_runtime(self, uid: str) -> bool:
+        """Return whether an authenticated legacy user still has usable routing."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM users u
+                JOIN agent_clusters ac ON ac.user_id = u.id
+                WHERE u.omi_uid = $1
+                  AND u.status = 'ACTIVE'
+                  AND ac.status = 'ACTIVE'
+                  AND jsonb_typeof(ac.agents) = 'object'
+                  AND NULLIF(BTRIM(ac.agents->>'userAgentId'), '') IS NOT NULL
+            ) AS eligible
+            """,
+            uid,
+        )
+        return bool(row and row["eligible"])
+
     async def resolve_active_runtime(
         self,
         uid: str,

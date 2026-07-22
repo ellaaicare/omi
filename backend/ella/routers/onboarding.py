@@ -21,6 +21,7 @@ from ella.services.provisioning import (
     VerifiedIdentity,
     provisioning_enabled,
     public_receipt,
+    retained_compatibility_receipt,
 )
 from utils.other import endpoints as auth
 
@@ -77,6 +78,19 @@ async def _coordinator() -> ProvisioningCoordinator:
     return ProvisioningCoordinator(await EllaProvisioningRepository.create(firestore_db=_firestore_db))
 
 
+async def _retained_receipt(uid: str, target_schema_version: str) -> Optional[dict[str, Any]]:
+    """Return a public receipt only for an already-routed retained account."""
+    try:
+        repository = await EllaProvisioningRepository.create()
+        if await repository.has_active_retained_runtime(uid):
+            logger.info("Using retained-account onboarding compatibility for uid=%s", uid)
+            return retained_compatibility_receipt(target_schema_version)
+    except Exception as exc:
+        logger.exception("Retained-account onboarding lookup failed for uid=%s", uid)
+        raise HTTPException(status_code=503, detail={"code": "provisioning_unavailable"}) from exc
+    return None
+
+
 def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(mode="json")
@@ -90,10 +104,13 @@ async def ensure_onboarding(
     response: Response,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> dict[str, Any]:
-    if not provisioning_enabled(uid):
-        raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     if not SCHEMA_VERSION_RE.fullmatch(payload.target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
+    if not provisioning_enabled(uid):
+        receipt = await _retained_receipt(uid, payload.target_schema_version)
+        if receipt:
+            return receipt
+        raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     identity = _verified_identity(uid, payload)
     coordinator = await _coordinator()
     try:
@@ -127,10 +144,13 @@ async def onboarding_status(
     target_schema_version: str = DEFAULT_TARGET_SCHEMA_VERSION,
     uid: str = Depends(auth.get_current_user_uid),
 ) -> dict[str, Any]:
-    if not provisioning_enabled(uid):
-        raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
+    if not provisioning_enabled(uid):
+        receipt = await _retained_receipt(uid, target_schema_version)
+        if receipt:
+            return receipt
+        raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     repository = await EllaProvisioningRepository.create()
     try:
         await repository.assert_schema_ready()
