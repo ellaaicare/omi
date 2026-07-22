@@ -10109,6 +10109,69 @@
   "@voiceMicPermissionRequired": {
     "description": "Microphone permission error message"
   },
+  "voiceV2vUnavailableTitle": "{provider} couldn't connect",
+  "@voiceV2vUnavailableTitle": {
+    "description": "Title shown when a native realtime voice provider cannot connect",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
+  "voiceV2vUnavailableBody": "The live voice session failed at {stage} ({detail}). Retry it, use ElevenLabs standard voice for this call, or stop.",
+  "@voiceV2vUnavailableBody": {
+    "description": "Redacted V2V connection failure and explicit fallback explanation",
+    "placeholders": {
+      "stage": {
+        "type": "String"
+      },
+      "detail": {
+        "type": "String"
+      }
+    }
+  },
+  "voiceUseElevenLabs": "Use ElevenLabs",
+  "@voiceUseElevenLabs": {
+    "description": "Button to explicitly use standard ElevenLabs voice after V2V fails"
+  },
+  "voiceElevenLabsFallbackActive": "Listening with ElevenLabs standard voice",
+  "@voiceElevenLabsFallbackActive": {
+    "description": "Voice status after the user explicitly chooses ElevenLabs fallback"
+  },
+  "voiceV2vConnecting": "Connecting to {provider}...",
+  "@voiceV2vConnecting": {
+    "description": "V2V provider connection status",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
+  "voiceV2vActive": "{provider} active - Tap to stop",
+  "@voiceV2vActive": {
+    "description": "Connected V2V provider status",
+    "placeholders": {
+      "provider": {
+        "type": "String"
+      }
+    }
+  },
+  "voiceProviderGrokNative": "Grok Native Realtime",
+  "@voiceProviderGrokNative": {
+    "description": "Grok native realtime provider label"
+  },
+  "voiceProviderGeminiNative": "Gemini Native Live",
+  "@voiceProviderGeminiNative": {
+    "description": "Gemini native live provider label"
+  },
+  "voiceProviderOpenAiNative": "OpenAI Native Realtime",
+  "@voiceProviderOpenAiNative": {
+    "description": "OpenAI native realtime provider label"
+  },
+  "voiceProviderOpenClawDirect": "OpenClaw Direct",
+  "@voiceProviderOpenClawDirect": {
+    "description": "OpenClaw direct provider label"
+  },
   "ellaAddCaregiverErrorNameRequired": "Name is required",
   "ellaAddCaregiverErrorEmailRequired": "Email is required",
   "ellaAddCaregiverErrorEmailInvalid": "Please enter a valid email",

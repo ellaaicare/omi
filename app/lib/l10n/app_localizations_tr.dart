@@ -8447,6 +8447,44 @@ class AppLocalizationsTr extends AppLocalizations {
   String get voiceMicPermissionRequired => 'Microphone permission is required for voice chat';
 
   @override
+  String voiceV2vUnavailableTitle(String provider) {
+    return '$provider couldn\'t connect';
+  }
+
+  @override
+  String voiceV2vUnavailableBody(String stage, String detail) {
+    return 'The live voice session failed at $stage ($detail). Retry it, use ElevenLabs standard voice for this call, or stop.';
+  }
+
+  @override
+  String get voiceUseElevenLabs => 'Use ElevenLabs';
+
+  @override
+  String get voiceElevenLabsFallbackActive => 'Listening with ElevenLabs standard voice';
+
+  @override
+  String voiceV2vConnecting(String provider) {
+    return 'Connecting to $provider...';
+  }
+
+  @override
+  String voiceV2vActive(String provider) {
+    return '$provider active - Tap to stop';
+  }
+
+  @override
+  String get voiceProviderGrokNative => 'Grok Native Realtime';
+
+  @override
+  String get voiceProviderGeminiNative => 'Gemini Native Live';
+
+  @override
+  String get voiceProviderOpenAiNative => 'OpenAI Native Realtime';
+
+  @override
+  String get voiceProviderOpenClawDirect => 'OpenClaw Direct';
+
+  @override
   String get ellaAddCaregiverErrorNameRequired => 'Name is required';
 
   @override

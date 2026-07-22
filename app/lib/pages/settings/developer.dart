@@ -14,6 +14,7 @@ import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/http/api/knowledge_graph_api.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/stt_provider.dart';
 import 'package:omi/pages/persona/persona_profile.dart';
@@ -843,17 +844,29 @@ class _DeveloperSettingsPageState extends State<DeveloperSettingsPage> {
                           ),
                         ),
                         DropdownButton<String>(
-                          value: SharedPreferencesUtil().ttsProvider,
+                          value: {
+                            'elevenlabs',
+                            'fish-audio-s2',
+                            'kokoro',
+                            'inworld',
+                            'grok-voice',
+                            'gemini-native-live',
+                          }.contains(V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider))
+                              ? V2VClient.normalizeProvider(SharedPreferencesUtil().ttsProvider)
+                              : 'elevenlabs',
                           dropdownColor: const Color(0xFF2A2A2E),
                           underline: const SizedBox.shrink(),
                           style: const TextStyle(color: Colors.white, fontSize: 14),
-                          items: const [
-                            DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
-                            DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
-                            DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
-                            DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
-                            DropdownMenuItem(value: 'grok-voice', child: Text('Grok Voice (V2V)')),
-                            DropdownMenuItem(value: 'gemini-live', child: Text('Gemini Live (V2V)')),
+                          items: [
+                            const DropdownMenuItem(value: 'elevenlabs', child: Text('ElevenLabs')),
+                            const DropdownMenuItem(value: 'fish-audio-s2', child: Text('Fish Audio S2')),
+                            const DropdownMenuItem(value: 'kokoro', child: Text('Kokoro (local)')),
+                            const DropdownMenuItem(value: 'inworld', child: Text('Inworld TTS (cloud, ~120ms)')),
+                            DropdownMenuItem(value: 'grok-voice', child: Text(context.l10n.voiceProviderGrokNative)),
+                            DropdownMenuItem(
+                              value: 'gemini-native-live',
+                              child: Text(context.l10n.voiceProviderGeminiNative),
+                            ),
                           ],
                           onChanged: (value) {
                             if (value != null) {

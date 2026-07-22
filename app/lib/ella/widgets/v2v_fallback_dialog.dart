@@ -1,0 +1,65 @@
+import 'package:flutter/material.dart';
+
+import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/utils/l10n_extensions.dart';
+
+enum V2VFailureChoice { retry, useElevenLabs, stop }
+
+String localizedV2VProviderName(BuildContext context, String provider) {
+  return switch (V2VClient.normalizeProvider(provider)) {
+    'grok-voice' => context.l10n.voiceProviderGrokNative,
+    'gemini-native-live' => context.l10n.voiceProviderGeminiNative,
+    'openai-native-realtime' => context.l10n.voiceProviderOpenAiNative,
+    'openclaw-direct' => context.l10n.voiceProviderOpenClawDirect,
+    _ => V2VClient.providerDisplayName(provider),
+  };
+}
+
+class V2VFallbackDialog extends StatelessWidget {
+  const V2VFallbackDialog({required this.receipt, super.key});
+
+  final V2VConnectionReceipt receipt;
+
+  @override
+  Widget build(BuildContext context) {
+    final providerName = localizedV2VProviderName(context, receipt.provider);
+    return AlertDialog(
+      backgroundColor: EllaColors.card,
+      title: Text(
+        context.l10n.voiceV2vUnavailableTitle(providerName),
+        style: EllaTextStyles.display.copyWith(fontSize: 22),
+      ),
+      content: Text(
+        context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail),
+        style: EllaTextStyles.body,
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
+          child: Text(context.l10n.notNow),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
+          child: Text(context.l10n.voiceUseElevenLabs),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
+          child: Text(context.l10n.retry),
+        ),
+      ],
+    );
+  }
+}
+
+Future<V2VFailureChoice> showV2VFallbackDialog(
+  BuildContext context,
+  V2VConnectionReceipt receipt,
+) async {
+  return await showDialog<V2VFailureChoice>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => V2VFallbackDialog(receipt: receipt),
+      ) ??
+      V2VFailureChoice.stop;
+}
