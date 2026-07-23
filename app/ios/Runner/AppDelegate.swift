@@ -34,6 +34,7 @@ extension FlutterError: Error {}
   // Twilio Voice MethodChannel
   private var twilioVoiceChannel: TwilioVoiceMethodChannel?
   private var guardianModeChannel: FlutterMethodChannel?
+  private var audioRouteChannel: FlutterMethodChannel?
 
 
   override func application(
@@ -166,6 +167,19 @@ extension FlutterError: Error {}
     }
     print("AppDelegate: Guardian Mode MethodChannel registered")
 
+    audioRouteChannel = FlutterMethodChannel(
+        name: "com.ellaaicare.ella/audio_route",
+        binaryMessenger: controller.binaryMessenger
+    )
+    audioRouteChannel?.setMethodCallHandler { [weak self] (call, result) in
+        guard call.method == "getCurrentRoute" else {
+            result(FlutterMethodNotImplemented)
+            return
+        }
+        result(self?.currentAudioRoutePayload() ?? [:])
+    }
+    print("AppDelegate: Audio Route MethodChannel registered")
+
     // Debug Events MethodChannel
     let debugEventsChannel = FlutterMethodChannel(
         name: "com.ellaaicare.ella/debug_events",
@@ -246,11 +260,36 @@ extension FlutterError: Error {}
               } catch {
                   print("AppDelegate: Failed to override output port: \(error)")
               }
+              self.audioRouteChannel?.invokeMethod("routeChanged", arguments: self.currentAudioRoutePayload())
+          }
+      } else {
+          DispatchQueue.main.async {
+              self.audioRouteChannel?.invokeMethod("routeChanged", arguments: self.currentAudioRoutePayload())
           }
       }
 
       // Report new route to backend so consolidator knows current echo risk
       GuardianModeManager.shared.reportPlaybackEvent()
+  }
+
+  private func currentAudioRoutePayload() -> [String: Any] {
+      let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+      let output = outputs.first
+      let privateOutputTypes: Set<AVAudioSession.Port> = [
+          .bluetoothA2DP,
+          .bluetoothHFP,
+          .bluetoothLE,
+          .headphones,
+      ]
+      let outputType = output?.portType ?? .builtInSpeaker
+      let hasHeadset = privateOutputTypes.contains(outputType)
+
+      return [
+          "outputName": output?.portName ?? "iPhone speaker",
+          "outputType": outputType.rawValue,
+          "hasHeadset": hasHeadset,
+          "usesPhoneSpeaker": outputType == .builtInSpeaker,
+      ]
   }
 
   @objc private func handleApplicationDidBecomeActive(notification: Notification) {

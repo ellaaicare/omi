@@ -7,12 +7,12 @@ class EllaColors {
   EllaColors._();
 
   static const Color paper = Color(0xFFFAF6F0);
-  static const Color card = Color(0xFFF2EBE1);
+  static const Color card = Color(0xFF9F8A72);
   static const Color cardDeep = Color(0xFFE9DFD2);
   static const Color ink = Color(0xFF23201C);
-  static const Color inkSoft = Color(0xFF6B655D);
-  static const Color teal = Color(0xFF5A9E8F);
-  static const Color tealDeep = Color(0xFF38695E);
+  static const Color inkSoft = Color(0xFF2B2621);
+  static const Color teal = Color(0xFF0C2B24);
+  static const Color tealDeep = Color(0xFF0C2B24);
 
   // Compatibility aliases for Ella surfaces not yet migrated to v2 names.
   static const Color primary = teal;
@@ -161,28 +161,35 @@ ThemeData ellaThemeData() {
       displayLarge: EllaTextStyles.display,
       displayMedium: EllaTextStyles.display,
       headlineMedium: TextStyle(
-          fontFamily: EllaTextStyles.uiFont, fontSize: 24, fontWeight: FontWeight.w600, color: EllaColors.ink),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 24,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+      ),
       titleLarge: TextStyle(
-          fontFamily: EllaTextStyles.uiFont,
-          fontSize: 22,
-          fontWeight: FontWeight.w600,
-          color: EllaColors.ink,
-          height: 1.3),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 22,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+        height: 1.3,
+      ),
       titleMedium: TextStyle(
-          fontFamily: EllaTextStyles.uiFont,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          color: EllaColors.ink,
-          height: 1.4),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+        height: 1.4,
+      ),
       bodyLarge: EllaTextStyles.body,
       bodyMedium: EllaTextStyles.body,
       bodySmall: EllaTextStyles.secondary,
       labelLarge: TextStyle(
-          fontFamily: EllaTextStyles.uiFont,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          color: EllaColors.ink,
-          height: 1.4),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+        height: 1.4,
+      ),
       labelMedium: EllaTextStyles.secondary,
       labelSmall: EllaTextStyles.caption,
     ),
@@ -212,7 +219,11 @@ ThemeData ellaThemeData() {
       surfaceTintColor: EllaColors.paper,
       elevation: 0,
       titleTextStyle: TextStyle(
-          fontFamily: EllaTextStyles.uiFont, fontSize: 28, fontWeight: FontWeight.w600, color: EllaColors.ink),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 28,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+      ),
       systemOverlayStyle: SystemUiOverlayStyle.dark,
     ),
     cardTheme: CardThemeData(
@@ -261,13 +272,21 @@ ThemeData ellaThemeData() {
     snackBarTheme: const SnackBarThemeData(
       backgroundColor: EllaColors.ink,
       contentTextStyle: TextStyle(
-          fontFamily: EllaTextStyles.uiFont, fontSize: 18, color: EllaColors.paper, fontWeight: FontWeight.w500),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 18,
+        color: EllaColors.paper,
+        fontWeight: FontWeight.w500,
+      ),
     ),
     dialogTheme: DialogThemeData(
       backgroundColor: EllaColors.paper,
       surfaceTintColor: EllaColors.paper,
       titleTextStyle: const TextStyle(
-          fontFamily: EllaTextStyles.uiFont, fontSize: 22, fontWeight: FontWeight.w600, color: EllaColors.ink),
+        fontFamily: EllaTextStyles.uiFont,
+        fontSize: 22,
+        fontWeight: FontWeight.w600,
+        color: EllaColors.ink,
+      ),
       contentTextStyle: EllaTextStyles.body,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
     ),

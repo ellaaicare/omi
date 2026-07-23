@@ -1,10 +1,26 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/pages/home/today_page.dart';
 
 void main() {
+  double contrastRatio(Color foreground, Color background) {
+    final foregroundLuminance = foreground.computeLuminance();
+    final backgroundLuminance = background.computeLuminance();
+    final lighter = foregroundLuminance > backgroundLuminance ? foregroundLuminance : backgroundLuminance;
+    final darker = foregroundLuminance > backgroundLuminance ? backgroundLuminance : foregroundLuminance;
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+
+  test('Ella surface and small-label tokens meet the contrast floor', () {
+    expect(contrastRatio(EllaColors.card, EllaColors.paper), greaterThanOrEqualTo(3));
+    expect(contrastRatio(EllaColors.inkSoft, EllaColors.card), greaterThanOrEqualTo(4.5));
+    expect(EllaColors.teal, EllaColors.tealDeep);
+  });
+
   test('Whispers off copy says listening and remembering continue', () {
     final copy = '${whisperStatusLead(false)}${whisperStatusDetail(false)}'.toLowerCase();
 

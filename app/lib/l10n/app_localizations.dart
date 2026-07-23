@@ -16250,6 +16250,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Retry now'**
   String get retryNow;
+
+  /// No description provided for @todayDailyNoteEmptyNoConversations.
+  ///
+  /// In en, this message translates to:
+  /// **'Once you and Ella have spent some of the day together, her first note will arrive in the evening.'**
+  String get todayDailyNoteEmptyNoConversations;
+
+  /// No description provided for @todayDailyNoteEmptyPreparing.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is preparing today’s note. It will appear here this evening.'**
+  String get todayDailyNoteEmptyPreparing;
+
+  /// No description provided for @todayHardwareStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'YOUR ELLA DEVICES'**
+  String get todayHardwareStatus;
+
+  /// No description provided for @todayNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace'**
+  String get todayNecklace;
+
+  /// No description provided for @todayHeadset.
+  ///
+  /// In en, this message translates to:
+  /// **'Headset'**
+  String get todayHeadset;
+
+  /// No description provided for @todayOn.
+  ///
+  /// In en, this message translates to:
+  /// **'ON'**
+  String get todayOn;
+
+  /// No description provided for @todayOff.
+  ///
+  /// In en, this message translates to:
+  /// **'OFF'**
+  String get todayOff;
+
+  /// No description provided for @todayConnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'CONNECTING…'**
+  String get todayConnecting;
+
+  /// No description provided for @todayBatteryPercent.
+  ///
+  /// In en, this message translates to:
+  /// **'{percent}% battery'**
+  String todayBatteryPercent(int percent);
+
+  /// No description provided for @todayNecklaceOffReconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap to reconnect'**
+  String get todayNecklaceOffReconnect;
+
+  /// No description provided for @todayVoiceOnPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella’s voice → phone'**
+  String get todayVoiceOnPhone;
+
+  /// No description provided for @todayHeadsetFallbackWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'Headset is off — Ella will speak from the phone.'**
+  String get todayHeadsetFallbackWarning;
+
+  /// No description provided for @todayListeningButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is listening — See what she hears'**
+  String get todayListeningButton;
+
+  /// No description provided for @todayWhispersHistory.
+  ///
+  /// In en, this message translates to:
+  /// **'See what Ella has whispered'**
+  String get todayWhispersHistory;
+
+  /// No description provided for @todayRemindersTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'TODAY’S REMINDERS'**
+  String get todayRemindersTitle;
+
+  /// No description provided for @todayReminderFromConversation.
+  ///
+  /// In en, this message translates to:
+  /// **'From a conversation'**
+  String get todayReminderFromConversation;
+
+  /// No description provided for @todayReminderFromSource.
+  ///
+  /// In en, this message translates to:
+  /// **'From {source}'**
+  String todayReminderFromSource(String source);
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

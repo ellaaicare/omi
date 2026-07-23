@@ -8728,4 +8728,60 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get retryNow => 'Retry now';
+
+  @override
+  String get todayDailyNoteEmptyNoConversations =>
+      'Once you and Ella have spent some of the day together, her first note will arrive in the evening.';
+
+  @override
+  String get todayDailyNoteEmptyPreparing => 'Ella is preparing today’s note. It will appear here this evening.';
+
+  @override
+  String get todayHardwareStatus => 'YOUR ELLA DEVICES';
+
+  @override
+  String get todayNecklace => 'Necklace';
+
+  @override
+  String get todayHeadset => 'Headset';
+
+  @override
+  String get todayOn => 'ON';
+
+  @override
+  String get todayOff => 'OFF';
+
+  @override
+  String get todayConnecting => 'CONNECTING…';
+
+  @override
+  String todayBatteryPercent(int percent) {
+    return '$percent% battery';
+  }
+
+  @override
+  String get todayNecklaceOffReconnect => 'Tap to reconnect';
+
+  @override
+  String get todayVoiceOnPhone => 'Ella’s voice → phone';
+
+  @override
+  String get todayHeadsetFallbackWarning => 'Headset is off — Ella will speak from the phone.';
+
+  @override
+  String get todayListeningButton => 'Ella is listening — See what she hears';
+
+  @override
+  String get todayWhispersHistory => 'See what Ella has whispered';
+
+  @override
+  String get todayRemindersTitle => 'TODAY’S REMINDERS';
+
+  @override
+  String get todayReminderFromConversation => 'From a conversation';
+
+  @override
+  String todayReminderFromSource(String source) {
+    return 'From $source';
+  }
 }
