@@ -2,9 +2,23 @@
 
 These rules apply to Codex when working in this repository.
 
+## Repository Boundaries
+
+- **Code and pull requests:** `ellaaicare/omi`.
+- **All Ella issues:** private `ellaaicare/ella-ai`. The public OMI fork's Issues feature is intentionally disabled.
+- Every issue command must name the private repository explicitly, for example:
+  `gh issue create --repo ellaaicare/ella-ai ...`.
+- Every pull-request command must name the code fork explicitly, for example:
+  `gh pr create --repo ellaaicare/omi ...`.
+- Never use a bare issue reference such as `#123` or `Closes #123`. Use the fully qualified
+  `ellaaicare/ella-ai#123`; use a closing keyword only when merging the PR should close the entire private issue.
+- `BasedHardware/omi` is fetch-only upstream. Never push to it or create issues, comments, reviews, or pull requests
+  there.
+- Run `scripts/setup-ella-repository-guardrails.sh` once per clone before GitHub operations.
+
 ## Setup
 
-- Install pre-commit hook: `ln -s -f ../../scripts/pre-commit .git/hooks/pre-commit`
+- Install repository guardrails and hooks: `scripts/setup-ella-repository-guardrails.sh`
 
 ## Coding Guidelines
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+
+if [[ "$remote_name" == "upstream" || "$remote_url" == *"github.com/BasedHardware/omi"* ]]; then
+  echo "BLOCKED: BasedHardware/omi is fetch-only. Push code only to ellaaicare/omi." >&2
+  exit 1
+fi

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private Ella issue tracker
+    url: https://github.com/ellaaicare/ella-ai/issues/new/choose
+    about: Authorized Ella collaborators must file every product, app, backend, and operations issue here.
