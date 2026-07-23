@@ -25,11 +25,7 @@ void main() {
           'reasons': ['low_confidence_title'],
         },
         'ella_tags': ['omi', 'family', 'guardian_relevant'],
-        'ella_signal': {
-          'salience': 'high',
-          'memory_promotion': 'candidate',
-          'guardian_relevant': true,
-        },
+        'ella_signal': {'salience': 'high', 'memory_promotion': 'candidate', 'guardian_relevant': true},
       });
 
       expect(conversation.hasInternalAssessment, isTrue);
@@ -53,14 +49,7 @@ void main() {
     final conversation = ServerConversation.fromJson({
       'id': 'failed-conversation',
       'created_at': '2026-07-20T08:00:00Z',
-      'structured': {
-        'title': '',
-        'overview': '',
-        'emoji': '',
-        'category': 'other',
-        'action_items': [],
-        'events': [],
-      },
+      'structured': {'title': '', 'overview': '', 'emoji': '', 'category': 'other', 'action_items': [], 'events': []},
       'transcript_segments': [],
       'apps_results': [],
       'audio_files': [],
@@ -112,11 +101,7 @@ void main() {
         'events': [],
       },
       'status': 'completed',
-      'enrichment_state': {
-        'status': 'failed',
-        'pending': true,
-        'error_code': 'conversation_summary_recovery_failed',
-      },
+      'enrichment_state': {'status': 'failed', 'pending': true, 'error_code': 'conversation_summary_recovery_failed'},
     });
 
     expect(conversation.isRetryableSummaryFailure, isFalse);

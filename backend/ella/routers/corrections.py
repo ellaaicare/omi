@@ -127,6 +127,13 @@ class ConversationCorrectionResponse(BaseModel):
     proposal_id: Optional[str] = None
 
 
+class ConversationCorrectionUndoResponse(BaseModel):
+    correction_id: str
+    conversation_id: str
+    status: str
+    active_summary_version_id: Optional[str] = None
+
+
 class ConversationProcessingRetryOutcome(str, Enum):
     processing = "processing"
     completed = "completed"
@@ -811,6 +818,110 @@ async def _submit_correction_to_n8n(
     }
 
 
+def _version_structured(version: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": version.get("title") or "",
+        "overview": version.get("overview") or "",
+        "emoji": version.get("emoji") or "\U0001f9e0",
+        "category": str(version.get("category") or "other"),
+    }
+
+
+def _undo_conversation_correction(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionUndoResponse:
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.get("is_locked", False):
+        raise HTTPException(status_code=402, detail="Conversation locked")
+
+    correction_state = conversation.get("correction_state") or {}
+    active_summary_version_id = str(conversation.get("active_summary_version_id") or "")
+    versions = list(conversation.get("summary_versions") or [])
+    active_version = next(
+        (
+            version
+            for version in versions
+            if str(version.get("id") or "") == active_summary_version_id
+            and str(version.get("correction_id") or "") == correction_id
+        ),
+        None,
+    )
+    if active_version is None and str(correction_state.get("correction_id") or "") != correction_id:
+        raise HTTPException(status_code=404, detail="Correction is not active on this conversation")
+
+    target_version_id = str((active_version or {}).get("based_on_version_id") or "")
+    target_version = next((version for version in versions if str(version.get("id") or "") == target_version_id), None)
+    target_structured = _version_structured(target_version) if target_version else correction_state.get("before")
+    if not isinstance(target_structured, dict) or not (
+        target_structured.get("title") or target_structured.get("overview")
+    ):
+        audit = _audit_ref(uid, conversation_id, correction_id).get()
+        audit_data = audit.to_dict() if getattr(audit, "exists", False) else {}
+        target_structured = audit_data.get("current_summary") if isinstance(audit_data, dict) else None
+    if not isinstance(target_structured, dict) or not (
+        target_structured.get("title") or target_structured.get("overview")
+    ):
+        raise HTTPException(status_code=409, detail="Previous summary is unavailable")
+
+    for version in versions:
+        version["is_active"] = bool(target_version_id and str(version.get("id") or "") == target_version_id)
+
+    undone_at = _now_iso()
+    update_data = {
+        "structured.title": target_structured.get("title") or "",
+        "structured.overview": target_structured.get("overview") or "",
+        "structured.emoji": target_structured.get("emoji") or "\U0001f9e0",
+        "structured.category": target_structured.get("category") or "other",
+        "apps_results": [],
+        "plugins_results": [],
+        "summary_versions": versions,
+        "active_summary_version_id": target_version_id or None,
+        "correction_state": {
+            **correction_state,
+            "correction_id": correction_id,
+            "status": "undone",
+            "pending": False,
+            "updated_at": undone_at,
+            "active_summary_version_id": target_version_id or None,
+            "undo_restored_summary": target_structured,
+            "propagation_undo_status": "none",
+        },
+    }
+    conversations_db.update_conversation(uid, conversation_id, update_data)
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "status": "undone",
+            "updated_at": undone_at,
+            "undo_restored_summary": target_structured,
+            "undo_active_summary_version_id": target_version_id or None,
+        },
+    )
+    _append_correction_event(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "stage": "undo_applied",
+            "status": "ok",
+            "at": undone_at,
+            "trace_id": f"undo:{conversation_id}:{correction_id}",
+        },
+    )
+    return ConversationCorrectionUndoResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        status="undone",
+        active_summary_version_id=target_version_id or None,
+    )
+
+
 async def _run_direct_correction_apply(
     *,
     uid: str,
@@ -854,6 +965,24 @@ async def _run_direct_correction_apply(
                 "updated_at": applied_at,
                 "direct_apply_result": apply_result,
                 "direct_apply_summary": corrected_summary,
+            },
+        )
+        _update_conversation_correction_state(
+            uid,
+            conversation_id,
+            {
+                "correction_state": {
+                    "correction_id": correction_id,
+                    "status": "applied",
+                    "pending": False,
+                    "source": request.source,
+                    "submitted_at": submitted_at,
+                    "updated_at": applied_at,
+                    "active_summary_version_id": apply_result.get("active_summary_version_id"),
+                    "before": structured,
+                    "after": corrected_summary,
+                    "propagation_applied": False,
+                }
             },
         )
         _append_correction_event(
@@ -1366,6 +1495,18 @@ async def submit_conversation_correction_ella(
 
 
 @router.post(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo",
+    response_model=ConversationCorrectionUndoResponse,
+)
+def undo_conversation_correction_ella(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionUndoResponse:
+    return _undo_conversation_correction(conversation_id, correction_id, uid)
+
+
+@router.post(
     "/v1/conversations/{conversation_id}/corrections",
     response_model=ConversationCorrectionResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -1377,3 +1518,15 @@ async def submit_conversation_correction(
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
+
+
+@router.post(
+    "/v1/conversations/{conversation_id}/corrections/{correction_id}/undo",
+    response_model=ConversationCorrectionUndoResponse,
+)
+def undo_conversation_correction(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionUndoResponse:
+    return _undo_conversation_correction(conversation_id, correction_id, uid)

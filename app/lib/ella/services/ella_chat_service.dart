@@ -51,22 +51,22 @@ class _ResolvedEndpoint {
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
   Map<String, dynamic> toJson() => {
-        'agentId': agentId,
-        'sessionKey': sessionKey,
-        'gatewayUrl': gatewayUrl,
-        'token': token,
-        'historyUrl': historyUrl,
-        'expiresAt': expiresAt.toIso8601String(),
-      };
+    'agentId': agentId,
+    'sessionKey': sessionKey,
+    'gatewayUrl': gatewayUrl,
+    'token': token,
+    'historyUrl': historyUrl,
+    'expiresAt': expiresAt.toIso8601String(),
+  };
 
   factory _ResolvedEndpoint.fromJson(Map<String, dynamic> json) => _ResolvedEndpoint(
-        agentId: json['agentId'] ?? '',
-        sessionKey: json['sessionKey'] ?? '',
-        gatewayUrl: json['gatewayUrl'] ?? '',
-        token: json['token'] ?? '',
-        historyUrl: json['historyUrl'] ?? '',
-        expiresAt: DateTime.tryParse(json['expiresAt'] ?? '') ?? DateTime(2000),
-      );
+    agentId: json['agentId'] ?? '',
+    sessionKey: json['sessionKey'] ?? '',
+    gatewayUrl: json['gatewayUrl'] ?? '',
+    token: json['token'] ?? '',
+    historyUrl: json['historyUrl'] ?? '',
+    expiresAt: DateTime.tryParse(json['expiresAt'] ?? '') ?? DateTime(2000),
+  );
 }
 
 /// In-memory cache (fast path).
@@ -136,10 +136,7 @@ Future<_ResolvedEndpoint?> _resolveEndpoint() async {
 
     // Cache it
     _cachedEndpoint = endpoint;
-    SharedPreferencesUtil().saveString(
-      'ellaResolvedEndpoint',
-      jsonEncode(endpoint.toJson()),
-    );
+    SharedPreferencesUtil().saveString('ellaResolvedEndpoint', jsonEncode(endpoint.toJson()));
 
     return endpoint;
   } catch (e) {
@@ -190,9 +187,7 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 
   final endpoint = await _resolveEndpoint();
   if (endpoint == null || endpoint.historyUrl.isEmpty) {
-    Logger.debug(
-      '[EllaChat] Cannot fetch history: no resolved endpoint or historyUrl',
-    );
+    Logger.debug('[EllaChat] Cannot fetch history: no resolved endpoint or historyUrl');
     return [];
   }
 
@@ -258,7 +253,14 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 ///
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
-Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
+Stream<ServerMessageChunk> sendEllaChatStream(
+  String text, {
+  String conversationId = '',
+  String scopedContext = '',
+  String scope = '',
+  String scopeConversationId = '',
+  bool persistToMainChat = true,
+}) async* {
   if (SharedPreferencesUtil().demoMode) {
     final message = DemoFixtures.chatMessages().last;
     yield ServerMessageChunk(message.id, message.text, MessageChunkType.done, message: message);
@@ -272,6 +274,11 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
       clientMessageId: const Uuid().v4(),
       clientSentAt: DateTime.now().toUtc(),
+      conversationId: conversationId,
+      scopedContext: scopedContext,
+      scope: scope,
+      scopeConversationId: scopeConversationId,
+      persistToMainChat: persistToMainChat,
     );
     return;
   }
@@ -285,6 +292,11 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
       headers: _ellaDebugHeaders(routeSource: 'proxy-resolve-fail'),
       clientMessageId: const Uuid().v4(),
       clientSentAt: DateTime.now().toUtc(),
+      conversationId: conversationId,
+      scopedContext: scopedContext,
+      scope: scope,
+      scopeConversationId: scopeConversationId,
+      persistToMainChat: persistToMainChat,
     );
     return;
   }
@@ -333,6 +345,11 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
         headers: _ellaDebugHeaders(routeSource: 'proxy-gateway-error'),
         clientMessageId: const Uuid().v4(),
         clientSentAt: DateTime.now().toUtc(),
+        conversationId: conversationId,
+        scopedContext: scopedContext,
+        scope: scope,
+        scopeConversationId: scopeConversationId,
+        persistToMainChat: persistToMainChat,
       );
       return;
     }

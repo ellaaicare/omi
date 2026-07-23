@@ -8659,4 +8659,91 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get conversationEllaEnrichedLabel => 'Summary enriched by Ella';
+
+  @override
+  String get fixSomething => 'Fix something';
+
+  @override
+  String get fixSomethingSheetBody => 'Tell Ella what should change, in your own words.';
+
+  @override
+  String get fixSomethingHint => 'Example: This was Greg and his son watching NASA news, not a group meeting.';
+
+  @override
+  String get submitChange => 'Submit change';
+
+  @override
+  String get talkAboutThis => 'Talk about this';
+
+  @override
+  String get talkingAbout => 'TALKING ABOUT';
+
+  @override
+  String get thisMorning => 'this morning';
+
+  @override
+  String get thisAfternoon => 'this afternoon';
+
+  @override
+  String get thisEvening => 'this evening';
+
+  @override
+  String get thisMemory => 'this memory';
+
+  @override
+  String memoryTalkOpeningLine(String when, String title) {
+    return 'This is from $when — $title. What would you like to tell me about it?';
+  }
+
+  @override
+  String get memoryTalkComposerHint => 'Tell Ella about it…';
+
+  @override
+  String get voiceSoon => 'Voice soon';
+
+  @override
+  String memoryTalkConfirmCorrection(String newText, String oldText) {
+    return 'So it was $newText, not $oldText — did I get that right?';
+  }
+
+  @override
+  String get memoryTalkCorrectionCancelled => 'Okay — I won’t change it.';
+
+  @override
+  String get memoryTalkUpdatedReply => 'I updated that.';
+
+  @override
+  String get memoryTalkUpdateFailed => 'I couldn’t change that yet. Please try again.';
+
+  @override
+  String get memoryTalkEmptyReply => 'I’m here with you. Tell me a little more.';
+
+  @override
+  String get updatedJustNow => 'Updated just now';
+
+  @override
+  String get seeWhatChanged => 'see what changed';
+
+  @override
+  String get whatChanged => 'WHAT CHANGED';
+
+  @override
+  String alsoFixedOnPersonPage(String name) {
+    return 'Also fixed on $name\'s page, everywhere she appears.';
+  }
+
+  @override
+  String get undoingChange => 'Undoing…';
+
+  @override
+  String get undoThisChange => 'Undo this change';
+
+  @override
+  String get conversationAboutThis => 'Conversation about this';
+
+  @override
+  String get changeUndone => 'Change undone.';
+
+  @override
+  String get changeUndoFailed => 'Couldn’t undo that change yet.';
 }

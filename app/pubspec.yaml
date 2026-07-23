@@ -221,6 +221,10 @@ flutter:
     - family: "Manrope"
       fonts:
         - asset: assets/fonts/Manrope-VariableFont_wght.ttf
+    - family: "Fraunces"
+      fonts:
+        - asset: assets/fonts/Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf
+          weight: 500
 
 flutter_gen:
   output: lib/gen/

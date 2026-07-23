@@ -2,33 +2,22 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Ella AI color palette -- V6 "Ella Home" warm aquamarine teal, light mode for elderly users.
-///
-/// V6 direction: V3 warmth + V2 precision. Technology that feels like home.
-/// All text colors verified for contrast ratio against bgPrimary (#FAF5F0):
-///   textPrimary:   14.5:1 (AAA)
-///   textSecondary: 10.4:1 (AAA)
-///   textTertiary:   5.5:1 (AA)
-///   textDisabled:   3.1:1 (AA large text only)
-///   primary:        3.5:1 (AA large text)
+/// Ella AI color palette from the iOS Design Spec v2 tokens.
 class EllaColors {
   EllaColors._();
 
-  // Primary teal palette -- V6 warm aquamarine
   static const Color primary = Color(0xFF5A9E8F);
-  static const Color primaryDark = Color(0xFF4A8A7B);
+  static const Color primaryDark = Color(0xFF38695E);
   static const Color primaryLight = Color(0xFF7AB5A8);
   static const Color primarySubtle = Color(0xFFE8F5F0);
 
-  // Backgrounds -- warm cream, inviting for elderly users
-  static const Color bgPrimary = Color(0xFFFAF5F0); // warm cream
-  static const Color bgSecondary = Color(0xFFF5F0E8); // light warm beige
-  static const Color bgTertiary = Color(0xFFE8E0D6); // warm taupe
+  static const Color bgPrimary = Color(0xFFFAF6F0);
+  static const Color bgSecondary = Color(0xFFF2EBE1);
+  static const Color bgTertiary = Color(0xFFE9DFD2);
 
-  // Text -- dark on light for readability
-  static const Color textPrimary = Color(0xFF2D2D2D); // soft charcoal
-  static const Color textSecondary = Color(0xFF4A4A4A); // dark grey
-  static const Color textTertiary = Color(0xFF7A7A7A); // medium grey
+  static const Color textPrimary = Color(0xFF23201C);
+  static const Color textSecondary = Color(0xFF23201C);
+  static const Color textTertiary = Color(0xFF6B655D);
   static const Color textDisabled = Color(0xFFB0B0B0); // light grey
 
   // Semantic (KEEP UNCHANGED)
@@ -85,6 +74,7 @@ ThemeData ellaThemeData() {
   return ThemeData(
     useMaterial3: false,
     brightness: Brightness.light,
+    fontFamily: 'Manrope',
     colorScheme: const ColorScheme.light(
       primary: EllaColors.bgPrimary, // Used as scaffold/appBar bg throughout OMI pages
       secondary: EllaColors.primary, // Teal brand color
@@ -98,11 +88,7 @@ ThemeData ellaThemeData() {
     scaffoldBackgroundColor: EllaColors.bgPrimary,
     snackBarTheme: SnackBarThemeData(
       backgroundColor: EllaColors.textPrimary,
-      contentTextStyle: const TextStyle(
-        fontSize: 18,
-        color: Colors.white,
-        fontWeight: FontWeight.w500,
-      ),
+      contentTextStyle: const TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.w500),
     ),
     textTheme: const TextTheme(
       displayLarge: TextStyle(fontSize: 32, fontWeight: FontWeight.w700, color: EllaColors.textPrimary, height: 1.2),
@@ -119,10 +105,7 @@ ThemeData ellaThemeData() {
       selectionColor: Color(0xFFB8E8DD), // warm teal selection
       selectionHandleColor: EllaColors.primary,
     ),
-    cupertinoOverrideTheme: const CupertinoThemeData(
-      primaryColor: EllaColors.primary,
-      brightness: Brightness.light,
-    ),
+    cupertinoOverrideTheme: const CupertinoThemeData(primaryColor: EllaColors.primary, brightness: Brightness.light),
     bottomNavigationBarTheme: const BottomNavigationBarThemeData(
       backgroundColor: Colors.white,
       selectedItemColor: EllaColors.primary,
@@ -143,9 +126,7 @@ ThemeData ellaThemeData() {
       color: Colors.white,
       elevation: 1,
       shadowColor: Colors.black.withOpacity(0.08),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
@@ -171,18 +152,14 @@ ThemeData ellaThemeData() {
         foregroundColor: Colors.white,
         minimumSize: const Size(double.infinity, 56),
         textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
       ),
     ),
     dialogTheme: DialogThemeData(
       backgroundColor: Colors.white,
       titleTextStyle: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
       contentTextStyle: const TextStyle(fontSize: 18, color: EllaColors.textSecondary, height: 1.5),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
     ),
   );
 }

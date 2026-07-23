@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import database.conversations as conversations_db
 from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
@@ -160,6 +161,10 @@ class EllaChatRequest(BaseModel):
     conversation_id: str = ""
     client_message_id: str = ""
     client_sent_at: str = ""
+    scoped_context: str = ""
+    scope: str = ""
+    scope_conversation_id: str = ""
+    persist_to_main_chat: bool = True
 
 
 def _parse_client_sent_at(value: str = "") -> datetime:
@@ -242,6 +247,48 @@ async def _write_ios_chat_canonical_event(event: CanonicalEventIn) -> None:
             event.event_id,
             exc,
         )
+
+
+def _append_memory_talk_turn(
+    *,
+    uid: str,
+    conversation_id: str,
+    turn_id: str,
+    user_text: str,
+    assistant_text: str,
+    started_at: datetime,
+    ended_at: datetime,
+) -> None:
+    if not conversation_id:
+        return
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        return
+
+    state = dict(conversation.get("memory_talk_state") or {})
+    turns = list(state.get("turns") or [])
+    turns.append(
+        {
+            "turn_id": turn_id,
+            "user_text": user_text,
+            "assistant_text": assistant_text,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+        }
+    )
+    conversations_db.update_conversation(
+        uid,
+        conversation_id,
+        {
+            "memory_talk_state": {
+                **state,
+                "has_discussion": True,
+                "turn_count": len(turns),
+                "turns": turns[-50:],
+                "updated_at": ended_at,
+            }
+        },
+    )
 
 
 def _resolve_debug_level(header_value: str = None) -> int:
@@ -710,6 +757,10 @@ async def _stream_hermes_chat(
     turn_id: str = "",
     client_sent_at: datetime = None,
     runtime: IsolatedRuntime | None = None,
+    scoped_context: str = "",
+    scope: str = "",
+    scope_conversation_id: str = "",
+    persist_to_main_chat: bool = True,
 ):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
     import time as _time
@@ -766,17 +817,31 @@ async def _stream_hermes_chat(
                 ),
             }
         )
-    await _write_ios_chat_canonical_event(
-        _ios_chat_event(
-            uid=uid,
-            turn_id=turn_id,
-            role="user",
-            text=user_message,
-            session_key=session_key,
-            started_at=user_started_at,
-            client_info=client_info,
+    scoped_context = scoped_context.strip()
+    if scoped_context:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "The next user turn is a private discussion attached to one memory. "
+                    "Use the memory context below to answer naturally. Do not create a new memory from this turn, "
+                    "and do not treat this as the user's main chat history.\n\n"
+                    f"{scoped_context}"
+                ),
+            }
         )
-    )
+    if persist_to_main_chat:
+        await _write_ios_chat_canonical_event(
+            _ios_chat_event(
+                uid=uid,
+                turn_id=turn_id,
+                role="user",
+                text=user_message,
+                session_key=session_key,
+                started_at=user_started_at,
+                client_info=client_info,
+            )
+        )
     messages.append({"role": "user", "content": user_message})
     memory_key = _hermes_chat_memory_key(uid)
     print(
@@ -850,18 +915,29 @@ async def _stream_hermes_chat(
                 )
         if full_text:
             assistant_started_at = datetime.now(timezone.utc)
-            await _write_ios_chat_canonical_event(
-                _ios_chat_event(
-                    uid=uid,
-                    turn_id=turn_id,
-                    role="assistant",
-                    text=full_text,
-                    session_key=session_key,
-                    started_at=assistant_started_at,
-                    ended_at=assistant_started_at,
-                    client_info=client_info,
+            if persist_to_main_chat:
+                await _write_ios_chat_canonical_event(
+                    _ios_chat_event(
+                        uid=uid,
+                        turn_id=turn_id,
+                        role="assistant",
+                        text=full_text,
+                        session_key=session_key,
+                        started_at=assistant_started_at,
+                        ended_at=assistant_started_at,
+                        client_info=client_info,
+                    )
                 )
-            )
+            elif scope == "memory" and scope_conversation_id:
+                _append_memory_talk_turn(
+                    uid=uid,
+                    conversation_id=scope_conversation_id,
+                    turn_id=turn_id,
+                    user_text=user_message,
+                    assistant_text=full_text,
+                    started_at=user_started_at,
+                    ended_at=assistant_started_at,
+                )
             msg = {
                 "id": str(uuid4()),
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -974,6 +1050,10 @@ async def ella_chat_stream(
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
+                scoped_context=request.scoped_context,
+                scope=request.scope,
+                scope_conversation_id=request.scope_conversation_id or request.conversation_id,
+                persist_to_main_chat=request.persist_to_main_chat,
             ),
             media_type="text/event-stream",
         )

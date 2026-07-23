@@ -10212,5 +10212,134 @@
   "conversationEllaEnrichedLabel": "Summary enriched by Ella",
   "@conversationEllaEnrichedLabel": {
     "description": "Accessible label and tooltip for the Ella-enriched memory badge"
+  },
+  "fixSomething": "Fix something",
+  "@fixSomething": {
+    "description": "Overflow menu item and sheet title for deliberate memory edits"
+  },
+  "fixSomethingSheetBody": "Tell Ella what should change, in your own words.",
+  "@fixSomethingSheetBody": {
+    "description": "Body text for memory correction sheet"
+  },
+  "fixSomethingHint": "Example: This was Greg and his son watching NASA news, not a group meeting.",
+  "@fixSomethingHint": {
+    "description": "Hint text for memory correction sheet"
+  },
+  "submitChange": "Submit change",
+  "@submitChange": {
+    "description": "Button label for submitting a memory correction"
+  },
+  "talkAboutThis": "Talk about this",
+  "@talkAboutThis": {
+    "description": "Floating pill label on memory detail"
+  },
+  "talkingAbout": "TALKING ABOUT",
+  "@talkingAbout": {
+    "description": "Eyebrow label in memory talk sheet"
+  },
+  "thisMorning": "this morning",
+  "@thisMorning": {
+    "description": "Friendly relative time phrase"
+  },
+  "thisAfternoon": "this afternoon",
+  "@thisAfternoon": {
+    "description": "Friendly relative time phrase"
+  },
+  "thisEvening": "this evening",
+  "@thisEvening": {
+    "description": "Friendly relative time phrase"
+  },
+  "thisMemory": "this memory",
+  "@thisMemory": {
+    "description": "Fallback memory title phrase"
+  },
+  "memoryTalkOpeningLine": "This is from {when} — {title}. What would you like to tell me about it?",
+  "@memoryTalkOpeningLine": {
+    "description": "Ella opening line in memory-scoped talk sheet",
+    "placeholders": {
+      "when": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkComposerHint": "Tell Ella about it…",
+  "@memoryTalkComposerHint": {
+    "description": "Composer hint in memory talk sheet"
+  },
+  "voiceSoon": "Voice soon",
+  "@voiceSoon": {
+    "description": "M1 voice toggle coming soon label"
+  },
+  "memoryTalkConfirmCorrection": "So it was {newText}, not {oldText} — did I get that right?",
+  "@memoryTalkConfirmCorrection": {
+    "description": "Ella confirmation before applying a conversational correction",
+    "placeholders": {
+      "newText": {
+        "type": "String"
+      },
+      "oldText": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkCorrectionCancelled": "Okay — I won’t change it.",
+  "@memoryTalkCorrectionCancelled": {
+    "description": "Ella reply when a pending correction is declined"
+  },
+  "memoryTalkUpdatedReply": "I updated that.",
+  "@memoryTalkUpdatedReply": {
+    "description": "Ella reply after a correction is accepted"
+  },
+  "memoryTalkUpdateFailed": "I couldn’t change that yet. Please try again.",
+  "@memoryTalkUpdateFailed": {
+    "description": "Ella reply when a correction submit fails"
+  },
+  "memoryTalkEmptyReply": "I’m here with you. Tell me a little more.",
+  "@memoryTalkEmptyReply": {
+    "description": "Fallback Ella reply when scoped chat returns empty"
+  },
+  "updatedJustNow": "Updated just now",
+  "@updatedJustNow": {
+    "description": "Receipt chip leading text after memory correction"
+  },
+  "seeWhatChanged": "see what changed",
+  "@seeWhatChanged": {
+    "description": "Receipt chip expansion link text"
+  },
+  "whatChanged": "WHAT CHANGED",
+  "@whatChanged": {
+    "description": "Correction receipt card heading"
+  },
+  "alsoFixedOnPersonPage": "Also fixed on {name}'s page, everywhere she appears.",
+  "@alsoFixedOnPersonPage": {
+    "description": "Receipt caption when person propagation occurred",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "undoingChange": "Undoing…",
+  "@undoingChange": {
+    "description": "Undo button loading label"
+  },
+  "undoThisChange": "Undo this change",
+  "@undoThisChange": {
+    "description": "Correction receipt undo button"
+  },
+  "conversationAboutThis": "Conversation about this",
+  "@conversationAboutThis": {
+    "description": "Memory detail history row shown after scoped discussion exists"
+  },
+  "changeUndone": "Change undone.",
+  "@changeUndone": {
+    "description": "Snackbar after successful correction undo"
+  },
+  "changeUndoFailed": "Couldn’t undo that change yet.",
+  "@changeUndoFailed": {
+    "description": "Snackbar after failed correction undo"
   }
 }

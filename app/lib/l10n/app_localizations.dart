@@ -16064,6 +16064,168 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Summary enriched by Ella'**
   String get conversationEllaEnrichedLabel;
+
+  /// Overflow menu item and sheet title for deliberate memory edits
+  ///
+  /// In en, this message translates to:
+  /// **'Fix something'**
+  String get fixSomething;
+
+  /// Body text for memory correction sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Tell Ella what should change, in your own words.'**
+  String get fixSomethingSheetBody;
+
+  /// Hint text for memory correction sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Example: This was Greg and his son watching NASA news, not a group meeting.'**
+  String get fixSomethingHint;
+
+  /// Button label for submitting a memory correction
+  ///
+  /// In en, this message translates to:
+  /// **'Submit change'**
+  String get submitChange;
+
+  /// Floating pill label on memory detail
+  ///
+  /// In en, this message translates to:
+  /// **'Talk about this'**
+  String get talkAboutThis;
+
+  /// Eyebrow label in memory talk sheet
+  ///
+  /// In en, this message translates to:
+  /// **'TALKING ABOUT'**
+  String get talkingAbout;
+
+  /// Friendly relative time phrase
+  ///
+  /// In en, this message translates to:
+  /// **'this morning'**
+  String get thisMorning;
+
+  /// Friendly relative time phrase
+  ///
+  /// In en, this message translates to:
+  /// **'this afternoon'**
+  String get thisAfternoon;
+
+  /// Friendly relative time phrase
+  ///
+  /// In en, this message translates to:
+  /// **'this evening'**
+  String get thisEvening;
+
+  /// Fallback memory title phrase
+  ///
+  /// In en, this message translates to:
+  /// **'this memory'**
+  String get thisMemory;
+
+  /// Ella opening line in memory-scoped talk sheet
+  ///
+  /// In en, this message translates to:
+  /// **'This is from {when} — {title}. What would you like to tell me about it?'**
+  String memoryTalkOpeningLine(String when, String title);
+
+  /// Composer hint in memory talk sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Tell Ella about it…'**
+  String get memoryTalkComposerHint;
+
+  /// M1 voice toggle coming soon label
+  ///
+  /// In en, this message translates to:
+  /// **'Voice soon'**
+  String get voiceSoon;
+
+  /// Ella confirmation before applying a conversational correction
+  ///
+  /// In en, this message translates to:
+  /// **'So it was {newText}, not {oldText} — did I get that right?'**
+  String memoryTalkConfirmCorrection(String newText, String oldText);
+
+  /// Ella reply when a pending correction is declined
+  ///
+  /// In en, this message translates to:
+  /// **'Okay — I won’t change it.'**
+  String get memoryTalkCorrectionCancelled;
+
+  /// Ella reply after a correction is accepted
+  ///
+  /// In en, this message translates to:
+  /// **'I updated that.'**
+  String get memoryTalkUpdatedReply;
+
+  /// Ella reply when a correction submit fails
+  ///
+  /// In en, this message translates to:
+  /// **'I couldn’t change that yet. Please try again.'**
+  String get memoryTalkUpdateFailed;
+
+  /// Fallback Ella reply when scoped chat returns empty
+  ///
+  /// In en, this message translates to:
+  /// **'I’m here with you. Tell me a little more.'**
+  String get memoryTalkEmptyReply;
+
+  /// Receipt chip leading text after memory correction
+  ///
+  /// In en, this message translates to:
+  /// **'Updated just now'**
+  String get updatedJustNow;
+
+  /// Receipt chip expansion link text
+  ///
+  /// In en, this message translates to:
+  /// **'see what changed'**
+  String get seeWhatChanged;
+
+  /// Correction receipt card heading
+  ///
+  /// In en, this message translates to:
+  /// **'WHAT CHANGED'**
+  String get whatChanged;
+
+  /// Receipt caption when person propagation occurred
+  ///
+  /// In en, this message translates to:
+  /// **'Also fixed on {name}\'s page, everywhere she appears.'**
+  String alsoFixedOnPersonPage(String name);
+
+  /// Undo button loading label
+  ///
+  /// In en, this message translates to:
+  /// **'Undoing…'**
+  String get undoingChange;
+
+  /// Correction receipt undo button
+  ///
+  /// In en, this message translates to:
+  /// **'Undo this change'**
+  String get undoThisChange;
+
+  /// Memory detail history row shown after scoped discussion exists
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation about this'**
+  String get conversationAboutThis;
+
+  /// Snackbar after successful correction undo
+  ///
+  /// In en, this message translates to:
+  /// **'Change undone.'**
+  String get changeUndone;
+
+  /// Snackbar after failed correction undo
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn’t undo that change yet.'**
+  String get changeUndoFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

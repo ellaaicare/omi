@@ -33,6 +33,13 @@ class $AssetsDeviceAssetsGen {
 class $AssetsFontsGen {
   const $AssetsFontsGen();
 
+  /// File path: assets/fonts/Fraunces-OFL.txt
+  String get frauncesOFL => 'assets/fonts/Fraunces-OFL.txt';
+
+  /// File path: assets/fonts/Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf
+  String get frauncesVariableFontSOFTWONKOpszWght =>
+      'assets/fonts/Fraunces-VariableFont_SOFT,WONK,opsz,wght.ttf';
+
   /// File path: assets/fonts/Manrope-VariableFont_wght.ttf
   String get manropeVariableFontWght =>
       'assets/fonts/Manrope-VariableFont_wght.ttf';
@@ -68,6 +75,8 @@ class $AssetsFontsGen {
 
   /// List of all assets
   List<String> get values => [
+    frauncesOFL,
+    frauncesVariableFontSOFTWONKOpszWght,
     manropeVariableFontWght,
     sfprodisplayblackitalic,
     sfprodisplaybold,

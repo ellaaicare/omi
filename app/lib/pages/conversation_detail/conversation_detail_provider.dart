@@ -21,6 +21,20 @@ import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
+class MemoryTalkLocalReceipt {
+  final String? correctionId;
+  final String oldText;
+  final String newText;
+  final String? propagatedPersonName;
+
+  const MemoryTalkLocalReceipt({
+    this.correctionId,
+    required this.oldText,
+    required this.newText,
+    this.propagatedPersonName,
+  });
+}
+
 class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixin {
   AppProvider? appProvider;
   ConversationProvider? conversationProvider;
@@ -95,6 +109,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   bool editSegmentLoading = false;
 
   bool showUnassignedFloatingButton = true;
+  bool memoryTalkStarted = false;
+  MemoryTalkLocalReceipt? memoryTalkLocalReceipt;
 
   void toggleEditSegmentLoading(bool value) {
     editSegmentLoading = value;
@@ -220,6 +236,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     titleFocusNode = FocusNode();
 
     showUnassignedFloatingButton = true;
+    memoryTalkStarted = conversation.memoryTalkState?.hasDiscussion == true;
+    memoryTalkLocalReceipt = null;
 
     titleController!.text = conversation.structured.title;
     titleFocusNode!.addListener(() {
@@ -308,10 +326,14 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     } catch (err, stacktrace) {
       print(err);
       var conversationReporting = MixpanelManager().getConversationEventProperties(conversation);
-      await PlatformManager.instance.crashReporter.reportCrash(err, stacktrace, userAttributes: {
-        'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
-        'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
-      });
+      await PlatformManager.instance.crashReporter.reportCrash(
+        err,
+        stacktrace,
+        userAttributes: {
+          'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
+          'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
+        },
+      );
       notifyError('REPROCESS_FAILED');
       updateReprocessConversationLoadingState(false);
       updateReprocessConversationId('');
@@ -337,10 +359,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
     // If no appResults but we have structured overview, create a fake AppResponse
     if (conversation.structured.overview.isNotEmpty) {
-      return AppResponse(
-        conversation.structured.overview,
-        appId: null,
-      );
+      return AppResponse(conversation.structured.overview, appId: null);
     }
     return null;
   }
@@ -389,8 +408,9 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
       if (_isDisposed) return;
 
       // Preserve locally added apps that aren't in the API response yet
-      final locallyAddedApps =
-          _cachedEnabledConversationApps.where((app) => _locallyAddedAppIds.contains(app.id)).toList();
+      final locallyAddedApps = _cachedEnabledConversationApps
+          .where((app) => _locallyAddedAppIds.contains(app.id))
+          .toList();
 
       _cachedEnabledConversationApps.clear();
       _cachedEnabledConversationApps.addAll(apps);
@@ -501,6 +521,22 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     notifyListeners();
   }
 
+  void markMemoryTalkStarted() {
+    memoryTalkStarted = true;
+    notifyListeners();
+  }
+
+  void setMemoryTalkReceipt(MemoryTalkLocalReceipt receipt) {
+    memoryTalkLocalReceipt = receipt;
+    memoryTalkStarted = true;
+    notifyListeners();
+  }
+
+  void clearMemoryTalkReceipt() {
+    memoryTalkLocalReceipt = null;
+    notifyListeners();
+  }
+
   Future<void> refreshConversation() async {
     if (SharedPreferencesUtil().demoMode) {
       final fixture = DemoFixtures.conversationById(conversation.id);
@@ -561,9 +597,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     final lastUsedId = getLastUsedSummarizationAppId();
     if (lastUsedId == null || appProvider == null) return null;
 
-    return appProvider!.apps.firstWhereOrNull(
-      (app) => app.id == lastUsedId && app.worksWithMemories() && app.enabled,
-    );
+    return appProvider!.apps.firstWhereOrNull((app) => app.id == lastUsedId && app.worksWithMemories() && app.enabled);
   }
 
   bool _isDisposed = false;

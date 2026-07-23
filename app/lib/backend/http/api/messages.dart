@@ -8,10 +8,7 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/string_utils.dart';
 
-Future<List<ServerMessage>> getMessagesServer({
-  String? appId,
-  bool dropdownSelected = false,
-}) async {
+Future<List<ServerMessage>> getMessagesServer({String? appId, bool dropdownSelected = false}) async {
   if (appId == 'no_selected') appId = null;
   // TODO: Add pagination
   var response = await makeApiCall(
@@ -60,19 +57,11 @@ Future<List<ServerMessage>> clearChatServer({String? appId}) async {
 
 ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   if (line.startsWith('think: ')) {
-    return ServerMessageChunk(
-      messageId,
-      line.substring(7).replaceAll("__CRLF__", "\n"),
-      MessageChunkType.think,
-    );
+    return ServerMessageChunk(messageId, line.substring(7).replaceAll("__CRLF__", "\n"), MessageChunkType.think);
   }
 
   if (line.startsWith('data: ')) {
-    return ServerMessageChunk(
-      messageId,
-      line.substring(6).replaceAll("__CRLF__", "\n"),
-      MessageChunkType.data,
-    );
+    return ServerMessageChunk(messageId, line.substring(6).replaceAll("__CRLF__", "\n"), MessageChunkType.data);
   }
 
   if (line.startsWith('done: ')) {
@@ -98,11 +87,7 @@ ServerMessageChunk? parseMessageChunk(String line, String messageId) {
   return null;
 }
 
-Stream<ServerMessageChunk> sendMessageStreamServer(
-  String text, {
-  String? appId,
-  List<String>? filesId,
-}) async* {
+Stream<ServerMessageChunk> sendMessageStreamServer(String text, {String? appId, List<String>? filesId}) async* {
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
@@ -110,10 +95,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
 
   var messageId = "1000"; // Default new message
 
-  await for (var line in makeStreamingApiCall(
-    url: url,
-    body: jsonEncode({'text': text, 'file_ids': filesId}),
-  )) {
+  await for (var line in makeStreamingApiCall(url: url, body: jsonEncode({'text': text, 'file_ids': filesId}))) {
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
       yield messageChunk;
@@ -132,6 +114,11 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   Map<String, String> headers = const {},
   String? clientMessageId,
   DateTime? clientSentAt,
+  String conversationId = '',
+  String scopedContext = '',
+  String scope = '',
+  String scopeConversationId = '',
+  bool persistToMainChat = true,
 }) async* {
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
   var uid = SharedPreferencesUtil().uid;
@@ -145,9 +132,13 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
     body: jsonEncode({
       'uid': uid,
       'message': text,
-      'conversation_id': '',
+      'conversation_id': conversationId,
       'client_message_id': requestClientMessageId,
       'client_sent_at': requestClientSentAt,
+      if (scopedContext.trim().isNotEmpty) 'scoped_context': scopedContext.trim(),
+      if (scope.trim().isNotEmpty) 'scope': scope.trim(),
+      if (scopeConversationId.trim().isNotEmpty) 'scope_conversation_id': scopeConversationId.trim(),
+      'persist_to_main_chat': persistToMainChat,
     }),
   )) {
     // Skip SSE comment lines (keep-alives from backend while waiting for LLM)
@@ -179,10 +170,7 @@ Future<ServerMessage> getInitialAppMessage(String? appId) {
   });
 }
 
-Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
-  List<File> files, {
-  String? language,
-}) async* {
+Stream<ServerMessageChunk> sendVoiceMessageStreamServer(List<File> files, {String? language}) async* {
   var messageId = "1000"; // Default new message
 
   await for (var line in makeMultipartStreamingApiCall(
@@ -200,10 +188,7 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
   }
 }
 
-Future<List<MessageFile>?> uploadFilesServer(
-  List<File> files, {
-  String? appId,
-}) async {
+Future<List<MessageFile>?> uploadFilesServer(List<File> files, {String? appId}) async {
   var url = '${Env.apiBaseUrl}v2/files?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/files';
@@ -213,17 +198,11 @@ Future<List<MessageFile>?> uploadFilesServer(
     var response = await makeMultipartApiCall(url: url, files: files);
 
     if (response.statusCode == 200) {
-      Logger.debug(
-        'uploadFileServer response body: ${jsonDecode(response.body)}',
-      );
+      Logger.debug('uploadFileServer response body: ${jsonDecode(response.body)}');
       return MessageFile.fromJsonList(jsonDecode(response.body));
     } else {
-      Logger.debug(
-        'Failed to upload file. Status code: ${response.statusCode} ${response.body}',
-      );
-      throw Exception(
-        'Failed to upload file. Status code: ${response.statusCode}',
-      );
+      Logger.debug('Failed to upload file. Status code: ${response.statusCode} ${response.body}');
+      throw Exception('Failed to upload file. Status code: ${response.statusCode}');
     }
   } catch (e) {
     Logger.debug('An error occurred uploadFileServer: $e');
@@ -244,10 +223,7 @@ Future reportMessageServer(String messageId) async {
   }
 }
 
-Future<String> transcribeVoiceMessage(
-  File audioFile, {
-  String? language,
-}) async {
+Future<String> transcribeVoiceMessage(File audioFile, {String? language}) async {
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v2/voice-message/transcribe',
@@ -259,9 +235,7 @@ Future<String> transcribeVoiceMessage(
       final data = jsonDecode(response.body);
       return data['transcript'] ?? '';
     } else {
-      Logger.debug(
-        'Failed to transcribe voice message: ${response.statusCode} ${response.body}',
-      );
+      Logger.debug('Failed to transcribe voice message: ${response.statusCode} ${response.body}');
       throw Exception('Failed to transcribe voice message');
     }
   } catch (e) {
