@@ -50,3 +50,43 @@ The 120% and 150% text-size checks are captured in `today-120.png` and `today-15
 - Claim gate: Whispers-off copy explicitly states that listening and remembering continue; no new safety, monitoring, emergency, diagnosis, dementia, fall-detection, or memory-improvement claim was introduced.
 
 Final status: **PASS**, with the two connected-device activation limitations documented above.
+
+---
+
+## Talking to Memories M1 — Design QA
+
+### Authority and target
+
+- Product authority: `ellaaicare/ella-ai#1086`, 2026-07-23 RESTART PRD plus GO amendment.
+- Structural source: `/Users/greg/repos/ella/ella-ai/docs/design/mockups/talking-to-memories/Talking to Memories.dc.html`.
+- Visual source: `/Users/greg/repos/ella/ella-ai/docs/design/mockups/talking-to-memories/exports/ttm-1a.png` through `ttm-1f.png`.
+- Token source: `/Users/greg/repos/ella/ella-ai/docs/design/2026-07-20-app-design-spec-v2.md` §1 and §8.
+- Baseline: `54142de0745f7c59220d7b328dd214615586cfca`.
+- Runtime target: iPhone 17 Pro, iOS 26.5, 402×874 points.
+
+### Reference-to-simulator comparison
+
+Each implemented state was captured from the iPhone 17 Pro simulator, normalized to the 402×874-point design viewport, and reviewed side by side with its corresponding local export.
+
+| State | Result | Review notes |
+| --- | --- | --- |
+| 1a | Pass | Phase A shell retained; `Summary` detail uses one conversational entry, no folder chip, no body correction form, 56-point 220-point-wide Talk pill. |
+| 1f | Pass | 60% sheet, reduced title/two-chip backdrop, 28-point sheet corners, 300-point Fraunces opener measure, focused 48-point composer, teal send glyph, Done then mic at right. |
+| 1d-text | Pass | M1 keyboard confirmation uses the locked confirmation pattern and keeps the pending claim until an affirmative, denial, or one plain-language ambiguous re-prompt. The exported 1d voice treatment remains M2. |
+| 1e | Pass | Updated title and overview, 44-point receipt chip, teal emphasis, expandable diff, 48-point Undo, and card history row match the approved state. Person-propagation copy is absent unless the receipt reports a real propagation. |
+
+### Interaction and containment checks
+
+- `Fix something` is reachable from the overflow menu and the former body CTA is absent.
+- The talk composer sends ordinary scoped turns without introducing a new session type.
+- Smart-apostrophe correction language is extracted correctly.
+- Affirmative replies apply; denials discard; ambiguous replies re-prompt once and do not silently apply or discard.
+- Applied changes produce a receipt and Undo restores the source title, overview, active version, and any propagation snapshots that were actually applied.
+- Correction-only exchanges are persisted under the selected memory with authenticated ownership.
+- Main Chat does not receive scoped turns, and the scoped route does not create a new memory.
+- Fraunces is used only for Ella-authored copy; UI and user copy remain Manrope.
+- New elder-visible strings contain none of the prohibited safety or system vocabulary.
+
+### Evidence policy
+
+Baseline evidence lives outside the repository under `/Users/greg/repos/ella/evidence/mem-talk-m1-r2/baseline-54142de074/`. Final PR screenshots are captured outside the repository from the exact submitted commit and identify that SHA in the PR body; design-export PNGs are reference inputs only, never implementation proof.
