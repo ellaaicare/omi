@@ -1,17 +1,30 @@
 ## Ella AI — Dispatch Worker Rules
 
+### Repository Boundary (MANDATORY)
+
+- Code branches and pull requests live in `ellaaicare/omi`.
+- Every Ella issue lives in the private `ellaaicare/ella-ai` repository. The public fork's issue tracker is disabled.
+- Always pass `--repo ellaaicare/ella-ai` to issue commands and `--repo ellaaicare/omi` to pull-request commands.
+- Never use bare issue references such as `#N` or `Closes #N`; use `ellaaicare/ella-ai#N`.
+- `BasedHardware/omi` is fetch-only upstream. Never push to it or open issues, comments, reviews, or pull requests
+  there.
+- Run `scripts/setup-ella-repository-guardrails.sh` before GitHub operations in a new clone.
+
 If you were launched by dispatch.sh (your prompt mentions "You are a worker agent"):
 
 ### MANDATORY Git Workflow
 
 1. **Branch from latest main**: `git fetch origin main && git checkout -b job-N-impl origin/main`
 2. **Push your branch**: `git push -u origin job-N-impl`
-3. **Create a PR**: `gh pr create --base main --head job-N-impl --title "Job #N: ..." --body "Closes #N"`
-4. **Merge the PR**: `gh pr merge --merge --delete-branch`
+3. **Create a PR in the code fork**:
+   `gh pr create --repo ellaaicare/omi --base main --head job-N-impl --title "Job N: ... (ellaaicare/ella-ai#N)" --body "Tracks ellaaicare/ella-ai#N"`
+4. **Merge the PR in the code fork**: `gh pr merge --repo ellaaicare/omi --merge --delete-branch`
 5. **Verify on main**: `git fetch origin main && git log origin/main --oneline -5` — your commits MUST appear
 
 ### NEVER
 
+- Create, comment on, label, close, or transfer an issue in `ellaaicare/omi`
+- Open or interact with an issue or pull request in `BasedHardware/omi`
 - Close an issue without merging your PR to `main`
 - Build or deploy from a job branch without merging first
 - Leave code only in local git — always push to remote
@@ -33,7 +46,7 @@ Work that doesn't reach `main` will be overwritten by the next worker.
 ### Install Pre-commit Hook
 Run once to enable auto-formatting on commit:
 ```bash
-ln -s -f ../../scripts/pre-commit .git/hooks/pre-commit
+scripts/setup-ella-repository-guardrails.sh
 ```
 
 ## Backend
