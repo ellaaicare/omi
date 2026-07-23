@@ -200,7 +200,80 @@ Future<ServerConversation?> reProcessConversationServer(String conversationId, {
   return null;
 }
 
-Future<bool> submitConversationCorrection({
+class ConversationCorrectionSubmission {
+  final String correctionId;
+  final String conversationId;
+  final String status;
+  final bool queued;
+
+  const ConversationCorrectionSubmission({
+    required this.correctionId,
+    required this.conversationId,
+    required this.status,
+    required this.queued,
+  });
+
+  factory ConversationCorrectionSubmission.fromJson(Map<String, dynamic> json) {
+    return ConversationCorrectionSubmission(
+      correctionId: json['correction_id']?.toString() ?? '',
+      conversationId: json['conversation_id']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      queued: json['queued'] == true,
+    );
+  }
+}
+
+class ConversationCorrectionReceipt {
+  final String correctionId;
+  final String conversationId;
+  final String status;
+  final DateTime? appliedAt;
+  final DateTime? undoneAt;
+  final String beforeTitle;
+  final String beforeOverview;
+  final String afterTitle;
+  final String afterOverview;
+  final int propagationAppliedCount;
+  final int propagationRevertedCount;
+
+  const ConversationCorrectionReceipt({
+    required this.correctionId,
+    required this.conversationId,
+    required this.status,
+    required this.appliedAt,
+    required this.undoneAt,
+    required this.beforeTitle,
+    required this.beforeOverview,
+    required this.afterTitle,
+    required this.afterOverview,
+    required this.propagationAppliedCount,
+    required this.propagationRevertedCount,
+  });
+
+  bool get isApplied => status == 'applied';
+  bool get isUndone => status == 'undone';
+  bool get propagated => propagationAppliedCount > 0;
+
+  factory ConversationCorrectionReceipt.fromJson(Map<String, dynamic> json) {
+    final before = json['before'] is Map ? Map<String, dynamic>.from(json['before']) : const <String, dynamic>{};
+    final after = json['after'] is Map ? Map<String, dynamic>.from(json['after']) : const <String, dynamic>{};
+    return ConversationCorrectionReceipt(
+      correctionId: json['correction_id']?.toString() ?? '',
+      conversationId: json['conversation_id']?.toString() ?? '',
+      status: json['status']?.toString() ?? '',
+      appliedAt: json['applied_at'] != null ? DateTime.tryParse(json['applied_at'].toString())?.toLocal() : null,
+      undoneAt: json['undone_at'] != null ? DateTime.tryParse(json['undone_at'].toString())?.toLocal() : null,
+      beforeTitle: before['title']?.toString() ?? '',
+      beforeOverview: before['overview']?.toString() ?? '',
+      afterTitle: after['title']?.toString() ?? '',
+      afterOverview: after['overview']?.toString() ?? '',
+      propagationAppliedCount: (json['propagation_applied_count'] as num?)?.toInt() ?? 0,
+      propagationRevertedCount: (json['propagation_reverted_count'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
+Future<ConversationCorrectionSubmission?> submitConversationCorrection({
   required String conversationId,
   required String correctionText,
   String? summaryTitle,
@@ -221,9 +294,48 @@ Future<bool> submitConversationCorrection({
       },
     }),
   );
-  if (response == null) return false;
-  Logger.debug('submitConversationCorrection: ${response.statusCode} ${response.body}');
-  return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
+  if (response == null) return null;
+  Logger.debug('submitConversationCorrection: ${response.statusCode}');
+  if (response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202) {
+    return ConversationCorrectionSubmission.fromJson(jsonDecode(response.body));
+  }
+  return null;
+}
+
+Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
+  required String conversationId,
+  required String correctionId,
+}) async {
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId',
+    headers: {},
+    method: 'GET',
+    body: '',
+  );
+  if (response == null) return null;
+  Logger.debug('getConversationCorrectionReceipt: ${response.statusCode}');
+  if (response.statusCode == 200) {
+    return ConversationCorrectionReceipt.fromJson(jsonDecode(response.body));
+  }
+  return null;
+}
+
+Future<ConversationCorrectionReceipt?> undoConversationCorrection({
+  required String conversationId,
+  required String correctionId,
+}) async {
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId/undo',
+    headers: {},
+    method: 'POST',
+    body: '{}',
+  );
+  if (response == null) return null;
+  Logger.debug('undoConversationCorrection: ${response.statusCode}');
+  if (response.statusCode == 200) {
+    return ConversationCorrectionReceipt.fromJson(jsonDecode(response.body));
+  }
+  return null;
 }
 
 Future<bool> deleteConversationServer(String conversationId) async {

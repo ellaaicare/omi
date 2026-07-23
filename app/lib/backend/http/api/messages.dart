@@ -133,6 +133,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   Map<String, String> headers = const {},
   String? clientMessageId,
   DateTime? clientSentAt,
+  String conversationId = '',
 }) async* {
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
   var uid = SharedPreferencesUtil().uid;
@@ -146,7 +147,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
     body: jsonEncode({
       if (!isHermesProvisioningGateEnabled) 'uid': uid,
       'message': text,
-      'conversation_id': '',
+      'conversation_id': conversationId,
       'client_message_id': requestClientMessageId,
       'client_sent_at': requestClientSentAt,
     }),

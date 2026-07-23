@@ -187,10 +187,17 @@ def _conversation_id(conversation: dict[str, Any]) -> str:
 
 
 def _source_ref(conversation: dict[str, Any]) -> dict[str, Any]:
+    structured = conversation.get("structured") if isinstance(conversation.get("structured"), dict) else {}
     return {
         "conversation_id": _conversation_id(conversation),
         "active_summary_version_id": _active_summary_version(conversation),
         "created_at": _conversation_time(conversation).isoformat(),
+        "structured": {
+            "title": str(structured.get("title") or ""),
+            "overview": str(structured.get("overview") or ""),
+            "emoji": str(structured.get("emoji") or ""),
+            "category": str(structured.get("category") or "other"),
+        },
     }
 
 

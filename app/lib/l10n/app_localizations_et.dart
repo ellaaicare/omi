@@ -8714,4 +8714,120 @@ class AppLocalizationsEt extends AppLocalizations {
 
   @override
   String get retryNow => 'Retry now';
+
+  @override
+  String get memoryTalkTalkAboutThis => 'Talk about this';
+
+  @override
+  String get memoryTalkTalkingAbout => 'TALKING ABOUT';
+
+  @override
+  String memoryTalkOpening(String when, String title) {
+    return 'This is from $when — $title. What would you like to tell me about it?';
+  }
+
+  @override
+  String get memoryTalkThisMorning => 'this morning';
+
+  @override
+  String get memoryTalkEarlierToday => 'earlier today';
+
+  @override
+  String memoryTalkOnDate(String date) {
+    return '$date';
+  }
+
+  @override
+  String get memoryTalkComposerHint => 'Ask or tell Ella about this…';
+
+  @override
+  String get memoryTalkSend => 'Send';
+
+  @override
+  String get memoryTalkDone => 'Done';
+
+  @override
+  String get memoryTalkVoiceComingSoon => 'Voice is coming soon.';
+
+  @override
+  String memoryTalkCorrectionConfirmation(String newValue, String oldValue) {
+    return 'So it was $newValue, not $oldValue — did I get that right?';
+  }
+
+  @override
+  String get memoryTalkCorrectionReprompt => 'Sorry — was that a yes or a no?';
+
+  @override
+  String get memoryTalkCorrectionDiscarded => 'All right — I won\'t change it.';
+
+  @override
+  String get memoryTalkCorrectionNotChanged => 'I didn\'t change it. You can tell me again whenever you like.';
+
+  @override
+  String get memoryTalkApplyingCorrection => 'Thank you. I\'m updating that now.';
+
+  @override
+  String get memoryTalkCorrectionStillWorking => 'I\'m still working on that. You can close this and come back soon.';
+
+  @override
+  String get memoryTalkCorrectionFailed => 'I couldn\'t make that change yet. Please try again in a little while.';
+
+  @override
+  String get memoryTalkDemoReply => 'I\'m glad you told me. What else do you remember about that morning?';
+
+  @override
+  String get memoryTalkSendFailed => 'I couldn\'t answer just now. Please try again.';
+
+  @override
+  String get memoryTalkUpdatedJustNow => 'Updated just now';
+
+  @override
+  String get memoryTalkSeeWhatChanged => 'see what changed';
+
+  @override
+  String get memoryTalkWhatChanged => 'WHAT CHANGED';
+
+  @override
+  String memoryTalkAlsoFixedOnPersonPage(String name) {
+    return 'Also fixed on $name\'s page, everywhere they appear.';
+  }
+
+  @override
+  String get memoryTalkUndoThisChange => 'Undo this change';
+
+  @override
+  String get memoryTalkUndoFailed => 'I couldn\'t undo that change yet. Please try again.';
+
+  @override
+  String get memoryTalkConversationAboutThis => 'Conversation about this';
+
+  @override
+  String memoryTalkMinutes(int count) {
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count mins',
+      one: '1 min',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get memoryTalkFixSomething => 'Fix something';
+
+  @override
+  String get memoryTalkFixDescription =>
+      'Tell Ella what was wrong in your own words. The current memory is included for context.';
+
+  @override
+  String get memoryTalkFixHint => 'Example: This was Rose, not Margaret.';
+
+  @override
+  String get memoryTalkFixSubmit => 'Submit change';
+
+  @override
+  String get memoryTalkFixSubmitted => 'Change submitted. Ella will check this memory.';
+
+  @override
+  String get memoryTalkFixFailed => 'Could not submit that change yet. Please try again later.';
 }

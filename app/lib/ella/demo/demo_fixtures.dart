@@ -3,6 +3,7 @@ import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/models/guardian_alert.dart';
 
 class DemoFixtures {
@@ -27,11 +28,34 @@ class DemoFixtures {
       ),
       _conversation(
         id: gardenConversationId,
-        title: 'A walk past the roses',
-        startedAt: day.add(const Duration(hours: 14, minutes: 15)),
-        duration: const Duration(minutes: 12, seconds: 4),
-        overview: 'The long way home along Elm — warm air, roses in bloom.',
-        emoji: '🚶',
+        title: 'Coffee in the garden with Margaret',
+        startedAt: day.add(const Duration(hours: 9, minutes: 40)),
+        duration: const Duration(minutes: 12),
+        overview:
+            'You had coffee out in the garden with Margaret this morning. The tomatoes are coming in, and the two of you planned Tuesday dinner together before she headed home.',
+        emoji: '☕️',
+        transcriptSegments: [
+          TranscriptSegment(
+            id: 'demo-garden-1',
+            text: 'The tomatoes are coming in early this year.',
+            speaker: 'SPEAKER_00',
+            isUser: true,
+            personId: null,
+            start: 0,
+            end: 340,
+            translations: const [],
+          ),
+          TranscriptSegment(
+            id: 'demo-garden-2',
+            text: 'Let us have dinner together on Tuesday.',
+            speaker: 'SPEAKER_01',
+            isUser: false,
+            personId: 'demo-person-margaret',
+            start: 340,
+            end: 720,
+            translations: const [],
+          ),
+        ],
       ),
       _conversation(
         id: 'demo-phone-call-with-david',
@@ -173,6 +197,7 @@ class DemoFixtures {
     required Duration duration,
     required String overview,
     String emoji = '🪽',
+    List<TranscriptSegment> transcriptSegments = const [],
   }) {
     return ServerConversation(
       id: id,
@@ -180,7 +205,7 @@ class DemoFixtures {
       startedAt: startedAt,
       finishedAt: startedAt.add(duration),
       structured: Structured(title, overview, emoji: emoji, category: ''),
-      transcriptSegments: const [],
+      transcriptSegments: transcriptSegments,
       status: ConversationStatus.completed,
     );
   }

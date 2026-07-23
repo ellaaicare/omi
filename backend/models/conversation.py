@@ -231,6 +231,12 @@ class CorrectionState(BaseModel):
     error: Optional[str] = Field(default=None, description="Last correction processing error if any")
 
 
+class MemoryTalkState(BaseModel):
+    has_discussion: bool = Field(default=False, description="Whether this memory has a scoped discussion")
+    turn_count: int = Field(default=0, ge=0, description="Number of persisted scoped discussion turns")
+    updated_at: Optional[datetime] = Field(default=None, description="When the scoped discussion last changed")
+
+
 class InternalAssessment(BaseModel):
     media_likelihood: Optional[float] = Field(default=None, description="Likelihood the audio was primarily media")
     speaker_confidence: Optional[str] = Field(default=None, description="Confidence in speaker attribution")
@@ -347,6 +353,7 @@ class Conversation(BaseModel):
     summary_versions: List[SummaryVersion] = []
     active_summary_version_id: Optional[str] = None
     correction_state: Optional[CorrectionState] = None
+    memory_talk_state: MemoryTalkState = Field(default_factory=MemoryTalkState)
     internal_assessment: Optional[InternalAssessment] = None
     ella_tags: List[str] = Field(default_factory=list)
     ella_signal: Optional[EllaSignal] = None

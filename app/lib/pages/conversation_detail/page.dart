@@ -37,9 +37,12 @@ import 'conversation_detail_provider.dart';
 import 'test_prompts.dart';
 import 'widgets/audio_download_progress_sheet.dart';
 import 'widgets/internal_assessment_debug_sheet.dart';
+import 'widgets/memory_talk_detail.dart';
+import 'widgets/memory_talk_sheet.dart';
 import 'widgets/name_speaker_sheet.dart';
 import 'widgets/share_to_contacts_sheet.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/memory_talk_service.dart';
 
 // import 'share.dart';
 // import 'package:omi/pages/settings/developer.dart';
@@ -72,11 +75,12 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   final AppReviewService _appReviewService = AppReviewService();
   ConversationTab selectedTab = ConversationTab.summary;
 
-  // Callback to seek audio to transcript segment
-  Future<void> Function(double)? _seekToSegmentCallback;
   bool _isSharing = false;
   bool _isTogglingStarred = false;
   bool _isDownloadingAudio = false;
+  MemoryTalkReceipt? _memoryTalkReceipt;
+  bool _hasMemoryDiscussion = false;
+  bool _isMemoryTalkOpen = false;
 
   // Search functionality
   bool _isSearching = false;
@@ -211,6 +215,12 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       }
 
       await provider.initConversation();
+      if (!mounted) return;
+      setState(() {
+        _hasMemoryDiscussion = provider.conversation.memoryTalkState.hasDiscussion;
+      });
+      await _loadLatestMemoryTalkReceipt(provider);
+      if (!mounted) return;
       if (!demoMode && provider.conversation.appResults.isEmpty) {
         final date = provider.selectedDate;
         final idx = conversationProvider.getConversationIndexById(provider.conversation.id, date);
@@ -265,7 +275,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
       case ConversationTab.transcript:
         return context.l10n.transcriptTab;
       case ConversationTab.summary:
-        return context.l10n.conversationTab;
+        return context.l10n.summary;
       case ConversationTab.actionItems:
         return context.l10n.actionItemsTab;
     }
@@ -336,6 +346,13 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                 : conversation.structured.toString();
         _copyContent(context, summaryContent);
         break;
+      case 'fix_something':
+        await showFixSomethingSheet(
+          context,
+          conversation: provider.conversation,
+          appSummary: provider.getSummarizedApp()?.content ?? provider.conversation.structured.overview,
+        );
+        break;
       case 'download_audio':
         await _downloadAudio(context, provider);
         break;
@@ -366,6 +383,118 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         _handleDelete(context, provider);
         break;
     }
+  }
+
+  Future<void> _openMemoryTalk(ConversationDetailProvider provider) async {
+    HapticFeedback.mediumImpact();
+    setState(() => _isMemoryTalkOpen = true);
+    MemoryTalkSheetResult? result;
+    try {
+      result = await showMemoryTalkSheet(
+        context,
+        conversation: provider.conversation,
+      );
+    } finally {
+      if (mounted) setState(() => _isMemoryTalkOpen = false);
+    }
+    final sheetResult = result;
+    if (!mounted || sheetResult == null) return;
+
+    if (sheetResult.discussed) {
+      provider.conversation.memoryTalkState = MemoryTalkState(
+        hasDiscussion: true,
+        turnCount: provider.conversation.memoryTalkState.turnCount + 1,
+        updatedAt: DateTime.now(),
+      );
+    }
+    final receipt = sheetResult.receipt;
+    if (receipt != null) {
+      provider.conversation.structured.title = receipt.afterTitle;
+      provider.conversation.structured.overview = receipt.afterOverview;
+      setState(() {
+        _memoryTalkReceipt = receipt;
+        _hasMemoryDiscussion = true;
+      });
+      provider.notifyMemoryTalkChanged();
+      return;
+    }
+    setState(() => _hasMemoryDiscussion = _hasMemoryDiscussion || sheetResult.discussed);
+    provider.notifyMemoryTalkChanged();
+  }
+
+  Future<void> _loadLatestMemoryTalkReceipt(ConversationDetailProvider provider) async {
+    if (SharedPreferencesUtil().demoMode) return;
+    final correctionState = provider.conversation.correctionState;
+    final correctionId = correctionState?.correctionId;
+    if (correctionId == null || correctionId.isEmpty || correctionState?.status != 'applied') return;
+
+    final receipt = await getConversationCorrectionReceipt(
+      conversationId: provider.conversation.id,
+      correctionId: correctionId,
+    );
+    if (!mounted || receipt == null || !receipt.isApplied) return;
+    final changed = _changedReceiptValues(receipt);
+    setState(() {
+      _memoryTalkReceipt = MemoryTalkReceipt(
+        correctionId: receipt.correctionId,
+        oldValue: changed.$1,
+        newValue: changed.$2,
+        beforeTitle: receipt.beforeTitle,
+        beforeOverview: receipt.beforeOverview,
+        afterTitle: receipt.afterTitle,
+        afterOverview: receipt.afterOverview,
+        appliedAt: receipt.appliedAt ?? DateTime.now(),
+        propagated: receipt.propagated,
+      );
+    });
+  }
+
+  (String, String) _changedReceiptValues(ConversationCorrectionReceipt receipt) {
+    final titleChange = _firstChangedWord(receipt.beforeTitle, receipt.afterTitle);
+    if (titleChange.$1.isNotEmpty || titleChange.$2.isNotEmpty) return titleChange;
+    final overviewChange = _firstChangedWord(receipt.beforeOverview, receipt.afterOverview);
+    if (overviewChange.$1.isNotEmpty || overviewChange.$2.isNotEmpty) return overviewChange;
+    return (receipt.beforeTitle, receipt.afterTitle);
+  }
+
+  (String, String) _firstChangedWord(String before, String after) {
+    final beforeWords = RegExp(r"[A-Za-z0-9'’_-]+").allMatches(before).map((match) => match.group(0)!).toList();
+    final afterWords = RegExp(r"[A-Za-z0-9'’_-]+").allMatches(after).map((match) => match.group(0)!).toList();
+    final maxLength = beforeWords.length > afterWords.length ? beforeWords.length : afterWords.length;
+    for (var index = 0; index < maxLength; index += 1) {
+      final oldValue = index < beforeWords.length ? beforeWords[index] : '';
+      final newValue = index < afterWords.length ? afterWords[index] : '';
+      if (oldValue != newValue) return (oldValue, newValue);
+    }
+    return ('', '');
+  }
+
+  Future<void> _undoMemoryTalk(ConversationDetailProvider provider) async {
+    final receipt = _memoryTalkReceipt;
+    if (receipt == null) return;
+
+    if (SharedPreferencesUtil().demoMode) {
+      provider.conversation.structured.title = receipt.beforeTitle;
+      provider.conversation.structured.overview = receipt.beforeOverview;
+      setState(() => _memoryTalkReceipt = null);
+      provider.notifyMemoryTalkChanged();
+      return;
+    }
+
+    final undone = await undoConversationCorrection(
+      conversationId: provider.conversation.id,
+      correctionId: receipt.correctionId,
+    );
+    if (!mounted) return;
+    if (undone == null || !undone.isUndone) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.memoryTalkUndoFailed)),
+      );
+      return;
+    }
+    await provider.refreshConversation();
+    if (!mounted) return;
+    setState(() => _memoryTalkReceipt = null);
   }
 
   void _handleDelete(BuildContext context, ConversationDetailProvider provider) {
@@ -607,306 +736,329 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
           appBar: AppBar(
             automaticallyImplyLeading: false,
             backgroundColor: Theme.of(context).colorScheme.primary,
-            leading: Container(
-              width: 36,
-              height: 36,
-              margin: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.grey.withOpacity(0.3),
-                shape: BoxShape.circle,
-              ),
-              child: IconButton(
-                padding: EdgeInsets.zero,
-                onPressed: () {
-                  HapticFeedback.mediumImpact();
-                  if (widget.isFromOnboarding) {
-                    SchedulerBinding.instance.addPostFrameCallback((_) {
-                      Navigator.pushAndRemoveUntil(
-                          context, MaterialPageRoute(builder: (context) => const HomePageWrapper()), (route) => false);
-                    });
-                  } else {
-                    Navigator.pop(context);
-                  }
-                },
-                icon: const FaIcon(FontAwesomeIcons.arrowLeft, size: 16.0, color: EllaColors.textPrimary),
-              ),
-            ),
+            leading: _isMemoryTalkOpen
+                ? const SizedBox.shrink()
+                : Container(
+                    width: 36,
+                    height: 36,
+                    margin: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withOpacity(0.3),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: () {
+                        HapticFeedback.mediumImpact();
+                        if (widget.isFromOnboarding) {
+                          SchedulerBinding.instance.addPostFrameCallback((_) {
+                            Navigator.pushAndRemoveUntil(
+                              context,
+                              MaterialPageRoute(builder: (context) => const HomePageWrapper()),
+                              (route) => false,
+                            );
+                          });
+                        } else {
+                          Navigator.pop(context);
+                        }
+                      },
+                      icon: const FaIcon(
+                        FontAwesomeIcons.arrowLeft,
+                        size: 16.0,
+                        color: EllaColors.textPrimary,
+                      ),
+                    ),
+                  ),
             title: Align(
               alignment: Alignment.centerLeft,
               child: Padding(
                 padding: const EdgeInsets.only(left: 8.0),
-                child: Text(
-                  _getTabTitle(context, selectedTab),
-                  style: const TextStyle(
-                    color: EllaColors.textPrimary,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                child: _isMemoryTalkOpen
+                    ? const SizedBox.shrink()
+                    : Text(
+                        _getTabTitle(context, selectedTab),
+                        style: const TextStyle(
+                          color: EllaColors.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
               ),
             ),
             titleSpacing: 0,
-            actions: [
-              Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Star button (first) - toggle starred status
-                      Container(
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: provider.conversation.starred
-                              ? Colors.amber.withValues(alpha: 0.3)
-                              : Colors.grey.withValues(alpha: 0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: IconButton(
-                          padding: EdgeInsets.zero,
-                          onPressed: _isTogglingStarred
-                              ? null
-                              : () async {
-                                  setState(() {
-                                    _isTogglingStarred = true;
-                                  });
-                                  HapticFeedback.mediumImpact();
-                                  try {
-                                    final newStarredState = !provider.conversation.starred;
-                                    bool success = await setConversationStarred(
-                                      provider.conversation.id,
-                                      newStarredState,
-                                    );
-                                    if (!mounted) return;
-                                    if (success) {
-                                      provider.conversation.starred = newStarredState;
-                                      // Update in conversation provider
-                                      context.read<ConversationProvider>().updateConversationInSortedList(
-                                            provider.conversation,
-                                          );
-                                      // Track star/unstar action
-                                      MixpanelManager().conversationStarToggled(
-                                        conversation: provider.conversation,
-                                        starred: newStarredState,
-                                        source: 'detail_page_button',
-                                      );
-                                    } else {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text(context.l10n.failedToUpdateStarred)),
-                                      );
-                                    }
-                                  } catch (e) {
-                                    Logger.debug('Failed to toggle starred status: $e');
-                                  } finally {
-                                    if (mounted) {
-                                      setState(() {
-                                        _isTogglingStarred = false;
-                                      });
-                                    }
-                                  }
-                                },
-                          icon: _isTogglingStarred
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                  ),
-                                )
-                              : FaIcon(
-                                  provider.conversation.starred ? FontAwesomeIcons.solidStar : FontAwesomeIcons.star,
-                                  size: 16.0,
-                                  color: provider.conversation.starred ? Colors.amber : EllaColors.textPrimary,
+            actions: _isMemoryTalkOpen
+                ? const <Widget>[]
+                : [
+                    Consumer<ConversationDetailProvider>(builder: (context, provider, child) {
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Keep the applied-change receipt focused, as approved in 1e.
+                            if (_memoryTalkReceipt == null)
+                              Container(
+                                width: 36,
+                                height: 36,
+                                margin: const EdgeInsets.only(right: 8),
+                                decoration: BoxDecoration(
+                                  color: provider.conversation.starred
+                                      ? Colors.amber.withValues(alpha: 0.3)
+                                      : Colors.grey.withValues(alpha: 0.3),
+                                  shape: BoxShape.circle,
                                 ),
-                        ),
-                      ),
-                      // Share button (second) - directly share summary link
-                      Container(
-                        key: _shareButtonKey,
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.withOpacity(0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: IconButton(
-                          padding: EdgeInsets.zero,
-                          onPressed: _isSharing
-                              ? null
-                              : () async {
-                                  setState(() {
-                                    _isSharing = true;
-                                  });
-                                  HapticFeedback.mediumImpact();
-                                  try {
-                                    // Directly share the summary link
-                                    bool shared = await setConversationVisibility(provider.conversation.id);
-                                    if (!shared) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text(context.l10n.conversationUrlNotShared)),
-                                      );
-                                      setState(() {
-                                        _isSharing = false;
-                                      });
-                                      return;
-                                    }
-                                    String content =
-                                        'https://ella-ai-care.com/conversations/${provider.conversation.id}';
-                                    // Track share event
-                                    MixpanelManager().conversationShared(
-                                      conversation: provider.conversation,
-                                      shareMethod: 'url_share',
-                                    );
-                                    // Start sharing and get the position for iOS
-                                    final RenderBox? box =
-                                        _shareButtonKey.currentContext?.findRenderObject() as RenderBox?;
-                                    if (box != null) {
-                                      final Offset position = box.localToGlobal(Offset.zero);
-                                      final Size size = box.size;
-                                      Share.share(
-                                        content,
-                                        subject: provider.conversation.structured.title,
-                                        sharePositionOrigin:
-                                            Rect.fromLTWH(position.dx, position.dy, size.width, size.height),
-                                      );
-                                    } else {
-                                      Share.share(content, subject: provider.conversation.structured.title);
-                                    }
-                                    // Small delay to let share sheet appear, then clear loading
-                                    await Future.delayed(const Duration(milliseconds: 150));
-                                    setState(() {
-                                      _isSharing = false;
-                                    });
-                                  } catch (e) {
-                                    setState(() {
-                                      _isSharing = false;
-                                    });
-                                  }
-                                },
-                          icon: _isSharing
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                  ),
-                                )
-                              : const FaIcon(FontAwesomeIcons.arrowUpFromBracket,
-                                  size: 16.0, color: EllaColors.textPrimary),
-                        ),
-                      ),
-                      // Search button (second) - only show on transcript and summary tabs
-                      if (_controller?.index != 2)
-                        Container(
-                          width: 36,
-                          height: 36,
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: _isSearching ? EllaColors.primary.withOpacity(0.8) : Colors.grey.withOpacity(0.3),
-                            shape: BoxShape.circle,
-                          ),
-                          child: IconButton(
-                            padding: EdgeInsets.zero,
-                            onPressed: () {
-                              setState(() {
-                                _isSearching = !_isSearching;
-                                if (!_isSearching) {
-                                  _searchQuery = '';
-                                  _searchController.clear();
-                                  _searchFocusNode.unfocus();
-                                } else {
-                                  _searchFocusNode.requestFocus();
-                                  MixpanelManager().conversationDetailSearchClicked(
-                                    conversationId: provider.conversation.id,
-                                  );
-                                }
-                              });
-                              HapticFeedback.mediumImpact();
-                            },
-                            icon: const FaIcon(FontAwesomeIcons.magnifyingGlass,
-                                size: 16.0, color: EllaColors.textPrimary),
-                          ),
-                        ),
-                      // Developer Tools button (third) - iOS style pull-down menu
-                      Container(
-                        width: 36,
-                        height: 36,
-                        margin: const EdgeInsets.only(right: 8),
-                        child: PullDownButton(
-                          itemBuilder: (context) => [
-                            PullDownMenuItem(
-                              title: context.l10n.copyTranscript,
-                              iconWidget: FaIcon(FontAwesomeIcons.copy, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'copy_transcript', provider),
-                            ),
-                            PullDownMenuItem(
-                              title: context.l10n.copySummary,
-                              iconWidget: FaIcon(FontAwesomeIcons.clone, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'copy_summary', provider),
-                            ),
-                            if (provider.conversation.hasAudio())
-                              PullDownMenuItem(
-                                title: context.l10n.shareAudio,
-                                iconWidget: const FaIcon(FontAwesomeIcons.share, size: 16),
-                                onTap: _isDownloadingAudio
-                                    ? null
-                                    : () => _handleMenuSelection(context, 'download_audio', provider),
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  onPressed: _isTogglingStarred
+                                      ? null
+                                      : () async {
+                                          setState(() {
+                                            _isTogglingStarred = true;
+                                          });
+                                          HapticFeedback.mediumImpact();
+                                          try {
+                                            final newStarredState = !provider.conversation.starred;
+                                            bool success = await setConversationStarred(
+                                              provider.conversation.id,
+                                              newStarredState,
+                                            );
+                                            if (!mounted) return;
+                                            if (success) {
+                                              provider.conversation.starred = newStarredState;
+                                              // Update in conversation provider
+                                              context.read<ConversationProvider>().updateConversationInSortedList(
+                                                    provider.conversation,
+                                                  );
+                                              // Track star/unstar action
+                                              MixpanelManager().conversationStarToggled(
+                                                conversation: provider.conversation,
+                                                starred: newStarredState,
+                                                source: 'detail_page_button',
+                                              );
+                                            } else {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(context.l10n.failedToUpdateStarred)),
+                                              );
+                                            }
+                                          } catch (e) {
+                                            Logger.debug('Failed to toggle starred status: $e');
+                                          } finally {
+                                            if (mounted) {
+                                              setState(() {
+                                                _isTogglingStarred = false;
+                                              });
+                                            }
+                                          }
+                                        },
+                                  icon: _isTogglingStarred
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                          ),
+                                        )
+                                      : FaIcon(
+                                          provider.conversation.starred
+                                              ? FontAwesomeIcons.solidStar
+                                              : FontAwesomeIcons.star,
+                                          size: 16.0,
+                                          color: provider.conversation.starred ? Colors.amber : EllaColors.textPrimary,
+                                        ),
+                                ),
                               ),
-                            // PullDownMenuItem(
-                            //   title: 'Trigger Integration',
-                            //   iconWidget: FaIcon(FontAwesomeIcons.paperPlane, size: 16),
-                            //   onTap: () => _handleMenuSelection(context, 'trigger_integration', provider),
-                            // ),
-                            PullDownMenuItem(
-                              title: context.l10n.testPrompt,
-                              iconWidget: FaIcon(FontAwesomeIcons.commentDots, size: 16),
-                              onTap: () => _handleMenuSelection(context, 'test_prompt', provider),
-                            ),
-                            if (!provider.conversation.discarded)
-                              PullDownMenuItem(
-                                title: context.l10n.reprocessConversation,
-                                iconWidget: FaIcon(FontAwesomeIcons.arrowsRotate, size: 16),
-                                onTap: () => _handleMenuSelection(context, 'reprocess', provider),
+                            // Share button (second) - directly share summary link
+                            if (_memoryTalkReceipt == null)
+                              Container(
+                                key: _shareButtonKey,
+                                width: 36,
+                                height: 36,
+                                margin: const EdgeInsets.only(right: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.withOpacity(0.3),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  onPressed: _isSharing
+                                      ? null
+                                      : () async {
+                                          setState(() {
+                                            _isSharing = true;
+                                          });
+                                          HapticFeedback.mediumImpact();
+                                          try {
+                                            // Directly share the summary link
+                                            bool shared = await setConversationVisibility(provider.conversation.id);
+                                            if (!shared) {
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(context.l10n.conversationUrlNotShared)),
+                                              );
+                                              setState(() {
+                                                _isSharing = false;
+                                              });
+                                              return;
+                                            }
+                                            String content =
+                                                'https://ella-ai-care.com/conversations/${provider.conversation.id}';
+                                            // Track share event
+                                            MixpanelManager().conversationShared(
+                                              conversation: provider.conversation,
+                                              shareMethod: 'url_share',
+                                            );
+                                            // Start sharing and get the position for iOS
+                                            final RenderBox? box =
+                                                _shareButtonKey.currentContext?.findRenderObject() as RenderBox?;
+                                            if (box != null) {
+                                              final Offset position = box.localToGlobal(Offset.zero);
+                                              final Size size = box.size;
+                                              Share.share(
+                                                content,
+                                                subject: provider.conversation.structured.title,
+                                                sharePositionOrigin:
+                                                    Rect.fromLTWH(position.dx, position.dy, size.width, size.height),
+                                              );
+                                            } else {
+                                              Share.share(content, subject: provider.conversation.structured.title);
+                                            }
+                                            // Small delay to let share sheet appear, then clear loading
+                                            await Future.delayed(const Duration(milliseconds: 150));
+                                            setState(() {
+                                              _isSharing = false;
+                                            });
+                                          } catch (e) {
+                                            setState(() {
+                                              _isSharing = false;
+                                            });
+                                          }
+                                        },
+                                  icon: _isSharing
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                          ),
+                                        )
+                                      : const FaIcon(FontAwesomeIcons.arrowUpFromBracket,
+                                          size: 16.0, color: EllaColors.textPrimary),
+                                ),
                               ),
-                            PullDownMenuItem(
-                              title: context.l10n.deleteConversation,
-                              iconWidget: FaIcon(FontAwesomeIcons.trashCan, size: 16, color: Colors.red),
-                              onTap: () => _handleMenuSelection(context, 'delete', provider),
-                            ),
-                          ],
-                          buttonBuilder: (context, showMenu) => GestureDetector(
-                            onTap: () {
-                              HapticFeedback.mediumImpact();
-                              MixpanelManager().conversationThreeDotsMenuOpened(
-                                conversationId: provider.conversation.id,
-                              );
-                              showMenu();
-                            },
-                            child: Container(
+                            // Search button (second) - only show on transcript and summary tabs
+                            if (_memoryTalkReceipt == null && _controller?.index != 2)
+                              Container(
+                                width: 36,
+                                height: 36,
+                                margin: const EdgeInsets.only(right: 8),
+                                decoration: BoxDecoration(
+                                  color:
+                                      _isSearching ? EllaColors.primary.withOpacity(0.8) : Colors.grey.withOpacity(0.3),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  onPressed: () {
+                                    setState(() {
+                                      _isSearching = !_isSearching;
+                                      if (!_isSearching) {
+                                        _searchQuery = '';
+                                        _searchController.clear();
+                                        _searchFocusNode.unfocus();
+                                      } else {
+                                        _searchFocusNode.requestFocus();
+                                        MixpanelManager().conversationDetailSearchClicked(
+                                          conversationId: provider.conversation.id,
+                                        );
+                                      }
+                                    });
+                                    HapticFeedback.mediumImpact();
+                                  },
+                                  icon: const FaIcon(FontAwesomeIcons.magnifyingGlass,
+                                      size: 16.0, color: EllaColors.textPrimary),
+                                ),
+                              ),
+                            // Developer Tools button (third) - iOS style pull-down menu
+                            Container(
                               width: 36,
                               height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.grey.withOpacity(0.3),
-                                shape: BoxShape.circle,
-                              ),
-                              child: const Center(
-                                child: FaIcon(FontAwesomeIcons.ellipsisVertical,
-                                    size: 16.0, color: EllaColors.textPrimary),
+                              margin: const EdgeInsets.only(right: 8),
+                              child: PullDownButton(
+                                itemBuilder: (context) => [
+                                  PullDownMenuItem(
+                                    title: context.l10n.memoryTalkFixSomething,
+                                    iconWidget: const FaIcon(FontAwesomeIcons.penToSquare, size: 16),
+                                    onTap: () => _handleMenuSelection(context, 'fix_something', provider),
+                                  ),
+                                  PullDownMenuItem(
+                                    title: context.l10n.copyTranscript,
+                                    iconWidget: FaIcon(FontAwesomeIcons.copy, size: 16),
+                                    onTap: () => _handleMenuSelection(context, 'copy_transcript', provider),
+                                  ),
+                                  PullDownMenuItem(
+                                    title: context.l10n.copySummary,
+                                    iconWidget: FaIcon(FontAwesomeIcons.clone, size: 16),
+                                    onTap: () => _handleMenuSelection(context, 'copy_summary', provider),
+                                  ),
+                                  if (provider.conversation.hasAudio())
+                                    PullDownMenuItem(
+                                      title: context.l10n.shareAudio,
+                                      iconWidget: const FaIcon(FontAwesomeIcons.share, size: 16),
+                                      onTap: _isDownloadingAudio
+                                          ? null
+                                          : () => _handleMenuSelection(context, 'download_audio', provider),
+                                    ),
+                                  // PullDownMenuItem(
+                                  //   title: 'Trigger Integration',
+                                  //   iconWidget: FaIcon(FontAwesomeIcons.paperPlane, size: 16),
+                                  //   onTap: () => _handleMenuSelection(context, 'trigger_integration', provider),
+                                  // ),
+                                  PullDownMenuItem(
+                                    title: context.l10n.testPrompt,
+                                    iconWidget: FaIcon(FontAwesomeIcons.commentDots, size: 16),
+                                    onTap: () => _handleMenuSelection(context, 'test_prompt', provider),
+                                  ),
+                                  if (!provider.conversation.discarded)
+                                    PullDownMenuItem(
+                                      title: context.l10n.reprocessConversation,
+                                      iconWidget: FaIcon(FontAwesomeIcons.arrowsRotate, size: 16),
+                                      onTap: () => _handleMenuSelection(context, 'reprocess', provider),
+                                    ),
+                                  PullDownMenuItem(
+                                    title: context.l10n.deleteConversation,
+                                    iconWidget: FaIcon(FontAwesomeIcons.trashCan, size: 16, color: Colors.red),
+                                    onTap: () => _handleMenuSelection(context, 'delete', provider),
+                                  ),
+                                ],
+                                buttonBuilder: (context, showMenu) => GestureDetector(
+                                  onTap: () {
+                                    HapticFeedback.mediumImpact();
+                                    MixpanelManager().conversationThreeDotsMenuOpened(
+                                      conversationId: provider.conversation.id,
+                                    );
+                                    showMenu();
+                                  },
+                                  child: Container(
+                                    width: 36,
+                                    height: 36,
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.withOpacity(0.3),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Center(
+                                      child: FaIcon(FontAwesomeIcons.ellipsisVertical,
+                                          size: 16.0, color: EllaColors.textPrimary),
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
+                          ],
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-            ],
+                      );
+                    }),
+                  ],
           ),
           // Removed floating action button as we now have the more button in the bottom bar
           body: Stack(
@@ -946,106 +1098,33 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                     Expanded(
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Builder(builder: (context) {
-                          return TabBarView(
-                            controller: _controller,
-                            physics: const NeverScrollableScrollPhysics(),
-                            children: [
-                              TranscriptWidgets(
-                                searchQuery: _searchQuery,
-                                currentResultIndex: getCurrentResultIndexForHighlighting(),
-                                onTapWhenSearchEmpty: () {
-                                  if (_isSearching && _searchQuery.isEmpty) {
-                                    setState(() {
-                                      _isSearching = false;
-                                      _searchController.clear();
-                                      _searchFocusNode.unfocus();
-                                    });
-                                  }
-                                },
-                                onSegmentTap: (segment) async {
-                                  if (selectedTab != ConversationTab.transcript) {
-                                    setState(() {
-                                      selectedTab = ConversationTab.transcript;
-                                    });
-                                    _controller!.animateTo(0);
-                                  }
-
-                                  // Seek to segment using callback
-                                  if (_seekToSegmentCallback != null) {
-                                    await _seekToSegmentCallback!(segment.start);
-                                    HapticFeedback.lightImpact();
-                                  }
-                                },
-                              ),
-                              SummaryTab(
-                                searchQuery: _searchQuery,
-                                currentResultIndex: getCurrentResultIndexForHighlighting(),
-                                onTapWhenSearchEmpty: () {
-                                  if (_isSearching && _searchQuery.isEmpty) {
-                                    setState(() {
-                                      _isSearching = false;
-                                      _searchController.clear();
-                                      _searchFocusNode.unfocus();
-                                    });
-                                  }
-                                },
-                              ),
-                              ActionItemsTab(),
-                            ],
-                          );
-                        }),
+                        child: Consumer<ConversationDetailProvider>(
+                          builder: (context, provider, child) => MemoryTalkDetail(
+                            conversation: provider.conversation,
+                            receipt: _memoryTalkReceipt,
+                            hasDiscussion: _hasMemoryDiscussion || provider.conversation.memoryTalkState.hasDiscussion,
+                            isTalkSheetOpen: _isMemoryTalkOpen,
+                            onUndo: () => _undoMemoryTalk(provider),
+                            onOpenDiscussion: () => _openMemoryTalk(provider),
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
 
-              // Floating bottom bar
+              // The single conversational entry on memory detail.
               Positioned(
-                bottom: 32,
+                bottom: 24,
                 left: 0,
                 right: 0,
                 child: Consumer<ConversationDetailProvider>(
                   builder: (context, provider, child) {
-                    final conversation = provider.conversation;
-                    final hasActionItems =
-                        conversation.structured.actionItems.where((item) => !item.deleted).isNotEmpty;
-                    return ConversationBottomBar(
-                      mode: ConversationBottomBarMode.detail,
-                      selectedTab: selectedTab,
-                      conversation: conversation,
-                      hasSegments: conversation.transcriptSegments.isNotEmpty ||
-                          conversation.photos.isNotEmpty ||
-                          conversation.externalIntegration != null,
-                      hasActionItems: hasActionItems,
-                      onSeekFunctionReady: (seekFunction) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) {
-                            setState(() {
-                              _seekToSegmentCallback = seekFunction;
-                            });
-                          }
-                        });
-                      },
-                      onTabSelected: (tab) {
-                        int index;
-                        switch (tab) {
-                          case ConversationTab.transcript:
-                            index = 0;
-                            break;
-                          case ConversationTab.summary:
-                            index = 1;
-                            break;
-                          case ConversationTab.actionItems:
-                            index = 2;
-                            break;
-                        }
-                        _controller!.animateTo(index);
-                      },
-                      onStopPressed: () {
-                        // Empty since we don't show the stop button in detail mode
-                      },
+                    return Center(
+                      child: MemoryTalkPill(
+                        onPressed: () => _openMemoryTalk(provider),
+                      ),
                     );
                   },
                 ),

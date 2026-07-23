@@ -708,72 +708,27 @@ class AppResultDetailWidget extends StatelessWidget {
                 ),
               ),
             ),
-          if (content.isNotEmpty) ...[
-            const SizedBox(height: 18),
-            _CorrectSummaryButton(
-              conversation: conversation,
-              appSummary: content,
-            ),
-          ],
         ],
       ),
     );
   }
 }
 
-class _CorrectSummaryButton extends StatelessWidget {
-  final ServerConversation conversation;
-  final String appSummary;
-
-  const _CorrectSummaryButton({
-    required this.conversation,
-    required this.appSummary,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: () {
-          HapticFeedback.lightImpact();
-          showModalBottomSheet(
-            context: context,
-            isScrollControlled: true,
-            backgroundColor: Colors.transparent,
-            builder: (context) => _CorrectSummarySheet(
-              conversation: conversation,
-              appSummary: appSummary,
-            ),
-          );
-        },
-        child: Ink(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: EllaColors.bgSecondary,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: EllaColors.bgTertiary),
-          ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              FaIcon(FontAwesomeIcons.penToSquare, size: 15, color: EllaColors.primary),
-              SizedBox(width: 8),
-              Text(
-                'Correct Summary',
-                style: TextStyle(
-                  color: EllaColors.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+Future<void> showFixSomethingSheet(
+  BuildContext context, {
+  required ServerConversation conversation,
+  required String appSummary,
+}) {
+  HapticFeedback.lightImpact();
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (context) => _CorrectSummarySheet(
+      conversation: conversation,
+      appSummary: appSummary,
+    ),
+  );
 }
 
 class _CorrectSummarySheet extends StatefulWidget {
@@ -807,7 +762,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
-    final ok = await submitConversationCorrection(
+    final submission = await submitConversationCorrection(
       conversationId: widget.conversation.id,
       correctionText: correctionText,
       summaryTitle: widget.conversation.structured.title,
@@ -818,16 +773,16 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
     if (!mounted) return;
     setState(() => _isSubmitting = false);
 
-    if (ok) {
+    if (submission != null) {
       HapticFeedback.mediumImpact();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Correction submitted. Ella will recheck this summary.')),
+        SnackBar(content: Text(context.l10n.memoryTalkFixSubmitted)),
       );
       navigator.pop();
     } else {
       HapticFeedback.lightImpact();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Could not submit correction yet. Please try again later.')),
+        SnackBar(content: Text(context.l10n.memoryTalkFixFailed)),
       );
     }
   }
@@ -861,18 +816,18 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Correct Summary',
-                style: TextStyle(
+              Text(
+                context.l10n.memoryTalkFixSomething,
+                style: const TextStyle(
                   color: EllaColors.textPrimary,
                   fontSize: 22,
                   fontWeight: FontWeight.w700,
                 ),
               ),
               const SizedBox(height: 8),
-              const Text(
-                'Tell Ella what was wrong in your own words. The conversation ID and current summary are attached in the background.',
-                style: TextStyle(
+              Text(
+                context.l10n.memoryTalkFixDescription,
+                style: const TextStyle(
                   color: EllaColors.textSecondary,
                   fontSize: 15,
                   height: 1.35,
@@ -887,7 +842,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                 textInputAction: TextInputAction.newline,
                 style: const TextStyle(color: EllaColors.textPrimary, fontSize: 16),
                 decoration: InputDecoration(
-                  hintText: 'Example: This was Greg and his son watching NASA news, not a group meeting.',
+                  hintText: context.l10n.memoryTalkFixHint,
                   hintStyle: const TextStyle(color: EllaColors.textTertiary),
                   filled: true,
                   fillColor: EllaColors.bgSecondary,
@@ -923,7 +878,7 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                           height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                         )
-                      : const Text('Submit Correction'),
+                      : Text(context.l10n.memoryTalkFixSubmit),
                 ),
               ),
             ],

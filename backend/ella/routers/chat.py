@@ -24,11 +24,12 @@ import os
 import re
 import hashlib
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -37,6 +38,7 @@ from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEve
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from utils.other import endpoints as auth
 from utils.ella.canonical_context import (
     DEFAULT_CONTEXT_CHANNELS,
     canonical_events_to_server_messages,
@@ -80,6 +82,13 @@ ELLA_SYSTEM_PROMPT = (
     "You help with daily life questions, provide companionship, and gently encourage healthy habits. "
     "Keep responses concise and easy to understand. "
     "If someone seems confused or distressed, respond with extra gentleness and reassurance."
+)
+
+MEMORY_TALK_PERSONA_PROMPT = (
+    "This is a discussion about one saved memory. Be a warm companion, not a commentator. "
+    "Acknowledge feelings without judging, taking sides, diagnosing motives, or analyzing the family. "
+    "Do not create a new memory from this discussion. Keep the response concise and grounded only in the "
+    "memory context below."
 )
 
 
@@ -140,11 +149,157 @@ async def _hermes_nonstream_completion(messages: list[dict], session_key: str, m
 
 
 class EllaChatRequest(BaseModel):
-    uid: str
+    uid: str = ""
     message: str
     conversation_id: str = ""
     client_message_id: str = ""
     client_sent_at: str = ""
+
+
+class MemoryTalkTurnInput(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+    turn_id: str = ""
+
+
+class MemoryTalkTurnsAppendRequest(BaseModel):
+    turns: list[MemoryTalkTurnInput]
+
+
+def _memory_talk_ref(uid: str, conversation_id: str):
+    from database._client import db
+
+    return (
+        db.collection("users")
+        .document(uid)
+        .collection("conversations")
+        .document(conversation_id)
+        .collection("memory_talk_turns")
+    )
+
+
+def _get_memory_conversation(uid: str, conversation_id: str) -> dict | None:
+    from database import conversations as conversations_db
+
+    return conversations_db.get_conversation(uid, conversation_id)
+
+
+def _get_linked_people(uid: str, person_ids: list[str]) -> list[dict]:
+    from database import users as users_db
+
+    return users_db.get_people_by_ids(uid, person_ids)
+
+
+def _update_memory_conversation(uid: str, conversation_id: str, update: dict) -> None:
+    from database import conversations as conversations_db
+
+    conversations_db.update_conversation(uid, conversation_id, update)
+
+
+def _memory_talk_context(uid: str, conversation_id: str) -> str:
+    conversation = _get_memory_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    structured = conversation.get("structured") if isinstance(conversation.get("structured"), dict) else {}
+    segments = (
+        conversation.get("transcript_segments") if isinstance(conversation.get("transcript_segments"), list) else []
+    )
+    person_ids = sorted(
+        {
+            str(segment.get("person_id"))
+            for segment in segments
+            if isinstance(segment, dict) and segment.get("person_id")
+        }
+    )
+    people = _get_linked_people(uid, person_ids) if person_ids else []
+    people_context = "\n".join(
+        f"- {str(person.get('name') or 'Unknown person').strip()}" for person in people if isinstance(person, dict)
+    )
+    transcript = "\n".join(
+        str(segment.get("text") or "").strip()
+        for segment in segments[:80]
+        if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+    )
+    occurred_at = conversation.get("started_at") or conversation.get("created_at") or ""
+    return (
+        f"Date: {occurred_at}\n"
+        f"Title: {str(structured.get('title') or '').strip()}\n"
+        f"Summary: {str(structured.get('overview') or '').strip()}\n"
+        f"Linked people:\n{people_context or '- None linked'}\n"
+        f"Source conversation:\n{transcript[:12000]}"
+    )
+
+
+def _persist_memory_talk_turn(
+    *,
+    uid: str,
+    conversation_id: str,
+    turn_id: str,
+    role: str,
+    text: str,
+    created_at: datetime,
+) -> None:
+    document_id = f"{turn_id}-{role}"
+    _memory_talk_ref(uid, conversation_id).document(document_id).set(
+        {
+            "id": document_id,
+            "role": role,
+            "text": text,
+            "created_at": created_at,
+            "conversation_id": conversation_id,
+        },
+        merge=True,
+    )
+    conversation = _get_memory_conversation(uid, conversation_id) or {}
+    state = conversation.get("memory_talk_state") if isinstance(conversation.get("memory_talk_state"), dict) else {}
+    _update_memory_conversation(
+        uid,
+        conversation_id,
+        {
+            "memory_talk_state": {
+                "has_discussion": True,
+                "turn_count": int(state.get("turn_count") or 0) + 1,
+                "updated_at": created_at,
+            }
+        },
+    )
+
+
+async def _persist_chat_turn(
+    *,
+    uid: str,
+    conversation_id: str,
+    turn_id: str,
+    role: str,
+    text: str,
+    session_key: str,
+    created_at: datetime,
+    client_info: dict | None = None,
+) -> None:
+    if conversation_id:
+        await asyncio.to_thread(
+            _persist_memory_talk_turn,
+            uid=uid,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            role=role,
+            text=text,
+            created_at=created_at,
+        )
+        return
+    await _write_ios_chat_canonical_event(
+        _ios_chat_event(
+            uid=uid,
+            turn_id=turn_id,
+            role=role,
+            text=text,
+            session_key=session_key,
+            started_at=created_at,
+            ended_at=created_at if role == "assistant" else None,
+            client_info=client_info,
+        )
+    )
 
 
 def _parse_client_sent_at(value: str = "") -> datetime:
@@ -553,9 +708,11 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
         _l4_trace.notes.append("WARNING: No cluster found, using fallback")
         print(f"[FLOW:CHAT-L4] provider=openclaw uid={uid} agent=main source=FALLBACK (no cluster)", flush=True)
 
-    canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
+    canonical_events = [] if conversation_id else await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
-    temporal_label, temporal_events = await _fetch_temporal_chat_context(uid, user_message)
+    temporal_label, temporal_events = (
+        (None, []) if conversation_id else await _fetch_temporal_chat_context(uid, user_message)
+    )
     temporal_context = format_canonical_context(
         temporal_events,
         max_chars=CHAT_TEMPORAL_CONTEXT_MAX_CHARS,
@@ -574,7 +731,7 @@ async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dic
                 ),
             }
         )
-    else:
+    elif not conversation_id:
         print(
             f"[FLOW:CHAT-L4] uid={uid} canonical_context=empty fallback=openclaw_session_history_migration",
             flush=True,
@@ -694,6 +851,8 @@ async def _stream_hermes_chat(
     *,
     turn_id: str = "",
     client_sent_at: datetime = None,
+    conversation_id: str = "",
+    memory_context: str = "",
 ):
     """Stream iOS chat through Hermes while preserving OMI chat SSE format."""
     import time as _time
@@ -718,6 +877,13 @@ async def _stream_hermes_chat(
         user_timezone=CHAT_USER_TIMEZONE,
     )
     messages = []
+    if conversation_id:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"{MEMORY_TALK_PERSONA_PROMPT}\n\nMemory context:\n{memory_context}",
+            }
+        )
     if canonical_context:
         messages.append(
             {
@@ -746,16 +912,15 @@ async def _stream_hermes_chat(
                 ),
             }
         )
-    await _write_ios_chat_canonical_event(
-        _ios_chat_event(
-            uid=uid,
-            turn_id=turn_id,
-            role="user",
-            text=user_message,
-            session_key=session_key,
-            started_at=user_started_at,
-            client_info=client_info,
-        )
+    await _persist_chat_turn(
+        uid=uid,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        role="user",
+        text=user_message,
+        session_key=session_key,
+        created_at=user_started_at,
+        client_info=client_info,
     )
     messages.append({"role": "user", "content": user_message})
     memory_key = _hermes_chat_memory_key(uid)
@@ -823,17 +988,15 @@ async def _stream_hermes_chat(
                 )
         if full_text:
             assistant_started_at = datetime.now(timezone.utc)
-            await _write_ios_chat_canonical_event(
-                _ios_chat_event(
-                    uid=uid,
-                    turn_id=turn_id,
-                    role="assistant",
-                    text=full_text,
-                    session_key=session_key,
-                    started_at=assistant_started_at,
-                    ended_at=assistant_started_at,
-                    client_info=client_info,
-                )
+            await _persist_chat_turn(
+                uid=uid,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                role="assistant",
+                text=full_text,
+                session_key=session_key,
+                created_at=assistant_started_at,
+                client_info=client_info,
             )
             msg = {
                 "id": str(uuid4()),
@@ -873,6 +1036,7 @@ async def ella_chat_stream(
     x_ella_client_type: str = Header(None, alias="X-Ella-Client-Type"),
     x_ella_client_version: str = Header(None, alias="X-Ella-Client-Version"),
     x_ella_route: str = Header(None, alias="X-Ella-Route"),
+    authenticated_uid: str = Depends(auth.get_current_user_uid),
 ):
     """
     Stream a chat response from Ella with configurable debug levels.
@@ -889,6 +1053,9 @@ async def ella_chat_stream(
     import time as _time
 
     _trace_start = _time.time()
+    if request.uid and request.uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail="Authenticated user does not match request")
+    request.uid = authenticated_uid
 
     debug_level = _resolve_debug_level(x_ella_debug_level)
 
@@ -914,10 +1081,13 @@ async def ella_chat_stream(
     client_sent_at = _parse_client_sent_at(request.client_sent_at)
     turn_id = _canonical_turn_id(request.uid, request, client_sent_at)
     trace.notes.append(f"canonical_turn_id={turn_id}")
+    memory_context = _memory_talk_context(request.uid, request.conversation_id) if request.conversation_id else ""
+    if request.conversation_id:
+        trace.notes.append("surface=memory_talk")
     # Capture all X-Ella-* headers for debugging
     trace.client_headers = {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")}
 
-    if CHAT_PLATFORM == "hermes":
+    if CHAT_PLATFORM == "hermes" or request.conversation_id:
         trace.resolved_agent = HERMES_AGENT_ID
         trace.resolve_source = "hermes_platform"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
@@ -935,6 +1105,8 @@ async def ella_chat_stream(
                 },
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
+                conversation_id=request.conversation_id,
+                memory_context=memory_context,
             ),
             media_type="text/event-stream",
         )
@@ -1005,6 +1177,54 @@ class EllaChatHistoryRequest(BaseModel):
     """Query params come as Pydantic model for POST, but we use GET with Query."""
 
     pass
+
+
+@router.get("/chat/memory/{conversation_id}/history")
+def memory_talk_history(
+    conversation_id: str,
+    limit: int = 50,
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    if _get_memory_conversation(uid, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    bounded_limit = max(1, min(limit, 100))
+    snapshots = _memory_talk_ref(uid, conversation_id).order_by("created_at").limit(bounded_limit).stream()
+    turns = []
+    for snapshot in snapshots:
+        turn = snapshot.to_dict() or {}
+        created_at = turn.get("created_at")
+        if isinstance(created_at, datetime):
+            turn["created_at"] = created_at.astimezone(timezone.utc).isoformat()
+        turns.append(turn)
+    return {"conversation_id": conversation_id, "turns": turns}
+
+
+@router.post("/chat/memory/{conversation_id}/turns")
+def append_memory_talk_turns(
+    conversation_id: str,
+    request: MemoryTalkTurnsAppendRequest,
+    uid: str = Depends(auth.get_current_user_uid),
+):
+    if _get_memory_conversation(uid, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not request.turns or len(request.turns) > 12:
+        raise HTTPException(status_code=400, detail="Provide between 1 and 12 turns")
+
+    persisted = 0
+    for turn in request.turns:
+        text = turn.text.strip()
+        if not text or len(text) > 4000:
+            raise HTTPException(status_code=400, detail="Turn text must be between 1 and 4000 characters")
+        _persist_memory_talk_turn(
+            uid=uid,
+            conversation_id=conversation_id,
+            turn_id=turn.turn_id.strip() or str(uuid4()),
+            role=turn.role,
+            text=text,
+            created_at=datetime.now(timezone.utc),
+        )
+        persisted += 1
+    return {"conversation_id": conversation_id, "persisted": persisted}
 
 
 PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")

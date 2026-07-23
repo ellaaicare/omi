@@ -540,6 +540,11 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
   }
 
+  void notifyMemoryTalkChanged() {
+    conversationProvider?.updateConversation(conversation);
+    notifyListeners();
+  }
+
   String? _preferredSummarizationAppId;
 
   String? get preferredSummarizationAppId => _preferredSummarizationAppId;

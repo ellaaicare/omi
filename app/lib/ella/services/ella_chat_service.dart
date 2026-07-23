@@ -26,6 +26,84 @@ Map<String, String> _ellaDebugHeaders({required String routeSource}) {
   };
 }
 
+class MemoryTalkHistoryTurn {
+  final String role;
+  final String text;
+  final DateTime? createdAt;
+
+  const MemoryTalkHistoryTurn({
+    required this.role,
+    required this.text,
+    required this.createdAt,
+  });
+}
+
+Future<List<MemoryTalkHistoryTurn>> fetchMemoryTalkHistory(String conversationId) async {
+  if (SharedPreferencesUtil().demoMode) return [];
+  try {
+    final uri = Uri.parse('${Env.apiBaseUrl}v1/ella/chat/memory/$conversationId/history').replace(
+      queryParameters: {
+        'limit': '50',
+      },
+    );
+    final response = await makeApiCall(
+      url: uri.toString(),
+      headers: _ellaDebugHeaders(routeSource: 'memory-talk-history'),
+      method: 'GET',
+      body: '',
+      timeout: const Duration(seconds: 10),
+    );
+    if (response == null || response.statusCode != 200) return [];
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    return (payload['turns'] as List<dynamic>? ?? [])
+        .whereType<Map>()
+        .map((turn) {
+          final value = Map<String, dynamic>.from(turn);
+          return MemoryTalkHistoryTurn(
+            role: value['role']?.toString() ?? '',
+            text: value['text']?.toString() ?? '',
+            createdAt:
+                value['created_at'] != null ? DateTime.tryParse(value['created_at'].toString())?.toLocal() : null,
+          );
+        })
+        .where((turn) => turn.text.trim().isNotEmpty)
+        .toList();
+  } catch (error) {
+    Logger.debug('[MemoryTalk] History fetch error: $error');
+    return [];
+  }
+}
+
+Future<bool> appendMemoryTalkTurns(
+  String conversationId,
+  List<MemoryTalkHistoryTurn> turns,
+) async {
+  if (SharedPreferencesUtil().demoMode || turns.isEmpty) return true;
+  try {
+    final response = await makeApiCall(
+      url: '${Env.apiBaseUrl}v1/ella/chat/memory/$conversationId/turns',
+      headers: _ellaDebugHeaders(routeSource: 'memory-talk-append'),
+      method: 'POST',
+      body: jsonEncode({
+        'turns': [
+          for (final turn in turns)
+            {
+              'turn_id': const Uuid().v4(),
+              'role': turn.role,
+              'text': turn.text,
+            },
+        ],
+      }),
+      timeout: const Duration(seconds: 5),
+      retries: 0,
+    );
+    return response?.statusCode == 200;
+  } catch (error) {
+    Logger.debug('[MemoryTalk] Turn persistence error: $error');
+    return false;
+  }
+}
+
 /// Fetch chat history from the VPS proxy endpoint.
 /// Returns messages in chronological order (oldest first), or empty list on failure.
 Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
@@ -98,7 +176,10 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 ///
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
-Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
+Stream<ServerMessageChunk> sendEllaChatStream(
+  String text, {
+  String conversationId = '',
+}) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     Logger.debug('[EllaChat] Blocked chat stream without AI consent');
     return;
@@ -115,5 +196,6 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
     headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
     clientMessageId: const Uuid().v4(),
     clientSentAt: DateTime.now().toUtc(),
+    conversationId: conversationId,
   );
 }

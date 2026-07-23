@@ -10359,5 +10359,168 @@
   "retryNow": "Retry now",
   "@retryNow": {
     "description": "Confirmation action for retrying a failed summary"
+  },
+  "memoryTalkTalkAboutThis": "Talk about this",
+  "@memoryTalkTalkAboutThis": {
+    "description": "Single primary action on a memory detail screen"
+  },
+  "memoryTalkTalkingAbout": "TALKING ABOUT",
+  "@memoryTalkTalkingAbout": {
+    "description": "Header above the memory title in the scoped talk sheet"
+  },
+  "memoryTalkOpening": "This is from {when} — {title}. What would you like to tell me about it?",
+  "@memoryTalkOpening": {
+    "description": "Ella's opening line in a memory-scoped discussion",
+    "placeholders": {
+      "when": {
+        "type": "String"
+      },
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkThisMorning": "this morning",
+  "@memoryTalkThisMorning": {
+    "description": "Friendly relative date in Ella's memory opener"
+  },
+  "memoryTalkEarlierToday": "earlier today",
+  "@memoryTalkEarlierToday": {
+    "description": "Friendly relative date in Ella's memory opener"
+  },
+  "memoryTalkOnDate": "{date}",
+  "@memoryTalkOnDate": {
+    "description": "Short date in Ella's memory opener",
+    "placeholders": {
+      "date": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkComposerHint": "Ask or tell Ella about this…",
+  "@memoryTalkComposerHint": {
+    "description": "Placeholder for the memory-scoped text composer"
+  },
+  "memoryTalkSend": "Send",
+  "@memoryTalkSend": {
+    "description": "Accessibility label for sending a scoped discussion turn"
+  },
+  "memoryTalkDone": "Done",
+  "@memoryTalkDone": {
+    "description": "Closes the memory-scoped talk sheet"
+  },
+  "memoryTalkVoiceComingSoon": "Voice is coming soon.",
+  "@memoryTalkVoiceComingSoon": {
+    "description": "M1 response when the voice-mode toggle is pressed"
+  },
+  "memoryTalkCorrectionConfirmation": "So it was {newValue}, not {oldValue} — did I get that right?",
+  "@memoryTalkCorrectionConfirmation": {
+    "description": "Ella confirms a correction before applying it",
+    "placeholders": {
+      "newValue": {
+        "type": "String"
+      },
+      "oldValue": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkCorrectionReprompt": "Sorry — was that a yes or a no?",
+  "@memoryTalkCorrectionReprompt": {
+    "description": "One plain-language reprompt after an ambiguous correction confirmation"
+  },
+  "memoryTalkCorrectionDiscarded": "All right — I won't change it.",
+  "@memoryTalkCorrectionDiscarded": {
+    "description": "Ella acknowledges a denied correction"
+  },
+  "memoryTalkCorrectionNotChanged": "I didn't change it. You can tell me again whenever you like.",
+  "@memoryTalkCorrectionNotChanged": {
+    "description": "Ella stops after the one allowed ambiguous-confirmation reprompt"
+  },
+  "memoryTalkApplyingCorrection": "Thank you. I'm updating that now.",
+  "@memoryTalkApplyingCorrection": {
+    "description": "Ella acknowledges an explicitly confirmed correction"
+  },
+  "memoryTalkCorrectionStillWorking": "I'm still working on that. You can close this and come back soon.",
+  "@memoryTalkCorrectionStillWorking": {
+    "description": "Shown when an accepted correction has not finished within the short polling window"
+  },
+  "memoryTalkCorrectionFailed": "I couldn't make that change yet. Please try again in a little while.",
+  "@memoryTalkCorrectionFailed": {
+    "description": "Shown when correction submission fails"
+  },
+  "memoryTalkDemoReply": "I'm glad you told me. What else do you remember about that morning?",
+  "@memoryTalkDemoReply": {
+    "description": "Demo Mode response in a memory-scoped discussion"
+  },
+  "memoryTalkSendFailed": "I couldn't answer just now. Please try again.",
+  "@memoryTalkSendFailed": {
+    "description": "Shown when a scoped discussion turn fails"
+  },
+  "memoryTalkUpdatedJustNow": "Updated just now",
+  "@memoryTalkUpdatedJustNow": {
+    "description": "Receipt status after a memory correction applies"
+  },
+  "memoryTalkSeeWhatChanged": "see what changed",
+  "@memoryTalkSeeWhatChanged": {
+    "description": "Receipt disclosure action"
+  },
+  "memoryTalkWhatChanged": "WHAT CHANGED",
+  "@memoryTalkWhatChanged": {
+    "description": "Header above the correction diff"
+  },
+  "memoryTalkAlsoFixedOnPersonPage": "Also fixed on {name}'s page, everywhere they appear.",
+  "@memoryTalkAlsoFixedOnPersonPage": {
+    "description": "Shown only when a person correction actually propagated",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkUndoThisChange": "Undo this change",
+  "@memoryTalkUndoThisChange": {
+    "description": "Reverts a memory correction and any actual propagation"
+  },
+  "memoryTalkUndoFailed": "I couldn't undo that change yet. Please try again.",
+  "@memoryTalkUndoFailed": {
+    "description": "Shown when a correction undo fails"
+  },
+  "memoryTalkConversationAboutThis": "Conversation about this",
+  "@memoryTalkConversationAboutThis": {
+    "description": "History row shown only after a scoped discussion exists"
+  },
+  "memoryTalkMinutes": "{count, plural, =1{1 min} other{{count} mins}}",
+  "@memoryTalkMinutes": {
+    "description": "Compact memory duration",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "memoryTalkFixSomething": "Fix something",
+  "@memoryTalkFixSomething": {
+    "description": "Overflow-menu family tool for the legacy correction form"
+  },
+  "memoryTalkFixDescription": "Tell Ella what was wrong in your own words. The current memory is included for context.",
+  "@memoryTalkFixDescription": {
+    "description": "Explanation in the overflow correction form"
+  },
+  "memoryTalkFixHint": "Example: This was Rose, not Margaret.",
+  "@memoryTalkFixHint": {
+    "description": "Example in the overflow correction form"
+  },
+  "memoryTalkFixSubmit": "Submit change",
+  "@memoryTalkFixSubmit": {
+    "description": "Submits the overflow correction form"
+  },
+  "memoryTalkFixSubmitted": "Change submitted. Ella will check this memory.",
+  "@memoryTalkFixSubmitted": {
+    "description": "Acknowledges submission from the overflow correction form"
+  },
+  "memoryTalkFixFailed": "Could not submit that change yet. Please try again later.",
+  "@memoryTalkFixFailed": {
+    "description": "Shown when the overflow correction form fails"
   }
 }

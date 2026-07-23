@@ -16250,6 +16250,204 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Retry now'**
   String get retryNow;
+
+  /// Single primary action on a memory detail screen
+  ///
+  /// In en, this message translates to:
+  /// **'Talk about this'**
+  String get memoryTalkTalkAboutThis;
+
+  /// Header above the memory title in the scoped talk sheet
+  ///
+  /// In en, this message translates to:
+  /// **'TALKING ABOUT'**
+  String get memoryTalkTalkingAbout;
+
+  /// Ella's opening line in a memory-scoped discussion
+  ///
+  /// In en, this message translates to:
+  /// **'This is from {when} — {title}. What would you like to tell me about it?'**
+  String memoryTalkOpening(String when, String title);
+
+  /// Friendly relative date in Ella's memory opener
+  ///
+  /// In en, this message translates to:
+  /// **'this morning'**
+  String get memoryTalkThisMorning;
+
+  /// Friendly relative date in Ella's memory opener
+  ///
+  /// In en, this message translates to:
+  /// **'earlier today'**
+  String get memoryTalkEarlierToday;
+
+  /// Short date in Ella's memory opener
+  ///
+  /// In en, this message translates to:
+  /// **'{date}'**
+  String memoryTalkOnDate(String date);
+
+  /// Placeholder for the memory-scoped text composer
+  ///
+  /// In en, this message translates to:
+  /// **'Ask or tell Ella about this…'**
+  String get memoryTalkComposerHint;
+
+  /// Accessibility label for sending a scoped discussion turn
+  ///
+  /// In en, this message translates to:
+  /// **'Send'**
+  String get memoryTalkSend;
+
+  /// Closes the memory-scoped talk sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get memoryTalkDone;
+
+  /// M1 response when the voice-mode toggle is pressed
+  ///
+  /// In en, this message translates to:
+  /// **'Voice is coming soon.'**
+  String get memoryTalkVoiceComingSoon;
+
+  /// Ella confirms a correction before applying it
+  ///
+  /// In en, this message translates to:
+  /// **'So it was {newValue}, not {oldValue} — did I get that right?'**
+  String memoryTalkCorrectionConfirmation(String newValue, String oldValue);
+
+  /// One plain-language reprompt after an ambiguous correction confirmation
+  ///
+  /// In en, this message translates to:
+  /// **'Sorry — was that a yes or a no?'**
+  String get memoryTalkCorrectionReprompt;
+
+  /// Ella acknowledges a denied correction
+  ///
+  /// In en, this message translates to:
+  /// **'All right — I won\'t change it.'**
+  String get memoryTalkCorrectionDiscarded;
+
+  /// Ella stops after the one allowed ambiguous-confirmation reprompt
+  ///
+  /// In en, this message translates to:
+  /// **'I didn\'t change it. You can tell me again whenever you like.'**
+  String get memoryTalkCorrectionNotChanged;
+
+  /// Ella acknowledges an explicitly confirmed correction
+  ///
+  /// In en, this message translates to:
+  /// **'Thank you. I\'m updating that now.'**
+  String get memoryTalkApplyingCorrection;
+
+  /// Shown when an accepted correction has not finished within the short polling window
+  ///
+  /// In en, this message translates to:
+  /// **'I\'m still working on that. You can close this and come back soon.'**
+  String get memoryTalkCorrectionStillWorking;
+
+  /// Shown when correction submission fails
+  ///
+  /// In en, this message translates to:
+  /// **'I couldn\'t make that change yet. Please try again in a little while.'**
+  String get memoryTalkCorrectionFailed;
+
+  /// Demo Mode response in a memory-scoped discussion
+  ///
+  /// In en, this message translates to:
+  /// **'I\'m glad you told me. What else do you remember about that morning?'**
+  String get memoryTalkDemoReply;
+
+  /// Shown when a scoped discussion turn fails
+  ///
+  /// In en, this message translates to:
+  /// **'I couldn\'t answer just now. Please try again.'**
+  String get memoryTalkSendFailed;
+
+  /// Receipt status after a memory correction applies
+  ///
+  /// In en, this message translates to:
+  /// **'Updated just now'**
+  String get memoryTalkUpdatedJustNow;
+
+  /// Receipt disclosure action
+  ///
+  /// In en, this message translates to:
+  /// **'see what changed'**
+  String get memoryTalkSeeWhatChanged;
+
+  /// Header above the correction diff
+  ///
+  /// In en, this message translates to:
+  /// **'WHAT CHANGED'**
+  String get memoryTalkWhatChanged;
+
+  /// Shown only when a person correction actually propagated
+  ///
+  /// In en, this message translates to:
+  /// **'Also fixed on {name}\'s page, everywhere they appear.'**
+  String memoryTalkAlsoFixedOnPersonPage(String name);
+
+  /// Reverts a memory correction and any actual propagation
+  ///
+  /// In en, this message translates to:
+  /// **'Undo this change'**
+  String get memoryTalkUndoThisChange;
+
+  /// Shown when a correction undo fails
+  ///
+  /// In en, this message translates to:
+  /// **'I couldn\'t undo that change yet. Please try again.'**
+  String get memoryTalkUndoFailed;
+
+  /// History row shown only after a scoped discussion exists
+  ///
+  /// In en, this message translates to:
+  /// **'Conversation about this'**
+  String get memoryTalkConversationAboutThis;
+
+  /// Compact memory duration
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{1 min} other{{count} mins}}'**
+  String memoryTalkMinutes(int count);
+
+  /// Overflow-menu family tool for the legacy correction form
+  ///
+  /// In en, this message translates to:
+  /// **'Fix something'**
+  String get memoryTalkFixSomething;
+
+  /// Explanation in the overflow correction form
+  ///
+  /// In en, this message translates to:
+  /// **'Tell Ella what was wrong in your own words. The current memory is included for context.'**
+  String get memoryTalkFixDescription;
+
+  /// Example in the overflow correction form
+  ///
+  /// In en, this message translates to:
+  /// **'Example: This was Rose, not Margaret.'**
+  String get memoryTalkFixHint;
+
+  /// Submits the overflow correction form
+  ///
+  /// In en, this message translates to:
+  /// **'Submit change'**
+  String get memoryTalkFixSubmit;
+
+  /// Acknowledges submission from the overflow correction form
+  ///
+  /// In en, this message translates to:
+  /// **'Change submitted. Ella will check this memory.'**
+  String get memoryTalkFixSubmitted;
+
+  /// Shown when the overflow correction form fails
+  ///
+  /// In en, this message translates to:
+  /// **'Could not submit that change yet. Please try again later.'**
+  String get memoryTalkFixFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

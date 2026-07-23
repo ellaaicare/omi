@@ -105,6 +105,9 @@ def test_correction_propagation_creates_idempotent_same_user_candidate_proposal(
     created = next(d for d in run1.decisions if d.action == "created_proposal")
     assert created.conversation_id == "conv-related"
     assert "teacher" in created.overlap_terms
+    assert created.rollback_ref["active_summary_version_id"] == "conv-related-v1"
+    assert created.rollback_ref["structured"]["title"] == "Teacher email follow-up"
+    assert created.rollback_ref["structured"]["overview"] == "[Ella] Mei Xin discussed emailing her teacher."
     assert run2.proposal_count == 1
     assert any(d.action == "deduped_proposal" for d in run2.decisions)
     assert any(d.action == "deduped_honcho_fact_proposal" for d in run2.decisions)

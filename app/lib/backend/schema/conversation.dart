@@ -171,6 +171,132 @@ class AudioFile {
       };
 }
 
+class ConversationSummaryVersion {
+  final String id;
+  final DateTime? createdAt;
+  final String source;
+  final String kind;
+  final String title;
+  final String overview;
+  final String emoji;
+  final String category;
+  final String? correctionId;
+  final String? basedOnVersionId;
+  final bool isActive;
+
+  const ConversationSummaryVersion({
+    required this.id,
+    required this.createdAt,
+    required this.source,
+    required this.kind,
+    required this.title,
+    required this.overview,
+    required this.emoji,
+    required this.category,
+    required this.correctionId,
+    required this.basedOnVersionId,
+    required this.isActive,
+  });
+
+  factory ConversationSummaryVersion.fromJson(Map<String, dynamic> json) {
+    return ConversationSummaryVersion(
+      id: json['id']?.toString() ?? '',
+      createdAt: json['created_at'] != null ? DateTime.tryParse(json['created_at'].toString())?.toLocal() : null,
+      source: json['source']?.toString() ?? '',
+      kind: json['kind']?.toString() ?? '',
+      title: json['title']?.toString() ?? '',
+      overview: json['overview']?.toString() ?? '',
+      emoji: json['emoji']?.toString() ?? '',
+      category: json['category']?.toString() ?? 'other',
+      correctionId: json['correction_id']?.toString(),
+      basedOnVersionId: json['based_on_version_id']?.toString(),
+      isActive: json['is_active'] == true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'created_at': createdAt?.toUtc().toIso8601String(),
+        'source': source,
+        'kind': kind,
+        'title': title,
+        'overview': overview,
+        'emoji': emoji,
+        'category': category,
+        'correction_id': correctionId,
+        'based_on_version_id': basedOnVersionId,
+        'is_active': isActive,
+      };
+}
+
+class ConversationCorrectionState {
+  final String? correctionId;
+  final String? status;
+  final bool pending;
+  final DateTime? submittedAt;
+  final DateTime? updatedAt;
+  final String? activeSummaryVersionId;
+  final String? error;
+
+  const ConversationCorrectionState({
+    required this.correctionId,
+    required this.status,
+    required this.pending,
+    required this.submittedAt,
+    required this.updatedAt,
+    required this.activeSummaryVersionId,
+    required this.error,
+  });
+
+  factory ConversationCorrectionState.fromJson(Map<String, dynamic> json) {
+    return ConversationCorrectionState(
+      correctionId: json['correction_id']?.toString(),
+      status: json['status']?.toString(),
+      pending: json['pending'] == true,
+      submittedAt: json['submitted_at'] != null ? DateTime.tryParse(json['submitted_at'].toString())?.toLocal() : null,
+      updatedAt: json['updated_at'] != null ? DateTime.tryParse(json['updated_at'].toString())?.toLocal() : null,
+      activeSummaryVersionId: json['active_summary_version_id']?.toString(),
+      error: json['error']?.toString(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'correction_id': correctionId,
+        'status': status,
+        'pending': pending,
+        'submitted_at': submittedAt?.toUtc().toIso8601String(),
+        'updated_at': updatedAt?.toUtc().toIso8601String(),
+        'active_summary_version_id': activeSummaryVersionId,
+        'error': error,
+      };
+}
+
+class MemoryTalkState {
+  final bool hasDiscussion;
+  final int turnCount;
+  final DateTime? updatedAt;
+
+  const MemoryTalkState({
+    required this.hasDiscussion,
+    required this.turnCount,
+    required this.updatedAt,
+  });
+
+  factory MemoryTalkState.fromJson(Map<String, dynamic> json) {
+    return MemoryTalkState(
+      hasDiscussion: json['has_discussion'] == true,
+      turnCount: (json['turn_count'] as num?)?.toInt() ?? 0,
+      updatedAt: json['updated_at'] != null ? DateTime.tryParse(json['updated_at'].toString())?.toLocal() : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'has_discussion': hasDiscussion,
+        'turn_count': turnCount,
+        'updated_at': updatedAt?.toUtc().toIso8601String(),
+      };
+}
+
 class ServerConversation {
   final String id;
   final DateTime createdAt;
@@ -193,6 +319,10 @@ class ServerConversation {
   final List<String> ellaTags;
   final Map<String, dynamic>? ellaSignal;
   final Map<String, dynamic>? enrichmentState;
+  final List<ConversationSummaryVersion> summaryVersions;
+  final String? activeSummaryVersionId;
+  final ConversationCorrectionState? correctionState;
+  MemoryTalkState memoryTalkState;
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
@@ -239,6 +369,10 @@ class ServerConversation {
     this.ellaTags = const [],
     this.ellaSignal,
     this.enrichmentState,
+    this.summaryVersions = const [],
+    this.activeSummaryVersionId,
+    this.correctionState,
+    this.memoryTalkState = const MemoryTalkState(hasDiscussion: false, turnCount: 0, updatedAt: null),
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
@@ -277,6 +411,17 @@ class ServerConversation {
       ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
       enrichmentState: json['enrichment_state'] is Map ? Map<String, dynamic>.from(json['enrichment_state']) : null,
+      summaryVersions: ((json['summary_versions'] ?? []) as List<dynamic>)
+          .whereType<Map>()
+          .map((version) => ConversationSummaryVersion.fromJson(Map<String, dynamic>.from(version)))
+          .toList(),
+      activeSummaryVersionId: json['active_summary_version_id']?.toString(),
+      correctionState: json['correction_state'] is Map
+          ? ConversationCorrectionState.fromJson(Map<String, dynamic>.from(json['correction_state']))
+          : null,
+      memoryTalkState: json['memory_talk_state'] is Map
+          ? MemoryTalkState.fromJson(Map<String, dynamic>.from(json['memory_talk_state']))
+          : const MemoryTalkState(hasDiscussion: false, turnCount: 0, updatedAt: null),
       processingRetryEnrichmentVectorStatus: json['processing_retry_enrichment_vector_status'],
       processingError: json['processing_error'],
       processingErrorAt:
@@ -311,6 +456,10 @@ class ServerConversation {
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
       'enrichment_state': enrichmentState,
+      'summary_versions': summaryVersions.map((version) => version.toJson()).toList(),
+      'active_summary_version_id': activeSummaryVersionId,
+      'correction_state': correctionState?.toJson(),
+      'memory_talk_state': memoryTalkState.toJson(),
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),
