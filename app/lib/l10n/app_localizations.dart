@@ -16305,17 +16305,29 @@ abstract class AppLocalizations {
   /// **'Done'**
   String get memoryTalkDone;
 
-  /// M1 response when the voice-mode toggle is pressed
+  /// Accessibility label for switching a memory conversation from voice to typing
   ///
   /// In en, this message translates to:
-  /// **'Voice is coming soon.'**
-  String get memoryTalkVoiceComingSoon;
+  /// **'Use keyboard'**
+  String get memoryTalkUseKeyboard;
+
+  /// Accessibility label for switching a memory conversation from typing to voice
+  ///
+  /// In en, this message translates to:
+  /// **'Use voice'**
+  String get memoryTalkUseVoice;
 
   /// Ella confirms a correction before applying it
   ///
   /// In en, this message translates to:
-  /// **'So it was {newValue}, not {oldValue} — did I get that right?'**
-  String memoryTalkCorrectionConfirmation(String newValue, String oldValue);
+  /// **'So it was {newValue}{contextPhrase}, not {oldValue} — did I get that right?'**
+  String memoryTalkCorrectionConfirmation(String newValue, String contextPhrase, String oldValue);
+
+  /// Person-language context added to the confirmation for the approved garden memory fixture
+  ///
+  /// In en, this message translates to:
+  /// **' at the garden'**
+  String get memoryTalkCorrectionAtTheGarden;
 
   /// One plain-language reprompt after an ambiguous correction confirmation
   ///
@@ -16388,6 +16400,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Also fixed on {name}\'s page, everywhere they appear.'**
   String memoryTalkAlsoFixedOnPersonPage(String name);
+
+  /// Locked propagation receipt copy for the approved Rose demo fixture
+  ///
+  /// In en, this message translates to:
+  /// **'Also fixed on Rose\'s page, everywhere she appears.'**
+  String get memoryTalkAlsoFixedOnRosePage;
 
   /// Reverts a memory correction and any actual propagation
   ///

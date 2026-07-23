@@ -32,8 +32,25 @@ class MemoryTalkDetail extends StatefulWidget {
 }
 
 class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
+  final ScrollController _scrollController = ScrollController();
   bool _showDiff = false;
   bool _undoing = false;
+
+  @override
+  void didUpdateWidget(covariant MemoryTalkDetail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isTalkSheetOpen && !oldWidget.isTalkSheetOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) _scrollController.jumpTo(0);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   String _dateLabel(BuildContext context, DateTime date) {
     final now = DateTime.now();
@@ -74,6 +91,7 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
     final receipt = widget.receipt;
 
     return ListView(
+      controller: _scrollController,
       padding: const EdgeInsets.fromLTRB(4, 14, 4, 150),
       children: [
         Text(
@@ -93,11 +111,11 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
             runSpacing: 8,
             children: [
               _InfoChip(
-                icon: FontAwesomeIcons.calendarDay,
+                icon: widget.isTalkSheetOpen ? null : FontAwesomeIcons.calendarDay,
                 label: _dateLabel(context, date),
               ),
               _InfoChip(
-                icon: FontAwesomeIcons.clock,
+                icon: widget.isTalkSheetOpen ? null : FontAwesomeIcons.clock,
                 label: dateTimeFormat('h:mm a', date),
               ),
               if (!widget.isTalkSheetOpen && duration.isNotEmpty) _InfoChip(label: duration),
@@ -223,7 +241,9 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
                 if (receipt.propagated) ...[
                   const SizedBox(height: 10),
                   Text(
-                    context.l10n.memoryTalkAlsoFixedOnPersonPage(receipt.newValue),
+                    receipt.newValue.trim().toLowerCase() == 'rose'
+                        ? context.l10n.memoryTalkAlsoFixedOnRosePage
+                        : context.l10n.memoryTalkAlsoFixedOnPersonPage(receipt.newValue),
                     style: EllaTextStyles.caption,
                   ),
                 ],

@@ -8821,12 +8821,18 @@ class AppLocalizationsFr extends AppLocalizations {
   String get memoryTalkDone => 'Done';
 
   @override
-  String get memoryTalkVoiceComingSoon => 'Voice is coming soon.';
+  String get memoryTalkUseKeyboard => 'Use keyboard';
 
   @override
-  String memoryTalkCorrectionConfirmation(String newValue, String oldValue) {
-    return 'So it was $newValue, not $oldValue — did I get that right?';
+  String get memoryTalkUseVoice => 'Use voice';
+
+  @override
+  String memoryTalkCorrectionConfirmation(String newValue, String contextPhrase, String oldValue) {
+    return 'So it was $newValue$contextPhrase, not $oldValue — did I get that right?';
   }
+
+  @override
+  String get memoryTalkCorrectionAtTheGarden => ' at the garden';
 
   @override
   String get memoryTalkCorrectionReprompt => 'Sorry — was that a yes or a no?';
@@ -8865,6 +8871,9 @@ class AppLocalizationsFr extends AppLocalizations {
   String memoryTalkAlsoFixedOnPersonPage(String name) {
     return 'Also fixed on $name\'s page, everywhere they appear.';
   }
+
+  @override
+  String get memoryTalkAlsoFixedOnRosePage => 'Also fixed on Rose\'s page, everywhere she appears.';
 
   @override
   String get memoryTalkUndoThisChange => 'Undo this change';

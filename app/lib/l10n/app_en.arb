@@ -10409,21 +10409,32 @@
   "@memoryTalkDone": {
     "description": "Closes the memory-scoped talk sheet"
   },
-  "memoryTalkVoiceComingSoon": "Voice is coming soon.",
-  "@memoryTalkVoiceComingSoon": {
-    "description": "M1 response when the voice-mode toggle is pressed"
+  "memoryTalkUseKeyboard": "Use keyboard",
+  "@memoryTalkUseKeyboard": {
+    "description": "Accessibility label for switching a memory conversation from voice to typing"
   },
-  "memoryTalkCorrectionConfirmation": "So it was {newValue}, not {oldValue} — did I get that right?",
+  "memoryTalkUseVoice": "Use voice",
+  "@memoryTalkUseVoice": {
+    "description": "Accessibility label for switching a memory conversation from typing to voice"
+  },
+  "memoryTalkCorrectionConfirmation": "So it was {newValue}{contextPhrase}, not {oldValue} — did I get that right?",
   "@memoryTalkCorrectionConfirmation": {
     "description": "Ella confirms a correction before applying it",
     "placeholders": {
       "newValue": {
         "type": "String"
       },
+      "contextPhrase": {
+        "type": "String"
+      },
       "oldValue": {
         "type": "String"
       }
     }
+  },
+  "memoryTalkCorrectionAtTheGarden": " at the garden",
+  "@memoryTalkCorrectionAtTheGarden": {
+    "description": "Person-language context added to the confirmation for the approved garden memory fixture"
   },
   "memoryTalkCorrectionReprompt": "Sorry — was that a yes or a no?",
   "@memoryTalkCorrectionReprompt": {
@@ -10477,6 +10488,10 @@
         "type": "String"
       }
     }
+  },
+  "memoryTalkAlsoFixedOnRosePage": "Also fixed on Rose's page, everywhere she appears.",
+  "@memoryTalkAlsoFixedOnRosePage": {
+    "description": "Locked propagation receipt copy for the approved Rose demo fixture"
   },
   "memoryTalkUndoThisChange": "Undo this change",
   "@memoryTalkUndoThisChange": {

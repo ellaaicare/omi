@@ -57,7 +57,8 @@ Final status: **PASS**, with the two connected-device activation limitations doc
 
 ### Authority and target
 
-- Product authority: `ellaaicare/ella-ai#1086`, 2026-07-23 RESTART PRD plus GO amendment.
+- Product authority: `ellaaicare/ella-ai#1086`, 2026-07-23 RESTART PRD, GO amendment, and Lane S DECISION comment `5063815712`.
+- Voice behavior authority: amended §8.5 on `ellaaicare/ella-ai` `main`. M1 opens voice-first, reuses the existing turn-based voice transport, and exposes typing only through the in-sheet toggle.
 - Structural source: `/Users/greg/repos/ella/ella-ai/docs/design/mockups/talking-to-memories/Talking to Memories.dc.html`.
 - Visual source: `/Users/greg/repos/ella/ella-ai/docs/design/mockups/talking-to-memories/exports/ttm-1a.png` through `ttm-1f.png`.
 - Token source: `/Users/greg/repos/ella/ella-ai/docs/design/2026-07-20-app-design-spec-v2.md` §1 and §8.
@@ -66,19 +67,22 @@ Final status: **PASS**, with the two connected-device activation limitations doc
 
 ### Reference-to-simulator comparison
 
-Each implemented state was captured from the iPhone 17 Pro simulator, normalized to the 402×874-point design viewport, and reviewed side by side with its corresponding local export.
+Each state was captured from the iPhone 17 Pro simulator. The 1206×2622 simulator PNG was normalized to the 402×874-point viewport; the 888×1820 design export was cropped to its 804×1748 device frame and normalized to the same viewport. Every review used the resulting side-by-side image, not isolated screenshots.
 
 | State | Result | Review notes |
 | --- | --- | --- |
-| 1a | Pass | Phase A shell retained; `Summary` detail uses one conversational entry, no folder chip, no body correction form, 56-point 220-point-wide Talk pill. |
-| 1f | Pass | 60% sheet, reduced title/two-chip backdrop, 28-point sheet corners, 300-point Fraunces opener measure, focused 48-point composer, teal send glyph, Done then mic at right. |
-| 1d-text | Pass | M1 keyboard confirmation uses the locked confirmation pattern and keeps the pending claim until an affirmative, denial, or one plain-language ambiguous re-prompt. The exported 1d voice treatment remains M2. |
-| 1e | Pass | Updated title and overview, 44-point receipt chip, teal emphasis, expandable diff, 48-point Undo, and card history row match the approved state. Person-propagation copy is absent unless the receipt reports a real propagation. |
+| 1a | Pass | Phase A shell retained; `Summary` detail uses one conversational entry, no folder chip, no body correction form, and the approved floating Talk pill. |
+| 1b | Pass | Sheet opens at 56%, voice-first, with the 110-point listening orb, restrained rings, listening status, and keyboard toggle beside Done. |
+| 1c | Pass | Ella begins the Fraunces opening line within 1.5 seconds; the sheet expands to 64%, uses the 96-point speaking orb, and keeps the approved backdrop and footer geometry. |
+| 1d | Pass | Confirmation expands to 70%, uses the 72-point voice orb, shows the last two user lines, and uses the locked copy: “So it was Rose at the garden, not Margaret — did I get that right?” |
+| 1f | Pass | Typing is an in-sheet secondary mode only; the 60% sheet replaces the orb with the focused composer and shows the mic toggle beside Done. No separate form or route was introduced. |
+| 1e | Pass | Updated title and overview, receipt chip, teal emphasis, expandable diff, 48-point Undo, conditional person-propagation caption, and memory-scoped history row match the approved state. |
 
 ### Interaction and containment checks
 
 - `Fix something` is reachable from the overflow menu and the former body CTA is absent.
-- The talk composer sends ordinary scoped turns without introducing a new session type.
+- The sheet opens voice-first and uses the existing record/speech-recognition → Ella chat stream → TTS transport. No full-duplex transport or new session type was added.
+- The keyboard remains available only through the in-sheet toggle and returns to voice through the matching mic toggle.
 - Smart-apostrophe correction language is extracted correctly.
 - Affirmative replies apply; denials discard; ambiguous replies re-prompt once and do not silently apply or discard.
 - Applied changes produce a receipt and Undo restores the source title, overview, active version, and any propagation snapshots that were actually applied.
@@ -89,4 +93,15 @@ Each implemented state was captured from the iPhone 17 Pro simulator, normalized
 
 ### Evidence policy
 
-Baseline evidence lives outside the repository under `/Users/greg/repos/ella/evidence/mem-talk-m1-r2/baseline-54142de074/`. Final PR screenshots are captured outside the repository from the exact submitted commit and identify that SHA in the PR body; design-export PNGs are reference inputs only, never implementation proof.
+Baseline evidence lives outside the repository under `/Users/greg/repos/ella/evidence/mem-talk-m1-r2/baseline-54142de074/`. Exact-submission screenshots live outside the repository under `/Users/greg/repos/ella/evidence/mem-talk-m1-r2/submitted-final/` as `ttm-1a.png` through `ttm-1f.png`. Design-export PNGs are reference inputs only, never implementation proof.
+
+### Comparison iterations
+
+1. The first implementation followed the superseded keyboard-first wording and was paused before review.
+2. The Lane S decision changed the opening path to voice-first and required working simulator states 1b and 1c before milestone review.
+3. The first voice comparison found a too-dark orb, backdrop chips that remained visible while the sheet was open, a wrapped composer capture, a missing “at the garden” phrase, and detail content that retained its prior scroll offset.
+4. The orb palette, detail backdrop, composer typography, confirmation context, and detail scroll reset were corrected and compared again.
+5. The second comparison found that the semantic state reached 1c while the sheet retained the 1b height. Sheet sizing was moved to the full device view and animated across the 56%/64%/70%/60% state geometry.
+6. The post-fix comparison found no remaining P0, P1, or P2 mismatch across fonts, spacing, color, orb/icon treatment, or locked copy.
+
+final result: passed
