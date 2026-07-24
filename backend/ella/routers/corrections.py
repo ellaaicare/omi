@@ -576,6 +576,140 @@ def _correction_receipt(
     )
 
 
+async def apply_memory_reinterpretation_correction(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    trace_id: str,
+    active_summary_version_id: str,
+    correction_text: str,
+    corrected_summary: dict[str, Any],
+    evidence_event_ids: list[str],
+    source_session_id: str,
+) -> dict[str, Any]:
+    """Apply one worker-confirmed proposal through the existing CAS/receipt path.
+
+    The deterministic correction ID and trace ID make crash-after-apply replay
+    idempotent. Hermes never calls this function directly; the OMI worker first
+    validates exact canonical evidence and the signed starting version.
+    """
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_unlocked_conversation(conversation)
+    _, existing = _correction_summary_versions(conversation, correction_id)
+    if existing is not None:
+        enrichment_state = conversation.get("enrichment_state") or {}
+        if enrichment_state.get("trace_id") == trace_id and enrichment_state.get("canonical_status") != "completed":
+            await apply_summary_update(
+                uid=uid,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                active_summary_version_id=active_summary_version_id,
+                summary=corrected_summary,
+                summary_kind="voice_reinterpreted",
+                summary_source="voice-memory-reinterpretation",
+                correction_id=correction_id,
+                require_canonical=True,
+                require_based_on_match=False,
+                preserve_generated_results=True,
+            )
+            conversation = conversations_db.get_conversation(uid, conversation_id) or conversation
+        replayed_at = _now_iso()
+        _persist_correction_audit(
+            uid,
+            conversation_id,
+            correction_id,
+            {
+                "status": "applied",
+                "applied_at": replayed_at,
+                "updated_at": replayed_at,
+                "applied_summary_version_id": str(existing.get("id") or ""),
+                "idempotent_replay": True,
+            },
+        )
+        return {
+            "status": "ok",
+            "conversation_id": conversation_id,
+            "active_summary_version_id": str(existing.get("id") or ""),
+            "idempotent_replay": True,
+            "receipt": _correction_receipt(
+                uid=uid,
+                conversation_id=conversation_id,
+                correction_id=correction_id,
+                conversation=conversation,
+            ).model_dump(mode="json"),
+        }
+
+    if str(conversation.get("active_summary_version_id") or "") != active_summary_version_id:
+        raise ConcurrentConversationSummaryChangeError("active_summary_version_changed")
+
+    submitted_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "correction_id": correction_id,
+            "trace_id": trace_id,
+            "uid": uid,
+            "conversation_id": conversation_id,
+            "status": "submitted",
+            "source": "voice-memory-reinterpretation",
+            "correction_text": correction_text,
+            "evidence_event_ids": list(evidence_event_ids),
+            "source_session_id": source_session_id,
+            "created_at": submitted_at,
+            "updated_at": submitted_at,
+            "events": [
+                {
+                    "stage": "submitted",
+                    "status": "ok",
+                    "at": submitted_at,
+                    "trace_id": trace_id,
+                }
+            ],
+        },
+    )
+    result = await apply_summary_update(
+        uid=uid,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        active_summary_version_id=active_summary_version_id,
+        summary=corrected_summary,
+        summary_kind="voice_reinterpreted",
+        summary_source="voice-memory-reinterpretation",
+        correction_id=correction_id,
+        require_canonical=True,
+        require_based_on_match=True,
+        preserve_generated_results=True,
+    )
+    applied_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "status": "applied",
+            "applied_at": applied_at,
+            "updated_at": applied_at,
+            "applied_summary_version_id": result.get("active_summary_version_id"),
+            "source_session_id": source_session_id,
+            "evidence_event_ids": list(evidence_event_ids),
+        },
+    )
+    return {
+        **result,
+        "idempotent_replay": bool(result.get("idempotent_replay")),
+        "receipt": _correction_receipt(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+        ).model_dump(mode="json"),
+    }
+
+
 def _prepare_applied_propagation_rollbacks(
     uid: str,
     conversation_id: str,

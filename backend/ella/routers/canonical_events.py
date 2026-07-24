@@ -7,7 +7,10 @@ scanner/guardian routes, or future agent runtimes. This module intentionally
 does not require OpenClaw runtime access.
 """
 
+from __future__ import annotations
+
 import json
+import hmac
 import logging
 import os
 from datetime import datetime, timezone
@@ -87,6 +90,65 @@ def _is_memory_scoped_event(item: dict[str, Any]) -> bool:
     source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory"
+
+
+def _reinterpretation_enabled() -> bool:
+    return os.getenv("ELLA_MEMORY_REINTERPRETATION_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _completion_can_reinterpret(completion: SessionCompleteIn) -> bool:
+    source_ref = completion.source_ref if isinstance(completion.source_ref, dict) else {}
+    metadata = completion.metadata if isinstance(completion.metadata, dict) else {}
+    can_reinterpret = source_ref.get("can_reinterpret")
+    if can_reinterpret is None:
+        can_reinterpret = metadata.get("can_reinterpret")
+    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory" and can_reinterpret is True
+
+
+def _require_reinterpretation_completion_auth(
+    completion: SessionCompleteIn,
+    authorization: str,
+) -> None:
+    if not _reinterpretation_enabled() or not _completion_can_reinterpret(completion):
+        return
+    expected = os.getenv("ELLA_EVENT_LEDGER_TOKEN", "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "reinterpretation_completion_auth_not_configured"},
+        )
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token or not hmac.compare_digest(token.encode(), expected.encode()):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_reinterpretation_completion_token"},
+        )
+
+
+def _reinterpretation_row(item: dict[str, Any]) -> dict[str, Any]:
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "event_id": item.get("event_id"),
+        "source_identity": item.get("source_identity"),
+        "uid": item.get("uid"),
+        "session_id": item.get("session_id"),
+        "role": item.get("role"),
+        "text": item.get("text"),
+        "started_at": item.get("started_at"),
+        "connection_id": source_ref.get("connection_id") or metadata.get("connection_id") or "",
+        "turn_index": source_ref.get("turn_index") or metadata.get("turn_index") or 0,
+        "scope_kind": source_ref.get("scope_kind") or metadata.get("scope_kind") or "",
+        "conversation_id": source_ref.get("conversation_id") or metadata.get("conversation_id") or "",
+        "active_summary_version_id": (
+            source_ref.get("active_summary_version_id") or metadata.get("active_summary_version_id") or ""
+        ),
+    }
 
 
 def _derive_source_identity(
@@ -217,6 +279,13 @@ class CanonicalEventStore:
 
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
+    def __init__(self, reinterpretation_repository: Any = None):
+        if reinterpretation_repository is None and _reinterpretation_enabled():
+            from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository
+
+            reinterpretation_repository = PostgresMemoryReinterpretationRepository(_get_pool)
+        self._reinterpretation_repository = reinterpretation_repository
+
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         if not events:
             return {"ok": True, "inserted": 0, "duplicates": 0, "events": []}
@@ -303,37 +372,58 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         item = completion.normalized(session_id)
         pool = await _get_pool()
         async with pool.acquire() as conn:
-            inserted = await conn.fetchval(
-                """
-                INSERT INTO canonical_event_sessions (
-                    session_id, source_identity, uid, canonical_identity,
-                    channel, provider, started_at, completed_at,
-                    source_ref, metadata, raw_completion
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO canonical_event_sessions (
+                        session_id, source_identity, uid, canonical_identity,
+                        channel, provider, started_at, completed_at,
+                        source_ref, metadata, raw_completion
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+                    ON CONFLICT (session_id, source_identity)
+                    DO UPDATE SET
+                        completed_at = GREATEST(
+                            canonical_event_sessions.completed_at,
+                            EXCLUDED.completed_at
+                        ),
+                        source_ref = EXCLUDED.source_ref,
+                        metadata = EXCLUDED.metadata,
+                        raw_completion = EXCLUDED.raw_completion
+                    RETURNING id, (xmax = 0) AS inserted
+                    """,
+                    item["session_id"],
+                    item["source_identity"],
+                    item["uid"],
+                    item["canonical_identity"],
+                    item["channel"],
+                    item["provider"],
+                    item["started_at"],
+                    item["completed_at"],
+                    _stable_json(item["source_ref"]),
+                    _stable_json(item["metadata"]),
+                    _stable_json(item["raw_completion"]),
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
-                ON CONFLICT (session_id, source_identity) DO NOTHING
-                RETURNING id
-                """,
-                item["session_id"],
-                item["source_identity"],
-                item["uid"],
-                item["canonical_identity"],
-                item["channel"],
-                item["provider"],
-                item["started_at"],
-                item["completed_at"],
-                _stable_json(item["source_ref"]),
-                _stable_json(item["metadata"]),
-                _stable_json(item["raw_completion"]),
-            )
+                job = None
+                if self._reinterpretation_repository is not None:
+                    job = await self._reinterpretation_repository.enqueue_from_completion(conn, item)
 
         return {
             "ok": True,
             "session_id": session_id,
             "source_identity": item["source_identity"],
             "completed_at": item["completed_at"].isoformat(),
-            "inserted": inserted is not None,
-            "duplicate": inserted is None,
+            "inserted": bool(row and row["inserted"]),
+            "duplicate": bool(row and not row["inserted"]),
+            "reinterpretation": (
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "not_before": job["not_before"].isoformat(),
+                }
+                if job
+                else None
+            ),
         }
 
     async def timeline(
@@ -394,9 +484,10 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
 
 
 class InMemoryCanonicalEventStore(CanonicalEventStore):
-    def __init__(self):
+    def __init__(self, reinterpretation_repository: Any = None):
         self._events: dict[tuple[str, str], dict[str, Any]] = {}
         self._sessions: dict[tuple[str, str], dict[str, Any]] = {}
+        self._reinterpretation_repository = reinterpretation_repository
 
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         statuses = []
@@ -426,8 +517,23 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         item = completion.normalized(session_id)
         key = (item["session_id"], item["source_identity"])
         inserted = key not in self._sessions
-        if inserted:
-            self._sessions[key] = item
+        self._sessions[key] = item
+        job = None
+        if self._reinterpretation_repository is not None:
+            rows = [
+                _reinterpretation_row(event)
+                for event in self._events.values()
+                if event.get("uid") == item.get("uid") and event.get("session_id") == session_id
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row.get("started_at") or _utc_now(),
+                    row.get("connection_id") or "",
+                    int(row.get("turn_index") or 0),
+                    row.get("event_id") or "",
+                )
+            )
+            job = await self._reinterpretation_repository.enqueue(item, rows)
         return {
             "ok": True,
             "session_id": session_id,
@@ -435,6 +541,15 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             "completed_at": item["completed_at"].isoformat(),
             "inserted": inserted,
             "duplicate": not inserted,
+            "reinterpretation": (
+                {
+                    "job_id": job["id"],
+                    "status": job["status"],
+                    "not_before": job["not_before"].isoformat(),
+                }
+                if job
+                else None
+            ),
         }
 
     async def timeline(
@@ -544,8 +659,16 @@ def create_canonical_events_router(store: Optional[CanonicalEventStore] = None) 
         return await default_store.write_batch(batch.events)
 
     @router.post("/v1/ella/sessions/{session_id}/complete")
-    async def complete_session(session_id: str, completion: SessionCompleteIn):
+    async def complete_session(
+        session_id: str,
+        completion: SessionCompleteIn,
+        request: Request,
+    ):
         """Record source session completion without converting sessions into OMI objects."""
+        _require_reinterpretation_completion_auth(
+            completion,
+            request.headers.get("Authorization", ""),
+        )
         return await default_store.complete_session(session_id, completion)
 
     @router.get("/v1/ella/timeline")
