@@ -9,11 +9,7 @@ import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
 class GuardianAlertHistoryResult {
-  const GuardianAlertHistoryResult({
-    required this.records,
-    required this.source,
-    this.error,
-  });
+  const GuardianAlertHistoryResult({required this.records, required this.source, this.error});
 
   final List<GuardianAlertRecord> records;
   final GuardianAlertHistorySource source;
@@ -30,7 +26,10 @@ class GuardianAlertHistoryApi {
   static Future<GuardianAlertHistoryResult> fetch({int limit = 50}) async {
     if (SharedPreferencesUtil().demoMode) {
       return GuardianAlertHistoryResult(
-        records: DemoFixtures.whispers().take(limit).toList(),
+        records: DemoFixtures.whispers()
+            .where((record) => !record.isSystemWakeAcknowledgement)
+            .take(limit)
+            .toList(growable: false),
         source: GuardianAlertHistorySource.backend,
       );
     }
@@ -75,7 +74,10 @@ class GuardianAlertHistoryApi {
 
   static List<GuardianAlertRecord> parseBackendRecords(dynamic decoded) {
     final items = _extractRecordList(decoded);
-    final records = items.map(GuardianAlertRecord.fromJson).toList();
+    final records = items
+        .map(GuardianAlertRecord.fromJson)
+        .where((record) => !record.isSystemWakeAcknowledgement)
+        .toList();
     records.sort(_newestFirst);
     return records;
   }
@@ -93,7 +95,9 @@ class GuardianAlertHistoryApi {
           final decoded = jsonDecode(trimmed);
           if (decoded is! Map<String, dynamic>) continue;
           if (!GuardianAlertRecord.isGuardianDebugLog(decoded)) continue;
-          records.add(GuardianAlertRecord.fromDebugLog(decoded));
+          final record = GuardianAlertRecord.fromDebugLog(decoded);
+          if (record.isSystemWakeAcknowledgement) continue;
+          records.add(record);
         }
         if (records.length >= limit) break;
       }

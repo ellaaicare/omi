@@ -7,12 +7,7 @@ void main() {
   test('selects only incomplete upcoming reminders due today', () {
     final now = DateTime(2026, 7, 19, 10);
     final items = [
-      ActionItemWithMetadata(
-        id: 'today',
-        description: 'Call Greg',
-        completed: false,
-        dueAt: DateTime(2026, 7, 19, 11),
-      ),
+      ActionItemWithMetadata(id: 'today', description: 'Call Greg', completed: false, dueAt: DateTime(2026, 7, 19, 11)),
       ActionItemWithMetadata(
         id: 'completed',
         description: 'Already done',
@@ -28,5 +23,17 @@ void main() {
     ];
 
     expect(todayUpcomingReminders(items, now).map((item) => item.id), ['today']);
+  });
+
+  test('action item source labels survive API parsing', () {
+    final item = ActionItemWithMetadata.fromJson({
+      'id': 'from-david',
+      'description': 'Dinner with David',
+      'completed': false,
+      'source_label': 'David',
+    });
+
+    expect(item.sourceLabel, 'David');
+    expect(item.toJson()['source_label'], 'David');
   });
 }

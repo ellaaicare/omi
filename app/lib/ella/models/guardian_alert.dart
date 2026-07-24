@@ -13,6 +13,8 @@ class GuardianAlertRecord {
     this.traceId,
     this.queueItemId,
     this.ttsProvider,
+    this.why,
+    this.ackOnly = false,
     this.isTest = false,
     this.fromLocalDebugLog = false,
   });
@@ -30,10 +32,15 @@ class GuardianAlertRecord {
   final String? traceId;
   final String? queueItemId;
   final String? ttsProvider;
+  final String? why;
+  final bool ackOnly;
   final bool isTest;
   final bool fromLocalDebugLog;
 
+  bool get isSystemWakeAcknowledgement => triggerType.trim().toLowerCase() == 'wake_word_ack' || ackOnly;
+
   factory GuardianAlertRecord.fromJson(Map<String, dynamic> json) {
+    final metadata = _nestedMap(json['metadata']);
     final id = _firstString(json, const [
       'id',
       'alert_id',
@@ -51,25 +58,9 @@ class GuardianAlertRecord {
       'user_facing_text',
       'spoken_text',
     ]);
-    final triggerType = _firstString(json, const [
-      'trigger_type',
-      'trigger',
-      'reason',
-      'guardian_mode',
-      'mode',
-    ]);
-    final deliveryTarget = _firstString(json, const [
-      'delivery_target',
-      'target',
-      'audience',
-      'recipient_type',
-    ]);
-    final playbackStatus = _firstString(json, const [
-      'playback_status',
-      'status',
-      'item_status',
-      'audio_status',
-    ]);
+    final triggerType = _firstString(json, const ['trigger_type', 'trigger', 'reason', 'guardian_mode', 'mode']);
+    final deliveryTarget = _firstString(json, const ['delivery_target', 'target', 'audience', 'recipient_type']);
+    final playbackStatus = _firstString(json, const ['playback_status', 'status', 'item_status', 'audio_status']);
 
     return GuardianAlertRecord(
       id: id.isNotEmpty ? id : 'guardian-alert-${DateTime.now().microsecondsSinceEpoch}',
@@ -77,30 +68,22 @@ class GuardianAlertRecord {
       triggerType: triggerType.isNotEmpty ? triggerType : 'unknown',
       deliveryTarget: deliveryTarget.isNotEmpty ? deliveryTarget : 'user',
       playbackStatus: playbackStatus.isNotEmpty ? playbackStatus : 'unknown',
-      createdAt: _firstDate(json, const [
-        'created_at',
-        'createdAt',
-        'queued_at',
-        'started_at',
-        'timestamp',
-        'ts',
-      ]),
+      createdAt: _firstDate(json, const ['created_at', 'createdAt', 'queued_at', 'started_at', 'timestamp', 'ts']),
       sourceConversationId: _nullableFirstString(json, const [
         'source_conversation_id',
         'conversation_id',
         'conversationId',
       ]),
-      sourceTranscriptId: _nullableFirstString(json, const [
-        'source_transcript_id',
-        'transcript_id',
-        'transcriptId',
-      ]),
+      sourceTranscriptId: _nullableFirstString(json, const ['source_transcript_id', 'transcript_id', 'transcriptId']),
       escalation: json['escalation'] == true || json['caregiver_escalation'] == true || json['escalated'] == true,
       escalationStatus: _nullableFirstString(json, const ['escalation_status', 'caregiver_status']),
       traceId: _nullableFirstString(json, const ['trace_id', 'traceId']),
       queueItemId: _nullableFirstString(json, const ['queue_item_id', 'guardian_queue_item_id']),
       ttsProvider: _nullableFirstString(json, const ['tts_provider', 'provider']),
-      isTest: json['is_test'] == true ||
+      why: _nullableFirstString(json, const ['why', 'trigger_explanation', 'triggerExplanation']),
+      ackOnly: _isTrue(json['ack_only']) || _isTrue(metadata['ack_only']),
+      isTest:
+          json['is_test'] == true ||
           json['dry_run'] == true ||
           _isTestTarget(_firstString(json, const ['delivery_target', 'target'])),
     );
@@ -110,6 +93,7 @@ class GuardianAlertRecord {
     final extra = json['extra'];
     final fields = <String, dynamic>{...json};
     if (extra is Map<String, dynamic>) fields.addAll(extra);
+    final metadata = _nestedMap(fields['metadata']);
 
     final type = _firstString(fields, const ['type', 'event_type']);
     final message = _firstString(fields, const ['message']);
@@ -119,9 +103,12 @@ class GuardianAlertRecord {
     final text = _firstString(fields, const ['alert_text', 'summary', 'tts_text', 'text']);
 
     return GuardianAlertRecord(
-      id: _firstString(fields, const ['id', 'event_id', 'queue_item_id', 'trace_id']).ifEmpty(
-        'local-${_firstString(fields, const ['timestamp', 'ts'])}',
-      ),
+      id: _firstString(fields, const [
+        'id',
+        'event_id',
+        'queue_item_id',
+        'trace_id',
+      ]).ifEmpty('local-${_firstString(fields, const ['timestamp', 'ts'])}'),
       alertText: text.isNotEmpty ? text : message.ifEmpty(type.ifEmpty('Guardian debug event')),
       triggerType: trigger.isNotEmpty ? trigger : type.ifEmpty('guardian'),
       deliveryTarget: target.isNotEmpty ? target : 'local-debug',
@@ -134,6 +121,8 @@ class GuardianAlertRecord {
       traceId: _nullableFirstString(fields, const ['trace_id', 'traceId']),
       queueItemId: _nullableFirstString(fields, const ['queue_item_id', 'guardian_queue_item_id']),
       ttsProvider: _nullableFirstString(fields, const ['tts_provider', 'provider']),
+      why: _nullableFirstString(fields, const ['why', 'trigger_explanation', 'triggerExplanation']),
+      ackOnly: _isTrue(fields['ack_only']) || _isTrue(metadata['ack_only']),
       isTest: fields['is_test'] == true || fields['dry_run'] == true || _isTestTarget(target),
       fromLocalDebugLog: true,
     );
@@ -203,3 +192,11 @@ bool _isTestTarget(String value) {
   final normalized = value.toLowerCase();
   return normalized.contains('test') || normalized.contains('dry-run') || normalized.contains('dry_run');
 }
+
+Map<String, dynamic> _nestedMap(dynamic value) {
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return value.map((key, item) => MapEntry(key.toString(), item));
+  return const {};
+}
+
+bool _isTrue(dynamic value) => value == true || (value is String && value.trim().toLowerCase() == 'true');

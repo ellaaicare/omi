@@ -117,8 +117,9 @@ class _FakeAlertPool:
         self.fetchrow_args.append(args)
         return {"timezone": self.timezone_name}
 
-    async def fetch(self, _query, *args):
+    async def fetch(self, query, *args):
         self.fetch_args.append(args)
+        self.fetch_query = query
         return self.rows
 
 
@@ -412,6 +413,7 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
                     "queue_item_id": "guardian_abc",
                     "source_conversation_id": "omi-123",
                     "dry_run": True,
+                    "trigger_explanation": "You asked where your glasses were.",
                 },
                 "created_at": created,
                 "consumed_at": consumed,
@@ -445,6 +447,8 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
     alert = result["alerts"][0]
     assert alert["queue_item_id"] == "guardian_abc"
     assert alert["summary"] == "Ella found your glasses near the kitchen table."
+    assert alert["why"] == "You asked where your glasses were."
+    assert alert["trigger_explanation"] == "You asked where your glasses were."
     assert alert["trigger_type"] == "wake_word_user_support"
     assert alert["delivery_target"] == "caregiver"
     assert alert["playback_status"] == "failed"
@@ -455,6 +459,70 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
     assert alert["test"] is True
     assert alert["created_time"]["timezone"] == "America/Los_Angeles"
     assert pool.fetch_args[0] == ("uid-1", 50)
+    assert "COALESCE(trigger_type, '') <> 'wake_word_ack'" in pool.fetch_query
+    assert "COALESCE(metadata->>'ack_only', '') <> 'true'" in pool.fetch_query
+
+
+def test_guardian_alerts_endpoint_excludes_ack_only_rows_but_keeps_real_wake_words(monkeypatch):
+    created = datetime(2026, 5, 15, 20, 0, tzinfo=timezone.utc)
+    pool = _FakeAlertPool(
+        [
+            {
+                "id": "guardian_ack_trigger",
+                "uid": "auth-uid",
+                "url": "https://example.test/wake-ack.mp3",
+                "priority": "normal",
+                "message": "wake_ack",
+                "trigger_type": "wake_word_ack",
+                "metadata": {"trace_id": "trace-ack-trigger"},
+                "created_at": created,
+                "consumed_at": None,
+                "trace_id": "trace-ack-trigger",
+                "events": [],
+                "deliveries": [],
+            },
+            {
+                "id": "guardian_ack_metadata",
+                "uid": "auth-uid",
+                "url": "https://example.test/wake-ack.mp3",
+                "priority": "normal",
+                "message": "Acknowledged",
+                "trigger_type": "wake_word",
+                "metadata": {"trace_id": "trace-ack-metadata", "ack_only": True},
+                "created_at": created,
+                "consumed_at": None,
+                "trace_id": "trace-ack-metadata",
+                "events": [],
+                "deliveries": [],
+            },
+            {
+                "id": "guardian_real_wake",
+                "uid": "auth-uid",
+                "url": "https://example.test/full-response.mp3",
+                "priority": "normal",
+                "message": "I found your glasses.",
+                "trigger_type": "wake_word",
+                "metadata": {"trace_id": "trace-real-wake", "ack_only": False},
+                "created_at": created,
+                "consumed_at": None,
+                "trace_id": "trace-real-wake",
+                "events": [],
+                "deliveries": [],
+            },
+        ]
+    )
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    app = FastAPI()
+    app.include_router(guardian.alerts_router)
+    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+
+    response = TestClient(app).get("/v1/ella/guardian-alerts?limit=50")
+
+    assert response.status_code == 200
+    assert [alert["queue_item_id"] for alert in response.json()["alerts"]] == ["guardian_real_wake"]
+    assert "COALESCE(trigger_type, '') <> 'wake_word_ack'" in pool.fetch_query
+    assert "COALESCE(metadata->>'ack_only', '') <> 'true'" in pool.fetch_query
 
 
 def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypatch):

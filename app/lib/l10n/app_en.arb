@@ -1083,7 +1083,7 @@
   "exportStarted": "Export started. This may take a few seconds...",
   "exportAllData": "Export All Data",
   "exportDataDesc": "Export conversations to a JSON file",
-  "exportedConversations": "Exported Conversations from Omi",
+  "exportedConversations": "Exported Conversations from Ella",
   "exportShared": "Export shared",
   "deleteKnowledgeGraphTitle": "Delete Knowledge Graph?",
   "deleteKnowledgeGraphMessage": "This will delete all derived knowledge graph data (nodes and connections). Your original memories will remain safe. The graph will be rebuilt over time or upon next request.",
@@ -8454,11 +8454,11 @@
   "@lowBatteryAlertBody": {
     "description": "Body text for low battery notification"
   },
-  "deviceDisconnectedNotificationTitle": "Your Omi Device Disconnected",
+  "deviceDisconnectedNotificationTitle": "Your Ella necklace disconnected",
   "@deviceDisconnectedNotificationTitle": {
     "description": "Title for device disconnected notification"
   },
-  "deviceDisconnectedNotificationBody": "Please reconnect to continue using your Omi.",
+  "deviceDisconnectedNotificationBody": "Please reconnect your Ella necklace to continue.",
   "@deviceDisconnectedNotificationBody": {
     "description": "Body text for device disconnected notification"
   },
@@ -10537,5 +10537,36 @@
   "memoryTalkFixFailed": "Could not submit that change yet. Please try again later.",
   "@memoryTalkFixFailed": {
     "description": "Shown when the overflow correction form fails"
+  },
+  "todayDailyNoteEmptyNoConversations": "Once you and Ella have spent some of the day together, her first note will arrive in the evening.",
+  "todayDailyNoteEmptyPreparing": "Ella is preparing today’s note. It will appear here this evening.",
+  "todayHardwareStatus": "YOUR ELLA DEVICES",
+  "todayNecklace": "Necklace",
+  "todayHeadset": "Headset",
+  "todayOn": "ON",
+  "todayOff": "OFF",
+  "todayConnecting": "CONNECTING…",
+  "todayBatteryPercent": "{percent}% battery",
+  "@todayBatteryPercent": {
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      }
+    }
+  },
+  "todayNecklaceOffReconnect": "Tap to reconnect",
+  "todayVoiceOnPhone": "Playing from the phone",
+  "todayHeadsetFallbackWarning": "Headset is off — Ella will speak from the phone.",
+  "todayListeningButton": "Ella is listening — See what she hears",
+  "todayWhispersHistory": "See what Ella has whispered",
+  "todayRemindersTitle": "TODAY’S REMINDERS",
+  "todayReminderFromConversation": "From a conversation",
+  "todayReminderFromSource": "From {source}",
+  "@todayReminderFromSource": {
+    "placeholders": {
+      "source": {
+        "type": "String"
+      }
+    }
   }
 }

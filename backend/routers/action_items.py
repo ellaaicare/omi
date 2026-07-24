@@ -46,6 +46,7 @@ class ActionItemResponse(BaseModel):
     due_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     conversation_id: Optional[str] = None
+    source_label: Optional[str] = None
     is_locked: bool = False
     exported: bool = False
     export_date: Optional[datetime] = None

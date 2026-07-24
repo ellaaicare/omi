@@ -1,12 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
-import 'package:omi/backend/http/shared.dart';
-import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/widgets/ella_relationship_picker.dart';
-import 'package:omi/env/env.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaEmergency extends StatefulWidget {
@@ -38,28 +34,27 @@ class _EllaEmergencyState extends State<EllaEmergency> {
   bool get _isValid =>
       _nameController.text.trim().isNotEmpty &&
       _phoneController.text.trim().isNotEmpty &&
+      _emailController.text.trim().isNotEmpty &&
       _selectedRelationship != null;
 
   Future<void> _submit() async {
     if (!_isValid || _isSubmitting) return;
     setState(() => _isSubmitting = true);
 
-    await makeApiCall(
-      url: '${Env.apiBaseUrl}v1/ella/emergency-contact',
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'uid': SharedPreferencesUtil().uid,
-        'name': _nameController.text.trim(),
-        'phone': _phoneController.text.trim(),
-        if (_emailController.text.trim().isNotEmpty) 'email': _emailController.text.trim(),
-        'relationship': _selectedRelationship ?? 'other',
-      }),
-      method: 'POST',
-    );
-
-    if (mounted) {
-      setState(() => _isSubmitting = false);
-      widget.onComplete();
+    try {
+      await caregiver_api.createEmergencyContact(
+        name: _nameController.text.trim(),
+        phone: _phoneController.text.trim(),
+        email: _emailController.text.trim(),
+        relationship: _selectedRelationship ?? 'other',
+      );
+      if (mounted) widget.onComplete();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.somethingWentWrong)));
+      }
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
@@ -118,10 +113,7 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                         child: Container(
                           width: 48,
                           height: 48,
-                          decoration: const BoxDecoration(
-                            color: EllaColors.bgTertiary,
-                            shape: BoxShape.circle,
-                          ),
+                          decoration: const BoxDecoration(color: EllaColors.bgTertiary, shape: BoxShape.circle),
                           child: const Icon(Icons.arrow_back, color: EllaColors.textPrimary, size: 24),
                         ),
                       ),
@@ -140,30 +132,18 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                   Center(
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(24),
-                      child: Image.asset(
-                        'assets/images/ella_onboarding_3.png',
-                        height: 200,
-                        fit: BoxFit.contain,
-                      ),
+                      child: Image.asset('assets/images/ella_onboarding_3.png', height: 200, fit: BoxFit.contain),
                     ),
                   ),
                   const SizedBox(height: 24),
                   Text(
                     context.l10n.ellaEmergencyTitle,
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: EllaColors.textPrimary,
-                    ),
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: EllaColors.textPrimary),
                   ),
                   const SizedBox(height: 12),
                   Text(
                     context.l10n.ellaEmergencySubtitle,
-                    style: const TextStyle(
-                      fontSize: 20,
-                      color: EllaColors.textSecondary,
-                      height: 1.4,
-                    ),
+                    style: const TextStyle(fontSize: 20, color: EllaColors.textSecondary, height: 1.4),
                   ),
                   const SizedBox(height: 32),
                   Text(
@@ -274,7 +254,7 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                     ),
                   ),
                   const SizedBox(height: 20),
-                  // Email field (optional)
+                  // A Care Team contact needs an email address for its invite.
                   Text(
                     context.l10n.ellaAddCaregiverEmail,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w400, color: EllaColors.textTertiary),
@@ -340,10 +320,7 @@ class _EllaEmergencyState extends State<EllaEmergency> {
                       style: TextButton.styleFrom(minimumSize: const Size(double.infinity, 48)),
                       child: Text(
                         context.l10n.ellaSkipForNow,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          color: EllaColors.textTertiary,
-                        ),
+                        style: const TextStyle(fontSize: 18, color: EllaColors.textTertiary),
                       ),
                     ),
                   ),

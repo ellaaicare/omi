@@ -181,6 +181,10 @@ class $AssetsImagesGen {
   /// File path: assets/images/clone.png
   AssetGenImage get clone => const AssetGenImage('assets/images/clone.png');
 
+  /// Directory path: assets/images/ella-hardware
+  $AssetsImagesEllaHardwareGen get ellaHardware =>
+      const $AssetsImagesEllaHardwareGen();
+
   /// File path: assets/images/ella_onboarding_1.png
   AssetGenImage get ellaOnboarding1 =>
       const AssetGenImage('assets/images/ella_onboarding_1.png');
@@ -557,6 +561,202 @@ class $AssetsIntegrationAppLogosGen {
     trelloLogo,
     whoop,
     xLogo,
+  ];
+}
+
+class $AssetsImagesEllaHardwareGen {
+  const $AssetsImagesEllaHardwareGen();
+
+  /// Directory path: assets/images/ella-hardware/png
+  $AssetsImagesEllaHardwarePngGen get png =>
+      const $AssetsImagesEllaHardwarePngGen();
+}
+
+class $AssetsImagesEllaHardwarePngGen {
+  const $AssetsImagesEllaHardwarePngGen();
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-glyph.png
+  AssetGenImage get headsetWhisperGlyph => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-glyph.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-glyph@2x.png
+  AssetGenImage get headsetWhisperGlyph2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-glyph@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-glyph@3x.png
+  AssetGenImage get headsetWhisperGlyph3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-glyph@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-low-battery.png
+  AssetGenImage get headsetWhisperLowBattery => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-low-battery.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-low-battery@2x.png
+  AssetGenImage get headsetWhisperLowBattery2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-low-battery@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-low-battery@3x.png
+  AssetGenImage get headsetWhisperLowBattery3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-low-battery@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-off.png
+  AssetGenImage get headsetWhisperOff => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-off.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-off@2x.png
+  AssetGenImage get headsetWhisperOff2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-off@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-off@3x.png
+  AssetGenImage get headsetWhisperOff3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-off@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-on.png
+  AssetGenImage get headsetWhisperOn => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-on.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-on@2x.png
+  AssetGenImage get headsetWhisperOn2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-on@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-on@3x.png
+  AssetGenImage get headsetWhisperOn3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-on@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-reconnecting.png
+  AssetGenImage get headsetWhisperReconnecting => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-reconnecting.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-reconnecting@2x.png
+  AssetGenImage get headsetWhisperReconnecting2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-reconnecting@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/headset-whisper-reconnecting@3x.png
+  AssetGenImage get headsetWhisperReconnecting3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/headset-whisper-reconnecting@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-glyph.png
+  AssetGenImage get necklaceOmiGlyph => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-glyph.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-glyph@2x.png
+  AssetGenImage get necklaceOmiGlyph2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-glyph@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-glyph@3x.png
+  AssetGenImage get necklaceOmiGlyph3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-glyph@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-low-battery.png
+  AssetGenImage get necklaceOmiLowBattery => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-low-battery.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-low-battery@2x.png
+  AssetGenImage get necklaceOmiLowBattery2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-low-battery@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-low-battery@3x.png
+  AssetGenImage get necklaceOmiLowBattery3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-low-battery@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-off.png
+  AssetGenImage get necklaceOmiOff => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-off.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-off@2x.png
+  AssetGenImage get necklaceOmiOff2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-off@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-off@3x.png
+  AssetGenImage get necklaceOmiOff3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-off@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-on.png
+  AssetGenImage get necklaceOmiOn => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-on.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-on@2x.png
+  AssetGenImage get necklaceOmiOn2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-on@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-on@3x.png
+  AssetGenImage get necklaceOmiOn3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-on@3x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-reconnecting.png
+  AssetGenImage get necklaceOmiReconnecting => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-reconnecting.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-reconnecting@2x.png
+  AssetGenImage get necklaceOmiReconnecting2x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-reconnecting@2x.png',
+  );
+
+  /// File path: assets/images/ella-hardware/png/necklace-omi-reconnecting@3x.png
+  AssetGenImage get necklaceOmiReconnecting3x => const AssetGenImage(
+    'assets/images/ella-hardware/png/necklace-omi-reconnecting@3x.png',
+  );
+
+  /// List of all assets
+  List<AssetGenImage> get values => [
+    headsetWhisperGlyph,
+    headsetWhisperGlyph2x,
+    headsetWhisperGlyph3x,
+    headsetWhisperLowBattery,
+    headsetWhisperLowBattery2x,
+    headsetWhisperLowBattery3x,
+    headsetWhisperOff,
+    headsetWhisperOff2x,
+    headsetWhisperOff3x,
+    headsetWhisperOn,
+    headsetWhisperOn2x,
+    headsetWhisperOn3x,
+    headsetWhisperReconnecting,
+    headsetWhisperReconnecting2x,
+    headsetWhisperReconnecting3x,
+    necklaceOmiGlyph,
+    necklaceOmiGlyph2x,
+    necklaceOmiGlyph3x,
+    necklaceOmiLowBattery,
+    necklaceOmiLowBattery2x,
+    necklaceOmiLowBattery3x,
+    necklaceOmiOff,
+    necklaceOmiOff2x,
+    necklaceOmiOff3x,
+    necklaceOmiOn,
+    necklaceOmiOn2x,
+    necklaceOmiOn3x,
+    necklaceOmiReconnecting,
+    necklaceOmiReconnecting2x,
+    necklaceOmiReconnecting3x,
   ];
 }
 

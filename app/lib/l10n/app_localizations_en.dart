@@ -827,7 +827,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get exportDataDesc => 'Export conversations to a JSON file';
 
   @override
-  String get exportedConversations => 'Exported Conversations from Omi';
+  String get exportedConversations => 'Exported Conversations from Ella';
 
   @override
   String get exportShared => 'Export shared';
@@ -1706,12 +1706,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String devicesFoundNearby(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: 'DEVICES',
-      one: 'DEVICE',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: 'DEVICES', one: 'DEVICE');
     return '$count $_temp0 FOUND NEARBY';
   }
 
@@ -6887,10 +6882,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get lowBatteryAlertBody => 'Your device is running low on battery. Time for a recharge! 🔋';
 
   @override
-  String get deviceDisconnectedNotificationTitle => 'Your Omi Device Disconnected';
+  String get deviceDisconnectedNotificationTitle => 'Your Ella necklace disconnected';
 
   @override
-  String get deviceDisconnectedNotificationBody => 'Please reconnect to continue using your Omi.';
+  String get deviceDisconnectedNotificationBody => 'Please reconnect your Ella necklace to continue.';
 
   @override
   String get firmwareUpdateAvailable => 'Firmware Update Available';
@@ -8177,12 +8172,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String ellaFamilyCaregiversSubtitle(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$count people',
-      one: '1 person',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count people', one: '1 person');
     return '$_temp0';
   }
 
@@ -8810,12 +8800,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String memoryTalkMinutes(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$count mins',
-      one: '1 min',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count mins', one: '1 min');
     return '$_temp0';
   }
 
@@ -8837,4 +8822,60 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get memoryTalkFixFailed => 'Could not submit that change yet. Please try again later.';
+
+  @override
+  String get todayDailyNoteEmptyNoConversations =>
+      'Once you and Ella have spent some of the day together, her first note will arrive in the evening.';
+
+  @override
+  String get todayDailyNoteEmptyPreparing => 'Ella is preparing today’s note. It will appear here this evening.';
+
+  @override
+  String get todayHardwareStatus => 'YOUR ELLA DEVICES';
+
+  @override
+  String get todayNecklace => 'Necklace';
+
+  @override
+  String get todayHeadset => 'Headset';
+
+  @override
+  String get todayOn => 'ON';
+
+  @override
+  String get todayOff => 'OFF';
+
+  @override
+  String get todayConnecting => 'CONNECTING…';
+
+  @override
+  String todayBatteryPercent(int percent) {
+    return '$percent% battery';
+  }
+
+  @override
+  String get todayNecklaceOffReconnect => 'Tap to reconnect';
+
+  @override
+  String get todayVoiceOnPhone => 'Playing from the phone';
+
+  @override
+  String get todayHeadsetFallbackWarning => 'Headset is off — Ella will speak from the phone.';
+
+  @override
+  String get todayListeningButton => 'Ella is listening — See what she hears';
+
+  @override
+  String get todayWhispersHistory => 'See what Ella has whispered';
+
+  @override
+  String get todayRemindersTitle => 'TODAY’S REMINDERS';
+
+  @override
+  String get todayReminderFromConversation => 'From a conversation';
+
+  @override
+  String todayReminderFromSource(String source) {
+    return 'From $source';
+  }
 }

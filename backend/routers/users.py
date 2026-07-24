@@ -942,6 +942,37 @@ def update_daily_summary_settings(data: DailySummarySettingsUpdate, uid: str = D
     return {'status': 'ok'}
 
 
+@router.get('/v1/users/daily-summary-settings/health', tags=['v1'])
+def get_daily_summary_health(uid: str = Depends(auth.get_current_user_uid)):
+    """Return the authenticated user's readiness for the hourly daily-note cron."""
+    time_zone_name = notification_db.get_user_time_zone(uid)
+    tokens = notification_db.get_all_tokens(uid)
+    enabled = notification_db.get_daily_summary_enabled(uid)
+    local_hour = notification_db.get_daily_summary_hour_local(uid)
+    if local_hour is None:
+        local_hour = notification_db.DEFAULT_DAILY_SUMMARY_HOUR_LOCAL
+
+    blockers = []
+    if not enabled:
+        blockers.append('disabled')
+    if not time_zone_name:
+        blockers.append('missing_timezone')
+    if not tokens:
+        blockers.append('missing_notification_token')
+
+    latest = daily_summaries_db.get_daily_summaries(uid, limit=1, offset=0)
+    return {
+        'status': 'ready' if not blockers else 'needs_attention',
+        'cron_schedule': 'hourly',
+        'enabled': enabled,
+        'local_hour': local_hour,
+        'time_zone': time_zone_name,
+        'notification_token_count': len(tokens),
+        'blocking_reasons': blockers,
+        'latest_summary_date': latest[0].get('date') if latest else None,
+    }
+
+
 class TestDailySummaryRequest(BaseModel):
     date: Optional[str] = None  # YYYY-MM-DD format, defaults to today
 

@@ -7,6 +7,7 @@ class ActionItemWithMetadata {
   final DateTime? dueAt;
   final DateTime? completedAt;
   final String? conversationId;
+  final String? sourceLabel;
   final bool isLocked;
   final bool exported;
   final DateTime? exportDate;
@@ -21,6 +22,7 @@ class ActionItemWithMetadata {
     this.dueAt,
     this.completedAt,
     this.conversationId,
+    this.sourceLabel,
     this.isLocked = false,
     this.exported = false,
     this.exportDate,
@@ -37,6 +39,7 @@ class ActionItemWithMetadata {
       dueAt: json['due_at'] != null ? DateTime.parse(json['due_at']).toLocal() : null,
       completedAt: json['completed_at'] != null ? DateTime.parse(json['completed_at']).toLocal() : null,
       conversationId: json['conversation_id'],
+      sourceLabel: json['source_label'],
       isLocked: json['is_locked'] ?? false,
       exported: json['exported'] ?? false,
       exportDate: json['export_date'] != null ? DateTime.parse(json['export_date']).toLocal() : null,
@@ -54,6 +57,7 @@ class ActionItemWithMetadata {
       'due_at': dueAt?.toUtc().toIso8601String(),
       'completed_at': completedAt?.toUtc().toIso8601String(),
       'conversation_id': conversationId,
+      'source_label': sourceLabel,
       'is_locked': isLocked,
       'exported': exported,
       'export_date': exportDate?.toUtc().toIso8601String(),
@@ -70,6 +74,7 @@ class ActionItemWithMetadata {
     DateTime? dueAt,
     DateTime? completedAt,
     String? conversationId,
+    String? sourceLabel,
     bool? isLocked,
     bool? exported,
     DateTime? exportDate,
@@ -84,6 +89,7 @@ class ActionItemWithMetadata {
       dueAt: dueAt ?? this.dueAt,
       completedAt: completedAt ?? this.completedAt,
       conversationId: conversationId ?? this.conversationId,
+      sourceLabel: sourceLabel ?? this.sourceLabel,
       isLocked: isLocked ?? this.isLocked,
       exported: exported ?? this.exported,
       exportDate: exportDate ?? this.exportDate,
@@ -96,15 +102,13 @@ class ActionItemsResponse {
   final List<ActionItemWithMetadata> actionItems;
   final bool hasMore;
 
-  ActionItemsResponse({
-    required this.actionItems,
-    required this.hasMore,
-  });
+  ActionItemsResponse({required this.actionItems, required this.hasMore});
 
   factory ActionItemsResponse.fromJson(Map<String, dynamic> json) {
     return ActionItemsResponse(
-      actionItems:
-          (json['action_items'] as List<dynamic>).map((item) => ActionItemWithMetadata.fromJson(item)).toList(),
+      actionItems: (json['action_items'] as List<dynamic>)
+          .map((item) => ActionItemWithMetadata.fromJson(item))
+          .toList(),
       hasMore: json['has_more'],
     );
   }

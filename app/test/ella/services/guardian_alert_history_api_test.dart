@@ -27,6 +27,7 @@ void main() {
             'queue_item_id': 'guardian_123',
             'caregiver_escalation': true,
             'escalation_status': 'not_sent',
+            'trigger_explanation': 'You asked for a quick reminder.',
           },
         ],
       });
@@ -40,6 +41,7 @@ void main() {
       expect(records.first.queueItemId, 'guardian_123');
       expect(records.first.escalation, isTrue);
       expect(records.first.isTest, isTrue);
+      expect(records.first.why, 'You asked for a quick reminder.');
     });
 
     test('recognizes and normalizes local Guardian debug log fallback records', () {
@@ -63,6 +65,37 @@ void main() {
       expect(record.playbackStatus, 'failed');
       expect(record.fromLocalDebugLog, isTrue);
       expect(record.createdAt, DateTime.parse('2026-05-15T20:05:00.000Z'));
+    });
+
+    test('excludes wake acknowledgement pulses while retaining genuine wake-word whispers', () {
+      final records = GuardianAlertHistoryApi.parseBackendRecords({
+        'alerts': [
+          {
+            'id': 'trigger-ack',
+            'alert_text': 'wake_ack',
+            'trigger_type': 'wake_word_ack',
+            'metadata': {'ack_only': false},
+            'created_at': '2026-05-15T20:07:00Z',
+          },
+          {
+            'id': 'metadata-ack',
+            'alert_text': 'Acknowledged',
+            'trigger_type': 'wake_word',
+            'metadata': {'ack_only': true},
+            'created_at': '2026-05-15T20:06:00Z',
+          },
+          {
+            'id': 'real-wake',
+            'alert_text': 'I found your glasses.',
+            'trigger_type': 'wake_word',
+            'metadata': {'ack_only': false},
+            'created_at': '2026-05-15T20:05:00Z',
+          },
+        ],
+      });
+
+      expect(records.map((record) => record.id), ['real-wake']);
+      expect(records.single.isSystemWakeAcknowledgement, isFalse);
     });
   });
 }

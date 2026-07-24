@@ -47,18 +47,12 @@ Future<InviteResponse> sendCaregiverInvite({
       if (phone != null && phone.isNotEmpty) 'phone': phone,
       'email': email,
       'relationship': relationship,
-      'permissions': {
-        'receive_daily_summary': dailySummary,
-        'daily_summary_email': dailySummary,
-      },
+      'permissions': {'receive_daily_summary': dailySummary, 'daily_summary_email': dailySummary},
     }),
   );
   if (response.statusCode != 200 && response.statusCode != 201) {
     Logger.debug('Caregiver invite failed: ${response.statusCode} ${response.body}');
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to send invite',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to send invite');
   }
   return InviteResponse.fromJson(jsonDecode(response.body));
 }
@@ -71,10 +65,7 @@ Future<void> removeCaregiver(String caregiverId) async {
     body: jsonEncode({'uid': _uid, 'caregiver_id': caregiverId}),
   );
   if (response.statusCode != 200 && response.statusCode != 204) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to remove caregiver',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to remove caregiver');
   }
 }
 
@@ -91,14 +82,11 @@ Future<void> updateCaregiverPermissions(String caregiverId, {required bool daily
     }),
   );
   if (response.statusCode != 200) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to update permissions',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to update permissions');
   }
 }
 
-/// PUT emergency contact (OMI backend — stays in Firestore)
+/// Set the emergency contact in the Care Team store.
 Future<void> setEmergencyContact(String caregiverId) async {
   final response = await http.post(
     Uri.parse('$_n8nBase/caregiver-set-emergency'),
@@ -106,10 +94,7 @@ Future<void> setEmergencyContact(String caregiverId) async {
     body: jsonEncode({'uid': _uid, 'caregiver_id': caregiverId}),
   );
   if (response.statusCode != 200) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to set emergency contact',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to set emergency contact');
   }
 }
 
@@ -121,10 +106,7 @@ Future<void> clearEmergencyContact() async {
     body: jsonEncode({'uid': _uid, 'caregiver_id': ''}),
   );
   if (response.statusCode != 200) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to clear emergency contact',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to clear emergency contact');
   }
 }
 
@@ -145,6 +127,27 @@ Future<String?> getEmergencyContactId() async {
   }
 }
 
+/// Create a Care Team member during onboarding, then make that person the
+/// emergency contact. This keeps onboarding and Settings on one source of truth.
+Future<void> createEmergencyContact({
+  required String name,
+  required String phone,
+  required String email,
+  required String relationship,
+}) async {
+  final invite = await sendCaregiverInvite(
+    name: name,
+    phone: phone,
+    email: email,
+    relationship: relationship,
+    dailySummary: false,
+  );
+  if (invite.caregiverId.isEmpty) {
+    throw CaregiverApiException(statusCode: 0, message: 'Caregiver invitation did not include a caregiver id');
+  }
+  await setEmergencyContact(invite.caregiverId);
+}
+
 /// POST resend caregiver invite via n8n webhook
 Future<void> resendInvite({required String uid, required String caregiverId}) async {
   final response = await http.post(
@@ -153,9 +156,6 @@ Future<void> resendInvite({required String uid, required String caregiverId}) as
     body: jsonEncode({'uid': uid, 'caregiver_id': caregiverId}),
   );
   if (response.statusCode != 200) {
-    throw CaregiverApiException(
-      statusCode: response.statusCode,
-      message: 'Failed to resend invite',
-    );
+    throw CaregiverApiException(statusCode: response.statusCode, message: 'Failed to resend invite');
   }
 }

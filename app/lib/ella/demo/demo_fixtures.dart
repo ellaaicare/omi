@@ -148,6 +148,7 @@ class DemoFixtures {
         description: 'Dinner with David',
         completed: false,
         dueAt: DateTime(base.year, base.month, base.day, 18),
+        sourceLabel: 'David',
       ),
       ActionItemWithMetadata(
         id: 'demo-reminder-prescription',
@@ -216,19 +217,7 @@ class DemoFixtures {
     required String text,
     required MessageSender sender,
   }) {
-    return ServerMessage(
-      id,
-      createdAt,
-      text,
-      sender,
-      MessageType.text,
-      null,
-      false,
-      [],
-      [],
-      [],
-      askForNps: false,
-    );
+    return ServerMessage(id, createdAt, text, sender, MessageType.text, null, false, [], [], [], askForNps: false);
   }
 
   static String _dateString(DateTime date) {

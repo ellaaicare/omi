@@ -156,7 +156,7 @@ abstract class AppLocalizations {
     Locale('tr'),
     Locale('uk'),
     Locale('vi'),
-    Locale('zh')
+    Locale('zh'),
   ];
 
   /// The app title displayed in various places
@@ -1728,7 +1728,7 @@ abstract class AppLocalizations {
   /// No description provided for @exportedConversations.
   ///
   /// In en, this message translates to:
-  /// **'Exported Conversations from Omi'**
+  /// **'Exported Conversations from Ella'**
   String get exportedConversations;
 
   /// No description provided for @exportShared.
@@ -12966,13 +12966,13 @@ abstract class AppLocalizations {
   /// Title for device disconnected notification
   ///
   /// In en, this message translates to:
-  /// **'Your Omi Device Disconnected'**
+  /// **'Your Ella necklace disconnected'**
   String get deviceDisconnectedNotificationTitle;
 
   /// Body text for device disconnected notification
   ///
   /// In en, this message translates to:
-  /// **'Please reconnect to continue using your Omi.'**
+  /// **'Please reconnect your Ella necklace to continue.'**
   String get deviceDisconnectedNotificationBody;
 
   /// Title for firmware update available dialog
@@ -16466,6 +16466,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Could not submit that change yet. Please try again later.'**
   String get memoryTalkFixFailed;
+
+  /// No description provided for @todayDailyNoteEmptyNoConversations.
+  ///
+  /// In en, this message translates to:
+  /// **'Once you and Ella have spent some of the day together, her first note will arrive in the evening.'**
+  String get todayDailyNoteEmptyNoConversations;
+
+  /// No description provided for @todayDailyNoteEmptyPreparing.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is preparing today’s note. It will appear here this evening.'**
+  String get todayDailyNoteEmptyPreparing;
+
+  /// No description provided for @todayHardwareStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'YOUR ELLA DEVICES'**
+  String get todayHardwareStatus;
+
+  /// No description provided for @todayNecklace.
+  ///
+  /// In en, this message translates to:
+  /// **'Necklace'**
+  String get todayNecklace;
+
+  /// No description provided for @todayHeadset.
+  ///
+  /// In en, this message translates to:
+  /// **'Headset'**
+  String get todayHeadset;
+
+  /// No description provided for @todayOn.
+  ///
+  /// In en, this message translates to:
+  /// **'ON'**
+  String get todayOn;
+
+  /// No description provided for @todayOff.
+  ///
+  /// In en, this message translates to:
+  /// **'OFF'**
+  String get todayOff;
+
+  /// No description provided for @todayConnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'CONNECTING…'**
+  String get todayConnecting;
+
+  /// No description provided for @todayBatteryPercent.
+  ///
+  /// In en, this message translates to:
+  /// **'{percent}% battery'**
+  String todayBatteryPercent(int percent);
+
+  /// No description provided for @todayNecklaceOffReconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Tap to reconnect'**
+  String get todayNecklaceOffReconnect;
+
+  /// No description provided for @todayVoiceOnPhone.
+  ///
+  /// In en, this message translates to:
+  /// **'Playing from the phone'**
+  String get todayVoiceOnPhone;
+
+  /// No description provided for @todayHeadsetFallbackWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'Headset is off — Ella will speak from the phone.'**
+  String get todayHeadsetFallbackWarning;
+
+  /// No description provided for @todayListeningButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is listening — See what she hears'**
+  String get todayListeningButton;
+
+  /// No description provided for @todayWhispersHistory.
+  ///
+  /// In en, this message translates to:
+  /// **'See what Ella has whispered'**
+  String get todayWhispersHistory;
+
+  /// No description provided for @todayRemindersTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'TODAY’S REMINDERS'**
+  String get todayRemindersTitle;
+
+  /// No description provided for @todayReminderFromConversation.
+  ///
+  /// In en, this message translates to:
+  /// **'From a conversation'**
+  String get todayReminderFromConversation;
+
+  /// No description provided for @todayReminderFromSource.
+  ///
+  /// In en, this message translates to:
+  /// **'From {source}'**
+  String todayReminderFromSource(String source);
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
@@ -16478,41 +16580,41 @@ class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> 
 
   @override
   bool isSupported(Locale locale) => <String>[
-        'ar',
-        'bg',
-        'ca',
-        'cs',
-        'da',
-        'de',
-        'el',
-        'en',
-        'es',
-        'et',
-        'fi',
-        'fr',
-        'hi',
-        'hu',
-        'id',
-        'it',
-        'ja',
-        'ko',
-        'lt',
-        'lv',
-        'ms',
-        'nl',
-        'no',
-        'pl',
-        'pt',
-        'ro',
-        'ru',
-        'sk',
-        'sv',
-        'th',
-        'tr',
-        'uk',
-        'vi',
-        'zh'
-      ].contains(locale.languageCode);
+    'ar',
+    'bg',
+    'ca',
+    'cs',
+    'da',
+    'de',
+    'el',
+    'en',
+    'es',
+    'et',
+    'fi',
+    'fr',
+    'hi',
+    'hu',
+    'id',
+    'it',
+    'ja',
+    'ko',
+    'lt',
+    'lv',
+    'ms',
+    'nl',
+    'no',
+    'pl',
+    'pt',
+    'ro',
+    'ru',
+    'sk',
+    'sv',
+    'th',
+    'tr',
+    'uk',
+    'vi',
+    'zh',
+  ].contains(locale.languageCode);
 
   @override
   bool shouldReload(_AppLocalizationsDelegate old) => false;
@@ -16591,8 +16693,10 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsZh();
   }
 
-  throw FlutterError('AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
-      'an issue with the localizations generation tool. Please file an issue '
-      'on GitHub with a reproducible sample app and the gen-l10n configuration '
-      'that was used.');
+  throw FlutterError(
+    'AppLocalizations.delegate failed to load unsupported locale "$locale". This is likely '
+    'an issue with the localizations generation tool. Please file an issue '
+    'on GitHub with a reproducible sample app and the gen-l10n configuration '
+    'that was used.',
+  );
 }

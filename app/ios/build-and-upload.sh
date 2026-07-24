@@ -155,6 +155,13 @@ EOF
 fi
 $FLUTTER pub get
 $DART run build_runner build --delete-conflicting-outputs
+# Envied's worker may not resolve annotation dotfile paths from APP_DIR.
+# Regenerate only the selected flavor with an absolute path before packaging.
+$DART run build_runner build \
+  --delete-conflicting-outputs \
+  --build-filter="lib/env/${FLAVOR}_env.g.dart" \
+  --define="envied_generator:envied=path=$APP_DIR/.${FLAVOR}.env" \
+  --define="envied_generator:envied=override=true"
 
 if [ "$FLAVOR" = "prod" ] && grep -q "static final String? apiBaseUrl = null;" lib/env/prod_env.g.dart; then
   echo "ERROR: ProdEnv.apiBaseUrl is null after build_runner; refusing to ship a backend-disconnected prod app."

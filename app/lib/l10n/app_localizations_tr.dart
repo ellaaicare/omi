@@ -1713,12 +1713,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String devicesFoundNearby(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: 'CİHAZ',
-      one: 'CİHAZ',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: 'CİHAZ', one: 'CİHAZ');
     return '$count $_temp0 YAKINLARDA BULUNDU';
   }
 
@@ -8193,12 +8188,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String ellaFamilyCaregiversSubtitle(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$count people',
-      one: '1 person',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count people', one: '1 person');
     return '$_temp0';
   }
 
@@ -8826,12 +8816,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String memoryTalkMinutes(int count) {
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$count mins',
-      one: '1 min',
-    );
+    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count mins', one: '1 min');
     return '$_temp0';
   }
 
@@ -8853,4 +8838,60 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get memoryTalkFixFailed => 'Could not submit that change yet. Please try again later.';
+
+  @override
+  String get todayDailyNoteEmptyNoConversations =>
+      'Once you and Ella have spent some of the day together, her first note will arrive in the evening.';
+
+  @override
+  String get todayDailyNoteEmptyPreparing => 'Ella is preparing today’s note. It will appear here this evening.';
+
+  @override
+  String get todayHardwareStatus => 'YOUR ELLA DEVICES';
+
+  @override
+  String get todayNecklace => 'Necklace';
+
+  @override
+  String get todayHeadset => 'Headset';
+
+  @override
+  String get todayOn => 'ON';
+
+  @override
+  String get todayOff => 'OFF';
+
+  @override
+  String get todayConnecting => 'CONNECTING…';
+
+  @override
+  String todayBatteryPercent(int percent) {
+    return '$percent% battery';
+  }
+
+  @override
+  String get todayNecklaceOffReconnect => 'Tap to reconnect';
+
+  @override
+  String get todayVoiceOnPhone => 'Playing from the phone';
+
+  @override
+  String get todayHeadsetFallbackWarning => 'Headset is off — Ella will speak from the phone.';
+
+  @override
+  String get todayListeningButton => 'Ella is listening — See what she hears';
+
+  @override
+  String get todayWhispersHistory => 'See what Ella has whispered';
+
+  @override
+  String get todayRemindersTitle => 'TODAY’S REMINDERS';
+
+  @override
+  String get todayReminderFromConversation => 'From a conversation';
+
+  @override
+  String todayReminderFromSource(String source) {
+    return 'From $source';
+  }
 }
