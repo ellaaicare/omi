@@ -171,12 +171,58 @@ def test_voice_session_token_rejects_empty_memory_version():
 
 @pytest.mark.parametrize("legacy_mode", ["v1", "v2", "v3-fast"])
 def test_voice_session_token_rejects_legacy_memory_scope(legacy_mode):
-    with pytest.raises(ValueError, match="V4-compatible"):
+    with pytest.raises(ValueError, match="memory_scoped_voice_mode_required"):
         voice.create_session_token(
             uid="uid-a",
             firebase_uid="uid-a",
             voice_mode=legacy_mode,
             provider="grok-voice",
+            isolated_runtime=False,
+            session_scope={
+                "kind": "memory",
+                "conversation_id": "memory-a",
+                "active_summary_version_id": "version-3",
+                "can_reinterpret": False,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider", "mode", "expected_code"),
+    [
+        (
+            "openai-native-realtime",
+            "openai-native-realtime-v1",
+            "memory_scoped_voice_provider_unsupported",
+        ),
+        (
+            "openai-native-realtime",
+            "v4",
+            "memory_scoped_voice_provider_unsupported",
+        ),
+        (
+            "grok-voice",
+            "gemini-live",
+            "memory_scoped_voice_provider_mode_mismatch",
+        ),
+        (
+            "gemini-live",
+            "v4",
+            "memory_scoped_voice_provider_mode_mismatch",
+        ),
+    ],
+)
+def test_voice_session_token_rejects_invalid_memory_scoped_provider_mode_pair(
+    provider,
+    mode,
+    expected_code,
+):
+    with pytest.raises(ValueError, match=expected_code):
+        voice.create_session_token(
+            uid="uid-a",
+            firebase_uid="uid-a",
+            voice_mode=mode,
+            provider=provider,
             isolated_runtime=False,
             session_scope={
                 "kind": "memory",

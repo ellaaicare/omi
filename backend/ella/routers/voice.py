@@ -396,6 +396,11 @@ MEMORY_SCOPED_VOICE_MODE_ALIASES = {
     "gemini-lite-live-v1": "v4",
     "gemini-full-live-v1": "v4",
 }
+MEMORY_SCOPED_VOICE_PROVIDERS = {
+    "grok-voice",
+    "gemini-live",
+    "gemini-native-live",
+}
 
 
 def _normalized_memory_scoped_voice_mode(value: str) -> str:
@@ -403,8 +408,18 @@ def _normalized_memory_scoped_voice_mode(value: str) -> str:
     return MEMORY_SCOPED_VOICE_MODE_ALIASES.get(candidate, candidate)
 
 
-def _memory_scoped_voice_mode_allowed(value: str) -> bool:
-    return _normalized_memory_scoped_voice_mode(value) == "v4"
+def _memory_scoped_voice_provider_mode_error(provider: str, voice_mode: str) -> Optional[str]:
+    provider = str(provider or "").strip().lower()
+    raw_mode = str(voice_mode or "").strip().lower()
+    if provider not in MEMORY_SCOPED_VOICE_PROVIDERS:
+        return "memory_scoped_voice_provider_unsupported"
+    if _normalized_memory_scoped_voice_mode(raw_mode) != "v4":
+        return "memory_scoped_voice_mode_required"
+    if provider == "grok-voice" and raw_mode != "v4":
+        return "memory_scoped_voice_provider_mode_mismatch"
+    if provider in {"gemini-live", "gemini-native-live"} and not raw_mode.startswith("gemini"):
+        return "memory_scoped_voice_provider_mode_mismatch"
+    return None
 
 
 # ============================================================================
@@ -688,8 +703,10 @@ def create_session_token(
     if not ELLA_SESSION_SECRET:
         raise HTTPException(status_code=500, detail="Session secret not configured")
 
-    if session_scope and not _memory_scoped_voice_mode_allowed(voice_mode):
-        raise ValueError("memory-scoped voice sessions require a V4-compatible mode")
+    if session_scope:
+        scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, voice_mode)
+        if scope_pair_error:
+            raise ValueError(scope_pair_error)
 
     payload = {
         "sub": firebase_uid,
@@ -879,6 +896,17 @@ async def create_voice_session(
 
     provider_info = V2V_PROVIDERS[provider]
 
+    # Resolve and validate the complete scoped pair before memory lookup or
+    # provider setup. Unscoped sessions retain their existing behavior.
+    resolved_mode = voice_mode or provider_info["default_mode"]
+    if requested_scope:
+        scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, resolved_mode)
+        if scope_pair_error:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": scope_pair_error},
+            )
+
     # Check provider availability
     if not provider_info["key_check"]():
         raise HTTPException(
@@ -886,13 +914,6 @@ async def create_voice_session(
             detail=f"Provider {provider!r} is not configured (missing API key)",
         )
 
-    # Resolve voice mode
-    resolved_mode = voice_mode or provider_info["default_mode"]
-    if requested_scope and not _memory_scoped_voice_mode_allowed(resolved_mode):
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "memory_scoped_voice_mode_required"},
-        )
     memory_scope = (
         await _resolve_voice_memory_scope(uid, requested_scope)
         if requested_scope
