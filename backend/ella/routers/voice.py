@@ -15,6 +15,7 @@ Provider types:
   v2v  — Voice-to-voice (WebSocket, bidirectional audio streaming via /session)
 """
 
+import asyncio
 import base64
 import hmac
 import json
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
 import asyncpg
 import httpx
@@ -37,6 +38,11 @@ from pydantic import BaseModel
 from database.conversations import _decrypt_conversation_data
 from ella.services.provisioning import ProvisioningError, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.voice_honcho import (
+    fetch_voice_honcho_context,
+    resolve_voice_honcho_target,
+    search_voice_honcho,
+)
 from utils.ella.canonical_context import fetch_canonical_timeline
 from utils.other import endpoints as auth
 
@@ -78,6 +84,12 @@ HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").st
 VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
+VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS", "0.35")
+)
+VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS = float(
+    os.getenv("ELLA_VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS", "15")
+)
 ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS", "true").strip().lower() in {
     "1",
     "true",
@@ -86,6 +98,7 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
 }
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+_VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 
 
 def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
@@ -104,6 +117,10 @@ class VoiceProxyPrincipal:
     provider: str
     voice_mode: str
     isolated_runtime: bool
+    scope_kind: Optional[str] = None
+    conversation_id: Optional[str] = None
+    active_summary_version_id: Optional[str] = None
+    can_reinterpret: bool = False
 
 
 def _voice_proxy_bearer(request: Request) -> str:
@@ -195,12 +212,39 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
+    scope_kind = claims.get("scope_kind")
+    scope_claim_keys = {
+        "scope_kind",
+        "conversation_id",
+        "active_summary_version_id",
+        "can_reinterpret",
+    }
+    if scope_kind is None:
+        if any(key in claims for key in scope_claim_keys):
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+    elif (
+        scope_kind != "memory"
+        or not str(claims.get("conversation_id") or "").strip()
+        or not isinstance(claims.get("active_summary_version_id"), str)
+        or not str(claims.get("active_summary_version_id") or "").strip()
+        or not isinstance(claims.get("can_reinterpret"), bool)
+    ):
+        raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+
     return VoiceProxyPrincipal(
         uid=subject,
         session_id=str(claims.get("jti") or ""),
         provider=str(claims.get("provider") or ""),
         voice_mode=str(claims.get("voice_mode") or ""),
         isolated_runtime=claims.get("isolated_runtime") is True,
+        scope_kind=scope_kind,
+        conversation_id=str(claims.get("conversation_id") or "").strip() or None,
+        active_summary_version_id=(
+            str(claims.get("active_summary_version_id"))
+            if scope_kind == "memory"
+            else None
+        ),
+        can_reinterpret=claims.get("can_reinterpret") is True,
     )
 
 
@@ -218,6 +262,58 @@ async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
         return await resolve_isolated_runtime(principal.uid)
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+
+
+async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
+    """Resolve Honcho without blocking the event loop or failing the voice path."""
+    if runtime is not None:
+        return resolve_voice_honcho_target(uid, runtime)
+
+    now = time.monotonic()
+    if _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE.get(uid, 0) > now:
+        return None, "honcho_profile_resolution_cached_unavailable"
+
+    try:
+        transport_timeout = max(
+            0.01,
+            VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS * 0.8,
+        )
+        target, reason = await asyncio.wait_for(
+            asyncio.to_thread(
+                resolve_voice_honcho_target,
+                uid,
+                runtime,
+                profile_map_timeout_seconds=transport_timeout,
+            ),
+            timeout=VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS,
+        )
+        if target:
+            _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE.pop(uid, None)
+            return target, reason
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
+        return None, reason
+    except asyncio.TimeoutError:
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
+        logger.warning(
+            "[FLOW:VOICE-HONCHO] target resolution timed out uid=%s timeout=%.3fs",
+            uid,
+            VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS,
+        )
+        return None, "honcho_profile_resolution_timeout"
+    except Exception as exc:
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
+        logger.warning(
+            "[FLOW:VOICE-HONCHO] target resolution degraded uid=%s error=%s",
+            uid,
+            type(exc).__name__,
+        )
+        return None, "honcho_profile_resolution_unavailable"
 
 
 def _hermes_workspace_headers(uid: str) -> dict[str, str]:
@@ -293,10 +389,50 @@ V2V_PROVIDERS = {
     },
 }
 
+MEMORY_SCOPED_VOICE_MODE_ALIASES = {
+    "gemini-live": "v4",
+    "gemini-native-live-v1": "v4",
+    "gemini-zero-live-v1": "v4",
+    "gemini-lite-live-v1": "v4",
+    "gemini-full-live-v1": "v4",
+}
+MEMORY_SCOPED_VOICE_PROVIDERS = {
+    "grok-voice",
+    "gemini-live",
+    "gemini-native-live",
+}
+
+
+def _normalized_memory_scoped_voice_mode(value: str) -> str:
+    candidate = str(value or "").strip().lower()
+    return MEMORY_SCOPED_VOICE_MODE_ALIASES.get(candidate, candidate)
+
+
+def _memory_scoped_voice_provider_mode_error(provider: str, voice_mode: str) -> Optional[str]:
+    provider = str(provider or "").strip().lower()
+    raw_mode = str(voice_mode or "").strip().lower()
+    if provider not in MEMORY_SCOPED_VOICE_PROVIDERS:
+        return "memory_scoped_voice_provider_unsupported"
+    if _normalized_memory_scoped_voice_mode(raw_mode) != "v4":
+        return "memory_scoped_voice_mode_required"
+    if provider == "grok-voice" and raw_mode != "v4":
+        return "memory_scoped_voice_provider_mode_mismatch"
+    if provider in {"gemini-live", "gemini-native-live"} and not raw_mode.startswith("gemini"):
+        return "memory_scoped_voice_provider_mode_mismatch"
+    return None
+
 
 # ============================================================================
 # Request/Response Models
 # ============================================================================
+
+
+class VoiceSessionScope(BaseModel):
+    """Non-authoritative client scope; all memory content is resolved server-side."""
+
+    kind: Literal["memory"]
+    conversation_id: str
+    expected_active_summary_version_id: Optional[str] = None
 
 
 class VoiceSessionRequest(BaseModel):
@@ -305,6 +441,7 @@ class VoiceSessionRequest(BaseModel):
     uid: Optional[str] = None
     provider: str = "grok-voice"
     voice_mode: Optional[str] = None
+    session_scope: Optional[VoiceSessionScope] = None
 
 
 class VoiceSessionResponse(BaseModel):
@@ -316,6 +453,8 @@ class VoiceSessionResponse(BaseModel):
     audio_format: dict
     provider: str
     voice_mode: str
+    session_id: str
+    session_scope: Optional[dict] = None
 
 
 class VoiceConfigResponse(BaseModel):
@@ -328,6 +467,148 @@ class VoiceConfigResponse(BaseModel):
 
 
 DEFAULT_ELEVENLABS_VOICE_ID = "pFZP5JQG7iQjIQuC4Bku"
+
+
+def _iso_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value or "")
+
+
+def _load_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> Optional[dict[str, Any]]:
+    """Load one user-owned canonical memory without probing other users."""
+    from database import conversations as conversations_db
+    from database import users as users_db
+
+    conversation_id = str(scope.conversation_id or "").strip()
+    if not conversation_id:
+        return None
+    version_result = conversations_db.ensure_voice_memory_summary_version(
+        uid,
+        conversation_id,
+        scope.expected_active_summary_version_id,
+    )
+    status = str(version_result.get("status") or "")
+    if status == "stale":
+        raise ValueError("voice_session_scope_stale")
+    if status == "version_unavailable":
+        raise ValueError("voice_session_scope_version_unavailable")
+    if status == "not_found":
+        return None
+    conversation = version_result.get("conversation")
+    if not isinstance(conversation, dict):
+        raise RuntimeError("voice_session_scope_invalid_result")
+
+    active_version_id = str(conversation.get("active_summary_version_id") or "")
+    if not active_version_id:
+        raise ValueError("voice_session_scope_version_unavailable")
+
+    structured = conversation.get("structured")
+    structured = structured if isinstance(structured, dict) else {}
+    person_ids: list[str] = []
+    for segment in conversation.get("transcript_segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        person_id = str(segment.get("person_id") or "").strip()
+        if person_id and person_id not in person_ids:
+            person_ids.append(person_id)
+    people: list[str] = []
+    if person_ids:
+        try:
+            for person in users_db.get_people_by_ids(uid, person_ids):
+                if not isinstance(person, dict):
+                    continue
+                name = str(person.get("name") or "").strip()
+                if name and name not in people:
+                    people.append(name)
+        except Exception as exc:
+            logger.warning(
+                "[FLOW:VOICE-SCOPE] people lookup degraded uid=%s conversation=%s error=%s",
+                uid,
+                conversation_id,
+                type(exc).__name__,
+            )
+
+    occurred_at = (
+        conversation.get("started_at")
+        or conversation.get("created_at")
+        or conversation.get("finished_at")
+    )
+    title = str(structured.get("title") or "Untitled memory").strip()
+    overview = str(structured.get("overview") or "").strip()
+    topic_query = " ".join(
+        part
+        for part in (
+            title,
+            overview[:700],
+            " ".join(people[:12]),
+            _iso_value(occurred_at)[:10],
+        )
+        if part
+    )[:1200]
+
+    return {
+        "kind": "memory",
+        "conversation_id": conversation_id,
+        "active_summary_version_id": active_version_id,
+        "can_reinterpret": not bool(conversation.get("is_locked")),
+        "title": title[:300],
+        "overview": overview[:1600],
+        "emoji": str(structured.get("emoji") or "")[:16],
+        "category": str(structured.get("category") or "")[:80],
+        "people": people[:12],
+        "occurred_at": _iso_value(occurred_at),
+        "topic_query": topic_query,
+        "instruction": (
+            "This is a memory-scoped conversation. Help the user reminisce and "
+            "answer questions normally. Do not treat every statement as a correction. "
+            "Memory changes are considered asynchronously after the session."
+        ),
+    }
+
+
+async def _resolve_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> dict[str, Any]:
+    try:
+        resolved = await asyncio.to_thread(_load_voice_memory_scope, uid, scope)
+    except ValueError as exc:
+        if str(exc) == "voice_session_scope_stale":
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"}) from exc
+        if str(exc) == "voice_session_scope_version_unavailable":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_session_scope_version_unavailable"},
+            ) from exc
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:VOICE-SCOPE] lookup unavailable uid=%s conversation=%s error=%s",
+            uid,
+            scope.conversation_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail={"code": "voice_session_scope_unavailable"}) from exc
+    if not resolved:
+        # Missing and non-owned IDs intentionally share one response.
+        raise HTTPException(status_code=404, detail={"code": "voice_session_scope_not_found"})
+    return resolved
+
+
+async def _resolve_principal_memory_scope(principal: VoiceProxyPrincipal) -> Optional[dict[str, Any]]:
+    if principal.scope_kind != "memory":
+        return None
+    resolved = await _resolve_voice_memory_scope(
+        principal.uid,
+        VoiceSessionScope(
+            kind="memory",
+            conversation_id=principal.conversation_id or "",
+            expected_active_summary_version_id=principal.active_summary_version_id,
+        ),
+    )
+    if resolved["can_reinterpret"] != principal.can_reinterpret:
+        raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
+    return resolved
 
 
 class TtsRequest(BaseModel):
@@ -399,6 +680,8 @@ def create_session_token(
     voice_mode: str = "v3-rich",
     provider: str = "grok-voice",
     isolated_runtime: bool = False,
+    session_id: Optional[str] = None,
+    session_scope: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     Create a JWT session token for V2V connection.
@@ -420,6 +703,11 @@ def create_session_token(
     if not ELLA_SESSION_SECRET:
         raise HTTPException(status_code=500, detail="Session secret not configured")
 
+    if session_scope:
+        scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, voice_mode)
+        if scope_pair_error:
+            raise ValueError(scope_pair_error)
+
     payload = {
         "sub": firebase_uid,
         "uid": uid,
@@ -431,11 +719,23 @@ def create_session_token(
         "context_url": f"{ELLA_API_BASE}/v1/users/{uid}/context",
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
         "aud": VOICE_SESSION_AUDIENCE,
-        "jti": str(uuid.uuid4()),
+        "jti": session_id or str(uuid.uuid4()),
         "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
     }
+    if session_scope:
+        active_summary_version_id = str(session_scope.get("active_summary_version_id") or "").strip()
+        if not active_summary_version_id:
+            raise ValueError("memory scope requires an active summary version")
+        payload.update(
+            {
+                "scope_kind": session_scope["kind"],
+                "conversation_id": session_scope["conversation_id"],
+                "active_summary_version_id": active_summary_version_id,
+                "can_reinterpret": bool(session_scope["can_reinterpret"]),
+            }
+        )
 
     return jwt.encode(payload, ELLA_SESSION_SECRET, algorithm="HS256")
 
@@ -570,6 +870,7 @@ async def create_voice_session(
     uid = authenticated_uid
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
+    requested_scope = body.session_scope if body else None
 
     runtime_bound = runtime_bindings_enabled(uid)
     voice_rollout_enabled = isolated_voice_routing_enabled(uid)
@@ -585,7 +886,6 @@ async def create_voice_session(
             # Runtime-bound users must never fall through to legacy voice while
             # their explicit isolated-voice rollout gate remains disabled.
             raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
-
     # Validate provider
     if provider not in V2V_PROVIDERS:
         valid = list(V2V_PROVIDERS.keys())
@@ -596,6 +896,17 @@ async def create_voice_session(
 
     provider_info = V2V_PROVIDERS[provider]
 
+    # Resolve and validate the complete scoped pair before memory lookup or
+    # provider setup. Unscoped sessions retain their existing behavior.
+    resolved_mode = voice_mode or provider_info["default_mode"]
+    if requested_scope:
+        scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, resolved_mode)
+        if scope_pair_error:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": scope_pair_error},
+            )
+
     # Check provider availability
     if not provider_info["key_check"]():
         raise HTTPException(
@@ -603,8 +914,11 @@ async def create_voice_session(
             detail=f"Provider {provider!r} is not configured (missing API key)",
         )
 
-    # Resolve voice mode
-    resolved_mode = voice_mode or provider_info["default_mode"]
+    memory_scope = (
+        await _resolve_voice_memory_scope(uid, requested_scope)
+        if requested_scope
+        else None
+    )
 
     _start = time.time()
 
@@ -621,6 +935,7 @@ async def create_voice_session(
         logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
 
     try:
+        session_id = str(uuid.uuid4())
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,
@@ -628,6 +943,8 @@ async def create_voice_session(
             voice_mode=resolved_mode,
             provider=provider,
             isolated_runtime=isolated_runtime,
+            session_id=session_id,
+            session_scope=memory_scope,
         )
 
         # Build endpoint URL with mode query param
@@ -653,6 +970,17 @@ async def create_voice_session(
             },
             provider=provider,
             voice_mode=resolved_mode,
+            session_id=session_id,
+            session_scope=(
+                {
+                    "kind": memory_scope["kind"],
+                    "conversation_id": memory_scope["conversation_id"],
+                    "active_summary_version_id": memory_scope["active_summary_version_id"],
+                    "can_reinterpret": memory_scope["can_reinterpret"],
+                }
+                if memory_scope
+                else None
+            ),
         )
 
     except HTTPException:
@@ -1038,6 +1366,8 @@ async def get_voice_context(request: Request):
     principal = authenticate_voice_proxy_request(request, uid)
     uid = principal.uid
     runtime = await _resolve_voice_runtime(principal)
+    memory_scope = await _resolve_principal_memory_scope(principal)
+    honcho_target, honcho_target_reason = await _resolve_voice_honcho_binding(uid, runtime)
 
     budget = body.get("context_budget", 8000)
     memory_timeout_seconds = float(body.get("memory_timeout_seconds", 2.0))
@@ -1140,15 +1470,26 @@ async def get_voice_context(request: Request):
     recent_conversations = ""
     recent_timeline = ""
     memory_context = ""
+    honcho_context_result: dict[str, Any] = {
+        "available": False,
+        "reason": honcho_target_reason or "missing_companion_honcho_target",
+        "context": "",
+    }
     try:
-        import asyncio as _aio
-
-        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=8))
-        timeline_task = _aio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
+        conv_task = asyncio.create_task(_fetch_recent_conversations(uid, limit=8))
+        timeline_task = asyncio.create_task(
+            _fetch_recent_canonical_timeline(
+                uid,
+                limit=40,
+                max_chars=9000,
+                scope_kind=principal.scope_kind,
+                conversation_id=principal.conversation_id,
+            )
+        )
         if runtime:
-            mem_task = _aio.create_task(_aio.sleep(0, result=""))
+            mem_task = asyncio.create_task(asyncio.sleep(0, result=""))
         else:
-            mem_task = _aio.create_task(
+            mem_task = asyncio.create_task(
                 _fetch_memory_context(
                     gateway_url,
                     gateway_token,
@@ -1156,10 +1497,34 @@ async def get_voice_context(request: Request):
                     timeout_seconds=memory_timeout_seconds,
                 )
             )
-        recent_conversations, recent_timeline, memory_context = await _aio.gather(
+        honcho_query = (
+            memory_scope.get("topic_query")
+            if memory_scope
+            else (
+                "Recent themes, personal facts, relationships, preferences, "
+                "plans, and details useful for a supportive voice conversation."
+            )
+        )
+        if honcho_target:
+            honcho_task = asyncio.create_task(
+                fetch_voice_honcho_context(
+                    honcho_target,
+                    query=str(honcho_query or ""),
+                    top_k=16 if memory_scope else 12,
+                )
+            )
+        else:
+            honcho_task = asyncio.create_task(asyncio.sleep(0, result=honcho_context_result))
+        (
+            recent_conversations,
+            recent_timeline,
+            memory_context,
+            honcho_context_result,
+        ) = await asyncio.gather(
             conv_task,
             timeline_task,
             mem_task,
+            honcho_task,
         )
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
@@ -1211,6 +1576,7 @@ async def get_voice_context(request: Request):
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
         f"files={len(files)} rules={len(dynamic_rules)} "
         f"convos={len(recent_conversations)} timeline={len(recent_timeline)} mem={len(memory_context)} "
+        f"honcho={honcho_context_result.get('reason')} "
         f"latency={_elapsed}ms",
         flush=True,
     )
@@ -1232,6 +1598,13 @@ async def get_voice_context(request: Request):
         "recent_timeline": recent_timeline,
         "recent_conversations": recent_conversations,
         "memory_context": memory_context,
+        "honcho_context": str(honcho_context_result.get("context") or ""),
+        "honcho_status": {
+            key: value
+            for key, value in honcho_context_result.items()
+            if key != "context"
+        },
+        "memory_scope": memory_scope,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
         "dynamic_rules": dynamic_rules,
@@ -1502,10 +1875,10 @@ async def search_omi_conversations(request: Request):
 # Privacy policy: maps agent_role -> source -> access level
 # True = full access, False = no access, "own" = own data only, "full" = full
 SEARCH_POLICY = {
-    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
-    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
-    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
-    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
+    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": "own"},
+    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "honcho": False, "scanner": "full"},
+    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "honcho": False, "scanner": False},
+    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": False},
 }
 
 # Which source keys map to which request-level source names
@@ -1516,6 +1889,7 @@ _SOURCE_TO_POLICY_KEYS = {
     "omi":       ["omi_full", "omi_meta"],
     "memories":  ["memories"],
     "voice":     ["voice"],
+    "honcho":    ["honcho"],
     "scanner":   ["scanner"],
 }
 
@@ -1750,7 +2124,14 @@ def _should_use_voice_memory_fast_path(query: str) -> bool:
     return not any(term in query_lower for term in detail_terms)
 
 
-async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
+async def _search_canonical_timeline(
+    uid: str,
+    query: str,
+    limit: int,
+    *,
+    scope_kind: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> list:
     """Search the canonical cross-channel event ledger.
 
     This is the durable source for voice/app/iMessage/chat turns and should be
@@ -1767,13 +2148,29 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
             """
             SELECT channel, provider, role, text, started_at, session_id, metadata
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
+              AND (
+                    NOT (
+                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
+                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                    )
+                    OR (
+                        $2 = 'memory'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'conversation_id', ''),
+                            metadata ->> 'conversation_id',
+                            ''
+                        ) = $3
+                    )
+              )
             ORDER BY started_at DESC, id DESC
             LIMIT 300
             """,
             uid,
+            scope_kind or "",
+            conversation_id or "",
         )
         matches = []
         include_assistant = any(
@@ -1879,7 +2276,14 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         return []
 
 
-async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars: int = 9000) -> str:
+async def _fetch_recent_canonical_timeline(
+    uid: str,
+    limit: int = 30,
+    max_chars: int = 9000,
+    *,
+    scope_kind: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> str:
     """Fetch the latest cross-channel turns for realtime voice startup context.
 
     This is not keyword search. Realtime voice providers need a hot chronological
@@ -1892,13 +2296,29 @@ async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars:
             """
             SELECT channel, provider, role, text, started_at
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
+              AND (
+                    NOT (
+                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
+                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                    )
+                    OR (
+                        $2 = 'memory'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'conversation_id', ''),
+                            metadata ->> 'conversation_id',
+                            ''
+                        ) = $3
+                    )
+              )
             ORDER BY started_at DESC, id DESC
-            LIMIT $2
+            LIMIT $4
             """,
             uid,
+            scope_kind or "",
+            conversation_id or "",
             limit,
         )
     except Exception as e:
@@ -2692,13 +3112,21 @@ async def unified_search(request: Request):
         raise HTTPException(status_code=403, detail="agent_id does not belong to this uid")
 
     _start = time.time()
+    honcho_target = None
+    honcho_target_reason = ""
+    honcho_target_resolved = False
+    prefetched_voice_memory_results = None
 
     # Realtime voice needs a bounded fast path. If the compact Hermes memory
     # pack has a high-confidence answer, return it immediately and avoid
-    # waiting on slower Firestore/workspace/Honcho fallback searches.
+    # waiting on slower fallback searches. A mapped retained companion still
+    # fans out to Honcho so retained and isolated voice share durable memory.
     if not runtime and agent_role == "voice" and not requested_sources and _should_use_voice_memory_fast_path(query):
+        honcho_target, honcho_target_reason = await _resolve_voice_honcho_binding(uid, runtime)
+        honcho_target_resolved = True
         fast_results = await _search_voice_memory_pack(uid, query, limit)
-        if fast_results and fast_results[0].get("score", 0) >= 120:
+        prefetched_voice_memory_results = fast_results
+        if not honcho_target and fast_results and fast_results[0].get("score", 0) >= 120:
             _elapsed = int((time.time() - _start) * 1000)
             logger.info(
                 f"[FLOW:UNIFIED-SEARCH] uid={uid} role={agent_role} query=\"{query}\" "
@@ -2741,6 +3169,15 @@ async def unified_search(request: Request):
 
     # Determine allowed sources based on role
     allowed = _get_allowed_sources(agent_role, requested_sources)
+    if allowed.get("honcho"):
+        if not honcho_target_resolved:
+            honcho_target, honcho_target_reason = await _resolve_voice_honcho_binding(uid, runtime)
+        if not honcho_target:
+            logger.info(
+                "[FLOW:UNIFIED-SEARCH] Honcho profile unavailable uid=%s reason=%s",
+                uid,
+                honcho_target_reason,
+            )
 
     # Build task list for parallel fan-out
     tasks = []
@@ -2751,11 +3188,22 @@ async def unified_search(request: Request):
         or (not requested_sources and _should_use_voice_memory_fast_path(query))
     )
     if agent_role in {"voice", "user"} and include_voice_memory:
-        tasks.append(_search_voice_memory_pack(uid, query, limit))
+        if prefetched_voice_memory_results is None:
+            tasks.append(_search_voice_memory_pack(uid, query, limit))
+        else:
+            tasks.append(_aio.sleep(0, result=prefetched_voice_memory_results))
         task_source_names.append("voice_memory")
 
     if allowed.get("timeline"):
-        tasks.append(_search_canonical_timeline(uid, query, limit))
+        tasks.append(
+            _search_canonical_timeline(
+                uid,
+                query,
+                limit,
+                scope_kind=principal.scope_kind,
+                conversation_id=principal.conversation_id,
+            )
+        )
         task_source_names.append("timeline")
 
     if allowed.get("workspace"):
@@ -2801,6 +3249,10 @@ async def unified_search(request: Request):
             tasks.append(_search_voice_logs(uid, agent_id, query, limit))
         task_source_names.append("voice")
 
+    if honcho_target and allowed.get("honcho"):
+        tasks.append(search_voice_honcho(honcho_target, query, limit))
+        task_source_names.append("honcho")
+
     scanner_access = allowed.get("scanner")
     if scanner_access:
         access_level = "full" if scanner_access == "full" else "own"
@@ -2808,7 +3260,16 @@ async def unified_search(request: Request):
         task_source_names.append("scanner")
 
     # Determine which sources were denied
-    all_source_names = {"voice_memory", "timeline", "workspace", "omi", "memories", "voice", "scanner"}
+    all_source_names = {
+        "voice_memory",
+        "timeline",
+        "workspace",
+        "omi",
+        "memories",
+        "voice",
+        "honcho",
+        "scanner",
+    }
     if requested_sources:
         requested_set = set(requested_sources)
     else:

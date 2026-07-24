@@ -616,6 +616,108 @@ def update_conversation_if_active_summary_version(
     )
 
 
+def _ensure_voice_memory_summary_version_transaction(
+    transaction,
+    conversation_ref,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Establish a durable active summary version before evaluating a voice CAS."""
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return {'status': 'not_found'}
+
+    conversation = snapshot.to_dict() or {}
+    versions = conversation.get('summary_versions')
+    versions = copy.deepcopy(versions) if isinstance(versions, list) else []
+    active_version = _active_summary_version(conversation)
+    update_data: Dict[str, Any] = {}
+
+    if not active_version:
+        if not versions:
+            bootstrap_update = bootstrap_summary_versioning_update(conversation)
+            if bootstrap_update:
+                versions = bootstrap_update['summary_versions']
+                active_version = versions[0]
+                update_data.update(bootstrap_update)
+        else:
+            # Recover a missing active pointer from the newest durable version.
+            active_version = next(
+                (
+                    version
+                    for version in reversed(versions)
+                    if isinstance(version, dict) and str(version.get('id') or '').strip()
+                ),
+                None,
+            )
+            if active_version:
+                active_id = str(active_version['id'])
+                for version in versions:
+                    if isinstance(version, dict):
+                        version['is_active'] = str(version.get('id') or '') == active_id
+                update_data.update(
+                    {
+                        'summary_versions': versions,
+                        'active_summary_version_id': active_id,
+                    }
+                )
+
+    active_version_id = str((active_version or {}).get('id') or '').strip()
+    if not active_version_id:
+        return {'status': 'version_unavailable'}
+
+    if str(conversation.get('active_summary_version_id') or '').strip() != active_version_id:
+        update_data['active_summary_version_id'] = active_version_id
+    if update_data:
+        transaction.update(conversation_ref, update_data)
+        conversation.update(update_data)
+
+    expected_version_id = str(expected_active_summary_version_id or '').strip()
+    if expected_version_id and expected_version_id != active_version_id:
+        return {
+            'status': 'stale',
+            'active_summary_version_id': active_version_id,
+            'conversation': conversation,
+        }
+    return {
+        'status': 'ready',
+        'active_summary_version_id': active_version_id,
+        'conversation': conversation,
+    }
+
+
+@transactional
+def _ensure_voice_memory_summary_version(
+    transaction,
+    conversation_ref,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _ensure_voice_memory_summary_version_transaction(
+        transaction,
+        conversation_ref,
+        expected_active_summary_version_id,
+    )
+
+
+def ensure_voice_memory_summary_version(
+    uid: str,
+    conversation_id: str,
+    expected_active_summary_version_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Load one user-owned memory and atomically establish its voice CAS version."""
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    result = _ensure_voice_memory_summary_version(
+        db.transaction(),
+        conversation_ref,
+        expected_active_summary_version_id,
+    )
+    conversation = result.get('conversation')
+    if isinstance(conversation, dict):
+        result = {**result, 'conversation': _prepare_conversation_for_read(conversation, uid)}
+    return result
+
+
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,

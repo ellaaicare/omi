@@ -209,6 +209,312 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
     assert claims["isolated_runtime"] is True
 
 
+def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monkeypatch):
+    async def ready_runtime(uid):
+        assert uid == "user-a"
+        return object()
+
+    async def resolve_scope(uid, scope):
+        assert uid == "user-a"
+        assert scope.conversation_id == "memory-a"
+        return {
+            "kind": "memory",
+            "conversation_id": "memory-a",
+            "active_summary_version_id": "version-2",
+            "can_reinterpret": True,
+            "title": "Private title",
+            "overview": "Private overview",
+        }
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return {"name": "User A"}
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", resolve_scope)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(
+                uid="user-a",
+                provider="grok-voice",
+                session_scope=voice.VoiceSessionScope(
+                    kind="memory",
+                    conversation_id="memory-a",
+                ),
+            ),
+            authenticated_uid="user-a",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.session_id == claims["jti"]
+    assert result.session_scope == {
+        "kind": "memory",
+        "conversation_id": "memory-a",
+        "active_summary_version_id": "version-2",
+        "can_reinterpret": True,
+    }
+    assert claims["conversation_id"] == "memory-a"
+    assert "title" not in claims
+    assert "overview" not in claims
+
+
+@pytest.mark.parametrize("legacy_mode", ["v1", "v2", "v3-fast"])
+def test_memory_scoped_voice_session_rejects_legacy_mode_before_scope_resolution(
+    monkeypatch,
+    legacy_mode,
+):
+    async def forbidden_scope_resolution(*args, **kwargs):
+        raise AssertionError("legacy scoped mode must fail before memory resolution")
+
+    def forbidden_token_issuance(*args, **kwargs):
+        raise AssertionError("legacy scoped mode must fail before token issuance")
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", forbidden_scope_resolution)
+    monkeypatch.setattr(voice, "create_session_token", forbidden_token_issuance)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(
+                    uid="user-a",
+                    provider="grok-voice",
+                    voice_mode=legacy_mode,
+                    session_scope=voice.VoiceSessionScope(
+                        kind="memory",
+                        conversation_id="memory-a",
+                    ),
+                ),
+                authenticated_uid="user-a",
+            )
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == {"code": "memory_scoped_voice_mode_required"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "mode"),
+    [
+        ("grok-voice", "v4"),
+        ("gemini-live", "gemini-live"),
+        ("gemini-native-live", "gemini-native-live-v1"),
+        ("gemini-live", "gemini-zero-live-v1"),
+        ("gemini-native-live", "gemini-lite-live-v1"),
+        ("gemini-native-live", "gemini-full-live-v1"),
+    ],
+)
+def test_memory_scoped_voice_provider_mode_allows_modern_proxy_pairs(provider, mode):
+    assert voice._memory_scoped_voice_provider_mode_error(provider, mode) is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "mode", "expected_code"),
+    [
+        (
+            "openai-native-realtime",
+            None,
+            "memory_scoped_voice_provider_unsupported",
+        ),
+        (
+            "openai-native-realtime",
+            "v4",
+            "memory_scoped_voice_provider_unsupported",
+        ),
+        (
+            "grok-voice",
+            "gemini-live",
+            "memory_scoped_voice_provider_mode_mismatch",
+        ),
+        (
+            "gemini-live",
+            "v4",
+            "memory_scoped_voice_provider_mode_mismatch",
+        ),
+    ],
+)
+def test_memory_scoped_voice_session_rejects_unsupported_provider_mode_pair_before_scope_resolution(
+    monkeypatch,
+    provider,
+    mode,
+    expected_code,
+):
+    async def forbidden_scope_resolution(*args, **kwargs):
+        raise AssertionError("invalid scoped pair must fail before memory resolution")
+
+    def forbidden_token_issuance(*args, **kwargs):
+        raise AssertionError("invalid scoped pair must fail before token issuance")
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", forbidden_scope_resolution)
+    monkeypatch.setattr(voice, "create_session_token", forbidden_token_issuance)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(
+                    uid="user-a",
+                    provider=provider,
+                    voice_mode=mode,
+                    session_scope=voice.VoiceSessionScope(
+                        kind="memory",
+                        conversation_id="memory-a",
+                    ),
+                ),
+                authenticated_uid="user-a",
+            )
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == {"code": expected_code}
+
+
+@pytest.mark.parametrize(
+    ("provider", "requested_mode", "expected_mode"),
+    [
+        ("grok-voice", None, "v4"),
+        ("grok-voice", "v4", "v4"),
+        ("gemini-live", None, "gemini-live"),
+        ("gemini-live", "gemini-zero-live-v1", "gemini-zero-live-v1"),
+        ("gemini-native-live", None, "gemini-native-live-v1"),
+        ("gemini-native-live", "gemini-full-live-v1", "gemini-full-live-v1"),
+    ],
+)
+def test_retained_memory_scoped_voice_session_accepts_supported_provider_mode_pair(
+    monkeypatch,
+    provider,
+    requested_mode,
+    expected_mode,
+):
+    async def resolve_scope(uid, scope):
+        assert uid == "user-a"
+        return {
+            "kind": "memory",
+            "conversation_id": scope.conversation_id,
+            "active_summary_version_id": "version-2",
+            "can_reinterpret": True,
+        }
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", resolve_scope)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(
+                uid="user-a",
+                provider=provider,
+                voice_mode=requested_mode,
+                session_scope=voice.VoiceSessionScope(
+                    kind="memory",
+                    conversation_id="memory-a",
+                ),
+            ),
+            authenticated_uid="user-a",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.provider == provider
+    assert result.voice_mode == expected_mode
+    assert claims["provider"] == provider
+    assert claims["voice_mode"] == expected_mode
+    assert claims["isolated_runtime"] is False
+
+
+@pytest.mark.parametrize(
+    ("provider", "mode"),
+    [
+        ("grok-voice", "v1"),
+        ("grok-voice", "gemini-live"),
+        ("gemini-live", "v4"),
+        ("openai-native-realtime", "v4"),
+    ],
+)
+def test_unscoped_voice_session_preserves_existing_provider_mode_behavior(
+    monkeypatch,
+    provider,
+    mode,
+):
+    class Pool:
+        async def fetchrow(self, *args):
+            return None
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(
+                uid="user-a",
+                provider=provider,
+                voice_mode=mode,
+            ),
+            authenticated_uid="user-a",
+        )
+    )
+
+    assert result.provider == provider
+    assert result.voice_mode == mode
+
+
+def test_unversionable_memory_scope_returns_defined_nonwriteable_state(monkeypatch):
+    def unavailable(uid, scope):
+        raise ValueError("voice_session_scope_version_unavailable")
+
+    monkeypatch.setattr(voice, "_load_voice_memory_scope", unavailable)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice._resolve_voice_memory_scope(
+                "user-a",
+                voice.VoiceSessionScope(kind="memory", conversation_id="memory-empty"),
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "voice_session_scope_version_unavailable"}
+
+
 def test_voice_session_rejects_voice_canary_without_runtime_binding(monkeypatch):
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: uid == "user-a")

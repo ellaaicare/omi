@@ -1,7 +1,10 @@
 import asyncio
 import json
-from datetime import datetime, timezone
 import sys
+import threading
+import time
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock
 
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
@@ -497,6 +500,142 @@ def test_write_honcho_fact_candidate_native_honcho_profile_map_targets_companion
     assert calls[4]["json"]["filters"] == {"observer_id": "ella", "observed_id": "plato"}
 
 
+def test_companion_profile_maps_treat_firebase_uids_as_case_sensitive(monkeypatch, tmp_path):
+    profile_config = tmp_path / "honcho.json"
+    profile_config.write_text(
+        json.dumps({"workspace": "wrong-workspace", "peerName": "wrong-peer"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps(
+            {
+                "usera": {"workspace": "wrong-dict-workspace", "peerName": "wrong-dict-peer"},
+                "profiles": [
+                    {
+                        "uid": "usera",
+                        "workspace": "wrong-list-workspace",
+                        "peerName": "wrong-list-peer",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "usera")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(profile_config))
+
+    target, reason = contract.resolve_companion_honcho_target("UserA")
+
+    assert target is None
+    assert reason == "missing_companion_honcho_target"
+
+
+def test_companion_profile_map_checks_local_exact_uid_before_remote_source(monkeypatch):
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps({"UserA": {"workspace": "workspace-a", "peerName": "user-a"}}),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(
+        contract,
+        "_safe_json_url",
+        lambda url: (_ for _ in ()).throw(AssertionError("remote map must stay lazy")),
+    )
+
+    target, reason = contract.resolve_companion_honcho_target("UserA")
+
+    assert reason == ""
+    assert target["workspace"] == "workspace-a"
+    assert target["observed_peer_id"] == "user-a"
+
+
+def test_companion_profile_config_checks_local_exact_uid_before_remote_source(monkeypatch, tmp_path):
+    profile_config = tmp_path / "honcho.json"
+    profile_config.write_text(
+        json.dumps(
+            {
+                "workspace": "workspace-config",
+                "peerName": "user-config",
+                "aiPeer": "ella-config",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_JSON", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "http://unavailable.test/profile-map")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "UserA")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(profile_config))
+    monkeypatch.setattr(
+        contract,
+        "_safe_json_url",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("remote map must stay lazy")
+        ),
+    )
+
+    target, reason = contract.resolve_companion_honcho_target("UserA")
+
+    assert reason == ""
+    assert target == {
+        "workspace": "workspace-config",
+        "observer_peer_id": "ella-config",
+        "observed_peer_id": "user-config",
+        "source": "profile_config",
+    }
+
+
+def test_remote_profile_loader_honors_transport_timeout(monkeypatch):
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(0.25)
+            body = b'{"entries": {}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
+    thread.start()
+    monkeypatch.setattr(
+        contract,
+        "_PROFILE_MAP_URL_CACHE",
+        {"url": "", "fetched_at": 0.0, "data": None},
+    )
+
+    started = time.monotonic()
+    try:
+        result = contract._safe_json_url(
+            f"http://127.0.0.1:{server.server_port}/profile-map",
+            timeout_seconds=0.03,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=0.2)
+
+    assert result is None
+    assert elapsed < 0.15
+
+
 def test_write_honcho_fact_candidate_native_honcho_profile_map_url_targets_companion_scope(monkeypatch):
     candidate = _candidate(active_summary_version_id="v1")
     fake_client, calls = _fake_sequence_client_factory(
@@ -531,7 +670,7 @@ def test_write_honcho_fact_candidate_native_honcho_profile_map_url_targets_compa
     monkeypatch.setattr(
         contract,
         "_safe_json_url",
-        lambda url: {
+        lambda url, **kwargs: {
             "user-123": {
                 "workspace": "ella-omi-firebaseuid-a-canonical",
                 "observed_peer_id": "user-FirebaseUID-A",
@@ -597,6 +736,39 @@ def test_write_honcho_fact_candidate_native_honcho_profile_config_prefers_host_a
         "observed_peer_id": "plato",
         "source": "profile_config",
     }
+
+
+def test_companion_target_requires_exact_uid_and_ignores_global_write_override(monkeypatch, tmp_path):
+    config = tmp_path / "honcho.json"
+    config.write_text(
+        json.dumps(
+            {
+                "workspace": "workspace-a",
+                "peerName": "user-a",
+                "aiPeer": "ella-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(contract, "HONCHO_WORKSPACE", "shared-write-workspace")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_JSON", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(config))
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "user-a")
+
+    target_a, reason_a = contract.resolve_companion_honcho_target("user-a")
+    target_b, reason_b = contract.resolve_companion_honcho_target("user-b")
+
+    assert reason_a == ""
+    assert target_a == {
+        "workspace": "workspace-a",
+        "observer_peer_id": "ella-a",
+        "observed_peer_id": "user-a",
+        "source": "profile_config",
+    }
+    assert target_b is None
+    assert reason_b == "missing_companion_honcho_target"
 
 
 def test_write_honcho_fact_candidate_native_honcho_explicit_workspace_can_set_observed_peer(monkeypatch):
