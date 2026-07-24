@@ -223,6 +223,200 @@ def test_submit_correction_uses_authenticated_uid_for_ownership(monkeypatch):
     assert calls == [("authenticated-user", "conv-123")]
 
 
+def test_correction_receipt_exposes_old_and_new_summary_and_real_propagation_count(monkeypatch):
+    conversation = {
+        "summary_versions": [
+            {
+                "id": "before-v1",
+                "title": "Coffee with Margaret",
+                "overview": "Margaret came by.",
+                "emoji": "☕",
+                "category": "other",
+            },
+            {
+                "id": "after-v2",
+                "based_on_version_id": "before-v1",
+                "correction_id": "corr-1",
+                "title": "Coffee with Rose",
+                "overview": "Rose came by.",
+                "emoji": "☕",
+                "category": "other",
+            },
+        ],
+        "active_summary_version_id": "after-v2",
+        "correction_state": {"correction_id": "corr-1", "status": "applied"},
+    }
+
+    class AuditRef:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {"status": "applied", "applied_at": "2026-07-23T17:00:00+00:00"},
+            )
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections, "_correction_propagation_counts", lambda uid, conversation_id, correction_id: (1, 0)
+    )
+
+    receipt = corrections._correction_receipt(
+        uid="uid-1",
+        conversation_id="conv-1",
+        correction_id="corr-1",
+    )
+
+    assert receipt.before.title == "Coffee with Margaret"
+    assert receipt.after.title == "Coffee with Rose"
+    assert receipt.propagation_applied_count == 1
+    assert receipt.propagation_reverted_count == 0
+
+
+def test_undo_restores_source_summary_and_reverts_actual_propagations(monkeypatch):
+    conversation = {
+        "summary_versions": [
+            {
+                "id": "before-v1",
+                "title": "Coffee with Margaret",
+                "overview": "Margaret came by.",
+                "emoji": "☕",
+                "category": "other",
+            },
+            {
+                "id": "after-v2",
+                "based_on_version_id": "before-v1",
+                "correction_id": "corr-1",
+                "title": "Coffee with Rose",
+                "overview": "Rose came by.",
+                "emoji": "☕",
+                "category": "other",
+            },
+        ],
+        "active_summary_version_id": "after-v2",
+        "correction_state": {"correction_id": "corr-1", "status": "applied", "source": "ios"},
+    }
+    applied = {}
+    audits = []
+    updates = []
+
+    class AuditRef:
+        def get(self):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"status": "applied"})
+
+    async def fake_apply(**kwargs):
+        applied.update(kwargs)
+        return {"status": "ok", "active_summary_version_id": "undo-v3"}
+
+    expected = corrections.ConversationCorrectionReceiptResponse(
+        correction_id="corr-1",
+        conversation_id="conv-1",
+        status="undone",
+        before=corrections.CorrectionSummarySnapshot(title="Coffee with Margaret"),
+        after=corrections.CorrectionSummarySnapshot(title="Coffee with Rose"),
+        propagation_applied_count=1,
+        propagation_reverted_count=1,
+    )
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update: updates.append(update),
+    )
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(corrections, "apply_summary_update", fake_apply)
+    monkeypatch.setattr(corrections, "_revert_applied_propagations", lambda uid, cid, correction_id: 1)
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda uid, conversation_id, correction_id, payload: audits.append(payload),
+    )
+    monkeypatch.setattr(corrections, "_correction_receipt", lambda **kwargs: expected)
+
+    receipt = asyncio.run(
+        corrections.undo_conversation_correction(
+            "conv-1",
+            "corr-1",
+            uid="uid-1",
+        )
+    )
+
+    assert applied["summary"]["title"] == "Coffee with Margaret"
+    assert applied["active_summary_version_id"] == "after-v2"
+    assert applied["require_based_on_match"] is True
+    assert audits[-1]["status"] == "undone"
+    assert audits[-1]["propagation_reverted_count"] == 1
+    assert updates[-1]["correction_state"]["status"] == "undone"
+    assert receipt.status == "undone"
+
+
+def test_propagation_undo_restores_each_related_summary_from_rollback_snapshot(monkeypatch):
+    updates = []
+    run_updates = []
+
+    class RunReference:
+        def set(self, payload, merge=False):
+            run_updates.append((payload, merge))
+
+    class RunSnapshot:
+        reference = RunReference()
+
+        def to_dict(self):
+            return {
+                "auto_applied_count": 1,
+                "decisions": [
+                    {
+                        "action": "auto_applied",
+                        "conversation_id": "related-1",
+                        "rollback_ref": {
+                            "active_summary_version_id": "related-v1",
+                            "structured": {
+                                "title": "Coffee with Margaret",
+                                "overview": "Margaret came by.",
+                                "emoji": "☕",
+                                "category": "other",
+                            },
+                        },
+                    }
+                ],
+            }
+
+    class RunCollection:
+        def stream(self):
+            return [RunSnapshot()]
+
+    class AuditRef:
+        def collection(self, name):
+            assert name == "propagation_runs"
+            return RunCollection()
+
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "update_conversation",
+        lambda uid, conversation_id, update: updates.append((uid, conversation_id, update)),
+    )
+
+    reverted = corrections._revert_applied_propagations("uid-1", "conv-1", "corr-1")
+
+    assert reverted == 1
+    assert updates == [
+        (
+            "uid-1",
+            "related-1",
+            {
+                "structured.title": "Coffee with Margaret",
+                "structured.overview": "Margaret came by.",
+                "structured.emoji": "☕",
+                "structured.category": "other",
+                "active_summary_version_id": "related-v1",
+            },
+        )
+    ]
+    assert run_updates[0][0]["reverted_count"] == 1
+    assert run_updates[0][1] is True
+
+
 def test_submit_correction_rejects_locked_conversation(monkeypatch):
     monkeypatch.setattr(
         corrections.conversations_db,

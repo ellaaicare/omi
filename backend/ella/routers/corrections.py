@@ -126,6 +126,25 @@ class ConversationCorrectionResponse(BaseModel):
     proposal_id: Optional[str] = None
 
 
+class CorrectionSummarySnapshot(BaseModel):
+    title: str = ""
+    overview: str = ""
+    emoji: str = ""
+    category: str = "other"
+
+
+class ConversationCorrectionReceiptResponse(BaseModel):
+    correction_id: str
+    conversation_id: str
+    status: str
+    applied_at: Optional[datetime] = None
+    undone_at: Optional[datetime] = None
+    before: CorrectionSummarySnapshot
+    after: CorrectionSummarySnapshot
+    propagation_applied_count: int = 0
+    propagation_reverted_count: int = 0
+
+
 class ConversationProcessingRetryOutcome(str, Enum):
     processing = "processing"
     completed = "completed"
@@ -410,6 +429,140 @@ def _audit_ref(uid: str, conversation_id: str, correction_id: str):
         .collection("corrections")
         .document(correction_id)
     )
+
+
+def _summary_version(conversation: dict[str, Any], version_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not version_id:
+        return None
+    for version in conversation.get("summary_versions") or []:
+        if isinstance(version, dict) and str(version.get("id") or "") == str(version_id):
+            return version
+    return None
+
+
+def _correction_summary_versions(
+    conversation: dict[str, Any],
+    correction_id: str,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    corrected = next(
+        (
+            version
+            for version in reversed(conversation.get("summary_versions") or [])
+            if isinstance(version, dict) and str(version.get("correction_id") or "") == correction_id
+        ),
+        None,
+    )
+    before = _summary_version(conversation, corrected.get("based_on_version_id") if corrected else None)
+    return before, corrected
+
+
+def _snapshot(version: Optional[dict[str, Any]]) -> CorrectionSummarySnapshot:
+    value = version or {}
+    return CorrectionSummarySnapshot(
+        title=str(value.get("title") or ""),
+        overview=str(value.get("overview") or ""),
+        emoji=str(value.get("emoji") or ""),
+        category=str(value.get("category") or "other"),
+    )
+
+
+def _correction_propagation_counts(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+) -> tuple[int, int]:
+    applied = 0
+    reverted = 0
+    try:
+        snapshots = _audit_ref(uid, conversation_id, correction_id).collection("propagation_runs").stream()
+        for snapshot in snapshots:
+            run = snapshot.to_dict() or {}
+            applied += int(run.get("auto_applied_count") or 0)
+            reverted += int(run.get("reverted_count") or 0)
+    except Exception:
+        logger.exception(
+            "Failed to read correction propagation counts",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+    return applied, reverted
+
+
+def _correction_receipt(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    conversation: Optional[dict[str, Any]] = None,
+) -> ConversationCorrectionReceiptResponse:
+    conversation = conversation or conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+    audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    before, corrected = _correction_summary_versions(conversation, correction_id)
+    if not audit and corrected is None:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    state = conversation.get("correction_state") if isinstance(conversation.get("correction_state"), dict) else {}
+    status_value = str(audit.get("status") or state.get("status") or "pending")
+    applied_count, reverted_count = _correction_propagation_counts(uid, conversation_id, correction_id)
+    return ConversationCorrectionReceiptResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        status=status_value,
+        applied_at=audit.get("applied_at"),
+        undone_at=audit.get("undone_at"),
+        before=_snapshot(before),
+        after=_snapshot(corrected),
+        propagation_applied_count=applied_count,
+        propagation_reverted_count=reverted_count,
+    )
+
+
+def _revert_applied_propagations(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+) -> int:
+    reverted = 0
+    snapshots = list(_audit_ref(uid, conversation_id, correction_id).collection("propagation_runs").stream())
+    for snapshot in snapshots:
+        run = snapshot.to_dict() or {}
+        auto_applied_count = int(run.get("auto_applied_count") or 0)
+        if auto_applied_count <= 0:
+            continue
+        run_reverted = 0
+        decisions = run.get("decisions") if isinstance(run.get("decisions"), list) else []
+        applicable = [
+            decision
+            for decision in decisions
+            if isinstance(decision, dict) and decision.get("action") in {"applied", "auto_applied"}
+        ]
+        if len(applicable) != auto_applied_count:
+            raise HTTPException(status_code=409, detail="Propagation rollback data is incomplete")
+        for decision in applicable:
+            rollback = decision.get("rollback_ref") if isinstance(decision.get("rollback_ref"), dict) else {}
+            structured = rollback.get("structured") if isinstance(rollback.get("structured"), dict) else None
+            related_id = str(decision.get("conversation_id") or "")
+            if not related_id or structured is None:
+                raise HTTPException(status_code=409, detail="Propagation rollback data is incomplete")
+            conversations_db.update_conversation(
+                uid,
+                related_id,
+                {
+                    "structured.title": structured.get("title") or "",
+                    "structured.overview": structured.get("overview") or "",
+                    "structured.emoji": structured.get("emoji") or "",
+                    "structured.category": structured.get("category") or "other",
+                    "active_summary_version_id": rollback.get("active_summary_version_id"),
+                },
+            )
+            run_reverted += 1
+            reverted += 1
+        snapshot.reference.set(
+            {"reverted_count": run_reverted, "reverted_at": datetime.now(timezone.utc)},
+            merge=True,
+        )
+    return reverted
 
 
 def _persist_correction_audit(
@@ -1358,6 +1511,105 @@ async def submit_conversation_correction_ella(
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
+
+
+@router.get(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}",
+    response_model=ConversationCorrectionReceiptResponse,
+)
+def get_conversation_correction_receipt(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionReceiptResponse:
+    return _correction_receipt(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+    )
+
+
+@router.post(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo",
+    response_model=ConversationCorrectionReceiptResponse,
+)
+async def undo_conversation_correction(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionReceiptResponse:
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    before, corrected = _correction_summary_versions(conversation, correction_id)
+    if before is None or corrected is None:
+        raise HTTPException(status_code=404, detail="Applied correction not found")
+
+    audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+    audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    if audit.get("status") == "undone":
+        return _correction_receipt(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            conversation=conversation,
+        )
+    if str(conversation.get("active_summary_version_id") or "") != str(corrected.get("id") or ""):
+        raise HTTPException(status_code=409, detail="A newer memory update must be undone first")
+
+    trace_id = f"correction-undo:{conversation_id}:{correction_id}"
+    await apply_summary_update(
+        uid=uid,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        active_summary_version_id=str(corrected.get("id") or ""),
+        summary={
+            "title": before.get("title"),
+            "overview": before.get("overview"),
+            "emoji": before.get("emoji"),
+            "category": before.get("category"),
+        },
+        summary_kind="correction_undo",
+        summary_source="ios",
+        require_based_on_match=True,
+        preserve_generated_results=True,
+    )
+    reverted_count = _revert_applied_propagations(uid, conversation_id, correction_id)
+    undone_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "status": "undone",
+            "undone_at": undone_at,
+            "updated_at": undone_at,
+            "propagation_reverted_count": reverted_count,
+        },
+    )
+    latest = conversations_db.get_conversation(uid, conversation_id) or conversation
+    conversations_db.update_conversation(
+        uid,
+        conversation_id,
+        {
+            "correction_state": {
+                "correction_id": correction_id,
+                "status": "undone",
+                "pending": False,
+                "source": (conversation.get("correction_state") or {}).get("source"),
+                "submitted_at": (conversation.get("correction_state") or {}).get("submitted_at"),
+                "updated_at": datetime.now(timezone.utc),
+                "active_summary_version_id": latest.get("active_summary_version_id"),
+            }
+        },
+    )
+    latest = conversations_db.get_conversation(uid, conversation_id) or latest
+    return _correction_receipt(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        conversation=latest,
+    )
 
 
 @router.post(
