@@ -273,6 +273,54 @@ def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monke
     assert "overview" not in claims
 
 
+@pytest.mark.parametrize("legacy_mode", ["v1", "v2", "v3-fast"])
+def test_memory_scoped_voice_session_rejects_legacy_mode_before_scope_resolution(
+    monkeypatch,
+    legacy_mode,
+):
+    async def forbidden_scope_resolution(*args, **kwargs):
+        raise AssertionError("legacy scoped mode must fail before memory resolution")
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", forbidden_scope_resolution)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.create_voice_session(
+                body=voice.VoiceSessionRequest(
+                    uid="user-a",
+                    provider="grok-voice",
+                    voice_mode=legacy_mode,
+                    session_scope=voice.VoiceSessionScope(
+                        kind="memory",
+                        conversation_id="memory-a",
+                    ),
+                ),
+                authenticated_uid="user-a",
+            )
+        )
+
+    assert error.value.status_code == 400
+    assert error.value.detail == {"code": "memory_scoped_voice_mode_required"}
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "v4",
+        "gemini-live",
+        "gemini-native-live-v1",
+        "gemini-zero-live-v1",
+        "gemini-lite-live-v1",
+        "gemini-full-live-v1",
+    ],
+)
+def test_memory_scoped_voice_mode_allows_modern_proxy_aliases(mode):
+    assert voice._memory_scoped_voice_mode_allowed(mode) is True
+
+
 def test_unversionable_memory_scope_returns_defined_nonwriteable_state(monkeypatch):
     def unavailable(uid, scope):
         raise ValueError("voice_session_scope_version_unavailable")

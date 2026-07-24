@@ -169,6 +169,24 @@ def test_voice_session_token_rejects_empty_memory_version():
         )
 
 
+@pytest.mark.parametrize("legacy_mode", ["v1", "v2", "v3-fast"])
+def test_voice_session_token_rejects_legacy_memory_scope(legacy_mode):
+    with pytest.raises(ValueError, match="V4-compatible"):
+        voice.create_session_token(
+            uid="uid-a",
+            firebase_uid="uid-a",
+            voice_mode=legacy_mode,
+            provider="grok-voice",
+            isolated_runtime=False,
+            session_scope={
+                "kind": "memory",
+                "conversation_id": "memory-a",
+                "active_summary_version_id": "version-3",
+                "can_reinterpret": False,
+            },
+        )
+
+
 def test_voice_proxy_rejects_partial_scope_claims():
     token = _token(
         "uid-a",

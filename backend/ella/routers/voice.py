@@ -389,6 +389,23 @@ V2V_PROVIDERS = {
     },
 }
 
+MEMORY_SCOPED_VOICE_MODE_ALIASES = {
+    "gemini-live": "v4",
+    "gemini-native-live-v1": "v4",
+    "gemini-zero-live-v1": "v4",
+    "gemini-lite-live-v1": "v4",
+    "gemini-full-live-v1": "v4",
+}
+
+
+def _normalized_memory_scoped_voice_mode(value: str) -> str:
+    candidate = str(value or "").strip().lower()
+    return MEMORY_SCOPED_VOICE_MODE_ALIASES.get(candidate, candidate)
+
+
+def _memory_scoped_voice_mode_allowed(value: str) -> bool:
+    return _normalized_memory_scoped_voice_mode(value) == "v4"
+
 
 # ============================================================================
 # Request/Response Models
@@ -671,6 +688,9 @@ def create_session_token(
     if not ELLA_SESSION_SECRET:
         raise HTTPException(status_code=500, detail="Session secret not configured")
 
+    if session_scope and not _memory_scoped_voice_mode_allowed(voice_mode):
+        raise ValueError("memory-scoped voice sessions require a V4-compatible mode")
+
     payload = {
         "sub": firebase_uid,
         "uid": uid,
@@ -849,12 +869,6 @@ async def create_voice_session(
             # Runtime-bound users must never fall through to legacy voice while
             # their explicit isolated-voice rollout gate remains disabled.
             raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
-    memory_scope = (
-        await _resolve_voice_memory_scope(uid, requested_scope)
-        if requested_scope
-        else None
-    )
-
     # Validate provider
     if provider not in V2V_PROVIDERS:
         valid = list(V2V_PROVIDERS.keys())
@@ -874,6 +888,16 @@ async def create_voice_session(
 
     # Resolve voice mode
     resolved_mode = voice_mode or provider_info["default_mode"]
+    if requested_scope and not _memory_scoped_voice_mode_allowed(resolved_mode):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "memory_scoped_voice_mode_required"},
+        )
+    memory_scope = (
+        await _resolve_voice_memory_scope(uid, requested_scope)
+        if requested_scope
+        else None
+    )
 
     _start = time.time()
 
