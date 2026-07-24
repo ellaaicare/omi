@@ -59,4 +59,17 @@ void main() {
 
     expect(claim, isNull);
   });
+
+  test('strips leading relation words so "with Rose" does not double the preposition', () {
+    final claim = extractCorrectionClaim(
+      'It was with Rose, not Margaret.',
+      _gardenMemory(),
+    );
+
+    expect(claim, isNotNull);
+    expect(claim!.oldValue, 'Margaret');
+    expect(claim.newValue, 'Rose');
+    // Must produce "...with Rose", never "...with with Rose".
+    expect(replaceMemoryValue(_gardenMemory().structured.title, claim), 'Coffee in the garden with Rose');
+  });
 }

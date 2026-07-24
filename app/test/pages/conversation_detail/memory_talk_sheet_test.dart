@@ -195,6 +195,58 @@ void main() {
     expect(submissionCount, 1);
   });
 
+  testWidgets('shows failure copy when the correction receipt is a terminal failure', (tester) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      app(
+        correctionSubmitter: ({
+          required conversationId,
+          required correctionText,
+          summaryTitle,
+          summaryOverview,
+          appSummary,
+        }) async =>
+            const ConversationCorrectionSubmission(
+          correctionId: 'correction-1',
+          conversationId: 'garden',
+          status: 'queued',
+          queued: true,
+        ),
+        correctionReceiptLoader: ({
+          required conversationId,
+          required correctionId,
+        }) async =>
+            ConversationCorrectionReceipt(
+          correctionId: correctionId,
+          conversationId: conversationId,
+          status: 'direct_apply_failed',
+          appliedAt: null,
+          undoneAt: null,
+          beforeTitle: 'Coffee in the garden with Margaret',
+          beforeOverview: 'You had coffee in the garden with Margaret this morning.',
+          afterTitle: 'Coffee in the garden with Margaret',
+          afterOverview: 'You had coffee in the garden with Margaret this morning.',
+          propagationAppliedCount: 0,
+          propagationRevertedCount: 0,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await useKeyboard(tester);
+
+    await send(tester, "Actually, it wasn't Margaret — it was Rose who came by.");
+    await send(tester, 'Yes');
+    await tester.pump(const Duration(seconds: 3));
+
+    // Terminal failure must use failure copy, never the "still working" (timeout) message.
+    expect(find.text("I couldn't make that change yet. Please try again in a little while."), findsOneWidget);
+    expect(find.text("I'm still working on that. You can close this and come back soon."), findsNothing);
+  });
+
   testWidgets('resumes ambient capture after the sheet is closed without a correction', (tester) async {
     tester.view.physicalSize = const Size(402, 874);
     tester.view.devicePixelRatio = 1;
