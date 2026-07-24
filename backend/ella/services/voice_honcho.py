@@ -30,7 +30,12 @@ class VoiceHonchoTarget:
     source: str
 
 
-def resolve_voice_honcho_target(uid: str, runtime: Any = None) -> tuple[VoiceHonchoTarget | None, str]:
+def resolve_voice_honcho_target(
+    uid: str,
+    runtime: Any = None,
+    *,
+    profile_map_timeout_seconds: float | None = None,
+) -> tuple[VoiceHonchoTarget | None, str]:
     """Prefer an isolated runtime receipt; otherwise require an exact UID profile."""
     uid = str(uid or "").strip()
     if runtime is not None:
@@ -53,7 +58,13 @@ def resolve_voice_honcho_target(uid: str, runtime: Any = None) -> tuple[VoiceHon
             "",
         )
 
-    target, reason = resolve_companion_honcho_target(uid)
+    if profile_map_timeout_seconds is None:
+        target, reason = resolve_companion_honcho_target(uid)
+    else:
+        target, reason = resolve_companion_honcho_target(
+            uid,
+            remote_timeout_seconds=profile_map_timeout_seconds,
+        )
     if not target:
         return None, reason
     return (

@@ -274,8 +274,17 @@ async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
         return None, "honcho_profile_resolution_cached_unavailable"
 
     try:
+        transport_timeout = max(
+            0.01,
+            VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS * 0.8,
+        )
         target, reason = await asyncio.wait_for(
-            asyncio.to_thread(resolve_voice_honcho_target, uid, runtime),
+            asyncio.to_thread(
+                resolve_voice_honcho_target,
+                uid,
+                runtime,
+                profile_map_timeout_seconds=transport_timeout,
+            ),
             timeout=VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS,
         )
         if target:
@@ -2094,7 +2103,7 @@ async def _search_canonical_timeline(
             """
             SELECT channel, provider, role, text, started_at, session_id, metadata
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
               AND (
@@ -2242,7 +2251,7 @@ async def _fetch_recent_canonical_timeline(
             """
             SELECT channel, provider, role, text, started_at
             FROM canonical_events
-            WHERE lower(uid) = lower($1)
+            WHERE uid = $1
               AND text IS NOT NULL
               AND trim(text) != ''
               AND (

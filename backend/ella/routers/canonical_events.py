@@ -346,7 +346,7 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
     ) -> list[dict[str, Any]]:
         params: list[Any] = [uid]
         filters = [
-            "lower(uid) = lower($1)",
+            "uid = $1",
             (
                 "NOT ("
                 "COALESCE(source_ref ->> 'scope_kind', '') = 'memory' "
@@ -448,7 +448,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
         channel_set = set(channels or [])
         events = []
         for event in self._events.values():
-            if event["uid"].lower() != uid.lower():
+            if event["uid"] != uid:
                 continue
             if since and event["started_at"] < since:
                 continue

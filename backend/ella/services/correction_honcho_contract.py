@@ -167,7 +167,7 @@ def _safe_json_file(path: str) -> Any:
         return None
 
 
-def _safe_json_url(url: str) -> Any:
+def _safe_json_url(url: str, *, timeout_seconds: float = 5.0) -> Any:
     if not str(url or "").strip():
         return None
     now = time.monotonic()
@@ -181,7 +181,10 @@ def _safe_json_url(url: str) -> Any:
     if HONCHO_PROFILE_MAP_URL_TOKEN:
         headers["Authorization"] = f"Bearer {HONCHO_PROFILE_MAP_URL_TOKEN}"
     try:
-        with urlopen(Request(url, headers=headers), timeout=5) as response:
+        with urlopen(
+            Request(url, headers=headers),
+            timeout=max(0.01, float(timeout_seconds)),
+        ) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
@@ -247,11 +250,8 @@ def _target_from_profile_map_data(uid: str, data: Any) -> dict[str, str] | None:
     return None
 
 
-def _target_from_profile_map(uid: str) -> dict[str, str] | None:
+def _target_from_local_profile_map(uid: str) -> dict[str, str] | None:
     uid = str(uid or "").strip()
-    # Evaluate local sources before the remote provisioning map. This avoids
-    # putting a network timeout on the voice startup path when a local exact-UID
-    # binding is already available.
     for data in (
         _safe_json_loads(HONCHO_PROFILE_MAP_JSON),
         _safe_json_file(HONCHO_PROFILE_MAP_PATH),
@@ -259,8 +259,21 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
         target = _target_from_profile_map_data(uid, data)
         if target:
             return target
+    return None
 
-    return _target_from_profile_map_data(uid, _safe_json_url(HONCHO_PROFILE_MAP_URL))
+
+def _target_from_remote_profile_map(
+    uid: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, str] | None:
+    return _target_from_profile_map_data(
+        str(uid or "").strip(),
+        _safe_json_url(
+            HONCHO_PROFILE_MAP_URL,
+            timeout_seconds=timeout_seconds,
+        ),
+    )
 
 
 def _target_from_profile_config(uid: str) -> dict[str, str] | None:
@@ -274,12 +287,24 @@ def _target_from_profile_config(uid: str) -> dict[str, str] | None:
     return None
 
 
-def resolve_companion_honcho_target(uid: str) -> tuple[dict[str, str] | None, str]:
+def resolve_companion_honcho_target(
+    uid: str,
+    *,
+    remote_timeout_seconds: float = 5.0,
+) -> tuple[dict[str, str] | None, str]:
     """Resolve an exact user profile without correction-write global fallbacks."""
     uid = str(uid or "").strip()
     if not uid:
         return None, "missing_companion_honcho_target"
-    target = _target_from_profile_map(uid) or _target_from_profile_config(uid)
+    # Every local exact-UID source must win before remote provisioning I/O.
+    target = (
+        _target_from_local_profile_map(uid)
+        or _target_from_profile_config(uid)
+        or _target_from_remote_profile_map(
+            uid,
+            timeout_seconds=remote_timeout_seconds,
+        )
+    )
     if not target:
         return None, "missing_companion_honcho_target"
     return (
