@@ -1,17 +1,20 @@
 import asyncio
 import concurrent.futures
 import threading
+from collections import Counter
 from datetime import datetime, time, timedelta
 
 import pytz
 
 import database.chat as chat_db
 import database.conversations as conversations_db
+import database.daily_summaries as daily_summaries_db
 import database.notifications as notification_db
 from database.redis_db import set_daily_summary_sent, has_daily_summary_been_sent
 from models.notification_message import NotificationMessage
 from models.conversation import Conversation
-from utils.llm.external_integrations import get_conversation_summary
+from utils.daily_summary_health import daily_summary_cron_health
+from utils.llm.external_integrations import generate_comprehensive_daily_summary, get_conversation_summary
 from utils.notifications import send_bulk_notification, send_notification
 from utils.webhooks import day_summary_webhook
 
@@ -44,17 +47,29 @@ async def send_daily_summary_notification():
         # Group timezones by their current local hour
         timezones_by_hour = _get_timezones_grouped_by_hour()
 
+        health_counts = Counter()
         for target_hour, timezones in timezones_by_hour.items():
             # Get users in those timezones who want notifications at this hour
             users = await notification_db.get_users_for_daily_summary(timezones, target_hour)
 
             if users:
                 print(f"Sending daily summary to {len(users)} users at local hour {target_hour}")
-                await _send_bulk_summary_notification(users)
+                health_counts['eligible_users'] += len(users)
+                health_counts.update(await _send_bulk_summary_notification(users))
+
+        health = daily_summary_cron_health(health_counts['eligible_users'], dict(health_counts))
+        print(
+            'daily_summary_cron_health '
+            f"eligible_users={health['eligible_users']} "
+            f"sent={health['sent']} "
+            f"already_sent={health['already_sent']} "
+            f"no_conversations={health['no_conversations']}"
+        )
+        return health
 
     except Exception as e:
         print(f"Error sending daily summary: {e}")
-        return None
+        return {'error': 1}
 
 
 def _get_timezones_grouped_by_hour() -> dict[int, list[str]]:
@@ -117,18 +132,15 @@ def _send_summary_notification(user_data: tuple):
 
     # Check if summary already sent for this date
     if has_daily_summary_been_sent(uid, date_str):
-        return
+        return 'already_sent'
 
     conversations_data = conversations_db.get_conversations(uid, start_date=start_date_utc, end_date=end_date_utc)
     if not conversations_data or len(conversations_data) == 0:
-        return
+        return 'no_conversations'
 
     conversations = [Conversation(**convo_data) for convo_data in conversations_data]
 
     # Generate comprehensive daily summary
-    from utils.llm.external_integrations import generate_comprehensive_daily_summary
-    import database.daily_summaries as daily_summaries_db
-
     summary_data = generate_comprehensive_daily_summary(uid, conversations, date_str, start_date_utc, end_date_utc)
 
     # Store in database
@@ -160,13 +172,15 @@ def _send_summary_notification(user_data: tuple):
 
     # Mark that summary was sent for this date
     set_daily_summary_sent(uid, date_str)
+    return 'sent'
 
 
 async def _send_bulk_summary_notification(users: list):
     loop = asyncio.get_running_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
         tasks = [loop.run_in_executor(pool, _send_summary_notification, user_tokens) for user_tokens in users]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
+    return dict(Counter(results))
 
 
 async def send_daily_notification():

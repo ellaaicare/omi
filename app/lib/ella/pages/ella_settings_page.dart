@@ -311,11 +311,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
             // CAPTURE section
             _buildSectionHeader(context.l10n.ellaCaptureSection),
-            EllaSettingsRow(
-              icon: Icons.hearing,
-              title: context.l10n.listeningAndConsent,
-              onTap: _openListeningConsent,
-            ),
+            EllaSettingsRow(icon: Icons.hearing, title: context.l10n.listeningAndConsent, onTap: _openListeningConsent),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.schedule,
@@ -340,14 +336,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
 
-            _buildSectionHeader(context.l10n.ellaMoreSection),
-            EllaSettingsRow(
-              icon: Icons.developer_mode,
-              title: context.l10n.ellaAdvancedSettings,
-              subtitle: context.l10n.ellaAdvancedSettingsSubtitle,
-              onTap: () => SettingsDrawer.show(context),
-            ),
-            const SizedBox(height: 8),
+            if (!publicMode) ...[
+              _buildSectionHeader(context.l10n.ellaMoreSection),
+              EllaSettingsRow(
+                icon: Icons.developer_mode,
+                title: context.l10n.ellaAdvancedSettings,
+                subtitle: context.l10n.ellaAdvancedSettingsSubtitle,
+                onTap: () => SettingsDrawer.show(context),
+              ),
+              const SizedBox(height: 8),
+            ],
 
             // ABOUT section
             _buildSectionHeader(context.l10n.ellaAboutSection),

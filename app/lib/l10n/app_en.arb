@@ -10359,5 +10359,36 @@
   "retryNow": "Retry now",
   "@retryNow": {
     "description": "Confirmation action for retrying a failed summary"
+  },
+  "todayDailyNoteEmptyNoConversations": "Once you and Ella have spent some of the day together, her first note will arrive in the evening.",
+  "todayDailyNoteEmptyPreparing": "Ella is preparing today’s note. It will appear here this evening.",
+  "todayHardwareStatus": "YOUR ELLA DEVICES",
+  "todayNecklace": "Necklace",
+  "todayHeadset": "Headset",
+  "todayOn": "ON",
+  "todayOff": "OFF",
+  "todayConnecting": "CONNECTING…",
+  "todayBatteryPercent": "{percent}% battery",
+  "@todayBatteryPercent": {
+    "placeholders": {
+      "percent": {
+        "type": "int"
+      }
+    }
+  },
+  "todayNecklaceOffReconnect": "Tap to reconnect",
+  "todayVoiceOnPhone": "Ella’s voice → phone",
+  "todayHeadsetFallbackWarning": "Headset is off — Ella will speak from the phone.",
+  "todayListeningButton": "Ella is listening — See what she hears",
+  "todayWhispersHistory": "See what Ella has whispered",
+  "todayRemindersTitle": "TODAY’S REMINDERS",
+  "todayReminderFromConversation": "From a conversation",
+  "todayReminderFromSource": "From {source}",
+  "@todayReminderFromSource": {
+    "placeholders": {
+      "source": {
+        "type": "String"
+      }
+    }
   }
 }
