@@ -130,17 +130,12 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         }
       }
     } else if (selectedTab == ConversationTab.summary) {
-      // Count matches in app summaries
-      final summarizedApp = provider.getSummarizedApp();
-      if (summarizedApp != null && summarizedApp.content.trim().isNotEmpty) {
-        final appContent = summarizedApp.content.trim().decodeString.toLowerCase();
-        final query = _searchQuery.toLowerCase();
-        int index = 0;
-        while ((index = appContent.indexOf(query, index)) != -1) {
-          _searchResultPositions.add(count);
-          count++;
-          index += query.length;
-        }
+      // Memory Talk replaces the legacy app summary on this tab, so only index
+      // text that the user can actually see and navigate.
+      final visibleMatchCount = countMemoryTalkSearchMatches(provider.conversation, _searchQuery);
+      for (var index = 0; index < visibleMatchCount; index += 1) {
+        _searchResultPositions.add(count);
+        count++;
       }
     }
 
@@ -1142,6 +1137,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                           receipt: _memoryTalkReceipt,
                           hasDiscussion: _hasMemoryDiscussion || provider.conversation.memoryTalkState.hasDiscussion,
                           isTalkSheetOpen: _isMemoryTalkOpen,
+                          searchQuery: _searchQuery,
+                          currentResultIndex: getCurrentResultIndexForHighlighting(),
                           onUndo: () => _undoMemoryTalk(provider),
                         ),
                       ),

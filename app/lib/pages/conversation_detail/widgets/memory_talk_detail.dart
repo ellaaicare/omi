@@ -9,11 +9,69 @@ import 'package:omi/ella/services/memory_talk_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
 
+int _countTextMatches(String text, String query) {
+  if (query.isEmpty) return 0;
+
+  final lowerText = text.toLowerCase();
+  final lowerQuery = query.toLowerCase();
+  var count = 0;
+  var index = 0;
+  while ((index = lowerText.indexOf(lowerQuery, index)) != -1) {
+    count += 1;
+    index += lowerQuery.length;
+  }
+  return count;
+}
+
+int countMemoryTalkSearchMatches(ServerConversation conversation, String query) {
+  return _countTextMatches(conversation.structured.title, query) +
+      _countTextMatches(conversation.structured.overview, query);
+}
+
+List<TextSpan> _highlightSearchMatches(String text, String query, int currentResultIndex) {
+  if (query.isEmpty) return [TextSpan(text: text)];
+
+  final spans = <TextSpan>[];
+  final lowerText = text.toLowerCase();
+  final lowerQuery = query.toLowerCase();
+  var start = 0;
+  var matchIndex = 0;
+  var index = lowerText.indexOf(lowerQuery);
+
+  while (index != -1) {
+    if (index > start) {
+      spans.add(TextSpan(text: text.substring(start, index)));
+    }
+    final isCurrentResult = matchIndex == currentResultIndex;
+    spans.add(
+      TextSpan(
+        text: text.substring(index, index + query.length),
+        style: TextStyle(
+          backgroundColor:
+              isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : EllaColors.primary.withValues(alpha: 0.6),
+          color: Colors.white,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+    matchIndex += 1;
+    start = index + query.length;
+    index = lowerText.indexOf(lowerQuery, start);
+  }
+
+  if (start < text.length) {
+    spans.add(TextSpan(text: text.substring(start)));
+  }
+  return spans;
+}
+
 class MemoryTalkDetail extends StatefulWidget {
   final ServerConversation conversation;
   final MemoryTalkReceipt? receipt;
   final bool hasDiscussion;
   final bool isTalkSheetOpen;
+  final String searchQuery;
+  final int currentResultIndex;
   final Future<void> Function() onUndo;
 
   const MemoryTalkDetail({
@@ -22,6 +80,8 @@ class MemoryTalkDetail extends StatefulWidget {
     required this.receipt,
     required this.hasDiscussion,
     required this.isTalkSheetOpen,
+    this.searchQuery = '',
+    this.currentResultIndex = -1,
     required this.onUndo,
   });
 
@@ -87,13 +147,21 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
     final date = conversation.startedAt ?? conversation.createdAt;
     final duration = _durationLabel(context);
     final receipt = widget.receipt;
+    final titleMatchCount = _countTextMatches(conversation.structured.title, widget.searchQuery);
 
     return ListView(
       controller: _scrollController,
       padding: const EdgeInsets.fromLTRB(4, 14, 4, 150),
       children: [
-        Text(
-          conversation.structured.title,
+        Text.rich(
+          TextSpan(
+            children: _highlightSearchMatches(
+              conversation.structured.title,
+              widget.searchQuery,
+              widget.currentResultIndex,
+            ),
+          ),
+          key: const ValueKey('memory-talk-title'),
           style: const TextStyle(
             fontFamily: EllaTextStyles.uiFont,
             fontSize: 24,
@@ -190,6 +258,8 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
           _OverviewText(
             overview: conversation.structured.overview,
             emphasizedValue: receipt?.newValue,
+            searchQuery: widget.searchQuery,
+            currentResultIndex: widget.currentResultIndex - titleMatchCount,
           ),
         ],
         if (!widget.isTalkSheetOpen && receipt != null && _showDiff) ...[
@@ -315,22 +385,34 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
 class _OverviewText extends StatelessWidget {
   final String overview;
   final String? emphasizedValue;
+  final String searchQuery;
+  final int currentResultIndex;
 
   const _OverviewText({
     required this.overview,
     required this.emphasizedValue,
+    required this.searchQuery,
+    required this.currentResultIndex,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (searchQuery.isNotEmpty) {
+      return Text.rich(
+        TextSpan(children: _highlightSearchMatches(overview, searchQuery, currentResultIndex)),
+        key: const ValueKey('memory-talk-overview'),
+        style: EllaTextStyles.body,
+      );
+    }
+
     final value = emphasizedValue;
     if (value == null || value.isEmpty) {
-      return Text(overview, style: EllaTextStyles.body);
+      return Text(overview, key: const ValueKey('memory-talk-overview'), style: EllaTextStyles.body);
     }
 
     final match = RegExp(RegExp.escape(value), caseSensitive: false).firstMatch(overview);
     if (match == null) {
-      return Text(overview, style: EllaTextStyles.body);
+      return Text(overview, key: const ValueKey('memory-talk-overview'), style: EllaTextStyles.body);
     }
 
     return Text.rich(
@@ -347,6 +429,7 @@ class _OverviewText extends StatelessWidget {
           TextSpan(text: overview.substring(match.end)),
         ],
       ),
+      key: const ValueKey('memory-talk-overview'),
       style: EllaTextStyles.body,
     );
   }
