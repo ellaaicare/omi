@@ -25,6 +25,19 @@ import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
+typedef MemoryTalkCorrectionSubmitter = Future<ConversationCorrectionSubmission?> Function({
+  required String conversationId,
+  required String correctionText,
+  String? summaryTitle,
+  String? summaryOverview,
+  String? appSummary,
+});
+
+typedef MemoryTalkCorrectionReceiptLoader = Future<ConversationCorrectionReceipt?> Function({
+  required String conversationId,
+  required String correctionId,
+});
+
 class MemoryTalkSheetResult {
   final bool discussed;
   final MemoryTalkReceipt? receipt;
@@ -66,10 +79,14 @@ Future<MemoryTalkSheetResult?> showMemoryTalkSheet(
 
 class MemoryTalkSheet extends StatefulWidget {
   final ServerConversation conversation;
+  final MemoryTalkCorrectionSubmitter? correctionSubmitter;
+  final MemoryTalkCorrectionReceiptLoader? correctionReceiptLoader;
 
   const MemoryTalkSheet({
     super.key,
     required this.conversation,
+    this.correctionSubmitter,
+    this.correctionReceiptLoader,
   });
 
   @override
@@ -571,7 +588,7 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
       await _speakEllaResponse(response, resumeListening: false);
     }
 
-    if (_isDemoMode) {
+    if (_isDemoMode && widget.correctionSubmitter == null) {
       await Future<void>.delayed(const Duration(milliseconds: 320));
       final beforeTitle = widget.conversation.structured.title;
       final beforeOverview = widget.conversation.structured.overview;
@@ -591,7 +608,7 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
       return;
     }
 
-    final submission = await submitConversationCorrection(
+    final submission = await (widget.correctionSubmitter ?? submitConversationCorrection)(
       conversationId: widget.conversation.id,
       correctionText: claim.correctionText,
       summaryTitle: widget.conversation.structured.title,
@@ -626,7 +643,7 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
 
   Future<ConversationCorrectionReceipt?> _waitForReceipt(String correctionId) async {
     for (var attempt = 0; attempt < 12; attempt += 1) {
-      final receipt = await getConversationCorrectionReceipt(
+      final receipt = await (widget.correctionReceiptLoader ?? getConversationCorrectionReceipt)(
         conversationId: widget.conversation.id,
         correctionId: correctionId,
       );

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
@@ -26,18 +27,26 @@ void main() {
         ),
       );
 
-  Widget app() => MaterialApp(
+  Widget app({
+    MemoryTalkCorrectionSubmitter? correctionSubmitter,
+    MemoryTalkCorrectionReceiptLoader? correctionReceiptLoader,
+  }) =>
+      MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(body: MemoryTalkSheet(conversation: memory())),
+        home: Scaffold(
+          body: MemoryTalkSheet(
+            conversation: memory(),
+            correctionSubmitter: correctionSubmitter,
+            correctionReceiptLoader: correctionReceiptLoader,
+          ),
+        ),
       );
 
   Future<void> send(WidgetTester tester, String text) async {
     final field = find.byType(TextField);
     await tester.enterText(field, text);
-    await tester.ensureVisible(find.bySemanticsLabel('Send'));
-    await tester.pump();
-    await tester.tap(find.bySemanticsLabel('Send'));
+    await tester.testTextInput.receiveAction(TextInputAction.send);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 320));
   }
@@ -102,5 +111,59 @@ void main() {
 
     expect(find.text("All right — I won't change it."), findsOneWidget);
     expect(memory().structured.title, contains('Margaret'));
+  });
+
+  testWidgets('does not submit a correction until the user explicitly confirms it', (tester) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var submissionCount = 0;
+    await tester.pumpWidget(
+      app(
+        correctionSubmitter: ({
+          required conversationId,
+          required correctionText,
+          summaryTitle,
+          summaryOverview,
+          appSummary,
+        }) async {
+          submissionCount += 1;
+          return const ConversationCorrectionSubmission(
+            correctionId: 'correction-1',
+            conversationId: 'garden',
+            status: 'queued',
+            queued: true,
+          );
+        },
+        correctionReceiptLoader: ({
+          required conversationId,
+          required correctionId,
+        }) async =>
+            ConversationCorrectionReceipt(
+          correctionId: correctionId,
+          conversationId: conversationId,
+          status: 'applied',
+          appliedAt: DateTime(2026, 7, 23, 9, 45),
+          undoneAt: null,
+          beforeTitle: 'Coffee in the garden with Margaret',
+          beforeOverview: 'You had coffee in the garden with Margaret this morning.',
+          afterTitle: 'Coffee in the garden with Rose',
+          afterOverview: 'You had coffee in the garden with Rose this morning.',
+          propagationAppliedCount: 1,
+          propagationRevertedCount: 0,
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await useKeyboard(tester);
+
+    await send(tester, "Actually, it wasn't Margaret — it was Rose who came by.");
+    expect(submissionCount, 0);
+
+    await send(tester, 'Yes');
+    await tester.pumpAndSettle();
+    expect(submissionCount, 1);
   });
 }
