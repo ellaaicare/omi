@@ -84,6 +84,12 @@ HERMES_PROVISION_API_TOKEN = os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "").st
 VOICE_PROXY_SERVICE_TOKEN = os.getenv("ELLA_VOICE_PROXY_SERVICE_TOKEN", "").strip()
 VOICE_PROXY_SERVICE_HEADER = "X-Ella-Voice-Proxy-Token"
 VOICE_SESSION_AUDIENCE = "ella-voice-proxy"
+VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS = float(
+    os.getenv("ELLA_VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS", "0.35")
+)
+VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS = float(
+    os.getenv("ELLA_VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS", "15")
+)
 ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS", "true").strip().lower() in {
     "1",
     "true",
@@ -92,6 +98,7 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
 }
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+_VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 
 
 def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
@@ -259,9 +266,39 @@ async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
 
 async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
     """Resolve Honcho without blocking the event loop or failing the voice path."""
+    if runtime is not None:
+        return resolve_voice_honcho_target(uid, runtime)
+
+    now = time.monotonic()
+    if _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE.get(uid, 0) > now:
+        return None, "honcho_profile_resolution_cached_unavailable"
+
     try:
-        return await asyncio.to_thread(resolve_voice_honcho_target, uid, runtime)
+        target, reason = await asyncio.wait_for(
+            asyncio.to_thread(resolve_voice_honcho_target, uid, runtime),
+            timeout=VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS,
+        )
+        if target:
+            _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE.pop(uid, None)
+            return target, reason
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
+        return None, reason
+    except asyncio.TimeoutError:
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
+        logger.warning(
+            "[FLOW:VOICE-HONCHO] target resolution timed out uid=%s timeout=%.3fs",
+            uid,
+            VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS,
+        )
+        return None, "honcho_profile_resolution_timeout"
     except Exception as exc:
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
+            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
+        )
         logger.warning(
             "[FLOW:VOICE-HONCHO] target resolution degraded uid=%s error=%s",
             uid,
@@ -1386,7 +1423,15 @@ async def get_voice_context(request: Request):
     }
     try:
         conv_task = asyncio.create_task(_fetch_recent_conversations(uid, limit=8))
-        timeline_task = asyncio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
+        timeline_task = asyncio.create_task(
+            _fetch_recent_canonical_timeline(
+                uid,
+                limit=40,
+                max_chars=9000,
+                scope_kind=principal.scope_kind,
+                conversation_id=principal.conversation_id,
+            )
+        )
         if runtime:
             mem_task = asyncio.create_task(asyncio.sleep(0, result=""))
         else:
@@ -2025,7 +2070,14 @@ def _should_use_voice_memory_fast_path(query: str) -> bool:
     return not any(term in query_lower for term in detail_terms)
 
 
-async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
+async def _search_canonical_timeline(
+    uid: str,
+    query: str,
+    limit: int,
+    *,
+    scope_kind: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> list:
     """Search the canonical cross-channel event ledger.
 
     This is the durable source for voice/app/iMessage/chat turns and should be
@@ -2045,10 +2097,26 @@ async def _search_canonical_timeline(uid: str, query: str, limit: int) -> list:
             WHERE lower(uid) = lower($1)
               AND text IS NOT NULL
               AND trim(text) != ''
+              AND (
+                    NOT (
+                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
+                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                    )
+                    OR (
+                        $2 = 'memory'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'conversation_id', ''),
+                            metadata ->> 'conversation_id',
+                            ''
+                        ) = $3
+                    )
+              )
             ORDER BY started_at DESC, id DESC
             LIMIT 300
             """,
             uid,
+            scope_kind or "",
+            conversation_id or "",
         )
         matches = []
         include_assistant = any(
@@ -2154,7 +2222,14 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         return []
 
 
-async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars: int = 9000) -> str:
+async def _fetch_recent_canonical_timeline(
+    uid: str,
+    limit: int = 30,
+    max_chars: int = 9000,
+    *,
+    scope_kind: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> str:
     """Fetch the latest cross-channel turns for realtime voice startup context.
 
     This is not keyword search. Realtime voice providers need a hot chronological
@@ -2170,10 +2245,26 @@ async def _fetch_recent_canonical_timeline(uid: str, limit: int = 30, max_chars:
             WHERE lower(uid) = lower($1)
               AND text IS NOT NULL
               AND trim(text) != ''
+              AND (
+                    NOT (
+                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
+                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                    )
+                    OR (
+                        $2 = 'memory'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'conversation_id', ''),
+                            metadata ->> 'conversation_id',
+                            ''
+                        ) = $3
+                    )
+              )
             ORDER BY started_at DESC, id DESC
-            LIMIT $2
+            LIMIT $4
             """,
             uid,
+            scope_kind or "",
+            conversation_id or "",
             limit,
         )
     except Exception as e:
@@ -3050,7 +3141,15 @@ async def unified_search(request: Request):
         task_source_names.append("voice_memory")
 
     if allowed.get("timeline"):
-        tasks.append(_search_canonical_timeline(uid, query, limit))
+        tasks.append(
+            _search_canonical_timeline(
+                uid,
+                query,
+                limit,
+                scope_kind=principal.scope_kind,
+                conversation_id=principal.conversation_id,
+            )
+        )
         task_source_names.append("timeline")
 
     if allowed.get("workspace"):

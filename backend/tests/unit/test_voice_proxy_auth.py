@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 
@@ -522,6 +523,64 @@ def test_retained_context_loads_uid_mapped_honcho_without_runtime_receipt(monkey
     assert result["honcho_status"]["available"] is True
 
 
+def test_retained_context_profile_resolution_timeout_degrades_within_cap(monkeypatch):
+    to_thread_calls = []
+
+    class Pool:
+        async def fetchrow(self, query, uid):
+            return {
+                "id": "db-user-a",
+                "name": "User A",
+                "conditions": [],
+                "medications": [],
+                "guardian_mode": "off",
+                "agents": {},
+            }
+
+        async def fetch(self, *args):
+            return []
+
+    async def empty(*args, **kwargs):
+        return ""
+
+    async def slow_to_thread(*args, **kwargs):
+        to_thread_calls.append(args)
+        await asyncio.sleep(0.25)
+
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "VOICE_HONCHO_PROFILE_RESOLUTION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(voice, "VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS", 30)
+    monkeypatch.setattr(voice.asyncio, "to_thread", slow_to_thread)
+    monkeypatch.setattr(voice, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
+    monkeypatch.setattr(voice, "_fetch_recent_conversations", empty)
+    monkeypatch.setattr(voice, "_fetch_recent_canonical_timeline", empty)
+    monkeypatch.setattr(voice, "_fetch_memory_context", empty)
+    monkeypatch.setattr(voice, "_VOICE_HONCHO_PROFILE_NEGATIVE_CACHE", {})
+
+    async def load_context():
+        started = time.monotonic()
+        result = await voice.get_voice_context(
+            _request(
+                {"uid": "uid-a"},
+                token=_token("uid-a", isolated=False),
+                service_token="test-proxy-secret",
+            )
+        )
+        return result, time.monotonic() - started
+
+    result, elapsed = asyncio.run(load_context())
+    cached_result, cached_elapsed = asyncio.run(load_context())
+
+    assert elapsed < 0.15
+    assert cached_elapsed < 0.15
+    assert result["honcho_context"] == ""
+    assert result["honcho_status"]["reason"] == "honcho_profile_resolution_timeout"
+    assert cached_result["honcho_status"]["reason"] == "honcho_profile_resolution_cached_unavailable"
+    assert len(to_thread_calls) == 1
+    assert voice._VOICE_HONCHO_PROFILE_NEGATIVE_CACHE["uid-a"] > time.monotonic()
+
+
 def test_isolated_search_forces_receipt_agent_and_owner_header(monkeypatch):
     runtime = SimpleNamespace(agent_id="ella-uid-a", revision=8)
     calls = []
@@ -687,6 +746,89 @@ def test_retained_search_uses_uid_mapped_honcho_and_unmapped_user_fails_open(mon
     assert unmapped["results"] == []
     assert unmapped["sources_searched"] == []
     assert unmapped["sources_denied"] == ["honcho"]
+
+
+def test_canonical_startup_and_search_only_include_matching_signed_memory_scope(monkeypatch):
+    rows = [
+        {
+            "channel": "ios_voice",
+            "provider": "grok-realtime",
+            "role": "user",
+            "text": "General garden plans.",
+            "started_at": datetime(2026, 7, 24, 10, 0),
+            "session_id": "general-session",
+            "source_ref": {},
+            "metadata": {},
+        },
+        {
+            "channel": "ios_voice",
+            "provider": "grok-realtime",
+            "role": "user",
+            "text": "Memory A garden detail.",
+            "started_at": datetime(2026, 7, 24, 10, 1),
+            "session_id": "scoped-session",
+            "source_ref": {"scope_kind": "memory", "conversation_id": "memory-a"},
+            "metadata": {"scope_kind": "memory", "conversation_id": "memory-a"},
+        },
+        {
+            "channel": "ios_voice",
+            "provider": "grok-realtime",
+            "role": "user",
+            "text": "Memory B private garden detail.",
+            "started_at": datetime(2026, 7, 24, 10, 2),
+            "session_id": "other-scoped-session",
+            "source_ref": {"scope_kind": "memory", "conversation_id": "memory-b"},
+            "metadata": {"scope_kind": "memory", "conversation_id": "memory-b"},
+        },
+    ]
+    queries = []
+
+    class Pool:
+        async def fetch(self, query, uid, scope_kind, conversation_id, *rest):
+            queries.append((query, uid, scope_kind, conversation_id, rest))
+            visible = []
+            for row in rows:
+                row_scope = row["source_ref"].get("scope_kind")
+                row_conversation = row["source_ref"].get("conversation_id")
+                if row_scope != "memory" or (
+                    scope_kind == "memory" and row_conversation == conversation_id
+                ):
+                    visible.append(row)
+            return visible
+
+    monkeypatch.setattr(voice, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
+
+    general_startup = asyncio.run(voice._fetch_recent_canonical_timeline("uid-a"))
+    scoped_startup = asyncio.run(
+        voice._fetch_recent_canonical_timeline(
+            "uid-a",
+            scope_kind="memory",
+            conversation_id="memory-a",
+        )
+    )
+    general_search = asyncio.run(voice._search_canonical_timeline("uid-a", "garden", 10))
+    scoped_search = asyncio.run(
+        voice._search_canonical_timeline(
+            "uid-a",
+            "garden",
+            10,
+            scope_kind="memory",
+            conversation_id="memory-a",
+        )
+    )
+
+    assert "General garden plans." in general_startup
+    assert "Memory A garden detail." not in general_startup
+    assert "Memory B private garden detail." not in general_startup
+    assert "General garden plans." in scoped_startup
+    assert "Memory A garden detail." in scoped_startup
+    assert "Memory B private garden detail." not in scoped_startup
+    assert [result["content"] for result in general_search] == ["General garden plans."]
+    assert {result["content"] for result in scoped_search} == {
+        "General garden plans.",
+        "Memory A garden detail.",
+    }
+    assert all("source_ref ->> 'scope_kind'" in query for query, *_ in queries)
 
 
 def test_isolated_workspace_search_uses_hermes_post_contract(monkeypatch):

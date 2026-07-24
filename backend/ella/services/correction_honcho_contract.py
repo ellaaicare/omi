@@ -223,45 +223,49 @@ def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
     }
 
 
-def _target_from_profile_map(uid: str) -> dict[str, str] | None:
-    uid_norm = str(uid or "").strip().lower()
-    candidates = []
-    inline = _safe_json_loads(HONCHO_PROFILE_MAP_JSON)
-    if inline is not None:
-        candidates.append(inline)
-    url_data = _safe_json_url(HONCHO_PROFILE_MAP_URL)
-    if url_data is not None:
-        candidates.append(url_data)
-    file_data = _safe_json_file(HONCHO_PROFILE_MAP_PATH)
-    if file_data is not None:
-        candidates.append(file_data)
-
-    for data in candidates:
-        if isinstance(data, dict):
-            for key in (uid, uid_norm):
-                if key in data:
-                    target = _profile_target_from_entry(data[key])
-                    if target:
-                        return {**target, "source": "profile_map"}
-            profiles = data.get("profiles") or data.get("users")
-            if isinstance(profiles, list):
-                data = profiles
-        if isinstance(data, list):
-            for entry in data:
-                if not isinstance(entry, dict):
-                    continue
-                entry_uid = str(entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or "").lower()
-                if entry_uid != uid_norm:
-                    continue
-                target = _profile_target_from_entry(entry)
-                if target:
-                    return {**target, "source": "profile_map"}
+def _target_from_profile_map_data(uid: str, data: Any) -> dict[str, str] | None:
+    if isinstance(data, dict):
+        if uid in data:
+            target = _profile_target_from_entry(data[uid])
+            if target:
+                return {**target, "source": "profile_map"}
+        profiles = data.get("profiles") or data.get("users")
+        if isinstance(profiles, list):
+            data = profiles
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            entry_uid = str(
+                entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or ""
+            ).strip()
+            if entry_uid != uid:
+                continue
+            target = _profile_target_from_entry(entry)
+            if target:
+                return {**target, "source": "profile_map"}
     return None
 
 
+def _target_from_profile_map(uid: str) -> dict[str, str] | None:
+    uid = str(uid or "").strip()
+    # Evaluate local sources before the remote provisioning map. This avoids
+    # putting a network timeout on the voice startup path when a local exact-UID
+    # binding is already available.
+    for data in (
+        _safe_json_loads(HONCHO_PROFILE_MAP_JSON),
+        _safe_json_file(HONCHO_PROFILE_MAP_PATH),
+    ):
+        target = _target_from_profile_map_data(uid, data)
+        if target:
+            return target
+
+    return _target_from_profile_map_data(uid, _safe_json_url(HONCHO_PROFILE_MAP_URL))
+
+
 def _target_from_profile_config(uid: str) -> dict[str, str] | None:
-    uid_norm = str(uid or "").strip().lower()
-    if not HONCHO_PROFILE_UID or HONCHO_PROFILE_UID.strip().lower() != uid_norm:
+    uid = str(uid or "").strip()
+    if not HONCHO_PROFILE_UID or HONCHO_PROFILE_UID.strip() != uid:
         return None
     data = _safe_json_file(HONCHO_PROFILE_CONFIG_PATH)
     target = _profile_target_from_entry(data)

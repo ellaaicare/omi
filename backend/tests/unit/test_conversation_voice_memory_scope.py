@@ -89,26 +89,35 @@ def test_legacy_memory_atomically_bootstraps_a_durable_active_version():
     ]
 
 
-def test_bootstrap_commits_before_client_cas_and_retry_observes_same_version():
-    reference = _DocumentRef(_legacy_conversation())
-    first = conversations_db._ensure_voice_memory_summary_version_transaction(
-        _Transaction(),
-        reference,
+def test_transaction_retry_after_competing_bootstrap_observes_committed_version_without_second_write():
+    losing_reference = _DocumentRef(_legacy_conversation())
+    losing_transaction = _Transaction()
+    first_attempt = conversations_db._ensure_voice_memory_summary_version_transaction(
+        losing_transaction,
+        losing_reference,
         "client-prebootstrap-version",
     )
 
-    assert first["status"] == "stale"
-    established_version = first["active_summary_version_id"]
-    assert reference.data["active_summary_version_id"] == established_version
+    assert first_attempt["status"] == "stale"
+    assert len(losing_transaction.updates) == 1
+
+    # Simulate another transaction committing the same deterministic bootstrap
+    # while Firestore retries this callback from a fresh server snapshot.
+    winning_snapshot = _legacy_conversation()
+    winning_snapshot.update(copy.deepcopy(losing_transaction.updates[0]))
+    established_version = winning_snapshot["active_summary_version_id"]
+    retry_reference = _DocumentRef(winning_snapshot)
+    retry_transaction = _Transaction()
 
     retry = conversations_db._ensure_voice_memory_summary_version_transaction(
-        _Transaction(),
-        reference,
+        retry_transaction,
+        retry_reference,
         established_version,
     )
 
     assert retry["status"] == "ready"
     assert retry["active_summary_version_id"] == established_version
+    assert retry_transaction.updates == []
 
 
 def test_unversionable_memory_returns_defined_nonwriteable_state():

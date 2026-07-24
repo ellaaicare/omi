@@ -83,6 +83,12 @@ def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
 
 
+def _is_memory_scoped_event(item: dict[str, Any]) -> bool:
+    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory"
+
+
 def _derive_source_identity(
     *,
     uid: str,
@@ -339,7 +345,15 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
         channels: Optional[list[str]],
     ) -> list[dict[str, Any]]:
         params: list[Any] = [uid]
-        filters = ["lower(uid) = lower($1)"]
+        filters = [
+            "lower(uid) = lower($1)",
+            (
+                "NOT ("
+                "COALESCE(source_ref ->> 'scope_kind', '') = 'memory' "
+                "OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'"
+                ")"
+            ),
+        ]
         if since:
             params.append(since)
             filters.append(f"started_at >= ${len(params)}")
@@ -439,6 +453,8 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             if since and event["started_at"] < since:
                 continue
             if channel_set and event["channel"] not in channel_set:
+                continue
+            if _is_memory_scoped_event(event):
                 continue
             events.append(event)
 

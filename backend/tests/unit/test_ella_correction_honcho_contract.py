@@ -497,6 +497,59 @@ def test_write_honcho_fact_candidate_native_honcho_profile_map_targets_companion
     assert calls[4]["json"]["filters"] == {"observer_id": "ella", "observed_id": "plato"}
 
 
+def test_companion_profile_maps_treat_firebase_uids_as_case_sensitive(monkeypatch, tmp_path):
+    profile_config = tmp_path / "honcho.json"
+    profile_config.write_text(
+        json.dumps({"workspace": "wrong-workspace", "peerName": "wrong-peer"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps(
+            {
+                "usera": {"workspace": "wrong-dict-workspace", "peerName": "wrong-dict-peer"},
+                "profiles": [
+                    {
+                        "uid": "usera",
+                        "workspace": "wrong-list-workspace",
+                        "peerName": "wrong-list-peer",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "usera")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(profile_config))
+
+    target, reason = contract.resolve_companion_honcho_target("UserA")
+
+    assert target is None
+    assert reason == "missing_companion_honcho_target"
+
+
+def test_companion_profile_map_checks_local_exact_uid_before_remote_source(monkeypatch):
+    monkeypatch.setattr(
+        contract,
+        "HONCHO_PROFILE_MAP_JSON",
+        json.dumps({"UserA": {"workspace": "workspace-a", "peerName": "user-a"}}),
+    )
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(
+        contract,
+        "_safe_json_url",
+        lambda url: (_ for _ in ()).throw(AssertionError("remote map must stay lazy")),
+    )
+
+    target, reason = contract.resolve_companion_honcho_target("UserA")
+
+    assert reason == ""
+    assert target["workspace"] == "workspace-a"
+    assert target["observed_peer_id"] == "user-a"
+
+
 def test_write_honcho_fact_candidate_native_honcho_profile_map_url_targets_companion_scope(monkeypatch):
     candidate = _candidate(active_summary_version_id="v1")
     fake_client, calls = _fake_sequence_client_factory(
