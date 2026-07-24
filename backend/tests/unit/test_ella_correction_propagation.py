@@ -2,8 +2,10 @@ from datetime import datetime, timezone
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.modules.setdefault("database._client", MagicMock(db=MagicMock()))
-from ella.services.correction_propagation import run_correction_propagation
+from ella.services.correction_propagation import CorrectionPropagationDecision, run_correction_propagation
 
 
 def _conversation(conversation_id: str, uid: str, title: str, overview: str, text: str, hour: int = 9):
@@ -134,3 +136,18 @@ def test_correction_propagation_skips_active_version_incompatible_candidate():
     assert run.proposal_count == 0
     assert run.decisions[0].action == "skip"
     assert "active_summary_version_incompatible" in run.decisions[0].skipped_reasons
+
+
+def test_applied_propagation_decision_requires_created_summary_version_id():
+    with pytest.raises(ValueError, match="applied_summary_version_id"):
+        CorrectionPropagationDecision(
+            action="auto_applied",
+            conversation_id="related-1",
+        )
+
+    decision = CorrectionPropagationDecision(
+        action="auto_applied",
+        conversation_id="related-1",
+        applied_summary_version_id="related-v2",
+    )
+    assert decision.applied_summary_version_id == "related-v2"

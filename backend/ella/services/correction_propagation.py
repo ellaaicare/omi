@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from database._client import db
 from ella.services import proposal_ingest
@@ -69,7 +69,14 @@ class CorrectionPropagationDecision(BaseModel):
     idempotency_key: str = ""
     proposal_id: str = ""
     active_summary_version_id: str = ""
+    applied_summary_version_id: str = ""
     rollback_ref: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_applied_version_for_rollback(self):
+        if self.action in {"applied", "auto_applied"} and not self.applied_summary_version_id:
+            raise ValueError("applied_summary_version_id is required for applied propagation decisions")
+        return self
 
 
 class CorrectionPropagationRun(BaseModel):

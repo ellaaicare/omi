@@ -257,7 +257,7 @@ def test_correction_receipt_exposes_old_and_new_summary_and_real_propagation_cou
     monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
     monkeypatch.setattr(
-        corrections, "_correction_propagation_counts", lambda uid, conversation_id, correction_id: (1, 0)
+        corrections, "_correction_propagation_counts", lambda uid, conversation_id, correction_id: (1, 0, "known")
     )
 
     receipt = corrections._correction_receipt(
@@ -268,6 +268,11 @@ def test_correction_receipt_exposes_old_and_new_summary_and_real_propagation_cou
 
     assert receipt.before.title == "Coffee with Margaret"
     assert receipt.after.title == "Coffee with Rose"
+    assert receipt.before_version_id == "before-v1"
+    assert receipt.after_version_id == "after-v2"
+    assert receipt.active_version_id == "after-v2"
+    assert receipt.undo_version_id is None
+    assert receipt.propagation_status == "known"
     assert receipt.propagation_applied_count == 1
     assert receipt.propagation_reverted_count == 0
 
@@ -325,7 +330,13 @@ def test_undo_restores_source_summary_and_reverts_actual_propagations(monkeypatc
     )
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
     monkeypatch.setattr(corrections, "apply_summary_update", fake_apply)
-    monkeypatch.setattr(corrections, "_revert_applied_propagations", lambda uid, cid, correction_id: 1)
+    monkeypatch.setattr(corrections, "_prepare_applied_propagation_rollbacks", lambda uid, cid, correction_id: [])
+
+    async def fake_revert(uid, cid, correction_id, *, rollback_plan=None):
+        assert rollback_plan == []
+        return 1
+
+    monkeypatch.setattr(corrections, "_revert_applied_propagations", fake_revert)
     monkeypatch.setattr(
         corrections,
         "_persist_correction_audit",
@@ -351,8 +362,15 @@ def test_undo_restores_source_summary_and_reverts_actual_propagations(monkeypatc
 
 
 def test_propagation_undo_restores_each_related_summary_from_rollback_snapshot(monkeypatch):
-    updates = []
+    applies = []
     run_updates = []
+    related = {
+        "active_summary_version_id": "related-v2",
+        "summary_versions": [
+            {"id": "related-v1", "kind": "observer_enriched", "is_active": False},
+            {"id": "related-v2", "kind": "correction_propagation", "is_active": True},
+        ],
+    }
 
     class RunReference:
         def set(self, payload, merge=False):
@@ -368,6 +386,7 @@ def test_propagation_undo_restores_each_related_summary_from_rollback_snapshot(m
                     {
                         "action": "auto_applied",
                         "conversation_id": "related-1",
+                        "applied_summary_version_id": "related-v2",
                         "rollback_ref": {
                             "active_summary_version_id": "related-v1",
                             "structured": {
@@ -393,28 +412,389 @@ def test_propagation_undo_restores_each_related_summary_from_rollback_snapshot(m
     monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
     monkeypatch.setattr(
         corrections.conversations_db,
-        "update_conversation",
-        lambda uid, conversation_id, update: updates.append((uid, conversation_id, update)),
+        "get_conversation",
+        lambda uid, conversation_id: related,
     )
 
-    reverted = corrections._revert_applied_propagations("uid-1", "conv-1", "corr-1")
+    async def fake_apply(**kwargs):
+        applies.append(kwargs)
+        return {"status": "ok", "active_summary_version_id": "related-undo-v3"}
+
+    monkeypatch.setattr(corrections, "apply_summary_update", fake_apply)
+
+    plan = corrections._prepare_applied_propagation_rollbacks("uid-1", "conv-1", "corr-1")
+    reverted = asyncio.run(
+        corrections._revert_applied_propagations(
+            "uid-1",
+            "conv-1",
+            "corr-1",
+            rollback_plan=plan,
+        )
+    )
 
     assert reverted == 1
-    assert updates == [
-        (
-            "uid-1",
-            "related-1",
-            {
-                "structured.title": "Coffee with Margaret",
-                "structured.overview": "Margaret came by.",
-                "structured.emoji": "☕",
-                "structured.category": "other",
-                "active_summary_version_id": "related-v1",
-            },
-        )
-    ]
+    assert applies[0]["conversation_id"] == "related-1"
+    assert applies[0]["active_summary_version_id"] == "related-v2"
+    assert applies[0]["summary"]["title"] == "Coffee with Margaret"
+    assert applies[0]["summary_kind"] == "correction_propagation_undo"
+    assert applies[0]["require_based_on_match"] is True
     assert run_updates[0][0]["reverted_count"] == 1
+    assert run_updates[0][0]["decisions"][0]["reverted_summary_version_id"] == "related-undo-v3"
     assert run_updates[0][1] is True
+
+
+def test_correction_receipt_exposes_unknown_propagation_state_and_ignores_other_correction_state(monkeypatch):
+    conversation = {
+        "summary_versions": [
+            {"id": "before-v1", "title": "Before"},
+            {
+                "id": "after-v2",
+                "based_on_version_id": "before-v1",
+                "correction_id": "corr-1",
+                "title": "After",
+            },
+        ],
+        "active_summary_version_id": "after-v2",
+        "correction_state": {"correction_id": "different-correction", "status": "undone"},
+    }
+
+    class AuditRef:
+        def get(self):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"applied_at": "2026-07-23T17:00:00+00:00"})
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections,
+        "_correction_propagation_counts",
+        lambda uid, conversation_id, correction_id: (None, None, "unknown"),
+    )
+
+    receipt = corrections._correction_receipt(
+        uid="uid-1",
+        conversation_id="conv-1",
+        correction_id="corr-1",
+    )
+
+    assert receipt.status == "pending"
+    assert receipt.propagation_status == "unknown"
+    assert receipt.propagation_applied_count is None
+    assert receipt.propagation_reverted_count is None
+
+
+def test_receipt_and_undo_reject_locked_conversation_before_audit_access(monkeypatch):
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {"is_locked": True},
+    )
+    monkeypatch.setattr(
+        corrections,
+        "_audit_ref",
+        lambda *args: pytest.fail("locked conversations must not expose correction audit data"),
+    )
+
+    with pytest.raises(HTTPException) as receipt_error:
+        corrections._correction_receipt(
+            uid="uid-1",
+            conversation_id="conv-locked",
+            correction_id="corr-1",
+        )
+    with pytest.raises(HTTPException) as undo_error:
+        asyncio.run(
+            corrections.undo_conversation_correction(
+                "conv-locked",
+                "corr-1",
+                uid="uid-1",
+            )
+        )
+
+    assert receipt_error.value.status_code == 402
+    assert undo_error.value.status_code == 402
+
+
+def test_propagation_undo_preflight_rejects_stale_related_version_before_any_write(monkeypatch):
+    run = {
+        "auto_applied_count": 1,
+        "decisions": [
+            {
+                "action": "auto_applied",
+                "conversation_id": "related-1",
+                "applied_summary_version_id": "related-v2",
+                "rollback_ref": {
+                    "active_summary_version_id": "related-v1",
+                    "structured": {"title": "Before", "overview": "Before", "category": "other"},
+                },
+            }
+        ],
+    }
+
+    class RunSnapshot:
+        reference = SimpleNamespace(set=lambda *args, **kwargs: pytest.fail("preflight must not write"))
+
+        def to_dict(self):
+            return run
+
+    class AuditRef:
+        def collection(self, name):
+            return SimpleNamespace(stream=lambda: [RunSnapshot()])
+
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: {"active_summary_version_id": "newer-v3"},
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        corrections._prepare_applied_propagation_rollbacks("uid-1", "source-1", "corr-1")
+
+    assert excinfo.value.status_code == 409
+    assert "newer related memory" in excinfo.value.detail
+
+
+def test_undo_preflights_stale_related_target_before_source_or_audit_mutation(monkeypatch):
+    source = {
+        "summary_versions": [
+            {"id": "before-v1", "title": "Before"},
+            {
+                "id": "after-v2",
+                "based_on_version_id": "before-v1",
+                "correction_id": "corr-1",
+                "title": "After",
+            },
+        ],
+        "active_summary_version_id": "after-v2",
+    }
+    run = {
+        "auto_applied_count": 1,
+        "decisions": [
+            {
+                "action": "auto_applied",
+                "conversation_id": "related-1",
+                "applied_summary_version_id": "related-v2",
+                "rollback_ref": {
+                    "active_summary_version_id": "related-v1",
+                    "structured": {"title": "Before", "overview": "Before", "category": "other"},
+                },
+            }
+        ],
+    }
+
+    class RunSnapshot:
+        reference = SimpleNamespace(set=lambda *args, **kwargs: pytest.fail("preflight must not write"))
+
+        def to_dict(self):
+            return run
+
+    class AuditRef:
+        def get(self):
+            return SimpleNamespace(exists=True, to_dict=lambda: {"status": "applied"})
+
+        def collection(self, name):
+            return SimpleNamespace(stream=lambda: [RunSnapshot()])
+
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: (
+            source if conversation_id == "source-1" else {"active_summary_version_id": "newer-v3"}
+        ),
+    )
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections,
+        "_persist_correction_audit",
+        lambda *args, **kwargs: pytest.fail("failed preflight must not mutate the audit"),
+    )
+
+    async def fail_apply(**kwargs):
+        pytest.fail("failed preflight must not mutate the source")
+
+    monkeypatch.setattr(corrections, "apply_summary_update", fail_apply)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(
+            corrections.undo_conversation_correction(
+                "source-1",
+                "corr-1",
+                uid="uid-1",
+            )
+        )
+
+    assert excinfo.value.status_code == 409
+
+
+def test_propagation_undo_resumes_after_one_of_multiple_writes_fails(monkeypatch):
+    run = {
+        "auto_applied_count": 2,
+        "decisions": [
+            {
+                "action": "auto_applied",
+                "conversation_id": "related-1",
+                "applied_summary_version_id": "related-1-v2",
+                "rollback_ref": {
+                    "active_summary_version_id": "related-1-v1",
+                    "structured": {"title": "Related one before", "overview": "Before", "category": "other"},
+                },
+            },
+            {
+                "action": "auto_applied",
+                "conversation_id": "related-2",
+                "applied_summary_version_id": "related-2-v2",
+                "rollback_ref": {
+                    "active_summary_version_id": "related-2-v1",
+                    "structured": {"title": "Related two before", "overview": "Before", "category": "other"},
+                },
+            },
+        ],
+    }
+    related = {
+        "related-1": {
+            "active_summary_version_id": "related-1-v2",
+            "summary_versions": [{"id": "related-1-v2", "kind": "correction_propagation"}],
+        },
+        "related-2": {
+            "active_summary_version_id": "related-2-v2",
+            "summary_versions": [{"id": "related-2-v2", "kind": "correction_propagation"}],
+        },
+    }
+    run_writes = []
+
+    class RunReference:
+        def set(self, payload, merge=False):
+            assert merge is True
+            run.update(payload)
+            run_writes.append(payload)
+
+    class RunSnapshot:
+        reference = RunReference()
+
+        def to_dict(self):
+            return run
+
+    class AuditRef:
+        def collection(self, name):
+            return SimpleNamespace(stream=lambda: [RunSnapshot()])
+
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections.conversations_db,
+        "get_conversation",
+        lambda uid, conversation_id: related[conversation_id],
+    )
+    calls = []
+    fail_second = {"enabled": True}
+
+    async def fake_apply(**kwargs):
+        related_id = kwargs["conversation_id"]
+        calls.append(related_id)
+        if related_id == "related-2" and fail_second["enabled"]:
+            raise RuntimeError("simulated second write failure")
+        undo_id = f"{related_id}-undo"
+        related[related_id]["active_summary_version_id"] = undo_id
+        related[related_id]["summary_versions"].append(
+            {
+                "id": undo_id,
+                "kind": "correction_propagation_undo",
+                "based_on_version_id": kwargs["active_summary_version_id"],
+            }
+        )
+        return {"status": "ok", "active_summary_version_id": undo_id}
+
+    monkeypatch.setattr(corrections, "apply_summary_update", fake_apply)
+
+    first_plan = corrections._prepare_applied_propagation_rollbacks("uid-1", "source-1", "corr-1")
+    with pytest.raises(RuntimeError, match="second write failure"):
+        asyncio.run(
+            corrections._revert_applied_propagations(
+                "uid-1",
+                "source-1",
+                "corr-1",
+                rollback_plan=first_plan,
+            )
+        )
+
+    assert run["decisions"][0]["reverted_summary_version_id"] == "related-1-undo"
+    assert "reverted_summary_version_id" not in run["decisions"][1]
+    assert run["reverted_count"] == 1
+
+    fail_second["enabled"] = False
+    retry_plan = corrections._prepare_applied_propagation_rollbacks("uid-1", "source-1", "corr-1")
+    reverted = asyncio.run(
+        corrections._revert_applied_propagations(
+            "uid-1",
+            "source-1",
+            "corr-1",
+            rollback_plan=retry_plan,
+        )
+    )
+
+    assert reverted == 2
+    assert calls.count("related-1") == 1
+    assert calls.count("related-2") == 2
+    assert run["reverted_count"] == 2
+    assert run["decisions"][1]["reverted_summary_version_id"] == "related-2-undo"
+    assert len(run_writes) == 3
+
+
+def test_repeated_undo_returns_same_recorded_undo_version_without_writing(monkeypatch):
+    conversation = {
+        "summary_versions": [
+            {"id": "before-v1", "title": "Before"},
+            {
+                "id": "after-v2",
+                "based_on_version_id": "before-v1",
+                "correction_id": "corr-1",
+                "title": "After",
+            },
+            {
+                "id": "undo-v3",
+                "based_on_version_id": "after-v2",
+                "kind": "correction_undo",
+                "title": "Before",
+            },
+        ],
+        "active_summary_version_id": "undo-v3",
+        "correction_state": {"correction_id": "corr-1", "status": "undone"},
+    }
+
+    class AuditRef:
+        def get(self):
+            return SimpleNamespace(
+                exists=True,
+                to_dict=lambda: {
+                    "status": "undone",
+                    "applied_at": "2026-07-23T17:00:00+00:00",
+                    "undone_at": "2026-07-23T18:00:00+00:00",
+                    "undo_version_id": "undo-v3",
+                },
+            )
+
+        def collection(self, name):
+            return SimpleNamespace(stream=lambda: [])
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", lambda uid, conversation_id: conversation)
+    monkeypatch.setattr(corrections, "_audit_ref", lambda uid, conversation_id, correction_id: AuditRef())
+    monkeypatch.setattr(
+        corrections,
+        "apply_summary_update",
+        lambda **kwargs: pytest.fail("repeated undo must not append another version"),
+    )
+
+    receipt = asyncio.run(
+        corrections.undo_conversation_correction(
+            "conv-1",
+            "corr-1",
+            uid="uid-1",
+        )
+    )
+
+    assert receipt.status == "undone"
+    assert receipt.before_version_id == "before-v1"
+    assert receipt.after_version_id == "after-v2"
+    assert receipt.active_version_id == "undo-v3"
+    assert receipt.undo_version_id == "undo-v3"
 
 
 def test_submit_correction_rejects_locked_conversation(monkeypatch):
@@ -610,6 +990,7 @@ def test_submit_correction_directly_applies_when_model_path_succeeds(monkeypatch
     assert submitted["active_summary_version_id"] == "legacy-v1"
     assert submitted["corrected"]["overview"].startswith("[Ella] ")
     assert audits[-1]["status"] == "applied"
+    assert audits[-1]["applied_at"] == audits[-1]["updated_at"]
     assert audits[-1]["direct_apply_result"]["active_summary_version_id"] == "corrected-v1"
     assert events[-1]["stage"] == "direct_apply_succeeded"
     assert conversation_updates[0]["correction_state"]["status"] == "submitted"
@@ -2385,6 +2766,103 @@ def test_recovery_writeback_fails_closed_when_active_summary_changed(monkeypatch
                 category="other",
                 based_on_version_id="generic-v1",
                 require_based_on_match=True,
+            )
+        )
+
+
+def test_strict_summary_writeback_uses_atomic_active_version_compare_and_set(monkeypatch):
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "generic-v1",
+        "summary_versions": [{"id": "generic-v1", "kind": "generic", "is_active": True}],
+    }
+    cas_calls = []
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "build_summary_version_update",
+        lambda *args, **kwargs: {
+            "summary_versions": [
+                {"id": "generic-v1", "kind": "generic", "is_active": False},
+                {"id": "undo-v2", "kind": "correction_undo", "is_active": True},
+            ],
+            "active_summary_version_id": "undo-v2",
+        },
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: cas_calls.append((uid, cid, expected, update)) or True,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation",
+        lambda *args: pytest.fail("strict write must use the transactional compare-and-set helper"),
+    )
+
+    result = asyncio.run(
+        summary_writeback.write_conversation_summary(
+            uid="user-1",
+            conversation_id="conversation-1",
+            title="Restored",
+            overview="[Ella] Restored the prior conversation summary without changing newer memory.",
+            category="other",
+            summary_kind="correction_undo",
+            based_on_version_id="generic-v1",
+            require_based_on_match=True,
+            canonical_writer=lambda *args, **kwargs: {"ok": True},
+        )
+    )
+
+    assert result["active_summary_version_id"] == "undo-v2"
+    assert cas_calls[0][0:3] == ("user-1", "conversation-1", "generic-v1")
+    assert cas_calls[0][3]["active_summary_version_id"] == "undo-v2"
+
+
+def test_strict_summary_writeback_fails_when_atomic_compare_and_set_loses_race(monkeypatch):
+    conversation = {
+        **_retry_conversation(status="completed", request_id=None),
+        "active_summary_version_id": "generic-v1",
+        "summary_versions": [{"id": "generic-v1", "kind": "generic", "is_active": True}],
+    }
+    monkeypatch.setattr(summary_writeback.conversations_db, "get_conversation", lambda uid, cid: conversation)
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "build_summary_version_update",
+        lambda *args, **kwargs: {
+            "summary_versions": [
+                {"id": "generic-v1", "kind": "generic", "is_active": False},
+                {"id": "undo-v2", "kind": "correction_undo", "is_active": True},
+            ],
+            "active_summary_version_id": "undo-v2",
+        },
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation_if_active_summary_version",
+        lambda uid, cid, expected, update: False,
+    )
+    monkeypatch.setattr(
+        summary_writeback.conversations_db,
+        "update_conversation",
+        lambda *args: pytest.fail("lost CAS must not fall back to an unconditional write"),
+    )
+
+    with pytest.raises(
+        summary_writeback.ConcurrentConversationSummaryChangeError,
+        match="active_summary_version_changed",
+    ):
+        asyncio.run(
+            summary_writeback.write_conversation_summary(
+                uid="user-1",
+                conversation_id="conversation-1",
+                title="Restored",
+                overview="[Ella] Restored the prior conversation summary without changing newer memory.",
+                category="other",
+                summary_kind="correction_undo",
+                based_on_version_id="generic-v1",
+                require_based_on_match=True,
+                canonical_writer=lambda *args, **kwargs: {"ok": True},
             )
         )
 
