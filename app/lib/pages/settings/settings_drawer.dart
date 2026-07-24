@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:omi/core/app_shell.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/pages/persona/persona_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/pages/settings/developer.dart';
@@ -34,19 +35,19 @@ enum SettingsMode { no_device, omi }
 
 class SettingsDrawer extends StatefulWidget {
   final SettingsMode mode;
+  final bool ellaMode;
 
-  const SettingsDrawer({super.key, this.mode = SettingsMode.omi});
+  const SettingsDrawer({super.key, this.mode = SettingsMode.omi, this.ellaMode = false});
 
   @override
   State<SettingsDrawer> createState() => _SettingsDrawerState();
 
-  static void show(BuildContext context, {SettingsMode mode = SettingsMode.omi}) {
-    if (SharedPreferencesUtil().publicMode) return;
+  static void show(BuildContext context, {SettingsMode mode = SettingsMode.omi, bool ellaMode = false}) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => SettingsDrawer(mode: mode),
+      builder: (context) => SettingsDrawer(mode: mode, ellaMode: ellaMode),
     );
   }
 }
@@ -211,7 +212,7 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
   }
 
   Future<void> _copyVersionInfo() async {
-    final versionPart = buildVersion != null ? 'Omi AI ${version ?? ""} ($buildVersion)' : 'Omi AI ${version ?? ""}';
+    final versionPart = buildVersion != null ? 'Ella ${version ?? ""} ($buildVersion)' : 'Ella ${version ?? ""}';
     final devicePart = shortDeviceInfo ?? context.l10n.unknownDevice;
     final fullVersionInfo = '$versionPart — $devicePart';
 
@@ -555,6 +556,26 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
     );
   }
 
+  /// Ella only exposes this drawer after the explicit seven-tap developer
+  /// unlock. Keeping this separate prevents legacy Omi consumer rows from
+  /// appearing in the Ella build.
+  Widget _buildEllaAdvancedContent(BuildContext context) {
+    return Column(
+      children: [
+        EllaCardSurface(
+          child: ListTile(
+            leading: const Icon(Icons.developer_mode, color: EllaColors.tealDeep),
+            title: Text(context.l10n.developerSettings, style: EllaTextStyles.body),
+            subtitle: Text(context.l10n.ellaAdvancedSettingsSubtitle, style: EllaTextStyles.secondary),
+            onTap: () => routeToPage(context, const DeveloperSettingsPage()),
+          ),
+        ),
+        const SizedBox(height: EllaSizes.sectionGap),
+        _buildVersionInfoSection(),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -603,7 +624,9 @@ class _SettingsDrawerState extends State<SettingsDrawer> {
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: widget.mode == SettingsMode.omi
+              child: widget.ellaMode
+                  ? _buildEllaAdvancedContent(context)
+                  : widget.mode == SettingsMode.omi
                   ? _buildOmiModeContent(context)
                   : _buildNoDeviceModeContent(context),
             ),

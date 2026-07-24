@@ -23,11 +23,7 @@ void main() {
   });
 
   testWidgets('Ella card surfaces use the approved hairline and shadow', (tester) async {
-    await tester.pumpWidget(
-      const MaterialApp(
-        home: EllaCardSurface(child: SizedBox(width: 100, height: 100)),
-      ),
-    );
+    await tester.pumpWidget(const MaterialApp(home: EllaCardSurface(child: SizedBox(width: 100, height: 100))));
 
     final decoratedBox = tester.widget<DecoratedBox>(
       find.descendant(of: find.byType(EllaCardSurface), matching: find.byType(DecoratedBox)),
@@ -54,7 +50,7 @@ void main() {
     const systemWords = ['detected', 'triggered', 'classified', 'transcript'];
 
     for (final record in DemoFixtures.whispers(now: DateTime(2026, 7, 20, 12))) {
-      final why = whisperWhyText(record.triggerType).toLowerCase();
+      final why = whisperWhyText(record).toLowerCase();
       for (final word in systemWords) {
         expect(why, isNot(contains(word)), reason: 'why line contained "$word": $why');
       }

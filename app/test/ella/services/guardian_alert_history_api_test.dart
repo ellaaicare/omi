@@ -27,6 +27,7 @@ void main() {
             'queue_item_id': 'guardian_123',
             'caregiver_escalation': true,
             'escalation_status': 'not_sent',
+            'trigger_explanation': 'You asked for a quick reminder.',
           },
         ],
       });
@@ -40,6 +41,7 @@ void main() {
       expect(records.first.queueItemId, 'guardian_123');
       expect(records.first.escalation, isTrue);
       expect(records.first.isTest, isTrue);
+      expect(records.first.why, 'You asked for a quick reminder.');
     });
 
     test('recognizes and normalizes local Guardian debug log fallback records', () {

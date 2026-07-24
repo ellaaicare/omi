@@ -412,6 +412,7 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
                     "queue_item_id": "guardian_abc",
                     "source_conversation_id": "omi-123",
                     "dry_run": True,
+                    "trigger_explanation": "You asked where your glasses were.",
                 },
                 "created_at": created,
                 "consumed_at": consumed,
@@ -445,6 +446,8 @@ def test_guardian_alert_history_normalizes_queue_event_delivery_rows(monkeypatch
     alert = result["alerts"][0]
     assert alert["queue_item_id"] == "guardian_abc"
     assert alert["summary"] == "Ella found your glasses near the kitchen table."
+    assert alert["why"] == "You asked where your glasses were."
+    assert alert["trigger_explanation"] == "You asked where your glasses were."
     assert alert["trigger_type"] == "wake_word_user_support"
     assert alert["delivery_target"] == "caregiver"
     assert alert["playback_status"] == "failed"

@@ -1728,7 +1728,7 @@ abstract class AppLocalizations {
   /// No description provided for @exportedConversations.
   ///
   /// In en, this message translates to:
-  /// **'Exported Conversations from Omi'**
+  /// **'Exported Conversations from Ella'**
   String get exportedConversations;
 
   /// No description provided for @exportShared.
@@ -12966,13 +12966,13 @@ abstract class AppLocalizations {
   /// Title for device disconnected notification
   ///
   /// In en, this message translates to:
-  /// **'Your Omi Device Disconnected'**
+  /// **'Your Ella necklace disconnected'**
   String get deviceDisconnectedNotificationTitle;
 
   /// Body text for device disconnected notification
   ///
   /// In en, this message translates to:
-  /// **'Please reconnect to continue using your Omi.'**
+  /// **'Please reconnect your Ella necklace to continue.'**
   String get deviceDisconnectedNotificationBody;
 
   /// Title for firmware update available dialog
@@ -16314,7 +16314,7 @@ abstract class AppLocalizations {
   /// No description provided for @todayVoiceOnPhone.
   ///
   /// In en, this message translates to:
-  /// **'Ella’s voice → phone'**
+  /// **'Playing from the phone'**
   String get todayVoiceOnPhone;
 
   /// No description provided for @todayHeadsetFallbackWarning.
