@@ -9,6 +9,7 @@ class EllaColors {
   static const Color paper = Color(0xFFFAF6F0);
   static const Color card = Color(0xFFF2EBE1);
   static const Color cardDeep = Color(0xFFE9DFD2);
+  static const Color cardEdge = Color(0xFF8A7B66);
   static const Color ink = Color(0xFF23201C);
   static const Color inkSoft = Color(0xFF665F56);
   static const Color teal = Color(0xFF5A9E8F);
@@ -66,6 +67,44 @@ class EllaSizes {
   static const double iconSmall = 20;
   static const double iconMedium = 24;
   static const double iconLarge = 28;
+}
+
+class EllaCardSurface extends StatelessWidget {
+  const EllaCardSurface({
+    super.key,
+    required this.child,
+    this.color = EllaColors.card,
+    this.borderRadius = EllaSizes.cardRadius,
+  });
+
+  static const shadow = BoxShadow(
+    color: Color(0x0F23201C),
+    offset: Offset(0, 1),
+    blurRadius: 2,
+  );
+
+  final Widget child;
+  final Color color;
+  final double borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(borderRadius);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: radius,
+        border: Border.all(color: EllaColors.cardEdge),
+        boxShadow: const [shadow],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: radius,
+        clipBehavior: Clip.antiAlias,
+        child: child,
+      ),
+    );
+  }
 }
 
 class EllaTextStyles {
@@ -228,9 +267,13 @@ ThemeData ellaThemeData() {
     ),
     cardTheme: CardThemeData(
       color: EllaColors.card,
-      elevation: 0,
+      elevation: 1,
+      shadowColor: const Color(0x0F23201C),
       surfaceTintColor: EllaColors.card,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        side: const BorderSide(color: EllaColors.cardEdge),
+      ),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,

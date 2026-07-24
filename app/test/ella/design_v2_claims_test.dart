@@ -15,10 +15,29 @@ void main() {
     return (lighter + 0.05) / (darker + 0.05);
   }
 
-  test('Ella surface and small-label tokens meet the contrast floor', () {
-    expect(contrastRatio(EllaColors.card, EllaColors.paper), greaterThanOrEqualTo(3));
+  test('Ella card edge and small-label tokens meet the contrast floor', () {
+    expect(contrastRatio(EllaColors.cardEdge, EllaColors.paper), greaterThanOrEqualTo(3));
+    expect(contrastRatio(EllaColors.cardEdge, EllaColors.card), greaterThanOrEqualTo(3));
     expect(contrastRatio(EllaColors.inkSoft, EllaColors.card), greaterThanOrEqualTo(4.5));
-    expect(EllaColors.teal, EllaColors.tealDeep);
+    expect(EllaColors.teal, isNot(EllaColors.tealDeep));
+  });
+
+  testWidgets('Ella card surfaces use the approved hairline and shadow', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: EllaCardSurface(child: SizedBox(width: 100, height: 100)),
+      ),
+    );
+
+    final decoratedBox = tester.widget<DecoratedBox>(
+      find.descendant(of: find.byType(EllaCardSurface), matching: find.byType(DecoratedBox)),
+    );
+    final decoration = decoratedBox.decoration as BoxDecoration;
+    final border = decoration.border! as Border;
+
+    expect(border.top.color, EllaColors.cardEdge);
+    expect(border.top.width, 1);
+    expect(decoration.boxShadow, const [EllaCardSurface.shadow]);
   });
 
   test('Whispers off copy says listening and remembering continue', () {

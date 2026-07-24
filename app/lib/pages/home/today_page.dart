@@ -334,9 +334,7 @@ class _DailyNoteCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final preview = _preview(context);
     final hasMore = text.isNotEmpty && preview.length < text.length;
-    return Material(
-      color: EllaColors.card,
-      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+    return EllaCardSurface(
       child: InkWell(
         key: const Key('daily-note-card'),
         onTap: text.isEmpty ? null : onTap,
@@ -450,9 +448,7 @@ class _WhisperCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final lead = whisperStatusLead(enabled);
     final rest = whisperStatusDetail(enabled);
-    return Material(
-      color: EllaColors.card,
-      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+    return EllaCardSurface(
       child: Padding(
         padding: const EdgeInsets.all(EllaSizes.cardPadding),
         child: Column(
@@ -616,9 +612,7 @@ class TodayHardwareStatusCard extends StatelessWidget {
       children: [
         Text(context.l10n.todayHardwareStatus, style: EllaTextStyles.eyebrow),
         const SizedBox(height: EllaSizes.cardGap),
-        Material(
-          color: EllaColors.card,
-          borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+        EllaCardSurface(
           child: Padding(
             padding: const EdgeInsets.all(EllaSizes.cardPadding),
             child: Column(
@@ -783,8 +777,7 @@ class _RemindersSection extends StatelessWidget {
       children: [
         Text(context.l10n.todayRemindersTitle, style: EllaTextStyles.eyebrow),
         const SizedBox(height: EllaSizes.cardGap),
-        Container(
-          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
+        EllaCardSurface(
           child: Column(
             children: [
               for (var index = 0; index < reminders.length; index++) ...[
@@ -959,14 +952,16 @@ class _RecentMemoriesLoading extends StatelessWidget {
       children: [
         const Text('RECENT MEMORIES', style: EllaTextStyles.eyebrow),
         const SizedBox(height: EllaSizes.cardGap),
-        Container(
-          height: _memoryCarouselHeight(context),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(color: EllaColors.card, borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
-          child: const SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+        EllaCardSurface(
+          child: SizedBox(
+            height: _memoryCarouselHeight(context),
+            child: const Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
+              ),
+            ),
           ),
         ),
       ],
@@ -995,9 +990,7 @@ class _MemoryPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: EllaColors.card,
-      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+    return EllaCardSurface(
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
@@ -1046,9 +1039,8 @@ class _AllMemoriesCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
+    return EllaCardSurface(
       color: EllaColors.cardDeep,
-      borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
