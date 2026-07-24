@@ -8745,7 +8745,7 @@ class AppLocalizationsCs extends AppLocalizations {
   String get todayNecklaceOffReconnect => 'Tap to reconnect';
 
   @override
-  String get todayVoiceOnPhone => 'Ella’s voice → phone';
+  String get todayVoiceOnPhone => 'Playing from the phone';
 
   @override
   String get todayHeadsetFallbackWarning => 'Headset is off — Ella will speak from the phone.';

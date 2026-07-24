@@ -47,6 +47,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   String? _emergencyContactId;
   String _appVersion = '';
   GuardianModeInfo? _guardianMode;
+  int _versionTapCount = 0;
+  bool _developerUnlocked = false;
 
   @override
   void initState() {
@@ -96,6 +98,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
         });
       }
     } catch (_) {}
+  }
+
+  void _unlockDeveloperSettings() {
+    setState(() {
+      _versionTapCount += 1;
+      if (_versionTapCount >= 7) _developerUnlocked = true;
+    });
   }
 
   String _emergencyContactSubtitle() {
@@ -227,8 +236,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             ),
             const SizedBox(height: 8),
 
-            // Internal policy picker; the public label remains Whispers.
-            if (!publicMode)
+            // Internal policy picker, only available after the developer unlock.
+            if (_developerUnlocked)
               EllaSettingsRow(
                 icon: Icons.shield,
                 iconColor: _guardianMode?.color ?? EllaColors.primary,
@@ -245,7 +254,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
 
             // Ella Key (for cross-device linking)
-            if (SharedPreferencesUtil().ellaKey.isNotEmpty) ...[
+            if (_developerUnlocked && SharedPreferencesUtil().ellaKey.isNotEmpty) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
                 icon: Icons.key,
@@ -299,19 +308,18 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               const SizedBox(height: 8),
             ],
 
+            // CAPTURE section
+            _buildSectionHeader(context.l10n.ellaCaptureSection),
+            EllaSettingsRow(icon: Icons.hearing, title: context.l10n.listeningAndConsent, onTap: _openListeningConsent),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.record_voice_over_rounded,
-              title: 'Whispers',
-              subtitle: 'Things Ella has said and why',
+              title: 'What Ella has said',
+              subtitle: 'Helpful things Ella has said and why',
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
               },
             ),
-
-            // CAPTURE section
-            _buildSectionHeader(context.l10n.ellaCaptureSection),
-            EllaSettingsRow(icon: Icons.hearing, title: context.l10n.listeningAndConsent, onTap: _openListeningConsent),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.schedule,
@@ -336,13 +344,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
 
-            if (!publicMode) ...[
+            if (_developerUnlocked) ...[
               _buildSectionHeader(context.l10n.ellaMoreSection),
               EllaSettingsRow(
                 icon: Icons.developer_mode,
                 title: context.l10n.ellaAdvancedSettings,
                 subtitle: context.l10n.ellaAdvancedSettingsSubtitle,
-                onTap: () => SettingsDrawer.show(context),
+                onTap: () => SettingsDrawer.show(context, ellaMode: true),
               ),
               const SizedBox(height: 8),
             ],
@@ -374,7 +382,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             const SizedBox(height: 24),
             if (_appVersion.isNotEmpty)
               Center(
-                child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
+                child: GestureDetector(
+                  onTap: _unlockDeveloperSettings,
+                  child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
+                ),
               ),
             const SizedBox(height: 32),
           ],

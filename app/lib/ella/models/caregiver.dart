@@ -67,12 +67,14 @@ class Caregiver {
 
 class InviteResponse {
   final String inviteId;
+  final String caregiverId;
   final String inviteCode;
   final String status;
   final DateTime expiresAt;
 
   InviteResponse.fromJson(Map<String, dynamic> json)
       : inviteId = json['invite_id'] ?? '',
+        caregiverId = json['caregiver_id'] ?? json['caregiverId'] ?? json['id'] ?? json['invite_id'] ?? '',
         inviteCode = json['invite_code'] ?? '',
         status = json['status'] ?? '',
         expiresAt = json['expires_at'] != null

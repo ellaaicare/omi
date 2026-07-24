@@ -99,75 +99,73 @@ class _WhisperEntry extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final related = _relatedConversation(context);
-    return Container(
-      padding: const EdgeInsets.all(EllaSizes.cardPadding),
-      decoration: BoxDecoration(
-        color: EllaColors.card,
-        borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 10,
-                height: 10,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _played ? EllaColors.teal : Colors.transparent,
-                  border: Border.all(color: _played ? EllaColors.teal : EllaColors.inkSoft, width: 1.5),
+    return EllaCardSurface(
+      child: Padding(
+        padding: const EdgeInsets.all(EllaSizes.cardPadding),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _played ? EllaColors.teal : Colors.transparent,
+                    border: Border.all(color: _played ? EllaColors.teal : EllaColors.inkSoft, width: 1.5),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Text(_time(record.createdAt), style: EllaTextStyles.secondary),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Text(
-            '“${record.alertText}”',
-            style: const TextStyle(
-              fontFamily: EllaTextStyles.noteFont,
-              fontSize: 18,
-              fontWeight: FontWeight.w400,
-              fontStyle: FontStyle.italic,
-              height: 1.45,
-              color: EllaColors.ink,
+                const SizedBox(width: 12),
+                Text(_time(record.createdAt), style: EllaTextStyles.secondary),
+              ],
             ),
-          ),
-          const SizedBox(height: 12),
-          Text(whisperWhyText(record.triggerType), style: EllaTextStyles.secondary),
-          if (related != null) ...[
             const SizedBox(height: 16),
-            Material(
-              color: EllaColors.cardDeep,
-              borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-              child: InkWell(
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: related)),
-                ),
+            Text(
+              '“${record.alertText}”',
+              style: const TextStyle(
+                fontFamily: EllaTextStyles.noteFont,
+                fontSize: 18,
+                fontWeight: FontWeight.w400,
+                fontStyle: FontStyle.italic,
+                height: 1.45,
+                color: EllaColors.ink,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(whisperWhyText(record), style: EllaTextStyles.secondary),
+            if (related != null) ...[
+              const SizedBox(height: 16),
+              Material(
+                color: EllaColors.cardDeep,
                 borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 14),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'Related memory',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: EllaColors.tealDeep),
-                        ),
-                        SizedBox(width: 4),
-                        Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep, size: 20),
-                      ],
+                child: InkWell(
+                  onTap: () => Navigator.of(
+                    context,
+                  ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: related))),
+                  borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 14),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Related memory',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: EllaColors.tealDeep),
+                          ),
+                          SizedBox(width: 4),
+                          Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep, size: 20),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -200,12 +198,7 @@ class _WhisperEmptyState extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: EllaColors.teal,
                         shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: EllaColors.teal.withValues(alpha: 0.15),
-                            spreadRadius: 8,
-                          ),
-                        ],
+                        boxShadow: [BoxShadow(color: EllaColors.teal.withValues(alpha: 0.15), spreadRadius: 8)],
                       ),
                     ),
                     const SizedBox(height: 20),
@@ -225,15 +218,9 @@ class _WhisperEmptyState extends StatelessWidget {
   }
 }
 
-String whisperWhyText(String trigger) {
-  final normalized = trigger.toLowerCase().replaceAll(RegExp(r'[_-]+'), ' ');
-  if (normalized.contains('scissor')) return 'You asked where they were.';
-  if (normalized.contains('biometric') || normalized.contains('appointment')) {
-    return 'You asked about your appointment.';
-  }
-  if (normalized.contains('dinner')) return 'You mentioned Tuesday dinner.';
-  if (normalized.contains('walk')) return 'You were deciding when to go.';
-  if (normalized.contains('call') || normalized.contains('phone')) return 'You wanted to call back.';
+String whisperWhyText(GuardianAlertRecord record) {
+  final explanation = record.why?.trim();
+  if (explanation != null && explanation.isNotEmpty) return explanation;
   return 'This came up in your conversation.';
 }
 
@@ -249,8 +236,8 @@ Map<String, List<GuardianAlertRecord>> _groupByDay(List<GuardianAlertRecord> rec
     final label = day == today
         ? 'TODAY'
         : day == today.subtract(const Duration(days: 1))
-            ? 'YESTERDAY'
-            : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
+        ? 'YESTERDAY'
+        : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
     result.putIfAbsent(label, () => []).add(record);
   }
   return result;

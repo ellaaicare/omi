@@ -474,6 +474,7 @@ class EnqueueRequest(BaseModel):
     priority: str = "normal"
     message: Optional[str] = None
     trigger: Optional[str] = None
+    trigger_explanation: Optional[str] = None
     metadata: Optional[dict] = None
 
 
@@ -673,6 +674,9 @@ def _normalize_guardian_alert_row(row: dict[str, Any], timezone_name: str) -> di
     queue_item_id = str(row.get("id") or metadata.get("queue_item_id") or "")
     trace_id = str(row.get("trace_id") or _trace_id_from_metadata(metadata, queue_item_id))
     alert_text, summary = _normalize_alert_text(row.get("message"), metadata)
+    why = str(
+        metadata.get("why") or metadata.get("trigger_explanation") or metadata.get("triggerExplanation") or ""
+    ).strip()
     tags = _guardian_alert_tags(row.get("priority"), row.get("trigger_type"), metadata)
 
     created_at = row.get("created_at")
@@ -683,6 +687,8 @@ def _normalize_guardian_alert_row(row: dict[str, Any], timezone_name: str) -> di
         "trace_id": trace_id,
         "alert_text": alert_text,
         "summary": summary,
+        "why": why or None,
+        "trigger_explanation": why or None,
         "trigger_type": str(row.get("trigger_type") or metadata.get("trigger_type") or metadata.get("category") or ""),
         "priority": str(row.get("priority") or ""),
         "delivery_target": _delivery_target_from_logs(deliveries, metadata),
@@ -1534,6 +1540,8 @@ async def enqueue(
     metadata = dict(req.metadata or {})
     metadata.setdefault("trace_id", trace_id)
     metadata.setdefault("queue_item_id", item_id)
+    if req.trigger_explanation and req.trigger_explanation.strip():
+        metadata.setdefault("trigger_explanation", req.trigger_explanation.strip())
     metadata_str = json.dumps(metadata)
 
     await pool.execute(

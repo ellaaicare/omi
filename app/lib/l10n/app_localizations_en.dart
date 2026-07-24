@@ -827,7 +827,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get exportDataDesc => 'Export conversations to a JSON file';
 
   @override
-  String get exportedConversations => 'Exported Conversations from Omi';
+  String get exportedConversations => 'Exported Conversations from Ella';
 
   @override
   String get exportShared => 'Export shared';
@@ -6887,10 +6887,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get lowBatteryAlertBody => 'Your device is running low on battery. Time for a recharge! 🔋';
 
   @override
-  String get deviceDisconnectedNotificationTitle => 'Your Omi Device Disconnected';
+  String get deviceDisconnectedNotificationTitle => 'Your Ella necklace disconnected';
 
   @override
-  String get deviceDisconnectedNotificationBody => 'Please reconnect to continue using your Omi.';
+  String get deviceDisconnectedNotificationBody => 'Please reconnect your Ella necklace to continue.';
 
   @override
   String get firmwareUpdateAvailable => 'Firmware Update Available';
@@ -8747,7 +8747,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get todayNecklaceOffReconnect => 'Tap to reconnect';
 
   @override
-  String get todayVoiceOnPhone => 'Ella’s voice → phone';
+  String get todayVoiceOnPhone => 'Playing from the phone';
 
   @override
   String get todayHeadsetFallbackWarning => 'Headset is off — Ella will speak from the phone.';
