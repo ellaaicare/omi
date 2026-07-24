@@ -50,9 +50,8 @@ List<TextSpan> _highlightSearchMatches(String text, String query, int currentRes
       TextSpan(
         text: text.substring(index, index + query.length),
         style: TextStyle(
-          backgroundColor: isCurrentResult
-              ? EllaColors.warning.withValues(alpha: 0.85)
-              : EllaColors.teal.withValues(alpha: 0.35),
+          backgroundColor:
+              isCurrentResult ? EllaColors.warning.withValues(alpha: 0.85) : EllaColors.teal.withValues(alpha: 0.35),
           color: EllaColors.ink,
           fontWeight: FontWeight.bold,
         ),

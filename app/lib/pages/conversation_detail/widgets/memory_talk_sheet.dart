@@ -692,9 +692,8 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
       // A terminal failed receipt will never continue applying, so it must use
       // failure copy rather than the "still working" (timeout) message.
       final isTerminalFailure = receipt != null && receipt.status.toLowerCase().contains('failed');
-      final message = isTerminalFailure
-          ? context.l10n.memoryTalkCorrectionFailed
-          : context.l10n.memoryTalkCorrectionStillWorking;
+      final message =
+          isTerminalFailure ? context.l10n.memoryTalkCorrectionFailed : context.l10n.memoryTalkCorrectionStillWorking;
       _addEllaTurn(message);
       if (speakAcknowledgement) await _speakEllaResponse(message);
       return;
