@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/conversation_detail/widgets/memory_talk_detail.dart';
 
 void main() {
@@ -51,5 +53,29 @@ void main() {
     expect(highlighted.style?.backgroundColor, isNotNull);
     expect(highlighted.style?.fontWeight, FontWeight.bold);
     expect(find.textContaining('Invisible legacy summary phrase', findRichText: true), findsNothing);
+  });
+
+  test('copy summary writes rendered content and ignores conflicting legacy content', () async {
+    String? copiedText;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copiedText = (call.arguments as Map<Object?, Object?>)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    await copyRenderedMemorySummary(conversation());
+
+    expect(copiedText, 'Coffee in the garden\n\nRose joined you for coffee in the garden.');
+    expect(copiedText, isNot(contains('Invisible legacy summary phrase')));
   });
 }

@@ -56,6 +56,17 @@ ConversationTab conversationTabForIndex(int index) {
   };
 }
 
+String renderedMemorySummaryText(ServerConversation conversation) {
+  return [
+    conversation.structured.title.trim(),
+    conversation.structured.overview.trim(),
+  ].where((value) => value.isNotEmpty).join('\n\n');
+}
+
+Future<void> copyRenderedMemorySummary(ServerConversation conversation) {
+  return Clipboard.setData(ClipboardData(text: renderedMemorySummaryText(conversation)));
+}
+
 class ConversationDetailPage extends StatefulWidget {
   final ServerConversation conversation;
   final bool isFromOnboarding;
@@ -344,13 +355,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
         _copyContent(context, provider.conversation.getTranscript(generate: true));
         break;
       case 'copy_summary':
-        // Use app-generated summary if available, otherwise fall back to structured summary
-        final conversation = provider.conversation;
-        final summaryContent =
-            conversation.appResults.isNotEmpty && conversation.appResults[0].content.trim().isNotEmpty
-                ? conversation.appResults[0].content.trim()
-                : conversation.structured.toString();
-        _copyContent(context, summaryContent);
+        copyRenderedMemorySummary(provider.conversation);
+        _showContentCopiedFeedback(context);
         break;
       case 'fix_something':
         await showFixSomethingSheet(
@@ -545,6 +551,10 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
 
   void _copyContent(BuildContext context, String content) {
     Clipboard.setData(ClipboardData(text: content));
+    _showContentCopiedFeedback(context);
+  }
+
+  void _showContentCopiedFeedback(BuildContext context) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(context.l10n.contentCopied)),
     );

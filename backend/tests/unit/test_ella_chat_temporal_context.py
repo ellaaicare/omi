@@ -308,3 +308,35 @@ def test_memory_talk_correction_exchange_is_persisted_under_the_selected_memory(
     assert result["persisted"] == 2
     assert [turn["role"] for turn in persisted] == ["user", "assistant"]
     assert {turn["conversation_id"] for turn in persisted} == {"memory-1"}
+
+
+def test_memory_talk_history_returns_latest_bounded_window_in_chronological_order(monkeypatch):
+    persisted = [
+        {
+            "id": f"turn-{index}",
+            "role": "user",
+            "text": f"Turn {index}",
+            "created_at": datetime(2026, 7, 23, 17, index, tzinfo=timezone.utc),
+        }
+        for index in range(5)
+    ]
+
+    monkeypatch.setattr(chat, "_get_memory_conversation", lambda uid, conversation_id: {"id": conversation_id})
+
+    def fake_list_turns(uid, conversation_id, limit, *, newest_first=False):
+        assert uid == "uid-1"
+        assert conversation_id == "memory-1"
+        assert limit == 3
+        assert newest_first is True
+        return list(reversed(persisted))[:limit]
+
+    monkeypatch.setattr(chat.memory_talk_db, "list_turns", fake_list_turns)
+
+    result = chat.memory_talk_history("memory-1", limit=3, uid="uid-1")
+
+    assert [turn["id"] for turn in result["turns"]] == ["turn-2", "turn-3", "turn-4"]
+    assert [turn["created_at"] for turn in result["turns"]] == [
+        "2026-07-23T17:02:00+00:00",
+        "2026-07-23T17:03:00+00:00",
+        "2026-07-23T17:04:00+00:00",
+    ]

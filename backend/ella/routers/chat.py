@@ -1193,7 +1193,8 @@ def memory_talk_history(
         raise HTTPException(status_code=404, detail="Conversation not found")
     bounded_limit = max(1, min(limit, 100))
     turns = []
-    for turn in memory_talk_db.list_turns(uid, conversation_id, bounded_limit):
+    latest_turns = memory_talk_db.list_turns(uid, conversation_id, bounded_limit, newest_first=True)
+    for turn in reversed(latest_turns):
         created_at = turn.get("created_at")
         if isinstance(created_at, datetime):
             turn["created_at"] = created_at.astimezone(timezone.utc).isoformat()

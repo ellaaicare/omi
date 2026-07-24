@@ -27,6 +27,13 @@ void main() {
       expect(classifyCorrectionReply('That is not right'), CorrectionReplyIntent.negative);
     });
 
+    test('standalone apostrophized replies preserve straight and curly apostrophes', () {
+      expect(classifyCorrectionReply("don't"), CorrectionReplyIntent.negative);
+      expect(classifyCorrectionReply('don’t'), CorrectionReplyIntent.negative);
+      expect(classifyCorrectionReply("that's right"), CorrectionReplyIntent.affirmative);
+      expect(classifyCorrectionReply('that’s right'), CorrectionReplyIntent.affirmative);
+    });
+
     test('ambiguous replies stay pending for one explicit reprompt', () {
       expect(classifyCorrectionReply('Maybe Rose stopped later'), CorrectionReplyIntent.ambiguous);
     });
