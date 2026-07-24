@@ -196,7 +196,17 @@ async def write_conversation_summary(
             'active_summary_version_id': version_update['active_summary_version_id'],
         }
 
-    conversations_db.update_conversation(uid, conversation_id, update_data)
+    if require_based_on_match:
+        updated = conversations_db.update_conversation_if_active_summary_version(
+            uid,
+            conversation_id,
+            based_on_version_id,
+            update_data,
+        )
+        if not updated:
+            raise ConcurrentConversationSummaryChangeError('active_summary_version_changed')
+    else:
+        conversations_db.update_conversation(uid, conversation_id, update_data)
     canonical_base = dict(conversation)
     canonical_conversation = {
         **canonical_base,
