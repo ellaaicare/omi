@@ -15,7 +15,6 @@ class MemoryTalkDetail extends StatefulWidget {
   final bool hasDiscussion;
   final bool isTalkSheetOpen;
   final Future<void> Function() onUndo;
-  final VoidCallback onOpenDiscussion;
 
   const MemoryTalkDetail({
     super.key,
@@ -24,7 +23,6 @@ class MemoryTalkDetail extends StatefulWidget {
     required this.hasDiscussion,
     required this.isTalkSheetOpen,
     required this.onUndo,
-    required this.onOpenDiscussion,
   });
 
   @override
@@ -283,32 +281,29 @@ class _MemoryTalkDetailState extends State<MemoryTalkDetail> {
         ],
         if (!widget.isTalkSheetOpen && widget.hasDiscussion) ...[
           const SizedBox(height: 20),
-          InkWell(
-            onTap: widget.onOpenDiscussion,
-            borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
-            child: Ink(
-              height: 64,
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              decoration: BoxDecoration(
-                color: EllaColors.card,
-                borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      context.l10n.memoryTalkConversationAboutThis,
-                      style: const TextStyle(
-                        fontFamily: EllaTextStyles.uiFont,
-                        color: EllaColors.ink,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w600,
-                      ),
+          Container(
+            height: 56,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            decoration: BoxDecoration(
+              color: EllaColors.card,
+              borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+            ),
+            child: Row(
+              children: [
+                const FaIcon(FontAwesomeIcons.check, size: 13, color: EllaColors.tealDeep),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    context.l10n.memoryTalkConversationAboutThis,
+                    style: const TextStyle(
+                      fontFamily: EllaTextStyles.uiFont,
+                      color: EllaColors.ink,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const FaIcon(FontAwesomeIcons.chevronRight, size: 13, color: EllaColors.inkSoft),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ],

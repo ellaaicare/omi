@@ -43,6 +43,34 @@ void main() {
         ),
       );
 
+  Widget launcherApp({
+    required MemoryTalkAmbientCapturePauser pauseAmbientCapture,
+    required MemoryTalkAmbientCaptureResumer resumeAmbientCapture,
+    MemoryTalkCorrectionSubmitter? correctionSubmitter,
+    MemoryTalkCorrectionReceiptLoader? correctionReceiptLoader,
+  }) =>
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                await showMemoryTalkSheet(
+                  context,
+                  conversation: memory(),
+                  pauseAmbientCapture: pauseAmbientCapture,
+                  resumeAmbientCapture: resumeAmbientCapture,
+                  correctionSubmitter: correctionSubmitter,
+                  correctionReceiptLoader: correctionReceiptLoader,
+                );
+              },
+              child: const Text('Open memory talk'),
+            ),
+          ),
+        ),
+      );
+
   Future<void> send(WidgetTester tester, String text) async {
     final field = find.byType(TextField);
     await tester.enterText(field, text);
@@ -163,7 +191,97 @@ void main() {
     expect(submissionCount, 0);
 
     await send(tester, 'Yes');
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 500));
     expect(submissionCount, 1);
+  });
+
+  testWidgets('resumes ambient capture after the sheet is closed without a correction', (tester) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var pauseCount = 0;
+    var resumeCount = 0;
+    await tester.pumpWidget(
+      launcherApp(
+        pauseAmbientCapture: () async {
+          pauseCount += 1;
+          return true;
+        },
+        resumeAmbientCapture: () async {
+          resumeCount += 1;
+        },
+      ),
+    );
+
+    await tester.tap(find.text('Open memory talk'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(pauseCount, 1);
+    expect(resumeCount, 0);
+
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+    expect(resumeCount, 1);
+  });
+
+  testWidgets('resumes ambient capture after an applied correction receipt closes the sheet', (tester) async {
+    tester.view.physicalSize = const Size(402, 874);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var resumeCount = 0;
+    await tester.pumpWidget(
+      launcherApp(
+        pauseAmbientCapture: () async => true,
+        resumeAmbientCapture: () async {
+          resumeCount += 1;
+        },
+        correctionSubmitter: ({
+          required conversationId,
+          required correctionText,
+          summaryTitle,
+          summaryOverview,
+          appSummary,
+        }) async =>
+            const ConversationCorrectionSubmission(
+          correctionId: 'correction-1',
+          conversationId: 'garden',
+          status: 'queued',
+          queued: true,
+        ),
+        correctionReceiptLoader: ({
+          required conversationId,
+          required correctionId,
+        }) async =>
+            ConversationCorrectionReceipt(
+          correctionId: correctionId,
+          conversationId: conversationId,
+          status: 'applied',
+          appliedAt: DateTime(2026, 7, 23, 9, 45),
+          undoneAt: null,
+          beforeTitle: 'Coffee in the garden with Margaret',
+          beforeOverview: 'You had coffee in the garden with Margaret this morning.',
+          afterTitle: 'Coffee in the garden with Rose',
+          afterOverview: 'You had coffee in the garden with Rose this morning.',
+          propagationAppliedCount: 1,
+          propagationRevertedCount: 0,
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open memory talk'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 100));
+    await useKeyboard(tester);
+    await send(tester, "Actually, it wasn't Margaret — it was Rose who came by.");
+    await send(tester, 'Yes');
+    await tester.pumpAndSettle();
+
+    expect(find.byType(MemoryTalkSheet), findsNothing);
+    expect(resumeCount, 1);
   });
 }

@@ -96,6 +96,12 @@ def test_hermes_session_defaults_to_canonical(monkeypatch):
     assert chat._hermes_chat_memory_key("User/123") == "ella:omi:user-123:canonical"
 
 
+def test_memory_talk_uses_conversation_scoped_hermes_session():
+    session_key = chat._hermes_memory_talk_session_key("User/123", "Memory/456")
+
+    assert session_key == "ella:omi:user-123:canonical:memory:memory-456"
+
+
 def test_hermes_chat_headers_include_stable_session_key():
     headers = chat._hermes_chat_headers("ella:omi:abc123:ios-chat:daily-20260530", "ella:omi:abc123:canonical")
 
@@ -165,13 +171,122 @@ def test_memory_talk_turn_is_not_written_to_main_chat_or_created_as_a_memory(mon
     assert canonical == []
 
 
-def test_memory_talk_persona_acknowledges_without_judging_or_taking_sides():
-    prompt = chat.MEMORY_TALK_PERSONA_PROMPT.lower()
+def test_memory_talk_route_sends_only_selected_memory_and_scoped_turns_to_hermes(monkeypatch):
+    captured = {}
+    persisted = []
 
-    assert "acknowledge" in prompt
-    assert "without judging" in prompt
-    assert "taking sides" in prompt
-    assert "do not create a new memory" in prompt
+    async def fail_global_context(*args, **kwargs):
+        raise AssertionError("Memory talk must not fetch user-wide context")
+
+    async def fake_persist(**kwargs):
+        persisted.append(kwargs)
+
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def aiter_lines(self):
+            yield (
+                'data: {"choices":[{"delta":{"content":'
+                '"That sounds painful. I can stay with what this memory says without judging anyone."}}]}'
+            )
+            yield "data: [DONE]"
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def stream(self, method, url, *, headers, json):
+            captured.update(
+                {
+                    "method": method,
+                    "url": url,
+                    "headers": headers,
+                    "json": json,
+                }
+            )
+            return FakeResponse()
+
+    monkeypatch.setattr(chat, "HERMES_GATEWAY_TOKEN", "test-token")
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", fail_global_context)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", fail_global_context)
+    monkeypatch.setattr(
+        chat,
+        "_load_memory_talk_turns",
+        lambda uid, conversation_id: [
+            {
+                "role": "user",
+                "content": "I felt abandoned when my daughter did not call.",
+            },
+            {
+                "role": "assistant",
+                "content": "That sounds lonely. I will stay with this memory.",
+            },
+        ],
+    )
+    monkeypatch.setattr(chat, "_persist_chat_turn", fake_persist)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", FakeClient)
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in chat._stream_hermes_chat(
+                "Was she selfish?",
+                "uid-1",
+                turn_id="turn-1",
+                conversation_id="memory-1",
+                memory_context=(
+                    "Title: A missed phone call\n"
+                    "Summary: Margaret expected a call from Rose.\n"
+                    "Source conversation:\nRose did not call."
+                ),
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert captured["headers"]["X-Hermes-Session-Id"] == "ella:omi:uid-1:canonical:memory:memory-1"
+    assert captured["headers"]["X-Hermes-Session-Key"] == "ella:omi:uid-1:canonical:memory:memory-1"
+    assert captured["json"]["messages"] == [
+        {
+            "role": "system",
+            "content": (
+                f"{chat.MEMORY_TALK_PERSONA_PROMPT}\n\n"
+                "Memory context:\n"
+                "Title: A missed phone call\n"
+                "Summary: Margaret expected a call from Rose.\n"
+                "Source conversation:\nRose did not call."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "I felt abandoned when my daughter did not call.",
+        },
+        {
+            "role": "assistant",
+            "content": "That sounds lonely. I will stay with this memory.",
+        },
+        {"role": "user", "content": "Was she selfish?"},
+    ]
+    serialized_messages = str(captured["json"]["messages"])
+    assert "canonical timeline" not in serialized_messages
+    assert "unrelated memory" not in serialized_messages
+    assert "without judging" in serialized_messages
+    assert any("That sounds painful" in chunk for chunk in chunks)
+    assert len(persisted) == 2
+    assert all(call["conversation_id"] == "memory-1" for call in persisted)
+    assert all(call["session_key"] == "ella:omi:uid-1:canonical:memory:memory-1" for call in persisted)
 
 
 def test_memory_talk_correction_exchange_is_persisted_under_the_selected_memory(monkeypatch):

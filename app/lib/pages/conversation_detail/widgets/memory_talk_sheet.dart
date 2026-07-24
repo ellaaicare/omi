@@ -38,6 +38,9 @@ typedef MemoryTalkCorrectionReceiptLoader = Future<ConversationCorrectionReceipt
   required String correctionId,
 });
 
+typedef MemoryTalkAmbientCapturePauser = Future<bool> Function();
+typedef MemoryTalkAmbientCaptureResumer = Future<void> Function();
+
 class MemoryTalkSheetResult {
   final bool discussed;
   final MemoryTalkReceipt? receipt;
@@ -60,6 +63,10 @@ enum _TalkInputMode { voice, keyboard }
 Future<MemoryTalkSheetResult?> showMemoryTalkSheet(
   BuildContext context, {
   required ServerConversation conversation,
+  MemoryTalkAmbientCapturePauser? pauseAmbientCapture,
+  MemoryTalkAmbientCaptureResumer? resumeAmbientCapture,
+  MemoryTalkCorrectionSubmitter? correctionSubmitter,
+  MemoryTalkCorrectionReceiptLoader? correctionReceiptLoader,
 }) async {
   if (!SharedPreferencesUtil().demoMode && !SharedPreferencesUtil().aiConsentAccepted) {
     final accepted = await AiConsentSheet.show(context);
@@ -67,26 +74,63 @@ Future<MemoryTalkSheetResult?> showMemoryTalkSheet(
   }
 
   if (!context.mounted) return null;
-  return showModalBottomSheet<MemoryTalkSheetResult>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
-    barrierColor: EllaColors.ink.withValues(alpha: 0.35),
-    builder: (_) => MemoryTalkSheet(conversation: conversation),
-  );
+  CaptureProvider? captureProvider;
+  try {
+    captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+  } catch (_) {
+    // Memory detail can be rendered without the app provider tree in tests and previews.
+  }
+
+  final pause = pauseAmbientCapture ??
+      () async {
+        if (captureProvider?.recordingState != RecordingState.record) return false;
+        await captureProvider!.stopStreamRecording();
+        return true;
+      };
+  final resume = resumeAmbientCapture ??
+      () async {
+        await captureProvider?.streamRecording();
+      };
+  final resourcesReleased = Completer<void>();
+  var shouldResumeCapture = false;
+
+  try {
+    shouldResumeCapture = await pause();
+    if (!context.mounted) return null;
+    final result = await showModalBottomSheet<MemoryTalkSheetResult>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      barrierColor: EllaColors.ink.withValues(alpha: 0.35),
+      builder: (_) => MemoryTalkSheet(
+        conversation: conversation,
+        correctionSubmitter: correctionSubmitter,
+        correctionReceiptLoader: correctionReceiptLoader,
+        onResourcesReleased: () {
+          if (!resourcesReleased.isCompleted) resourcesReleased.complete();
+        },
+      ),
+    );
+    await resourcesReleased.future;
+    return result;
+  } finally {
+    if (shouldResumeCapture) await resume();
+  }
 }
 
 class MemoryTalkSheet extends StatefulWidget {
   final ServerConversation conversation;
   final MemoryTalkCorrectionSubmitter? correctionSubmitter;
   final MemoryTalkCorrectionReceiptLoader? correctionReceiptLoader;
+  final VoidCallback? onResourcesReleased;
 
   const MemoryTalkSheet({
     super.key,
     required this.conversation,
     this.correctionSubmitter,
     this.correctionReceiptLoader,
+    this.onResourcesReleased,
   });
 
   @override
@@ -119,6 +163,8 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
   String _currentWords = '';
   String _liveTranscript = '';
   int _ambiguousReplyCount = 0;
+  Future<void>? _resourceRelease;
+  bool _didNotifyResourcesReleased = false;
 
   bool get _isDemoMode => SharedPreferencesUtil().demoMode;
 
@@ -187,10 +233,34 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
     _controller.dispose();
     _focusNode.dispose();
     _scrollController.dispose();
-    if (_speech.isListening) unawaited(_speech.stop());
-    unawaited(_audioPlayer.dispose());
-    unawaited(ElevenLabsTts.stopOnDevice());
+    unawaited(_releaseAudioResources());
     super.dispose();
+  }
+
+  Future<void> _releaseAudioResources() {
+    return _resourceRelease ??= () async {
+      try {
+        if (!_isDemoMode) {
+          if (_speech.isListening) await _speech.stop();
+          await _audioPlayer.stop();
+          await ElevenLabsTts.stopOnDevice();
+          await _audioPlayer.dispose();
+        }
+      } finally {
+        if (!_didNotifyResourcesReleased) {
+          _didNotifyResourcesReleased = true;
+          widget.onResourcesReleased?.call();
+        }
+      }
+    }();
+  }
+
+  Future<void> _closeWithResult(MemoryTalkSheetResult result) async {
+    _voiceModeActive = false;
+    _openingTimer?.cancel();
+    _cancelDemoSpeech();
+    await _releaseAudioResources();
+    if (mounted) Navigator.of(context).pop(result);
   }
 
   String _whenLabel() {
@@ -290,15 +360,6 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
           );
         }
         return;
-      }
-
-      try {
-        final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
-        if (captureProvider.recordingState == RecordingState.record) {
-          await captureProvider.stopStreamRecording();
-        }
-      } catch (_) {
-        // Memory detail can be rendered in isolation in tests and previews.
       }
 
       await _audioPlayer.stop();
@@ -604,7 +665,7 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
         propagated: true,
       );
       if (!mounted) return;
-      Navigator.of(context).pop(MemoryTalkSheetResult(discussed: true, receipt: receipt));
+      await _closeWithResult(MemoryTalkSheetResult(discussed: true, receipt: receipt));
       return;
     }
 
@@ -633,7 +694,7 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
       if (speakAcknowledgement) await _speakEllaResponse(stillWorking);
       return;
     }
-    Navigator.of(context).pop(
+    await _closeWithResult(
       MemoryTalkSheetResult(
         discussed: true,
         receipt: MemoryTalkReceipt.fromApi(receipt, claim: claim),
@@ -691,10 +752,8 @@ class _MemoryTalkSheetState extends State<MemoryTalkSheet> {
     }
   }
 
-  void _finish() {
-    _voiceModeActive = false;
-    _cancelDemoSpeech();
-    Navigator.of(context).pop(MemoryTalkSheetResult(discussed: _hasDiscussed));
+  Future<void> _finish() async {
+    await _closeWithResult(MemoryTalkSheetResult(discussed: _hasDiscussed));
   }
 
   double _sheetFraction() {

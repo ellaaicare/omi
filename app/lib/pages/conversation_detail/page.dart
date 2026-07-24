@@ -48,6 +48,14 @@ import 'package:omi/ella/services/memory_talk_service.dart';
 // import 'package:omi/pages/settings/developer.dart';
 // import 'package:omi/backend/http/webhooks.dart';
 
+ConversationTab conversationTabForIndex(int index) {
+  return switch (index) {
+    0 => ConversationTab.transcript,
+    2 => ConversationTab.actionItems,
+    _ => ConversationTab.summary,
+  };
+}
+
 class ConversationDetailPage extends StatefulWidget {
   final ServerConversation conversation;
   final bool isFromOnboarding;
@@ -75,6 +83,8 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   final AppReviewService _appReviewService = AppReviewService();
   ConversationTab selectedTab = ConversationTab.summary;
 
+  // Callback to seek audio to transcript segment
+  Future<void> Function(double)? _seekToSegmentCallback;
   bool _isSharing = false;
   bool _isTogglingStarred = false;
   bool _isDownloadingAudio = false;
@@ -158,6 +168,7 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
   void initState() {
     super.initState();
 
+    selectedTab = conversationTabForIndex(widget.initialTabIndex);
     _controller = TabController(length: 3, vsync: this, initialIndex: widget.initialTabIndex);
     _controller!.addListener(() {
       setState(() {
@@ -1093,38 +1104,102 @@ class _ConversationDetailPageState extends State<ConversationDetailPage> with Ti
                         }
                       }
                     : null,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Consumer<ConversationDetailProvider>(
-                          builder: (context, provider, child) => MemoryTalkDetail(
-                            conversation: provider.conversation,
-                            receipt: _memoryTalkReceipt,
-                            hasDiscussion: _hasMemoryDiscussion || provider.conversation.memoryTalkState.hasDiscussion,
-                            isTalkSheetOpen: _isMemoryTalkOpen,
-                            onUndo: () => _undoMemoryTalk(provider),
-                            onOpenDiscussion: () => _openMemoryTalk(provider),
-                          ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: TabBarView(
+                    key: const ValueKey('conversation-detail-tabs'),
+                    controller: _controller,
+                    physics: const NeverScrollableScrollPhysics(),
+                    children: [
+                      TranscriptWidgets(
+                        key: const ValueKey('conversation-detail-transcript'),
+                        searchQuery: _searchQuery,
+                        currentResultIndex: getCurrentResultIndexForHighlighting(),
+                        onTapWhenSearchEmpty: () {
+                          if (_isSearching && _searchQuery.isEmpty) {
+                            setState(() {
+                              _isSearching = false;
+                              _searchController.clear();
+                              _searchFocusNode.unfocus();
+                            });
+                          }
+                        },
+                        onSegmentTap: (segment) async {
+                          if (selectedTab != ConversationTab.transcript) {
+                            setState(() => selectedTab = ConversationTab.transcript);
+                            _controller!.animateTo(0);
+                          }
+                          if (_seekToSegmentCallback != null) {
+                            await _seekToSegmentCallback!(segment.start);
+                            HapticFeedback.lightImpact();
+                          }
+                        },
+                      ),
+                      Consumer<ConversationDetailProvider>(
+                        key: const ValueKey('conversation-detail-summary'),
+                        builder: (context, provider, child) => MemoryTalkDetail(
+                          conversation: provider.conversation,
+                          receipt: _memoryTalkReceipt,
+                          hasDiscussion: _hasMemoryDiscussion || provider.conversation.memoryTalkState.hasDiscussion,
+                          isTalkSheetOpen: _isMemoryTalkOpen,
+                          onUndo: () => _undoMemoryTalk(provider),
                         ),
                       ),
-                    ),
-                  ],
+                      const ActionItemsTab(key: ValueKey('conversation-detail-action-items')),
+                    ],
+                  ),
                 ),
               ),
 
               // The single conversational entry on memory detail.
+              if (selectedTab == ConversationTab.summary)
+                Positioned(
+                  bottom: 116,
+                  left: 0,
+                  right: 0,
+                  child: Consumer<ConversationDetailProvider>(
+                    builder: (context, provider, child) {
+                      return Center(
+                        child: MemoryTalkPill(
+                          onPressed: () => _openMemoryTalk(provider),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+
+              // Preserve transcript navigation and audio playback.
               Positioned(
-                bottom: 24,
+                bottom: 32,
                 left: 0,
                 right: 0,
                 child: Consumer<ConversationDetailProvider>(
                   builder: (context, provider, child) {
-                    return Center(
-                      child: MemoryTalkPill(
-                        onPressed: () => _openMemoryTalk(provider),
-                      ),
+                    final conversation = provider.conversation;
+                    final hasActionItems =
+                        conversation.structured.actionItems.where((item) => !item.deleted).isNotEmpty;
+                    return ConversationBottomBar(
+                      mode: ConversationBottomBarMode.detail,
+                      selectedTab: selectedTab,
+                      conversation: conversation,
+                      hasSegments: conversation.transcriptSegments.isNotEmpty ||
+                          conversation.photos.isNotEmpty ||
+                          conversation.externalIntegration != null,
+                      hasActionItems: hasActionItems,
+                      onSeekFunctionReady: (seekFunction) {
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) setState(() => _seekToSegmentCallback = seekFunction);
+                        });
+                      },
+                      onTabSelected: (tab) {
+                        final index = switch (tab) {
+                          ConversationTab.transcript => 0,
+                          ConversationTab.summary => 1,
+                          ConversationTab.actionItems => 2,
+                        };
+                        _controller!.animateTo(index);
+                      },
+                      onStopPressed: () {},
                     );
                   },
                 ),

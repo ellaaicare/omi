@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from database import memory_talk as memory_talk_db
 from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
@@ -68,6 +69,7 @@ CHAT_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_LIMIT", "25"))
 CHAT_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_CANONICAL_CONTEXT_MAX_CHARS", "6000"))
 CHAT_TEMPORAL_CONTEXT_LIMIT = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_LIMIT", "250"))
 CHAT_TEMPORAL_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_CHAT_TEMPORAL_CONTEXT_MAX_CHARS", "9000"))
+MEMORY_TALK_HISTORY_LIMIT = int(os.getenv("ELLA_MEMORY_TALK_HISTORY_LIMIT", "24"))
 CHAT_USER_TIMEZONE = timezone_name(os.getenv("ELLA_USER_TIMEZONE", os.getenv("ELLA_PLATO_TIMEZONE", "")))
 CHAT_CONTEXT_CHANNELS = [
     channel.strip()
@@ -107,6 +109,11 @@ def _hermes_chat_session_key(uid: str) -> str:
     else:
         epoch = datetime.now(timezone.utc).astimezone(ZoneInfo(CHAT_USER_TIMEZONE)).strftime("daily-%Y%m%d")
     return f"ella:omi:{safe_uid}:ios-chat:{epoch}"
+
+
+def _hermes_memory_talk_session_key(uid: str, conversation_id: str) -> str:
+    safe_conversation_id = safe_session_component(conversation_id.lower())
+    return f"{_hermes_chat_memory_key(uid)}:memory:{safe_conversation_id}"
 
 
 def _hermes_chat_headers(session_id: str, session_key: str | None = None) -> dict[str, str]:
@@ -166,34 +173,12 @@ class MemoryTalkTurnsAppendRequest(BaseModel):
     turns: list[MemoryTalkTurnInput]
 
 
-def _memory_talk_ref(uid: str, conversation_id: str):
-    from database._client import db
-
-    return (
-        db.collection("users")
-        .document(uid)
-        .collection("conversations")
-        .document(conversation_id)
-        .collection("memory_talk_turns")
-    )
-
-
 def _get_memory_conversation(uid: str, conversation_id: str) -> dict | None:
-    from database import conversations as conversations_db
-
-    return conversations_db.get_conversation(uid, conversation_id)
+    return memory_talk_db.get_conversation(uid, conversation_id)
 
 
 def _get_linked_people(uid: str, person_ids: list[str]) -> list[dict]:
-    from database import users as users_db
-
-    return users_db.get_people_by_ids(uid, person_ids)
-
-
-def _update_memory_conversation(uid: str, conversation_id: str, update: dict) -> None:
-    from database import conversations as conversations_db
-
-    conversations_db.update_conversation(uid, conversation_id, update)
+    return memory_talk_db.get_people_by_ids(uid, person_ids)
 
 
 def _memory_talk_context(uid: str, conversation_id: str) -> str:
@@ -231,6 +216,18 @@ def _memory_talk_context(uid: str, conversation_id: str) -> str:
     )
 
 
+def _load_memory_talk_turns(uid: str, conversation_id: str, limit: int = MEMORY_TALK_HISTORY_LIMIT) -> list[dict]:
+    bounded_limit = max(1, min(limit, 50))
+    turns = []
+    for value in memory_talk_db.list_turns(uid, conversation_id, bounded_limit, newest_first=True):
+        role = str(value.get("role") or "").strip()
+        text = str(value.get("text") or "").strip()
+        if role in {"user", "assistant"} and text:
+            turns.append({"role": role, "content": text[:4000]})
+    turns.reverse()
+    return turns
+
+
 def _persist_memory_talk_turn(
     *,
     uid: str,
@@ -241,28 +238,22 @@ def _persist_memory_talk_turn(
     created_at: datetime,
 ) -> None:
     document_id = f"{turn_id}-{role}"
-    _memory_talk_ref(uid, conversation_id).document(document_id).set(
-        {
-            "id": document_id,
-            "role": role,
-            "text": text,
-            "created_at": created_at,
-            "conversation_id": conversation_id,
-        },
-        merge=True,
+    memory_talk_db.write_turn(
+        uid=uid,
+        conversation_id=conversation_id,
+        document_id=document_id,
+        role=role,
+        text=text,
+        created_at=created_at,
     )
     conversation = _get_memory_conversation(uid, conversation_id) or {}
     state = conversation.get("memory_talk_state") if isinstance(conversation.get("memory_talk_state"), dict) else {}
-    _update_memory_conversation(
+    memory_talk_db.update_discussion_state(
         uid,
         conversation_id,
-        {
-            "memory_talk_state": {
-                "has_discussion": True,
-                "turn_count": int(state.get("turn_count") or 0) + 1,
-                "updated_at": created_at,
-            }
-        },
+        has_discussion=True,
+        turn_count=int(state.get("turn_count") or 0) + 1,
+        updated_at=created_at,
     )
 
 
@@ -649,7 +640,13 @@ async def _stream_level_3_n8n(user_message: str, uid: str, conversation_id: str)
             yield f"data: {error_data}\n\n"
 
 
-async def _stream_level_4_openclaw(user_message: str, uid: str, client_info: dict = None):
+async def _stream_level_4_openclaw(
+    user_message: str,
+    uid: str,
+    client_info: dict = None,
+    *,
+    conversation_id: str = "",
+):
     """Level 4: Direct to OpenClaw gateway's OpenAI-compatible endpoint.
 
     Dynamically resolves the user's agent from the database instead of
@@ -864,13 +861,19 @@ async def _stream_hermes_chat(
         yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
         return
 
-    session_key = _hermes_chat_session_key(uid)
+    is_memory_talk = bool(conversation_id)
+    session_key = (
+        _hermes_memory_talk_session_key(uid, conversation_id) if is_memory_talk else _hermes_chat_session_key(uid)
+    )
+    memory_key = session_key if is_memory_talk else _hermes_chat_memory_key(uid)
     user_started_at = client_sent_at or datetime.now(timezone.utc)
     turn_id = turn_id or f"server-{uuid4()}"
     text = []
-    canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
+    canonical_events = [] if is_memory_talk else await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
     canonical_context = format_canonical_context(canonical_events, max_chars=CHAT_CONTEXT_MAX_CHARS)
-    temporal_label, temporal_events = await _fetch_temporal_chat_context(uid, user_message)
+    temporal_label, temporal_events = (
+        (None, []) if is_memory_talk else await _fetch_temporal_chat_context(uid, user_message)
+    )
     temporal_context = format_canonical_context(
         temporal_events,
         max_chars=CHAT_TEMPORAL_CONTEXT_MAX_CHARS,
@@ -884,6 +887,7 @@ async def _stream_hermes_chat(
                 "content": f"{MEMORY_TALK_PERSONA_PROMPT}\n\nMemory context:\n{memory_context}",
             }
         )
+        messages.extend(await asyncio.to_thread(_load_memory_talk_turns, uid, conversation_id))
     if canonical_context:
         messages.append(
             {
@@ -896,7 +900,7 @@ async def _stream_hermes_chat(
                 ),
             }
         )
-    else:
+    elif not is_memory_talk:
         print(
             f"[FLOW:CHAT-HERMES] uid={uid} canonical_context=empty fallback=hermes_session_history_migration",
             flush=True,
@@ -923,7 +927,6 @@ async def _stream_hermes_chat(
         client_info=client_info,
     )
     messages.append({"role": "user", "content": user_message})
-    memory_key = _hermes_chat_memory_key(uid)
     print(
         f"[FLOW:CHAT-HERMES] uid={uid} gateway={HERMES_GATEWAY_URL} session={session_key} memory_key={memory_key} session_strategy={HERMES_CHAT_SESSION_SCOPE} turn_id={turn_id} canonical_events={len(canonical_events)} temporal_events={len(temporal_events)}",
         flush=True,
@@ -1154,6 +1157,7 @@ async def ella_chat_stream(
                     "route": x_ella_route or "",
                     "headers": {k: v for k, v in raw_request.headers.items() if k.lower().startswith("x-ella-")},
                 },
+                conversation_id=request.conversation_id,
             ),
             media_type="text/event-stream",
         )
@@ -1188,10 +1192,8 @@ def memory_talk_history(
     if _get_memory_conversation(uid, conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     bounded_limit = max(1, min(limit, 100))
-    snapshots = _memory_talk_ref(uid, conversation_id).order_by("created_at").limit(bounded_limit).stream()
     turns = []
-    for snapshot in snapshots:
-        turn = snapshot.to_dict() or {}
+    for turn in memory_talk_db.list_turns(uid, conversation_id, bounded_limit):
         created_at = turn.get("created_at")
         if isinstance(created_at, datetime):
             turn["created_at"] = created_at.astimezone(timezone.utc).isoformat()

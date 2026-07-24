@@ -5,7 +5,9 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/l10n/app_localizations.dart';
+import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/pages/conversations/widgets/failed_conversations_section.dart';
+import 'package:omi/widgets/conversation_bottom_bar.dart';
 
 ServerConversation _failedConversation() {
   return ServerConversation(
@@ -52,6 +54,16 @@ Widget _app({
 }
 
 void main() {
+  test('failed-conversation detail opens on the preserved transcript tab', () {
+    final page = ConversationDetailPage(
+      conversation: _failedConversation(),
+      initialTabIndex: 0,
+    );
+
+    expect(page.initialTabIndex, 0);
+    expect(conversationTabForIndex(page.initialTabIndex), ConversationTab.transcript);
+  });
+
   testWidgets('shows safe copy and preserved transcript without provider internals', (tester) async {
     await tester.pumpWidget(_app(retrying: false, onRetry: (_, {correctionText}) async => true));
     await tester.pumpAndSettle();
