@@ -15,6 +15,7 @@ Provider types:
   v2v  — Voice-to-voice (WebSocket, bidirectional audio streaming via /session)
 """
 
+import asyncio
 import base64
 import hmac
 import json
@@ -25,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
 import asyncpg
 import httpx
@@ -37,6 +38,7 @@ from pydantic import BaseModel
 from database.conversations import _decrypt_conversation_data
 from ella.services.provisioning import ProvisioningError, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.voice_honcho import fetch_voice_honcho_context, search_voice_honcho
 from utils.ella.canonical_context import fetch_canonical_timeline
 from utils.other import endpoints as auth
 
@@ -104,6 +106,10 @@ class VoiceProxyPrincipal:
     provider: str
     voice_mode: str
     isolated_runtime: bool
+    scope_kind: Optional[str] = None
+    conversation_id: Optional[str] = None
+    active_summary_version_id: Optional[str] = None
+    can_reinterpret: bool = False
 
 
 def _voice_proxy_bearer(request: Request) -> str:
@@ -195,12 +201,38 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
+    scope_kind = claims.get("scope_kind")
+    scope_claim_keys = {
+        "scope_kind",
+        "conversation_id",
+        "active_summary_version_id",
+        "can_reinterpret",
+    }
+    if scope_kind is None:
+        if any(key in claims for key in scope_claim_keys):
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+    elif (
+        scope_kind != "memory"
+        or not str(claims.get("conversation_id") or "").strip()
+        or not isinstance(claims.get("active_summary_version_id"), str)
+        or not isinstance(claims.get("can_reinterpret"), bool)
+    ):
+        raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+
     return VoiceProxyPrincipal(
         uid=subject,
         session_id=str(claims.get("jti") or ""),
         provider=str(claims.get("provider") or ""),
         voice_mode=str(claims.get("voice_mode") or ""),
         isolated_runtime=claims.get("isolated_runtime") is True,
+        scope_kind=scope_kind,
+        conversation_id=str(claims.get("conversation_id") or "").strip() or None,
+        active_summary_version_id=(
+            str(claims.get("active_summary_version_id"))
+            if scope_kind == "memory"
+            else None
+        ),
+        can_reinterpret=claims.get("can_reinterpret") is True,
     )
 
 
@@ -299,12 +331,21 @@ V2V_PROVIDERS = {
 # ============================================================================
 
 
+class VoiceSessionScope(BaseModel):
+    """Non-authoritative client scope; all memory content is resolved server-side."""
+
+    kind: Literal["memory"]
+    conversation_id: str
+    expected_active_summary_version_id: Optional[str] = None
+
+
 class VoiceSessionRequest(BaseModel):
     """Request for creating a V2V voice session."""
 
     uid: Optional[str] = None
     provider: str = "grok-voice"
     voice_mode: Optional[str] = None
+    session_scope: Optional[VoiceSessionScope] = None
 
 
 class VoiceSessionResponse(BaseModel):
@@ -316,6 +357,8 @@ class VoiceSessionResponse(BaseModel):
     audio_format: dict
     provider: str
     voice_mode: str
+    session_id: str
+    session_scope: Optional[dict] = None
 
 
 class VoiceConfigResponse(BaseModel):
@@ -328,6 +371,132 @@ class VoiceConfigResponse(BaseModel):
 
 
 DEFAULT_ELEVENLABS_VOICE_ID = "pFZP5JQG7iQjIQuC4Bku"
+
+
+def _iso_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value or "")
+
+
+def _load_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> Optional[dict[str, Any]]:
+    """Load one user-owned canonical memory without probing other users."""
+    from database import conversations as conversations_db
+    from database import users as users_db
+
+    conversation_id = str(scope.conversation_id or "").strip()
+    if not conversation_id:
+        return None
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if not isinstance(conversation, dict):
+        return None
+
+    active_version_id = str(conversation.get("active_summary_version_id") or "")
+    expected_version_id = str(scope.expected_active_summary_version_id or "")
+    if expected_version_id and expected_version_id != active_version_id:
+        raise ValueError("voice_session_scope_stale")
+
+    structured = conversation.get("structured")
+    structured = structured if isinstance(structured, dict) else {}
+    person_ids: list[str] = []
+    for segment in conversation.get("transcript_segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        person_id = str(segment.get("person_id") or "").strip()
+        if person_id and person_id not in person_ids:
+            person_ids.append(person_id)
+    people: list[str] = []
+    if person_ids:
+        try:
+            for person in users_db.get_people_by_ids(uid, person_ids):
+                if not isinstance(person, dict):
+                    continue
+                name = str(person.get("name") or "").strip()
+                if name and name not in people:
+                    people.append(name)
+        except Exception as exc:
+            logger.warning(
+                "[FLOW:VOICE-SCOPE] people lookup degraded uid=%s conversation=%s error=%s",
+                uid,
+                conversation_id,
+                type(exc).__name__,
+            )
+
+    occurred_at = (
+        conversation.get("started_at")
+        or conversation.get("created_at")
+        or conversation.get("finished_at")
+    )
+    title = str(structured.get("title") or "Untitled memory").strip()
+    overview = str(structured.get("overview") or "").strip()
+    topic_query = " ".join(
+        part
+        for part in (
+            title,
+            overview[:700],
+            " ".join(people[:12]),
+            _iso_value(occurred_at)[:10],
+        )
+        if part
+    )[:1200]
+
+    return {
+        "kind": "memory",
+        "conversation_id": conversation_id,
+        "active_summary_version_id": active_version_id,
+        "can_reinterpret": not bool(conversation.get("is_locked")),
+        "title": title[:300],
+        "overview": overview[:1600],
+        "emoji": str(structured.get("emoji") or "")[:16],
+        "category": str(structured.get("category") or "")[:80],
+        "people": people[:12],
+        "occurred_at": _iso_value(occurred_at),
+        "topic_query": topic_query,
+        "instruction": (
+            "This is a memory-scoped conversation. Help the user reminisce and "
+            "answer questions normally. Do not treat every statement as a correction. "
+            "Memory changes are considered asynchronously after the session."
+        ),
+    }
+
+
+async def _resolve_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> dict[str, Any]:
+    try:
+        resolved = await asyncio.to_thread(_load_voice_memory_scope, uid, scope)
+    except ValueError as exc:
+        if str(exc) == "voice_session_scope_stale":
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"}) from exc
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:VOICE-SCOPE] lookup unavailable uid=%s conversation=%s error=%s",
+            uid,
+            scope.conversation_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail={"code": "voice_session_scope_unavailable"}) from exc
+    if not resolved:
+        # Missing and non-owned IDs intentionally share one response.
+        raise HTTPException(status_code=404, detail={"code": "voice_session_scope_not_found"})
+    return resolved
+
+
+async def _resolve_principal_memory_scope(principal: VoiceProxyPrincipal) -> Optional[dict[str, Any]]:
+    if principal.scope_kind != "memory":
+        return None
+    resolved = await _resolve_voice_memory_scope(
+        principal.uid,
+        VoiceSessionScope(
+            kind="memory",
+            conversation_id=principal.conversation_id or "",
+            expected_active_summary_version_id=principal.active_summary_version_id,
+        ),
+    )
+    if resolved["can_reinterpret"] != principal.can_reinterpret:
+        raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
+    return resolved
 
 
 class TtsRequest(BaseModel):
@@ -399,6 +568,8 @@ def create_session_token(
     voice_mode: str = "v3-rich",
     provider: str = "grok-voice",
     isolated_runtime: bool = False,
+    session_id: Optional[str] = None,
+    session_scope: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     Create a JWT session token for V2V connection.
@@ -431,11 +602,20 @@ def create_session_token(
         "context_url": f"{ELLA_API_BASE}/v1/users/{uid}/context",
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
         "aud": VOICE_SESSION_AUDIENCE,
-        "jti": str(uuid.uuid4()),
+        "jti": session_id or str(uuid.uuid4()),
         "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
     }
+    if session_scope:
+        payload.update(
+            {
+                "scope_kind": session_scope["kind"],
+                "conversation_id": session_scope["conversation_id"],
+                "active_summary_version_id": session_scope["active_summary_version_id"],
+                "can_reinterpret": bool(session_scope["can_reinterpret"]),
+            }
+        )
 
     return jwt.encode(payload, ELLA_SESSION_SECRET, algorithm="HS256")
 
@@ -570,6 +750,7 @@ async def create_voice_session(
     uid = authenticated_uid
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
+    requested_scope = body.session_scope if body else None
 
     runtime_bound = runtime_bindings_enabled(uid)
     voice_rollout_enabled = isolated_voice_routing_enabled(uid)
@@ -585,6 +766,14 @@ async def create_voice_session(
             # Runtime-bound users must never fall through to legacy voice while
             # their explicit isolated-voice rollout gate remains disabled.
             raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
+    if requested_scope and not isolated_runtime:
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
+
+    memory_scope = (
+        await _resolve_voice_memory_scope(uid, requested_scope)
+        if requested_scope
+        else None
+    )
 
     # Validate provider
     if provider not in V2V_PROVIDERS:
@@ -621,6 +810,7 @@ async def create_voice_session(
         logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
 
     try:
+        session_id = str(uuid.uuid4())
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,
@@ -628,6 +818,8 @@ async def create_voice_session(
             voice_mode=resolved_mode,
             provider=provider,
             isolated_runtime=isolated_runtime,
+            session_id=session_id,
+            session_scope=memory_scope,
         )
 
         # Build endpoint URL with mode query param
@@ -653,6 +845,17 @@ async def create_voice_session(
             },
             provider=provider,
             voice_mode=resolved_mode,
+            session_id=session_id,
+            session_scope=(
+                {
+                    "kind": memory_scope["kind"],
+                    "conversation_id": memory_scope["conversation_id"],
+                    "active_summary_version_id": memory_scope["active_summary_version_id"],
+                    "can_reinterpret": memory_scope["can_reinterpret"],
+                }
+                if memory_scope
+                else None
+            ),
         )
 
     except HTTPException:
@@ -1038,6 +1241,7 @@ async def get_voice_context(request: Request):
     principal = authenticate_voice_proxy_request(request, uid)
     uid = principal.uid
     runtime = await _resolve_voice_runtime(principal)
+    memory_scope = await _resolve_principal_memory_scope(principal)
 
     budget = body.get("context_budget", 8000)
     memory_timeout_seconds = float(body.get("memory_timeout_seconds", 2.0))
@@ -1140,15 +1344,33 @@ async def get_voice_context(request: Request):
     recent_conversations = ""
     recent_timeline = ""
     memory_context = ""
+    honcho_context_result: dict[str, Any] = {
+        "available": False,
+        "reason": "isolated_runtime_required",
+        "context": "",
+    }
     try:
-        import asyncio as _aio
-
-        conv_task = _aio.create_task(_fetch_recent_conversations(uid, limit=8))
-        timeline_task = _aio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
+        conv_task = asyncio.create_task(_fetch_recent_conversations(uid, limit=8))
+        timeline_task = asyncio.create_task(_fetch_recent_canonical_timeline(uid, limit=40, max_chars=9000))
         if runtime:
-            mem_task = _aio.create_task(_aio.sleep(0, result=""))
+            mem_task = asyncio.create_task(asyncio.sleep(0, result=""))
+            honcho_query = (
+                memory_scope.get("topic_query")
+                if memory_scope
+                else (
+                    "Recent themes, personal facts, relationships, preferences, "
+                    "plans, and details useful for a supportive voice conversation."
+                )
+            )
+            honcho_task = asyncio.create_task(
+                fetch_voice_honcho_context(
+                    runtime,
+                    query=str(honcho_query or ""),
+                    top_k=16 if memory_scope else 12,
+                )
+            )
         else:
-            mem_task = _aio.create_task(
+            mem_task = asyncio.create_task(
                 _fetch_memory_context(
                     gateway_url,
                     gateway_token,
@@ -1156,10 +1378,17 @@ async def get_voice_context(request: Request):
                     timeout_seconds=memory_timeout_seconds,
                 )
             )
-        recent_conversations, recent_timeline, memory_context = await _aio.gather(
+            honcho_task = asyncio.create_task(asyncio.sleep(0, result=honcho_context_result))
+        (
+            recent_conversations,
+            recent_timeline,
+            memory_context,
+            honcho_context_result,
+        ) = await asyncio.gather(
             conv_task,
             timeline_task,
             mem_task,
+            honcho_task,
         )
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Parallel context fetch error: {e}")
@@ -1211,6 +1440,7 @@ async def get_voice_context(request: Request):
         f"[FLOW:VOICE-CONTEXT] uid={uid} user={row['name']} agent={agent_id} "
         f"files={len(files)} rules={len(dynamic_rules)} "
         f"convos={len(recent_conversations)} timeline={len(recent_timeline)} mem={len(memory_context)} "
+        f"honcho={honcho_context_result.get('reason')} "
         f"latency={_elapsed}ms",
         flush=True,
     )
@@ -1232,6 +1462,13 @@ async def get_voice_context(request: Request):
         "recent_timeline": recent_timeline,
         "recent_conversations": recent_conversations,
         "memory_context": memory_context,
+        "honcho_context": str(honcho_context_result.get("context") or ""),
+        "honcho_status": {
+            key: value
+            for key, value in honcho_context_result.items()
+            if key != "context"
+        },
+        "memory_scope": memory_scope,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
         "dynamic_rules": dynamic_rules,
@@ -1502,10 +1739,10 @@ async def search_omi_conversations(request: Request):
 # Privacy policy: maps agent_role -> source -> access level
 # True = full access, False = no access, "own" = own data only, "full" = full
 SEARCH_POLICY = {
-    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": "own"},
-    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "scanner": "full"},
-    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "scanner": False},
-    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "scanner": False},
+    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": "own"},
+    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "honcho": False, "scanner": "full"},
+    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "honcho": False, "scanner": False},
+    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": False},
 }
 
 # Which source keys map to which request-level source names
@@ -1516,6 +1753,7 @@ _SOURCE_TO_POLICY_KEYS = {
     "omi":       ["omi_full", "omi_meta"],
     "memories":  ["memories"],
     "voice":     ["voice"],
+    "honcho":    ["honcho"],
     "scanner":   ["scanner"],
 }
 
@@ -2801,6 +3039,10 @@ async def unified_search(request: Request):
             tasks.append(_search_voice_logs(uid, agent_id, query, limit))
         task_source_names.append("voice")
 
+    if runtime and allowed.get("honcho"):
+        tasks.append(search_voice_honcho(runtime, query, limit))
+        task_source_names.append("honcho")
+
     scanner_access = allowed.get("scanner")
     if scanner_access:
         access_level = "full" if scanner_access == "full" else "own"
@@ -2808,7 +3050,16 @@ async def unified_search(request: Request):
         task_source_names.append("scanner")
 
     # Determine which sources were denied
-    all_source_names = {"voice_memory", "timeline", "workspace", "omi", "memories", "voice", "scanner"}
+    all_source_names = {
+        "voice_memory",
+        "timeline",
+        "workspace",
+        "omi",
+        "memories",
+        "voice",
+        "honcho",
+        "scanner",
+    }
     if requested_sources:
         requested_set = set(requested_sources)
     else:

@@ -209,6 +209,90 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
     assert claims["isolated_runtime"] is True
 
 
+def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monkeypatch):
+    async def ready_runtime(uid):
+        assert uid == "user-a"
+        return object()
+
+    async def resolve_scope(uid, scope):
+        assert uid == "user-a"
+        assert scope.conversation_id == "memory-a"
+        return {
+            "kind": "memory",
+            "conversation_id": "memory-a",
+            "active_summary_version_id": "version-2",
+            "can_reinterpret": True,
+            "title": "Private title",
+            "overview": "Private overview",
+        }
+
+    class Pool:
+        async def fetchrow(self, *args):
+            return {"name": "User A"}
+
+    async def pool():
+        return Pool()
+
+    monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
+    monkeypatch.setattr(voice, "_resolve_voice_memory_scope", resolve_scope)
+    monkeypatch.setattr(voice, "_get_pool", pool)
+
+    result = asyncio.run(
+        voice.create_voice_session(
+            body=voice.VoiceSessionRequest(
+                uid="user-a",
+                provider="grok-voice",
+                session_scope=voice.VoiceSessionScope(
+                    kind="memory",
+                    conversation_id="memory-a",
+                ),
+            ),
+            authenticated_uid="user-a",
+        )
+    )
+    claims = voice.jwt.decode(
+        result.session_token,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert result.session_id == claims["jti"]
+    assert result.session_scope == {
+        "kind": "memory",
+        "conversation_id": "memory-a",
+        "active_summary_version_id": "version-2",
+        "can_reinterpret": True,
+    }
+    assert claims["conversation_id"] == "memory-a"
+    assert "title" not in claims
+    assert "overview" not in claims
+
+
+def test_missing_and_nonowned_memory_scope_are_indistinguishable(monkeypatch):
+    monkeypatch.setattr(voice, "_load_voice_memory_scope", lambda uid, scope: None)
+
+    responses = []
+    for conversation_id in ("missing", "owned-by-another-user"):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(
+                voice._resolve_voice_memory_scope(
+                    "user-a",
+                    voice.VoiceSessionScope(kind="memory", conversation_id=conversation_id),
+                )
+            )
+        responses.append((error.value.status_code, error.value.detail))
+
+    assert responses == [
+        (404, {"code": "voice_session_scope_not_found"}),
+        (404, {"code": "voice_session_scope_not_found"}),
+    ]
+
+
 def test_voice_session_rejects_voice_canary_without_runtime_binding(monkeypatch):
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: uid == "user-a")

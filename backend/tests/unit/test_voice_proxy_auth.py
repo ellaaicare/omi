@@ -39,22 +39,31 @@ def _request(body: dict, *, token: str = "", service_token: str = "") -> Request
     )
 
 
-def _token(uid: str, *, isolated: bool = True, expired: bool = False) -> str:
+def _token(
+    uid: str,
+    *,
+    isolated: bool = True,
+    expired: bool = False,
+    scope: dict | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
+    claims = {
+        "sub": uid,
+        "uid": uid,
+        "firebase_uid": uid,
+        "provider": "grok-voice",
+        "voice_mode": "v4",
+        "isolated_runtime": isolated,
+        "jti": f"session-{uid}",
+        "aud": voice.VOICE_SESSION_AUDIENCE,
+        "iss": "omi-backend",
+        "iat": now - timedelta(minutes=2),
+        "exp": now - timedelta(minutes=1) if expired else now + timedelta(minutes=10),
+    }
+    if scope:
+        claims.update(scope)
     return jwt.encode(
-        {
-            "sub": uid,
-            "uid": uid,
-            "firebase_uid": uid,
-            "provider": "grok-voice",
-            "voice_mode": "v4",
-            "isolated_runtime": isolated,
-            "jti": f"session-{uid}",
-            "aud": voice.VOICE_SESSION_AUDIENCE,
-            "iss": "omi-backend",
-            "iat": now - timedelta(minutes=2),
-            "exp": now - timedelta(minutes=1) if expired else now + timedelta(minutes=10),
-        },
+        claims,
         voice.ELLA_SESSION_SECRET,
         algorithm="HS256",
     )
@@ -105,6 +114,84 @@ def test_voice_session_token_has_firebase_subject_and_proxy_audience():
     assert claims["uid"] == "uid-a"
     assert claims["isolated_runtime"] is True
     assert claims["jti"]
+
+
+def test_voice_session_token_binds_memory_scope_without_memory_content():
+    encoded = voice.create_session_token(
+        uid="uid-a",
+        firebase_uid="uid-a",
+        voice_mode="v4",
+        provider="grok-voice",
+        isolated_runtime=True,
+        session_id="session-a",
+        session_scope={
+            "kind": "memory",
+            "conversation_id": "memory-a",
+            "active_summary_version_id": "version-3",
+            "can_reinterpret": True,
+            "title": "Must not enter token",
+        },
+    )
+    claims = jwt.decode(
+        encoded,
+        voice.ELLA_SESSION_SECRET,
+        algorithms=["HS256"],
+        issuer="omi-backend",
+        audience=voice.VOICE_SESSION_AUDIENCE,
+    )
+
+    assert claims["jti"] == "session-a"
+    assert claims["scope_kind"] == "memory"
+    assert claims["conversation_id"] == "memory-a"
+    assert claims["active_summary_version_id"] == "version-3"
+    assert claims["can_reinterpret"] is True
+    assert "title" not in claims
+
+
+def test_voice_proxy_rejects_partial_scope_claims():
+    token = _token(
+        "uid-a",
+        scope={"scope_kind": "memory", "conversation_id": "memory-a"},
+    )
+
+    with pytest.raises(HTTPException) as error:
+        voice.authenticate_voice_proxy_request(
+            _request(
+                {"uid": "uid-a"},
+                token=token,
+                service_token="test-proxy-secret",
+            ),
+            "uid-a",
+        )
+
+    assert error.value.status_code == 401
+    assert error.value.detail == {"code": "voice_session_invalid"}
+
+
+def test_voice_proxy_accepts_complete_memory_scope_claims():
+    token = _token(
+        "uid-a",
+        scope={
+            "scope_kind": "memory",
+            "conversation_id": "memory-a",
+            "active_summary_version_id": "version-3",
+            "can_reinterpret": False,
+        },
+    )
+
+    principal = voice.authenticate_voice_proxy_request(
+        _request(
+            {"uid": "uid-a"},
+            token=token,
+            service_token="test-proxy-secret",
+        ),
+        "uid-a",
+    )
+
+    assert principal.scope_kind == "memory"
+    assert principal.conversation_id == "memory-a"
+    assert principal.active_summary_version_id == "version-3"
+    assert principal.can_reinterpret is False
 
 
 @pytest.mark.parametrize("endpoint", ["context", "search", "tool"])
@@ -233,7 +320,14 @@ def test_voice_runtime_rechecks_rollout_gate_on_every_request(
 
 
 def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeypatch):
-    runtime = SimpleNamespace(agent_id="ella-uid-a", revision=7)
+    runtime = SimpleNamespace(
+        uid="uid-a",
+        agent_id="ella-uid-a",
+        revision=7,
+        honcho_workspace="workspace-a",
+        observer_peer="ella-a",
+        observed_peer="user-a",
+    )
     queries = []
     requests = []
 
@@ -278,12 +372,25 @@ def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeyp
     async def empty(*args, **kwargs):
         return ""
 
+    async def honcho_context(runtime_arg, *, query, top_k):
+        assert runtime_arg is runtime
+        assert "Recent themes" in query
+        assert top_k == 12
+        return {
+            "available": True,
+            "reason": "ok",
+            "context": "Honcho remembers the user's gardening plans.",
+            "latency_ms": 42,
+            "source": "honcho",
+        }
+
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(voice, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
     monkeypatch.setattr(voice, "_fetch_recent_conversations", empty)
     monkeypatch.setattr(voice, "_fetch_recent_canonical_timeline", empty)
+    monkeypatch.setattr(voice, "fetch_voice_honcho_context", honcho_context)
     monkeypatch.setattr(voice.httpx, "AsyncClient", Client)
 
     result = asyncio.run(
@@ -301,6 +408,8 @@ def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeyp
     assert result["runtime"] == {"provider": "hermes", "agent_id": "ella-uid-a", "binding_revision": 7}
     assert "gateway_token" not in result
     assert "gateway_url" not in result
+    assert result["honcho_context"] == "Honcho remembers the user's gardening plans."
+    assert result["honcho_status"]["available"] is True
     assert requests[0][0] == "http://hermes-8210/workspace/ella-uid-a/files"
     assert requests[0][1]["X-Ella-Owner-Uid"] == "uid-a"
 
@@ -343,6 +452,57 @@ def test_isolated_search_forces_receipt_agent_and_owner_header(monkeypatch):
             },
         )
     ]
+
+
+def test_isolated_search_includes_receipt_bound_honcho_source(monkeypatch):
+    runtime = SimpleNamespace(
+        uid="uid-a",
+        agent_id="ella-uid-a",
+        revision=8,
+        honcho_workspace="workspace-a",
+        observer_peer="ella-a",
+        observed_peer="user-a",
+    )
+    calls = []
+
+    async def resolve(uid):
+        return runtime
+
+    async def honcho_search(runtime_arg, query, limit):
+        calls.append((runtime_arg, query, limit))
+        return [
+            {
+                "source": "honcho",
+                "title": "Related user context",
+                "content": "User A discussed tomato plants.",
+                "score": 90,
+                "metadata": {"provenance": "honcho_conclusion"},
+            }
+        ]
+
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(voice, "search_voice_honcho", honcho_search)
+
+    result = asyncio.run(
+        voice.unified_search(
+            _request(
+                {
+                    "uid": "uid-a",
+                    "query": "tomato plants",
+                    "sources": ["honcho"],
+                },
+                token=_token("uid-a"),
+                service_token="test-proxy-secret",
+            )
+        )
+    )
+
+    assert result["sources_searched"] == ["honcho"]
+    assert result["sources_denied"] == []
+    assert result["results"][0]["content"] == "User A discussed tomato plants."
+    assert calls == [(runtime, "tomato plants", 5)]
 
 
 def test_isolated_workspace_search_uses_hermes_post_contract(monkeypatch):
