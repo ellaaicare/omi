@@ -15,6 +15,56 @@ def _runtime():
     )
 
 
+def test_isolated_target_uses_runtime_receipt_without_profile_fallback(monkeypatch):
+    monkeypatch.setattr(
+        voice_honcho,
+        "resolve_companion_honcho_target",
+        lambda uid: (_ for _ in ()).throw(AssertionError("profile fallback must not run")),
+    )
+
+    target, reason = voice_honcho.resolve_voice_honcho_target("uid-a", _runtime())
+
+    assert reason == ""
+    assert target.uid == "uid-a"
+    assert target.honcho_workspace == "workspace-a"
+    assert target.observer_peer == "ella-a"
+    assert target.observed_peer == "user-a"
+    assert target.source == "isolated_runtime_receipt"
+
+
+def test_retained_target_uses_exact_uid_profile_and_does_not_reuse_cross_user(monkeypatch):
+    mappings = {
+        "uid-a": {
+            "workspace": "workspace-a",
+            "observer_peer_id": "ella-a",
+            "observed_peer_id": "user-a",
+            "source": "profile_map",
+        },
+        "uid-b": {
+            "workspace": "workspace-b",
+            "observer_peer_id": "ella-b",
+            "observed_peer_id": "user-b",
+            "source": "profile_map",
+        },
+    }
+    monkeypatch.setattr(
+        voice_honcho,
+        "resolve_companion_honcho_target",
+        lambda uid: (mappings.get(uid), "" if uid in mappings else "missing_companion_honcho_target"),
+    )
+
+    target_a, reason_a = voice_honcho.resolve_voice_honcho_target("uid-a")
+    target_b, reason_b = voice_honcho.resolve_voice_honcho_target("uid-b")
+    missing, missing_reason = voice_honcho.resolve_voice_honcho_target("uid-c")
+
+    assert reason_a == reason_b == ""
+    assert (target_a.honcho_workspace, target_a.observed_peer) == ("workspace-a", "user-a")
+    assert (target_b.honcho_workspace, target_b.observed_peer) == ("workspace-b", "user-b")
+    assert target_a != target_b
+    assert missing is None
+    assert missing_reason == "missing_companion_honcho_target"
+
+
 def test_context_uses_exact_receipt_target(monkeypatch):
     calls = []
 

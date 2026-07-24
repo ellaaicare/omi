@@ -599,6 +599,39 @@ def test_write_honcho_fact_candidate_native_honcho_profile_config_prefers_host_a
     }
 
 
+def test_companion_target_requires_exact_uid_and_ignores_global_write_override(monkeypatch, tmp_path):
+    config = tmp_path / "honcho.json"
+    config.write_text(
+        json.dumps(
+            {
+                "workspace": "workspace-a",
+                "peerName": "user-a",
+                "aiPeer": "ella-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(contract, "HONCHO_WORKSPACE", "shared-write-workspace")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_JSON", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_PATH", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_MAP_URL", "")
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_CONFIG_PATH", str(config))
+    monkeypatch.setattr(contract, "HONCHO_PROFILE_UID", "user-a")
+
+    target_a, reason_a = contract.resolve_companion_honcho_target("user-a")
+    target_b, reason_b = contract.resolve_companion_honcho_target("user-b")
+
+    assert reason_a == ""
+    assert target_a == {
+        "workspace": "workspace-a",
+        "observer_peer_id": "ella-a",
+        "observed_peer_id": "user-a",
+        "source": "profile_config",
+    }
+    assert target_b is None
+    assert reason_b == "missing_companion_honcho_target"
+
+
 def test_write_honcho_fact_candidate_native_honcho_explicit_workspace_can_set_observed_peer(monkeypatch):
     candidate = _candidate(active_summary_version_id="v1")
     fake_client, calls = _fake_sequence_client_factory(

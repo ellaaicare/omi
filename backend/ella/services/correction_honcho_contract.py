@@ -259,14 +259,36 @@ def _target_from_profile_map(uid: str) -> dict[str, str] | None:
     return None
 
 
-def _target_from_profile_config(candidate: HonchoFactCandidate) -> dict[str, str] | None:
-    if HONCHO_PROFILE_UID and HONCHO_PROFILE_UID.lower() != candidate.uid.lower():
+def _target_from_profile_config(uid: str) -> dict[str, str] | None:
+    uid_norm = str(uid or "").strip().lower()
+    if not HONCHO_PROFILE_UID or HONCHO_PROFILE_UID.strip().lower() != uid_norm:
         return None
     data = _safe_json_file(HONCHO_PROFILE_CONFIG_PATH)
     target = _profile_target_from_entry(data)
     if target:
         return {**target, "source": "profile_config"}
     return None
+
+
+def resolve_companion_honcho_target(uid: str) -> tuple[dict[str, str] | None, str]:
+    """Resolve an exact user profile without correction-write global fallbacks."""
+    uid = str(uid or "").strip()
+    if not uid:
+        return None, "missing_companion_honcho_target"
+    target = _target_from_profile_map(uid) or _target_from_profile_config(uid)
+    if not target:
+        return None, "missing_companion_honcho_target"
+    return (
+        {
+            "workspace": target["workspace"],
+            "observer_peer_id": _honcho_resource_id(
+                target.get("observer_peer_id") or "ella-correction-observer"
+            ),
+            "observed_peer_id": target["observed_peer_id"],
+            "source": target.get("source") or "companion_profile",
+        },
+        "",
+    )
 
 
 def _resolve_native_honcho_target(
@@ -293,9 +315,9 @@ def _resolve_native_honcho_target(
             "",
         )
 
-    target = _target_from_profile_map(candidate.uid) or _target_from_profile_config(candidate)
+    target, _ = resolve_companion_honcho_target(candidate.uid)
     if target:
-        observer_peer_id = explicit_observer or target.get("observer_peer_id") or "ella-correction-observer"
+        observer_peer_id = explicit_observer or target["observer_peer_id"]
         return (
             {
                 "workspace": target["workspace"],

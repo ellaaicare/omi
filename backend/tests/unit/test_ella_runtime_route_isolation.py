@@ -273,24 +273,22 @@ def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monke
     assert "overview" not in claims
 
 
-def test_missing_and_nonowned_memory_scope_are_indistinguishable(monkeypatch):
-    monkeypatch.setattr(voice, "_load_voice_memory_scope", lambda uid, scope: None)
+def test_unversionable_memory_scope_returns_defined_nonwriteable_state(monkeypatch):
+    def unavailable(uid, scope):
+        raise ValueError("voice_session_scope_version_unavailable")
 
-    responses = []
-    for conversation_id in ("missing", "owned-by-another-user"):
-        with pytest.raises(HTTPException) as error:
-            asyncio.run(
-                voice._resolve_voice_memory_scope(
-                    "user-a",
-                    voice.VoiceSessionScope(kind="memory", conversation_id=conversation_id),
-                )
+    monkeypatch.setattr(voice, "_load_voice_memory_scope", unavailable)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice._resolve_voice_memory_scope(
+                "user-a",
+                voice.VoiceSessionScope(kind="memory", conversation_id="memory-empty"),
             )
-        responses.append((error.value.status_code, error.value.detail))
+        )
 
-    assert responses == [
-        (404, {"code": "voice_session_scope_not_found"}),
-        (404, {"code": "voice_session_scope_not_found"}),
-    ]
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "voice_session_scope_version_unavailable"}
 
 
 def test_voice_session_rejects_voice_canary_without_runtime_binding(monkeypatch):

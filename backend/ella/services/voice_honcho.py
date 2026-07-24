@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+
+from ella.services.correction_honcho_contract import resolve_companion_honcho_target
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +19,53 @@ HONCHO_BASE_URL = os.getenv("ELLA_VOICE_HONCHO_BASE_URL", "http://100.76.138.56:
 HONCHO_API_KEY = os.getenv("ELLA_VOICE_HONCHO_API_KEY", os.getenv("HONCHO_API_KEY", "")).strip()
 HONCHO_TIMEOUT_SECONDS = float(os.getenv("ELLA_VOICE_HONCHO_TIMEOUT_SECONDS", "1.5"))
 HONCHO_CONTEXT_MAX_CHARS = int(os.getenv("ELLA_VOICE_HONCHO_CONTEXT_MAX_CHARS", "2400"))
+
+
+@dataclass(frozen=True)
+class VoiceHonchoTarget:
+    uid: str
+    honcho_workspace: str
+    observer_peer: str
+    observed_peer: str
+    source: str
+
+
+def resolve_voice_honcho_target(uid: str, runtime: Any = None) -> tuple[VoiceHonchoTarget | None, str]:
+    """Prefer an isolated runtime receipt; otherwise require an exact UID profile."""
+    uid = str(uid or "").strip()
+    if runtime is not None:
+        runtime_uid = str(getattr(runtime, "uid", "") or "").strip()
+        if runtime_uid and runtime_uid != uid:
+            return None, "runtime_honcho_owner_mismatch"
+        workspace = str(getattr(runtime, "honcho_workspace", "") or "").strip()
+        observer = str(getattr(runtime, "observer_peer", "") or "").strip()
+        observed = str(getattr(runtime, "observed_peer", "") or "").strip()
+        if not all((workspace, observer, observed)):
+            return None, "runtime_honcho_binding_missing"
+        return (
+            VoiceHonchoTarget(
+                uid=uid,
+                honcho_workspace=workspace,
+                observer_peer=observer,
+                observed_peer=observed,
+                source="isolated_runtime_receipt",
+            ),
+            "",
+        )
+
+    target, reason = resolve_companion_honcho_target(uid)
+    if not target:
+        return None, reason
+    return (
+        VoiceHonchoTarget(
+            uid=uid,
+            honcho_workspace=target["workspace"],
+            observer_peer=target["observer_peer_id"],
+            observed_peer=target["observed_peer_id"],
+            source=str(target.get("source") or "companion_profile"),
+        ),
+        "",
+    )
 
 
 def _target(runtime: Any) -> tuple[str, str, str] | None:
