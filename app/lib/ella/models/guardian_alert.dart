@@ -14,6 +14,7 @@ class GuardianAlertRecord {
     this.queueItemId,
     this.ttsProvider,
     this.why,
+    this.ackOnly = false,
     this.isTest = false,
     this.fromLocalDebugLog = false,
   });
@@ -32,10 +33,14 @@ class GuardianAlertRecord {
   final String? queueItemId;
   final String? ttsProvider;
   final String? why;
+  final bool ackOnly;
   final bool isTest;
   final bool fromLocalDebugLog;
 
+  bool get isSystemWakeAcknowledgement => triggerType.trim().toLowerCase() == 'wake_word_ack' || ackOnly;
+
   factory GuardianAlertRecord.fromJson(Map<String, dynamic> json) {
+    final metadata = _nestedMap(json['metadata']);
     final id = _firstString(json, const [
       'id',
       'alert_id',
@@ -76,8 +81,8 @@ class GuardianAlertRecord {
       queueItemId: _nullableFirstString(json, const ['queue_item_id', 'guardian_queue_item_id']),
       ttsProvider: _nullableFirstString(json, const ['tts_provider', 'provider']),
       why: _nullableFirstString(json, const ['why', 'trigger_explanation', 'triggerExplanation']),
-      isTest:
-          json['is_test'] == true ||
+      ackOnly: _isTrue(json['ack_only']) || _isTrue(metadata['ack_only']),
+      isTest: json['is_test'] == true ||
           json['dry_run'] == true ||
           _isTestTarget(_firstString(json, const ['delivery_target', 'target'])),
     );
@@ -87,6 +92,7 @@ class GuardianAlertRecord {
     final extra = json['extra'];
     final fields = <String, dynamic>{...json};
     if (extra is Map<String, dynamic>) fields.addAll(extra);
+    final metadata = _nestedMap(fields['metadata']);
 
     final type = _firstString(fields, const ['type', 'event_type']);
     final message = _firstString(fields, const ['message']);
@@ -115,6 +121,7 @@ class GuardianAlertRecord {
       queueItemId: _nullableFirstString(fields, const ['queue_item_id', 'guardian_queue_item_id']),
       ttsProvider: _nullableFirstString(fields, const ['tts_provider', 'provider']),
       why: _nullableFirstString(fields, const ['why', 'trigger_explanation', 'triggerExplanation']),
+      ackOnly: _isTrue(fields['ack_only']) || _isTrue(metadata['ack_only']),
       isTest: fields['is_test'] == true || fields['dry_run'] == true || _isTestTarget(target),
       fromLocalDebugLog: true,
     );
@@ -184,3 +191,11 @@ bool _isTestTarget(String value) {
   final normalized = value.toLowerCase();
   return normalized.contains('test') || normalized.contains('dry-run') || normalized.contains('dry_run');
 }
+
+Map<String, dynamic> _nestedMap(dynamic value) {
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return value.map((key, item) => MapEntry(key.toString(), item));
+  return const {};
+}
+
+bool _isTrue(dynamic value) => value == true || (value is String && value.trim().toLowerCase() == 'true');

@@ -49,7 +49,8 @@ class _GuardianAlertHistoryPageState extends State<GuardianAlertHistoryPage> {
           if (snapshot.hasError || snapshot.data == null) {
             return _WhisperEmptyState(onRefresh: _refresh);
           }
-          final records = snapshot.data!.records;
+          final records =
+              snapshot.data!.records.where((record) => !record.isSystemWakeAcknowledgement).toList(growable: false);
           if (records.isEmpty) return _WhisperEmptyState(onRefresh: _refresh);
           final grouped = _groupByDay(records);
           return RefreshIndicator(
@@ -236,8 +237,8 @@ Map<String, List<GuardianAlertRecord>> _groupByDay(List<GuardianAlertRecord> rec
     final label = day == today
         ? 'TODAY'
         : day == today.subtract(const Duration(days: 1))
-        ? 'YESTERDAY'
-        : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
+            ? 'YESTERDAY'
+            : DateFormat('EEEE · MMMM d').format(day).toUpperCase();
     result.putIfAbsent(label, () => []).add(record);
   }
   return result;
