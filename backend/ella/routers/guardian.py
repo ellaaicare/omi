@@ -740,6 +740,8 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
                 ) AS trace_id
             FROM guardian_queue
             WHERE LOWER(uid) = LOWER($1)
+              AND COALESCE(trigger_type, '') <> 'wake_word_ack'
+              AND COALESCE(metadata->>'ack_only', '') <> 'true'
             ORDER BY created_at DESC
             LIMIT $2
         ),
@@ -794,7 +796,9 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
         safe_limit,
     )
 
-    alerts = [_normalize_guardian_alert_row(dict(row), timezone_name or "") for row in rows]
+    alerts = [
+        _normalize_guardian_alert_row(dict(row), timezone_name or "") for row in rows if not _is_wake_ack_row(dict(row))
+    ]
     return {
         "ok": True,
         "uid": uid,
@@ -825,6 +829,13 @@ def _queue_priority_rank(priority: Optional[str]) -> int:
 
 def _queue_trace_id(row: dict[str, Any]) -> str:
     return _trace_id_from_metadata(_coerce_metadata_dict(row.get("metadata")), str(row.get("id") or ""))
+
+
+def _is_wake_ack_row(row: dict[str, Any]) -> bool:
+    metadata = _coerce_metadata_dict(row.get("metadata"))
+    trigger = str(row.get("trigger_type") or metadata.get("trigger_type") or "").strip().lower()
+    ack_only = metadata.get("ack_only")
+    return trigger == "wake_word_ack" or ack_only is True or str(ack_only or "").strip().lower() == "true"
 
 
 def _normalize_for_echo_match(text: str) -> str:
