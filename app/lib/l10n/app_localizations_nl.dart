@@ -1713,7 +1713,12 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String devicesFoundNearby(int count) {
-    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: 'APPARATEN', one: 'APPARAAT');
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'APPARATEN',
+      one: 'APPARAAT',
+    );
     return '$count $_temp0 GEVONDEN IN DE BUURT';
   }
 
@@ -8200,7 +8205,12 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String ellaFamilyCaregiversSubtitle(int count) {
-    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count people', one: '1 person');
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count people',
+      one: '1 person',
+    );
     return '$_temp0';
   }
 
@@ -8828,7 +8838,12 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String memoryTalkMinutes(int count) {
-    String _temp0 = intl.Intl.pluralLogic(count, locale: localeName, other: '$count mins', one: '1 min');
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$count mins',
+      one: '1 min',
+    );
     return '$_temp0';
   }
 
