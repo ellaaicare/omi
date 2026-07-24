@@ -33,6 +33,7 @@ from ella.services.summary_recovery import (
     normalize_summary,
     recover_failed_conversation_summary,
 )
+from ella.services.summary_writeback import ConcurrentConversationSummaryChangeError
 from ella.services import proposal_ingest
 from models.conversation import Conversation, ConversationStatus
 from utils.other import endpoints as auth
@@ -124,6 +125,30 @@ class ConversationCorrectionResponse(BaseModel):
     status: str
     queued: bool
     proposal_id: Optional[str] = None
+
+
+class CorrectionSummarySnapshot(BaseModel):
+    title: str = ""
+    overview: str = ""
+    emoji: str = ""
+    category: str = "other"
+
+
+class ConversationCorrectionReceiptResponse(BaseModel):
+    correction_id: str
+    conversation_id: str
+    status: str
+    applied_at: Optional[datetime] = None
+    undone_at: Optional[datetime] = None
+    before_version_id: Optional[str] = None
+    after_version_id: Optional[str] = None
+    active_version_id: Optional[str] = None
+    undo_version_id: Optional[str] = None
+    before: CorrectionSummarySnapshot
+    after: CorrectionSummarySnapshot
+    propagation_status: str = "known"
+    propagation_applied_count: Optional[int] = 0
+    propagation_reverted_count: Optional[int] = 0
 
 
 class ConversationProcessingRetryOutcome(str, Enum):
@@ -410,6 +435,280 @@ def _audit_ref(uid: str, conversation_id: str, correction_id: str):
         .collection("corrections")
         .document(correction_id)
     )
+
+
+def _summary_version(conversation: dict[str, Any], version_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not version_id:
+        return None
+    for version in conversation.get("summary_versions") or []:
+        if isinstance(version, dict) and str(version.get("id") or "") == str(version_id):
+            return version
+    return None
+
+
+def _summary_version_by_kind_and_base(
+    conversation: dict[str, Any],
+    *,
+    kind: str,
+    based_on_version_id: str,
+) -> Optional[dict[str, Any]]:
+    return next(
+        (
+            version
+            for version in reversed(conversation.get("summary_versions") or [])
+            if isinstance(version, dict)
+            and str(version.get("kind") or "") == kind
+            and str(version.get("based_on_version_id") or "") == based_on_version_id
+        ),
+        None,
+    )
+
+
+def _require_unlocked_conversation(conversation: dict[str, Any]) -> None:
+    if conversation.get("is_locked", False):
+        raise HTTPException(status_code=402, detail="Conversation locked")
+
+
+def _correction_summary_versions(
+    conversation: dict[str, Any],
+    correction_id: str,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    corrected = next(
+        (
+            version
+            for version in reversed(conversation.get("summary_versions") or [])
+            if isinstance(version, dict) and str(version.get("correction_id") or "") == correction_id
+        ),
+        None,
+    )
+    before = _summary_version(conversation, corrected.get("based_on_version_id") if corrected else None)
+    return before, corrected
+
+
+def _snapshot(version: Optional[dict[str, Any]]) -> CorrectionSummarySnapshot:
+    value = version or {}
+    return CorrectionSummarySnapshot(
+        title=str(value.get("title") or ""),
+        overview=str(value.get("overview") or ""),
+        emoji=str(value.get("emoji") or ""),
+        category=str(value.get("category") or "other"),
+    )
+
+
+def _correction_propagation_counts(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+) -> tuple[Optional[int], Optional[int], str]:
+    applied = 0
+    reverted = 0
+    try:
+        snapshots = _audit_ref(uid, conversation_id, correction_id).collection("propagation_runs").stream()
+        for snapshot in snapshots:
+            run = snapshot.to_dict() or {}
+            applied += int(run.get("auto_applied_count") or 0)
+            reverted += int(run.get("reverted_count") or 0)
+    except Exception:
+        logger.exception(
+            "Failed to read correction propagation counts",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        return None, None, "unknown"
+    return applied, reverted, "known"
+
+
+def _correction_receipt(
+    *,
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    conversation: Optional[dict[str, Any]] = None,
+) -> ConversationCorrectionReceiptResponse:
+    conversation = conversation or conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_unlocked_conversation(conversation)
+    audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+    audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    before, corrected = _correction_summary_versions(conversation, correction_id)
+    if not audit and corrected is None:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    raw_state = conversation.get("correction_state")
+    state = (
+        raw_state if isinstance(raw_state, dict) and str(raw_state.get("correction_id") or "") == correction_id else {}
+    )
+    status_value = str(audit.get("status") or state.get("status") or "pending")
+    applied_count, reverted_count, propagation_status = _correction_propagation_counts(
+        uid,
+        conversation_id,
+        correction_id,
+    )
+    corrected_id = str(corrected.get("id") or "") if corrected else ""
+    undo_version = (
+        _summary_version_by_kind_and_base(
+            conversation,
+            kind="correction_undo",
+            based_on_version_id=corrected_id,
+        )
+        if corrected_id
+        else None
+    )
+    return ConversationCorrectionReceiptResponse(
+        correction_id=correction_id,
+        conversation_id=conversation_id,
+        status=status_value,
+        applied_at=audit.get("applied_at"),
+        undone_at=audit.get("undone_at"),
+        before_version_id=(str(before.get("id") or "") or None) if before else None,
+        after_version_id=corrected_id or None,
+        active_version_id=str(conversation.get("active_summary_version_id") or "") or None,
+        undo_version_id=(str(undo_version.get("id") or "") or None) if undo_version else None,
+        before=_snapshot(before),
+        after=_snapshot(corrected),
+        propagation_status=propagation_status,
+        propagation_applied_count=applied_count,
+        propagation_reverted_count=reverted_count,
+    )
+
+
+def _prepare_applied_propagation_rollbacks(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+) -> list[dict[str, Any]]:
+    try:
+        snapshots = list(_audit_ref(uid, conversation_id, correction_id).collection("propagation_runs").stream())
+    except Exception as exc:
+        logger.exception(
+            "Failed to preflight correction propagation rollback",
+            extra={"uid": uid, "conversation_id": conversation_id, "correction_id": correction_id},
+        )
+        raise HTTPException(status_code=503, detail="Propagation rollback state is unavailable") from exc
+
+    plan: list[dict[str, Any]] = []
+    seen_related_ids: set[str] = set()
+    for snapshot in snapshots:
+        run = snapshot.to_dict() or {}
+        auto_applied_count = int(run.get("auto_applied_count") or 0)
+        if auto_applied_count <= 0:
+            continue
+        decisions = run.get("decisions") if isinstance(run.get("decisions"), list) else []
+        applicable_indexes = [
+            index
+            for index, decision in enumerate(decisions)
+            if isinstance(decision, dict) and decision.get("action") in {"applied", "auto_applied"}
+        ]
+        if len(applicable_indexes) != auto_applied_count:
+            raise HTTPException(status_code=409, detail="Propagation rollback data is incomplete")
+        for decision_index in applicable_indexes:
+            decision = decisions[decision_index]
+            rollback = decision.get("rollback_ref") if isinstance(decision.get("rollback_ref"), dict) else {}
+            structured = rollback.get("structured") if isinstance(rollback.get("structured"), dict) else None
+            related_id = str(decision.get("conversation_id") or "")
+            applied_version_id = str(decision.get("applied_summary_version_id") or "")
+            if not related_id or structured is None or not applied_version_id:
+                raise HTTPException(status_code=409, detail="Propagation rollback data is incomplete")
+            if related_id in seen_related_ids:
+                raise HTTPException(status_code=409, detail="Propagation rollback contains duplicate targets")
+            seen_related_ids.add(related_id)
+
+            related = conversations_db.get_conversation(uid, related_id)
+            if related is None:
+                raise HTTPException(status_code=409, detail="Propagation rollback target is missing")
+            _require_unlocked_conversation(related)
+
+            reverted_version_id = str(decision.get("reverted_summary_version_id") or "")
+            discovered_undo = _summary_version_by_kind_and_base(
+                related,
+                kind="correction_propagation_undo",
+                based_on_version_id=applied_version_id,
+            )
+            if not reverted_version_id and discovered_undo is not None:
+                reverted_version_id = str(discovered_undo.get("id") or "")
+
+            current_version_id = str(related.get("active_summary_version_id") or "")
+            expected_version_id = reverted_version_id or applied_version_id
+            if current_version_id != expected_version_id:
+                raise HTTPException(status_code=409, detail="A newer related memory update must be undone first")
+
+            plan.append(
+                {
+                    "snapshot": snapshot,
+                    "run": run,
+                    "decisions": decisions,
+                    "decision_index": decision_index,
+                    "related_id": related_id,
+                    "structured": structured,
+                    "applied_version_id": applied_version_id,
+                    "reverted_version_id": reverted_version_id,
+                    "completed": bool(reverted_version_id),
+                }
+            )
+    return plan
+
+
+def _persist_propagation_rollback_progress(item: dict[str, Any]) -> None:
+    decisions = item["decisions"]
+    decision = decisions[item["decision_index"]]
+    decision["reverted_summary_version_id"] = item["reverted_version_id"]
+    decision["rollback_status"] = "reverted"
+    decision["reverted_at"] = item["reverted_at"]
+    reverted_count = sum(
+        1
+        for value in decisions
+        if isinstance(value, dict)
+        and value.get("action") in {"applied", "auto_applied"}
+        and value.get("reverted_summary_version_id")
+    )
+    auto_applied_count = int(item["run"].get("auto_applied_count") or 0)
+    payload: dict[str, Any] = {
+        "decisions": decisions,
+        "reverted_count": reverted_count,
+    }
+    if reverted_count == auto_applied_count:
+        payload["reverted_at"] = item["reverted_at"]
+    item["snapshot"].reference.set(payload, merge=True)
+
+
+async def _revert_applied_propagations(
+    uid: str,
+    conversation_id: str,
+    correction_id: str,
+    *,
+    rollback_plan: Optional[list[dict[str, Any]]] = None,
+) -> int:
+    plan = rollback_plan
+    if plan is None:
+        plan = _prepare_applied_propagation_rollbacks(uid, conversation_id, correction_id)
+    reverted = 0
+    for item in plan:
+        if not item["completed"]:
+            try:
+                result = await apply_summary_update(
+                    uid=uid,
+                    conversation_id=item["related_id"],
+                    trace_id=f"correction-propagation-undo:{conversation_id}:{correction_id}:{item['related_id']}",
+                    active_summary_version_id=item["applied_version_id"],
+                    summary=item["structured"],
+                    summary_kind="correction_propagation_undo",
+                    summary_source="observer",
+                    require_based_on_match=True,
+                    preserve_generated_results=True,
+                )
+            except ConcurrentConversationSummaryChangeError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A newer related memory update must be undone first",
+                ) from exc
+            reverted_version_id = str(result.get("active_summary_version_id") or "")
+            if not reverted_version_id:
+                raise HTTPException(status_code=500, detail="Propagation rollback version was not recorded")
+            item["reverted_version_id"] = reverted_version_id
+            item["completed"] = True
+        item["reverted_at"] = _now_iso()
+        _persist_propagation_rollback_progress(item)
+        reverted += 1
+    return reverted
 
 
 def _persist_correction_audit(
@@ -846,6 +1145,7 @@ async def _run_direct_correction_apply(
             correction_id,
             {
                 "status": "applied",
+                "applied_at": applied_at,
                 "updated_at": applied_at,
                 "direct_apply_result": apply_result,
                 "direct_apply_summary": corrected_summary,
@@ -1358,6 +1658,168 @@ async def submit_conversation_correction_ella(
     uid: str = Depends(auth.get_current_user_uid),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
+
+
+@router.get(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}",
+    response_model=ConversationCorrectionReceiptResponse,
+)
+def get_conversation_correction_receipt(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionReceiptResponse:
+    return _correction_receipt(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+    )
+
+
+@router.post(
+    "/v1/ella/conversations/{conversation_id}/corrections/{correction_id}/undo",
+    response_model=ConversationCorrectionReceiptResponse,
+)
+async def undo_conversation_correction(
+    conversation_id: str,
+    correction_id: str,
+    uid: str = Depends(auth.get_current_user_uid),
+) -> ConversationCorrectionReceiptResponse:
+    conversation = conversations_db.get_conversation(uid, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    _require_unlocked_conversation(conversation)
+    before, corrected = _correction_summary_versions(conversation, correction_id)
+    if before is None or corrected is None:
+        raise HTTPException(status_code=404, detail="Applied correction not found")
+
+    audit_snapshot = _audit_ref(uid, conversation_id, correction_id).get()
+    audit = audit_snapshot.to_dict() if getattr(audit_snapshot, "exists", False) else {}
+    if audit.get("status") == "undone":
+        return _correction_receipt(
+            uid=uid,
+            conversation_id=conversation_id,
+            correction_id=correction_id,
+            conversation=conversation,
+        )
+    corrected_version_id = str(corrected.get("id") or "")
+    undo_version = _summary_version_by_kind_and_base(
+        conversation,
+        kind="correction_undo",
+        based_on_version_id=corrected_version_id,
+    )
+    undo_version_id = str(undo_version.get("id") or "") if undo_version else ""
+    active_version_id = str(conversation.get("active_summary_version_id") or "")
+    source_already_reverted = bool(undo_version_id and active_version_id == undo_version_id)
+    if active_version_id != corrected_version_id and not source_already_reverted:
+        raise HTTPException(status_code=409, detail="A newer memory update must be undone first")
+
+    rollback_plan = _prepare_applied_propagation_rollbacks(uid, conversation_id, correction_id)
+    trace_id = f"correction-undo:{conversation_id}:{correction_id}"
+    prepared_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "undo_operation": {
+                "status": "prepared",
+                "expected_source_version_id": corrected_version_id,
+                "related_target_count": len(rollback_plan),
+                "prepared_at": prepared_at,
+            },
+            "updated_at": prepared_at,
+        },
+    )
+    reverted_count = await _revert_applied_propagations(
+        uid,
+        conversation_id,
+        correction_id,
+        rollback_plan=rollback_plan,
+    )
+    propagation_reverted_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "undo_operation": {
+                "status": "propagation_reverted",
+                "expected_source_version_id": corrected_version_id,
+                "related_target_count": len(rollback_plan),
+                "propagation_reverted_count": reverted_count,
+                "updated_at": propagation_reverted_at,
+            },
+            "updated_at": propagation_reverted_at,
+        },
+    )
+    if not source_already_reverted:
+        try:
+            apply_result = await apply_summary_update(
+                uid=uid,
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                active_summary_version_id=corrected_version_id,
+                summary={
+                    "title": before.get("title"),
+                    "overview": before.get("overview"),
+                    "emoji": before.get("emoji"),
+                    "category": before.get("category"),
+                },
+                summary_kind="correction_undo",
+                summary_source="ios",
+                require_based_on_match=True,
+                preserve_generated_results=True,
+            )
+        except ConcurrentConversationSummaryChangeError as exc:
+            raise HTTPException(status_code=409, detail="A newer memory update must be undone first") from exc
+        undo_version_id = str(apply_result.get("active_summary_version_id") or "")
+        if not undo_version_id:
+            raise HTTPException(status_code=500, detail="Correction undo version was not recorded")
+    undone_at = _now_iso()
+    _persist_correction_audit(
+        uid,
+        conversation_id,
+        correction_id,
+        {
+            "status": "undone",
+            "undone_at": undone_at,
+            "updated_at": undone_at,
+            "propagation_reverted_count": reverted_count,
+            "undo_version_id": undo_version_id,
+            "undo_operation": {
+                "status": "completed",
+                "expected_source_version_id": corrected_version_id,
+                "undo_version_id": undo_version_id,
+                "related_target_count": len(rollback_plan),
+                "propagation_reverted_count": reverted_count,
+                "completed_at": undone_at,
+            },
+        },
+    )
+    latest = conversations_db.get_conversation(uid, conversation_id) or conversation
+    conversations_db.update_conversation(
+        uid,
+        conversation_id,
+        {
+            "correction_state": {
+                "correction_id": correction_id,
+                "status": "undone",
+                "pending": False,
+                "source": (conversation.get("correction_state") or {}).get("source"),
+                "submitted_at": (conversation.get("correction_state") or {}).get("submitted_at"),
+                "updated_at": datetime.now(timezone.utc),
+                "active_summary_version_id": undo_version_id,
+            }
+        },
+    )
+    latest = conversations_db.get_conversation(uid, conversation_id) or latest
+    return _correction_receipt(
+        uid=uid,
+        conversation_id=conversation_id,
+        correction_id=correction_id,
+        conversation=latest,
+    )
 
 
 @router.post(
