@@ -105,11 +105,27 @@ CorrectionReplyIntent classifyCorrectionReply(String value) {
   return CorrectionReplyIntent.ambiguous;
 }
 
+// Leading relation/preposition words that the entity regexp can admit (e.g.
+// "It was with Rose, not Margaret" captures "with Rose"). Stripping them keeps
+// the correction to the bare entity so we never rewrite "with Margaret" into
+// "with with Rose".
+final _leadingRelationWords = RegExp(
+  r"^(?:with|and|to|for|of|from|at|in|on|by|the|a|an)\s+",
+  caseSensitive: false,
+);
+
 String _cleanEntity(String value) {
-  return value
+  var cleaned = value
       .replaceAll(RegExp(r'^[\s,.;:—–-]+|[\s,.;:—–-]+$'), '')
       .replaceAll(RegExp(r'\s+(who|that|which)\b.*$', caseSensitive: false), '')
       .trim();
+  // Strip leading relation words repeatedly ("with the Rose" -> "Rose").
+  var previous = '';
+  while (previous != cleaned) {
+    previous = cleaned;
+    cleaned = cleaned.replaceFirst(_leadingRelationWords, '').trim();
+  }
+  return cleaned;
 }
 
 MemoryCorrectionClaim? extractCorrectionClaim(
