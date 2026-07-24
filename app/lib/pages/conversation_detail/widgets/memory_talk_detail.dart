@@ -43,13 +43,17 @@ List<TextSpan> _highlightSearchMatches(String text, String query, int currentRes
       spans.add(TextSpan(text: text.substring(start, index)));
     }
     final isCurrentResult = matchIndex == currentResultIndex;
+    // Search highlight uses Ella semantic tokens (never raw Colors.* on elder
+    // surfaces): active match = warning amber, other matches = teal tint; text
+    // stays ink for contrast rather than pure white.
     spans.add(
       TextSpan(
         text: text.substring(index, index + query.length),
         style: TextStyle(
-          backgroundColor:
-              isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : EllaColors.primary.withValues(alpha: 0.6),
-          color: Colors.white,
+          backgroundColor: isCurrentResult
+              ? EllaColors.warning.withValues(alpha: 0.85)
+              : EllaColors.teal.withValues(alpha: 0.35),
+          color: EllaColors.ink,
           fontWeight: FontWeight.bold,
         ),
       ),
