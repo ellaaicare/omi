@@ -562,6 +562,60 @@ def update_conversation(uid: str, conversation_id: str, update_data: dict):
     doc_ref.update(prepared_data)
 
 
+def _update_conversation_if_active_summary_version_transaction(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    update_data: dict,
+) -> bool:
+    snapshot = conversation_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        return False
+    conversation = snapshot.to_dict() or {}
+    if str(conversation.get('active_summary_version_id') or '') != str(expected_active_summary_version_id or ''):
+        return False
+    doc_level = conversation.get('data_protection_level', 'standard')
+    prepared_data = _prepare_conversation_for_write(update_data, uid, doc_level)
+    transaction.update(conversation_ref, prepared_data)
+    return True
+
+
+@transactional
+def _update_conversation_if_active_summary_version(
+    transaction,
+    conversation_ref,
+    uid: str,
+    expected_active_summary_version_id: Optional[str],
+    update_data: dict,
+) -> bool:
+    return _update_conversation_if_active_summary_version_transaction(
+        transaction,
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        update_data,
+    )
+
+
+def update_conversation_if_active_summary_version(
+    uid: str,
+    conversation_id: str,
+    expected_active_summary_version_id: Optional[str],
+    update_data: dict,
+) -> bool:
+    conversation_ref = (
+        db.collection('users').document(uid).collection(conversations_collection).document(conversation_id)
+    )
+    return _update_conversation_if_active_summary_version(
+        db.transaction(),
+        conversation_ref,
+        uid,
+        expected_active_summary_version_id,
+        update_data,
+    )
+
+
 def create_audio_files_from_chunks(
     uid: str,
     conversation_id: str,
