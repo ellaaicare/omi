@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/hardware/ella_hardware_artwork.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/ella_daily_note_page.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
@@ -175,6 +176,8 @@ class TodayPageState extends State<TodayPage> {
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
     final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
+    final deviceType =
+        device.presentationConnectedDevice?.type ?? device.presentationPairedDevice?.type ?? DeviceType.omi;
     final audioRoute = context.watch<AudioRouteProvider>();
     final capture = context.watch<CaptureProvider>();
     final conversations = context.watch<ConversationProvider>();
@@ -223,9 +226,9 @@ class TodayPageState extends State<TodayPage> {
               necklaceConnected: deviceConnected,
               necklaceConnecting: device.isConnecting,
               batteryLevel: device.presentationBatteryLevel,
-              deviceImagePath: DeviceUtils.getDeviceImagePathWithState(
-                deviceType:
-                    device.presentationConnectedDevice?.type ?? device.presentationPairedDevice?.type ?? DeviceType.omi,
+              deviceType: deviceType,
+              fallbackDeviceImagePath: DeviceUtils.getDeviceImagePathWithState(
+                deviceType: deviceType,
                 modelNumber:
                     device.presentationConnectedDevice?.modelNumber ?? device.presentationPairedDevice?.modelNumber,
                 deviceName: device.presentationConnectedDevice?.name ?? device.presentationPairedDevice?.name,
@@ -571,10 +574,12 @@ class _WhisperCard extends StatelessWidget {
 
 class TodayHardwareStatusCard extends StatelessWidget {
   const TodayHardwareStatusCard({
+    super.key,
     required this.necklaceConnected,
     required this.necklaceConnecting,
     required this.batteryLevel,
-    required this.deviceImagePath,
+    required this.deviceType,
+    required this.fallbackDeviceImagePath,
     required this.headsetConnected,
     required this.audioOutputName,
     required this.usesPhoneSpeaker,
@@ -584,7 +589,8 @@ class TodayHardwareStatusCard extends StatelessWidget {
   final bool necklaceConnected;
   final bool necklaceConnecting;
   final int batteryLevel;
-  final String deviceImagePath;
+  final DeviceType deviceType;
+  final String fallbackDeviceImagePath;
   final bool headsetConnected;
   final String audioOutputName;
   final bool usesPhoneSpeaker;
@@ -592,6 +598,14 @@ class TodayHardwareStatusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final lowBattery = necklaceConnected && batteryLevel >= 0 && batteryLevel < 20;
+    final necklaceArtworkState =
+        necklaceConnected && !necklaceConnecting ? EllaHardwareArtworkState.on : EllaHardwareArtworkState.off;
+    final necklaceImagePath =
+        EllaHardwareArtwork.forDeviceType(deviceType, necklaceArtworkState) ?? fallbackDeviceImagePath;
+    final headsetImagePath = EllaHardwareArtwork.forWhisperHeadset(
+      headsetConnected ? EllaHardwareArtworkState.on : EllaHardwareArtworkState.off,
+    );
     final necklaceStatus = necklaceConnecting
         ? context.l10n.todayConnecting
         : necklaceConnected
@@ -621,7 +635,11 @@ class TodayHardwareStatusCard extends StatelessWidget {
                             : context.l10n.todayNecklaceOffReconnect,
                         connected: necklaceConnected,
                         onTap: onOpenNecklace,
-                        visual: _NecklaceVisual(imagePath: deviceImagePath, connected: necklaceConnected),
+                        detailColor: lowBattery ? EllaColors.warning : null,
+                        visual: _HardwareArtworkVisual(
+                          imagePath: necklaceImagePath,
+                          reconnecting: necklaceConnecting,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -631,11 +649,7 @@ class TodayHardwareStatusCard extends StatelessWidget {
                         status: headsetConnected ? context.l10n.todayOn : context.l10n.todayOff,
                         detail: headsetConnected ? audioOutputName : context.l10n.todayVoiceOnPhone,
                         connected: headsetConnected,
-                        visual: Icon(
-                          Icons.headphones_rounded,
-                          size: 58,
-                          color: headsetConnected ? EllaColors.tealDeep : EllaColors.inkSoft,
-                        ),
+                        visual: _HardwareArtworkVisual(imagePath: headsetImagePath),
                       ),
                     ),
                   ],
@@ -684,6 +698,7 @@ class _HardwareTile extends StatelessWidget {
     required this.connected,
     required this.visual,
     this.onTap,
+    this.detailColor,
   });
 
   final String label;
@@ -692,6 +707,7 @@ class _HardwareTile extends StatelessWidget {
   final bool connected;
   final Widget visual;
   final VoidCallback? onTap;
+  final Color? detailColor;
 
   @override
   Widget build(BuildContext context) {
@@ -715,7 +731,11 @@ class _HardwareTile extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 4),
-            Text(detail, textAlign: TextAlign.center, style: EllaTextStyles.caption),
+            Text(
+              detail,
+              textAlign: TextAlign.center,
+              style: EllaTextStyles.caption.copyWith(color: detailColor),
+            ),
           ],
         ),
       ),
@@ -723,42 +743,29 @@ class _HardwareTile extends StatelessWidget {
   }
 }
 
-class _NecklaceVisual extends StatelessWidget {
-  const _NecklaceVisual({required this.imagePath, required this.connected});
+class _HardwareArtworkVisual extends StatelessWidget {
+  const _HardwareArtworkVisual({required this.imagePath, this.reconnecting = false});
 
   final String imagePath;
-  final bool connected;
+  final bool reconnecting;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       alignment: Alignment.center,
       children: [
-        Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: EllaColors.ink,
-            border: Border.all(color: connected ? EllaColors.tealDeep : EllaColors.inkSoft, width: 5),
-          ),
-          child: Center(
-            child: Container(
-              width: 10,
-              height: 10,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: connected ? EllaColors.paper : EllaColors.cardDeep,
-              ),
-            ),
-          ),
-        ),
         Image.asset(
           imagePath,
-          height: 68,
+          width: 64,
+          height: 64,
           fit: BoxFit.contain,
-          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
         ),
+        if (reconnecting)
+          const Positioned(
+            right: 5,
+            bottom: 6,
+            child: EllaBreathingDot(active: true, live: true),
+          ),
       ],
     );
   }

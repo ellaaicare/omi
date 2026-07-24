@@ -192,6 +192,7 @@ flutter:
     - assets/images/herologo.png
     - assets/fonts/
     - assets/images/
+    - assets/images/ella-hardware/png/
     - assets/integration_app_logos/
     - assets/competitor-logos/
     - shorebird.yaml

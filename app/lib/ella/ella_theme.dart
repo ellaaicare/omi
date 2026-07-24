@@ -7,12 +7,12 @@ class EllaColors {
   EllaColors._();
 
   static const Color paper = Color(0xFFFAF6F0);
-  static const Color card = Color(0xFF9F8A72);
+  static const Color card = Color(0xFFF2EBE1);
   static const Color cardDeep = Color(0xFFE9DFD2);
   static const Color ink = Color(0xFF23201C);
-  static const Color inkSoft = Color(0xFF2B2621);
-  static const Color teal = Color(0xFF0C2B24);
-  static const Color tealDeep = Color(0xFF0C2B24);
+  static const Color inkSoft = Color(0xFF665F56);
+  static const Color teal = Color(0xFF5A9E8F);
+  static const Color tealDeep = Color(0xFF38695E);
 
   // Compatibility aliases for Ella surfaces not yet migrated to v2 names.
   static const Color primary = teal;

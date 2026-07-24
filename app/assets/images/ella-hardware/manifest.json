@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "pointSizes": {
+    "tile": 64,
+    "glyph": 24
+  },
+  "scales": [
+    1,
+    2,
+    3
+  ],
+  "palette": {
+    "paper": "#FAF6F0",
+    "card": "#F2EBE1",
+    "cardDeep": "#E9DFD2",
+    "ink": "#23201C",
+    "inkSoft": "#665F56",
+    "teal": "#5A9E8F",
+    "tealDeep": "#38695E",
+    "amber": "#8B6914"
+  },
+  "devices": {
+    "necklace-omi": {
+      "deviceType": "omi",
+      "sourceOn": "../omi-without-rope.webp",
+      "sourceOff": "../omi-without-rope-turned-off.webp",
+      "sourcePolicy": "Shipping OMI renders, resized only; never redrawn."
+    },
+    "headset-whisper": {
+      "deviceType": "whisperHeadset",
+      "sourceReference": "source/headset-system-reference.webp",
+      "sourceMaster": "source/headset-whisper-master.png",
+      "sourcePolicy": "Generated once from the Ella system reference photo; state exports are deterministic."
+    }
+  },
+  "states": {
+    "on": {
+      "treatment": "fullColor"
+    },
+    "off": {
+      "treatment": "grayscale",
+      "opacity": 0.45
+    },
+    "reconnecting": {
+      "treatment": "offWithBreathingDotSlot",
+      "breathingDot": {
+        "centerPt": [
+          54,
+          53
+        ],
+        "outerRadiusPt": 5,
+        "innerRadiusPt": 2.5,
+        "color": "#5A9E8F"
+      }
+    },
+    "low-battery": {
+      "treatment": "onWithAmberCaptionSlot",
+      "captionColor": "#8B6914",
+      "note": "App renders localized caption text; artwork includes the amber caption anchor bar only."
+    }
+  },
+  "naming": {
+    "svg": "<device-key>-<state>.svg",
+    "png1x": "<device-key>-<state>.png",
+    "png2x": "<device-key>-<state>@2x.png",
+    "png3x": "<device-key>-<state>@3x.png",
+    "glyph": "<device-key>-glyph.{svg,png,@2x.png,@3x.png}"
+  },
+  "constraints": [
+    "transparent backgrounds",
+    "no red",
+    "hardware-agnostic DeviceType resolution"
+  ]
+}

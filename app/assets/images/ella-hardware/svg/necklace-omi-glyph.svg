@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <title>OMI necklace</title>
+  <path d="M12 2.75C7.305 2.75 3.5 6.555 3.5 11.25S7.305 19.75 12 19.75s8.5-3.805 8.5-8.5S16.695 2.75 12 2.75Z" stroke="#23201C" stroke-width="1.7"/>
+  <path d="M12 5.15a6.1 6.1 0 1 0 0 12.2 6.1 6.1 0 0 0 0-12.2Z" stroke="#665F56" stroke-width="1.35"/>
+  <path d="M9.8 20.05 12 22l2.2-1.95" stroke="#23201C" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="12" cy="11.25" r="1.2" stroke="#38695E" stroke-width="1.5"/>
+</svg>

@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/pages/home/today_page.dart';
 
@@ -58,7 +58,8 @@ void main() {
                 necklaceConnected: true,
                 necklaceConnecting: false,
                 batteryLevel: 96,
-                deviceImagePath: 'assets/images/omi-devkit-without-rope.png',
+                deviceType: DeviceType.omi,
+                fallbackDeviceImagePath: 'assets/images/omi-devkit-without-rope.png',
                 headsetConnected: headsetConnected,
                 audioOutputName: 'Ella headset',
                 usesPhoneSpeaker: usesPhoneSpeaker,
@@ -66,6 +67,14 @@ void main() {
               ),
             ),
           ),
+        ),
+      ),
+    );
+    final imageElements = find.byType(Image).evaluate().toList();
+    await tester.runAsync(
+      () => Future.wait(
+        imageElements.map(
+          (element) => precacheImage((element.widget as Image).image, element),
         ),
       ),
     );
