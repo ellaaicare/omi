@@ -22,6 +22,7 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
@@ -101,6 +102,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   ConversationCorrectionReceipt? _memoryCorrectionReceipt;
   Timer? _memoryReceiptPollTimer;
   int _memoryReceiptPollAttempts = 0;
+  final MemoryReinterpretationReceiptDiscovery _memoryReceiptDiscovery = MemoryReinterpretationReceiptDiscovery();
+  String? _memoryReceiptDiscoveryKey;
 
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
@@ -222,6 +225,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
     _memoryReceiptPollTimer?.cancel();
+    _memoryReceiptDiscoveryKey = null;
     _playerSub?.cancel();
     _audioPlayer.dispose();
     _transcriptScrollController.dispose();
@@ -563,6 +567,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       onConnectionChanged: (connected) {
         if (!mounted) return;
         if (!connected && _isV2VMode) {
+          final endedSessionId = _activeSessionId;
           debugPrint('[VoiceChat] V2V disconnected unexpectedly');
           setState(() {
             _orbState = VoiceOrbState.idle;
@@ -570,6 +575,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             _isV2VMode = false;
             _voiceModeActive = false;
           });
+          _beginPostSessionReceiptDiscovery(endedSessionId);
+          _activeSessionId = '';
         }
       },
     );
@@ -626,9 +633,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     _activeSessionId = receipt.sessionId;
+    _memoryReceiptDiscoveryKey = null;
+    _memoryReinterpretationEvent = null;
+    _memoryReceiptPollTimer?.cancel();
     _activeV2VProvider = providerName;
     _usingElevenLabsFallback = false;
     setState(() {
+      _memoryCorrectionReceipt = null;
       _orbState = VoiceOrbState.listening;
       _statusText = context.l10n.voiceV2vActive(providerName);
     });
@@ -636,11 +647,36 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _stopV2V() async {
     debugPrint('[VoiceChat] Stopping V2V mode');
+    final endedSessionId = _activeSessionId;
     await _v2vClient?.disconnect();
     _v2vClient = null;
+    _beginPostSessionReceiptDiscovery(endedSessionId);
     _activeSessionId = '';
     _activeV2VProvider = '';
     _pauseVoiceMode();
+  }
+
+  void _beginPostSessionReceiptDiscovery(String sessionId) {
+    final scope = _sessionScope;
+    if (scope == null || sessionId.isEmpty) return;
+    final discoveryKey = '${scope.conversationId}:$sessionId';
+    if (_memoryReceiptDiscoveryKey == discoveryKey) return;
+    _memoryReceiptDiscoveryKey = discoveryKey;
+    unawaited(_discoverPostSessionReceipt(scope.conversationId, sessionId, discoveryKey));
+  }
+
+  Future<void> _discoverPostSessionReceipt(String conversationId, String sessionId, String discoveryKey) async {
+    final result = await _memoryReceiptDiscovery.discover(
+      conversationId: conversationId,
+      sessionId: sessionId,
+      shouldContinue: () => mounted && _memoryReceiptDiscoveryKey == discoveryKey,
+    );
+    if (!mounted || _memoryReceiptDiscoveryKey != discoveryKey) return;
+    debugPrint('[VoiceChat] Memory receipt discovery: ${result.state.name}');
+    final receipt = result.receipt;
+    if (receipt != null && receipt.conversationId == conversationId) {
+      setState(() => _memoryCorrectionReceipt = receipt);
+    }
   }
 
   void _onV2VEvent(V2VEvent event) {

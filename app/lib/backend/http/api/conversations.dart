@@ -280,6 +280,106 @@ class ConversationCorrectionReceipt {
       );
 }
 
+class ConversationReinterpretationReceiptReference {
+  const ConversationReinterpretationReceiptReference({
+    required this.conversationId,
+    required this.correctionId,
+    required this.status,
+  });
+
+  final String conversationId;
+  final String correctionId;
+  final String status;
+
+  static ConversationReinterpretationReceiptReference? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final conversationId = value['conversation_id']?.toString().trim() ?? '';
+    final correctionId = value['correction_id']?.toString().trim() ?? '';
+    final status = value['status']?.toString().trim() ?? '';
+    if (conversationId.isEmpty || correctionId.isEmpty || status.isEmpty) return null;
+    return ConversationReinterpretationReceiptReference(
+      conversationId: conversationId,
+      correctionId: correctionId,
+      status: status,
+    );
+  }
+}
+
+class ConversationReinterpretationJob {
+  const ConversationReinterpretationJob({
+    required this.jobId,
+    required this.sessionId,
+    required this.conversationId,
+    required this.status,
+    required this.correctionIds,
+    required this.receipts,
+  });
+
+  final String jobId;
+  final String sessionId;
+  final String conversationId;
+  final String status;
+  final List<String> correctionIds;
+  final List<ConversationReinterpretationReceiptReference> receipts;
+
+  bool get isPending => const {'pending', 'running', 'retry'}.contains(status);
+  bool get isNoChange => status == 'no_change';
+  bool get isPendingReview => status == 'pending_review';
+  bool get isApplied => status == 'applied';
+
+  String? get appliedCorrectionId {
+    for (final receipt in receipts) {
+      if (receipt.status == 'applied' && receipt.conversationId == conversationId) {
+        return receipt.correctionId;
+      }
+    }
+    return correctionIds.isEmpty ? null : correctionIds.first;
+  }
+
+  static ConversationReinterpretationJob? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final jobId = value['job_id']?.toString().trim() ?? '';
+    final sessionId = value['session_id']?.toString().trim() ?? '';
+    final conversationId = value['conversation_id']?.toString().trim() ?? '';
+    final status = value['status']?.toString().trim() ?? '';
+    if (jobId.isEmpty || sessionId.isEmpty || conversationId.isEmpty || status.isEmpty) return null;
+
+    final rawCorrectionIds = value['correction_ids'];
+    final correctionIds =
+        (rawCorrectionIds is List ? rawCorrectionIds : const []).map((item) => item.toString().trim()).where((id) {
+      return id.isNotEmpty;
+    }).toList(growable: false);
+    final rawReceipts = value['receipts'];
+    final receipts = (rawReceipts is List ? rawReceipts : const [])
+        .map(ConversationReinterpretationReceiptReference.tryParse)
+        .whereType<ConversationReinterpretationReceiptReference>()
+        .toList(growable: false);
+
+    return ConversationReinterpretationJob(
+      jobId: jobId,
+      sessionId: sessionId,
+      conversationId: conversationId,
+      status: status,
+      correctionIds: correctionIds,
+      receipts: receipts,
+    );
+  }
+}
+
+Future<ConversationReinterpretationJob?> getLatestConversationReinterpretation({required String conversationId}) async {
+  final encodedConversationId = Uri.encodeComponent(conversationId);
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$encodedConversationId/reinterpretations/latest',
+    headers: {},
+    method: 'GET',
+    body: '',
+  );
+  if (response == null || response.statusCode != 200) return null;
+  final decoded = jsonDecode(response.body);
+  if (decoded is! Map) return null;
+  return ConversationReinterpretationJob.tryParse(decoded['reinterpretation']);
+}
+
 Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
   required String conversationId,
   required String correctionId,
