@@ -62,9 +62,10 @@ List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int curr
     spans.add(TextSpan(
       text: text.substring(index, index + searchQuery.length),
       style: TextStyle(
-        backgroundColor:
-            isCurrentResult ? Colors.orange.withValues(alpha: 0.9) : EllaColors.primary.withValues(alpha: 0.6),
-        color: Colors.white,
+        backgroundColor: isCurrentResult
+            ? EllaColors.warning.withValues(alpha: 0.85)
+            : EllaColors.teal.withValues(alpha: 0.35),
+        color: EllaColors.ink,
         fontWeight: FontWeight.bold,
       ),
     ));
@@ -712,16 +713,14 @@ class AppResultDetailWidget extends StatelessWidget {
             ),
           if (content.isNotEmpty) ...[
             const SizedBox(height: 18),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                _TalkAboutMemoryButton(conversation: conversation),
-                _CorrectSummaryButton(
-                  conversation: conversation,
-                  appSummary: content,
-                ),
-              ],
+            // Voice is the one primary conversational entry; typing a correction
+            // stays available as a quiet fallback link (precision, quiet rooms,
+            // voice failures) rather than a competing button.
+            _TalkAboutMemoryButton(conversation: conversation),
+            const SizedBox(height: 12),
+            _TypeCorrectionLink(
+              conversation: conversation,
+              appSummary: content,
             ),
           ],
         ],
@@ -783,11 +782,11 @@ class _TalkAboutMemoryButton extends StatelessWidget {
   }
 }
 
-class _CorrectSummaryButton extends StatelessWidget {
+class _TypeCorrectionLink extends StatelessWidget {
   final ServerConversation conversation;
   final String appSummary;
 
-  const _CorrectSummaryButton({
+  const _TypeCorrectionLink({
     required this.conversation,
     required this.appSummary,
   });
@@ -797,7 +796,7 @@ class _CorrectSummaryButton extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        borderRadius: BorderRadius.circular(18),
+        borderRadius: BorderRadius.circular(12),
         onTap: () {
           HapticFeedback.lightImpact();
           showModalBottomSheet(
@@ -810,24 +809,19 @@ class _CorrectSummaryButton extends StatelessWidget {
             ),
           );
         },
-        child: Ink(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: EllaColors.bgSecondary,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: EllaColors.bgTertiary),
-          ),
-          child: const Row(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+          child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              FaIcon(FontAwesomeIcons.penToSquare, size: 15, color: EllaColors.primary),
-              SizedBox(width: 8),
+              const FaIcon(FontAwesomeIcons.penToSquare, size: 13, color: EllaColors.tealDeep),
+              const SizedBox(width: 6),
               Text(
-                'Correct Summary',
-                style: TextStyle(
-                  color: EllaColors.textPrimary,
+                context.l10n.memoryTypeCorrection,
+                style: const TextStyle(
+                  color: EllaColors.tealDeep,
                   fontSize: 14,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ],
@@ -923,8 +917,8 @@ class _CorrectSummarySheetState extends State<_CorrectSummarySheet> {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Correct Summary',
+              Text(
+                context.l10n.memoryTypeCorrection,
                 style: TextStyle(
                   color: EllaColors.textPrimary,
                   fontSize: 22,
