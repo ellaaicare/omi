@@ -21,6 +21,11 @@ from ella.services.summary_writeback import ConcurrentConversationSummaryChangeE
 
 logger = logging.getLogger(__name__)
 
+_WORKER_RUNTIME_METRICS: dict[str, int] = {
+    "loop_failures_total": 0,
+    "lease_renewal_failures_total": 0,
+}
+
 
 class ReinterpretationSummary(BaseModel):
     title: str = ""
@@ -105,12 +110,22 @@ def _current_summary(conversation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _proposal_id(job_id: str, index: int) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ella:{job_id}:proposal:{index}"))
+def _proposal_id(job_id: str, transcript_revision: int, index: int) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ella:{job_id}:revision:{transcript_revision}:proposal:{index}",
+        )
+    )
 
 
-def _correction_id(job_id: str, index: int) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ella:{job_id}:correction:{index}"))
+def _correction_id(job_id: str, transcript_revision: int, index: int) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ella:{job_id}:revision:{transcript_revision}:correction:{index}",
+        )
+    )
 
 
 def _evidence_is_explicit(
@@ -354,7 +369,9 @@ async def _apply_proposal(
         uid=job["uid"],
         conversation_id=job["conversation_id"],
         correction_id=correction_id,
-        trace_id=f"memory-reinterpretation:{job['id']}:proposal:{proposal_index}",
+        trace_id=(
+            f"memory-reinterpretation:{job['id']}:" f"revision:{job['transcript_revision']}:proposal:{proposal_index}"
+        ),
         active_summary_version_id=expected_version_id,
         correction_text=proposal.correction_text,
         corrected_summary=_model_dump(proposal.corrected_summary),
@@ -377,19 +394,70 @@ class MemoryReinterpretationWorker:
         conversation_loader: Callable[[str, str], Awaitable[Optional[dict[str, Any]]]] = _load_conversation,
         pending_proposal_writer: Callable[..., Awaitable[str]] = _create_pending_proposal,
         correction_writer: Callable[..., Awaitable[ApplyResult]] = _apply_proposal,
+        lease_seconds: Optional[int] = None,
     ):
         self.repository = repository
         self.hermes_client = hermes_client or HermesReinterpretationClient()
         self.conversation_loader = conversation_loader
         self.pending_proposal_writer = pending_proposal_writer
         self.correction_writer = correction_writer
+        configured_lease = (
+            lease_seconds
+            if lease_seconds is not None
+            else int(os.getenv("ELLA_MEMORY_REINTERPRETATION_LEASE_SECONDS", "120"))
+        )
+        self.lease_seconds = max(30, configured_lease)
+
+    async def _require_current_lease(self, job: dict[str, Any]) -> None:
+        try:
+            current = await self.repository.renew_lease(
+                job,
+                lease_seconds=self.lease_seconds,
+            )
+        except Exception as exc:
+            _WORKER_RUNTIME_METRICS["lease_renewal_failures_total"] += 1
+            raise ReinterpretationWorkerError(
+                "lease_renewal_failed",
+                retryable=True,
+                detail=type(exc).__name__,
+            ) from exc
+        if not current:
+            raise ReinterpretationWorkerError("lease_lost", retryable=True)
+
+    async def _heartbeat_lease(self, job: dict[str, Any]) -> None:
+        interval = max(5.0, self.lease_seconds / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                renewed = await self.repository.renew_lease(
+                    job,
+                    lease_seconds=self.lease_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _WORKER_RUNTIME_METRICS["lease_renewal_failures_total"] += 1
+                logger.exception(
+                    "[FLOW:MEMORY-REINTERPRETATION] lease heartbeat failed",
+                    extra={"job_id": job["id"]},
+                )
+                continue
+            if not renewed:
+                return
 
     async def run_once(self, worker_id: str) -> Optional[dict[str, Any]]:
-        job = await self.repository.claim_due(worker_id)
+        job = await self.repository.claim_due(
+            worker_id,
+            lease_seconds=self.lease_seconds,
+        )
         if job is None:
             return None
         started = time.monotonic()
-        metrics: dict[str, Any] = {"attempt": job["attempt_count"]}
+        metrics: dict[str, Any] = {
+            "attempt": job["attempt_count"],
+            "transcript_revision": job["transcript_revision"],
+        }
+        heartbeat_task = asyncio.create_task(self._heartbeat_lease(job))
         try:
             try:
                 rows = await self.repository.load_canonical_rows(job)
@@ -412,6 +480,7 @@ class MemoryReinterpretationWorker:
             else:
                 active_version_id = str(conversation.get("active_summary_version_id") or "")
                 if active_version_id != job["starting_summary_version_id"]:
+                    await self._require_current_lease(job)
                     finished = await self.repository.finish(
                         job,
                         status="conflict",
@@ -430,10 +499,12 @@ class MemoryReinterpretationWorker:
                     current_summary=_current_summary(conversation),
                     event_ids=[str(row["event_id"]) for row in rows],
                 )
+                await self._require_current_lease(job)
                 if not await self.repository.record_plan(job, _model_dump(plan)):
                     raise ReinterpretationWorkerError("lease_lost", retryable=True)
 
             if plan.outcome == "no_change":
+                await self._require_current_lease(job)
                 finished = await self.repository.finish(
                     job,
                     status="no_change",
@@ -463,7 +534,12 @@ class MemoryReinterpretationWorker:
                 if index in completed_indexes:
                     continue
                 if _evidence_is_explicit(proposal, rows_by_event_id):
-                    correction_id = _correction_id(job["id"], index)
+                    correction_id = _correction_id(
+                        job["id"],
+                        job["transcript_revision"],
+                        index,
+                    )
+                    await self._require_current_lease(job)
                     try:
                         applied = await self.correction_writer(
                             job=job,
@@ -473,6 +549,7 @@ class MemoryReinterpretationWorker:
                             expected_version_id=expected_version_id,
                         )
                     except ConcurrentConversationSummaryChangeError:
+                        await self._require_current_lease(job)
                         finished = await self.repository.finish(
                             job,
                             status="conflict",
@@ -501,7 +578,12 @@ class MemoryReinterpretationWorker:
                     applied_indexes.add(index)
                     has_applied = True
                 else:
-                    fallback_id = _proposal_id(job["id"], index)
+                    fallback_id = _proposal_id(
+                        job["id"],
+                        job["transcript_revision"],
+                        index,
+                    )
+                    await self._require_current_lease(job)
                     proposal_id = await self.pending_proposal_writer(
                         job=job,
                         proposal=proposal,
@@ -530,6 +612,7 @@ class MemoryReinterpretationWorker:
 
             status = "pending_review" if has_pending else "applied"
             outcome = "applied_with_pending" if has_applied and has_pending else status
+            await self._require_current_lease(job)
             finished = await self.repository.finish(
                 job,
                 status=status,
@@ -578,6 +661,12 @@ class MemoryReinterpretationWorker:
                 "status": status,
                 "error_code": "worker_unhandled_error",
             }
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
 
 _worker_task: Optional[asyncio.Task] = None
@@ -592,13 +681,38 @@ def worker_enabled() -> bool:
     }
 
 
-async def run_worker_loop(worker: MemoryReinterpretationWorker) -> None:
+def worker_runtime_metrics() -> dict[str, int]:
+    return dict(_WORKER_RUNTIME_METRICS)
+
+
+async def run_worker_loop(
+    worker: MemoryReinterpretationWorker,
+    *,
+    max_iterations: Optional[int] = None,
+    sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
     worker_id = os.getenv("ELLA_MEMORY_REINTERPRETATION_WORKER_ID") or f"omi-{uuid.uuid4()}"
     idle_seconds = max(1.0, float(os.getenv("ELLA_MEMORY_REINTERPRETATION_IDLE_SECONDS", "2")))
-    while True:
-        result = await worker.run_once(worker_id)
+    failure_backoff = 1.0
+    iterations = 0
+    while max_iterations is None or iterations < max_iterations:
+        iterations += 1
+        try:
+            result = await worker.run_once(worker_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _WORKER_RUNTIME_METRICS["loop_failures_total"] += 1
+            logger.exception(
+                "[FLOW:MEMORY-REINTERPRETATION] worker loop iteration failed",
+                extra={"worker_id": worker_id},
+            )
+            await sleep_func(failure_backoff)
+            failure_backoff = min(30.0, failure_backoff * 2)
+            continue
+        failure_backoff = 1.0
         if result is None:
-            await asyncio.sleep(idle_seconds)
+            await sleep_func(idle_seconds)
 
 
 async def start_worker(worker: MemoryReinterpretationWorker) -> None:

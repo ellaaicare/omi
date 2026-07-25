@@ -102,6 +102,7 @@ def row_to_job(row: Any) -> dict[str, Any]:
         "source_identity": _row_value(row, "source_identity"),
         "canonical_refs": _json_value(_row_value(row, "canonical_refs"), []),
         "transcript_hash": _row_value(row, "transcript_hash"),
+        "transcript_revision": int(_row_value(row, "transcript_revision", 1) or 1),
         "status": _row_value(row, "status"),
         "outcome": _row_value(row, "outcome"),
         "proposal_plan": _json_value(_row_value(row, "proposal_plan"), None),
@@ -130,6 +131,7 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
         "session_id": job.get("logical_session_id"),
         "conversation_id": job.get("conversation_id"),
         "starting_summary_version_id": job.get("starting_summary_version_id"),
+        "transcript_revision": int(job.get("transcript_revision") or 1),
         "status": job.get("status"),
         "outcome": job.get("outcome"),
         "proposal_ids": list(job.get("proposal_ids") or []),
@@ -229,83 +231,231 @@ class PostgresMemoryReinterpretationRepository:
         now = _utc_now()
         not_before = now + timedelta(seconds=self.debounce_seconds)
         job_id = deterministic_job_id(uid, session_id, conversation_id, version_id)
-        row = await conn.fetchrow(
+        refs_json = _stable_json(canonical_refs(scoped_rows))
+        transcript_hash = canonical_transcript_hash(scoped_rows)
+        existing_row = await conn.fetchrow(
             """
-            INSERT INTO memory_reinterpretation_jobs (
-                id, uid, logical_session_id, conversation_id,
-                starting_summary_version_id, source_identity,
-                canonical_refs, transcript_hash, status, not_before,
-                max_attempts, created_at, updated_at
-            )
-            VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7::jsonb, $8, 'pending', $9, $10, $11, $11
-            )
-            ON CONFLICT (
-                uid, logical_session_id, conversation_id, starting_summary_version_id
-            )
-            DO UPDATE SET
-                source_identity = EXCLUDED.source_identity,
-                canonical_refs = EXCLUDED.canonical_refs,
-                transcript_hash = EXCLUDED.transcript_hash,
-                not_before = CASE
-                    WHEN memory_reinterpretation_jobs.status IN ('pending', 'retry')
-                    THEN GREATEST(memory_reinterpretation_jobs.not_before, EXCLUDED.not_before)
-                    ELSE memory_reinterpretation_jobs.not_before
-                END,
-                updated_at = EXCLUDED.updated_at
-            RETURNING *
+            SELECT *
+            FROM memory_reinterpretation_jobs
+            WHERE uid = $1
+              AND logical_session_id = $2
+              AND conversation_id = $3
+              AND starting_summary_version_id = $4
+            FOR UPDATE
             """,
-            job_id,
             uid,
             session_id,
             conversation_id,
             version_id,
+        )
+        if existing_row is None:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO memory_reinterpretation_jobs (
+                    id, uid, logical_session_id, conversation_id,
+                    starting_summary_version_id, source_identity,
+                    canonical_refs, transcript_hash, transcript_revision,
+                    status, not_before, max_attempts, created_at, updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6,
+                    $7::jsonb, $8, 1, 'pending', $9, $10, $11, $11
+                )
+                ON CONFLICT (
+                    uid, logical_session_id, conversation_id, starting_summary_version_id
+                ) DO NOTHING
+                RETURNING *
+                """,
+                job_id,
+                uid,
+                session_id,
+                conversation_id,
+                version_id,
+                str(completion.get("source_identity") or ""),
+                refs_json,
+                transcript_hash,
+                not_before,
+                self.max_attempts,
+                now,
+            )
+            if row is not None:
+                return row_to_job(row)
+            existing_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM memory_reinterpretation_jobs
+                WHERE uid = $1
+                  AND logical_session_id = $2
+                  AND conversation_id = $3
+                  AND starting_summary_version_id = $4
+                FOR UPDATE
+                """,
+                uid,
+                session_id,
+                conversation_id,
+                version_id,
+            )
+            if existing_row is None:
+                raise RuntimeError("reinterpretation enqueue conflict row disappeared")
+
+        existing = row_to_job(existing_row)
+        if existing["status"] in TERMINAL_STATUSES:
+            return existing
+
+        if existing["transcript_hash"] == transcript_hash:
+            row = await conn.fetchrow(
+                """
+                UPDATE memory_reinterpretation_jobs
+                SET source_identity = $2,
+                    not_before = CASE
+                        WHEN status IN ('pending', 'retry')
+                        THEN GREATEST(not_before, $3)
+                        ELSE not_before
+                    END,
+                    updated_at = CASE
+                        WHEN status IN ('pending', 'retry') THEN $4 ELSE updated_at
+                    END
+                WHERE id = $1
+                RETURNING *
+                """,
+                existing["id"],
+                str(completion.get("source_identity") or ""),
+                not_before,
+                now,
+            )
+            return row_to_job(row)
+
+        if existing["status"] == "running" and existing.get("lease_token"):
+            await conn.execute(
+                """
+                UPDATE memory_reinterpretation_attempts
+                SET status = 'superseded',
+                    error_code = 'transcript_revised',
+                    finished_at = NOW()
+                WHERE job_id = $1
+                  AND attempt_number = $2
+                  AND lease_token = $3
+                  AND transcript_revision = $4
+                  AND status = 'running'
+                """,
+                existing["id"],
+                existing["attempt_count"],
+                existing["lease_token"],
+                existing["transcript_revision"],
+            )
+
+        row = await conn.fetchrow(
+            """
+            UPDATE memory_reinterpretation_jobs
+            SET source_identity = $2,
+                canonical_refs = $3::jsonb,
+                transcript_hash = $4,
+                transcript_revision = transcript_revision + 1,
+                status = 'pending',
+                outcome = NULL,
+                proposal_plan = NULL,
+                progress = '{}'::jsonb,
+                proposal_ids = '[]'::jsonb,
+                correction_ids = '[]'::jsonb,
+                receipt_refs = '[]'::jsonb,
+                not_before = $5,
+                attempt_count = 0,
+                lease_owner = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
+                last_error_code = NULL,
+                last_error_detail = NULL,
+                completed_at = NULL,
+                updated_at = $6
+            WHERE id = $1
+              AND status NOT IN (
+                  'no_change', 'pending_review', 'applied', 'conflict', 'dead_letter'
+              )
+            RETURNING *
+            """,
+            existing["id"],
             str(completion.get("source_identity") or ""),
-            _stable_json(canonical_refs(scoped_rows)),
-            canonical_transcript_hash(scoped_rows),
+            refs_json,
+            transcript_hash,
             not_before,
-            self.max_attempts,
             now,
         )
-        return row_to_job(row)
+        return row_to_job(row) if row else existing
 
     async def claim_due(self, worker_id: str, *, lease_seconds: int = 120) -> Optional[dict[str, Any]]:
         pool = await self._pool()
         lease_token = str(uuid.uuid4())
         async with pool.acquire() as conn:
             async with conn.transaction():
+                candidate_row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM memory_reinterpretation_jobs
+                    WHERE (
+                            status IN ('pending', 'retry')
+                            AND not_before <= NOW()
+                          )
+                       OR (
+                            status = 'running'
+                            AND lease_expires_at < NOW()
+                          )
+                    ORDER BY not_before ASC, created_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                )
+                if candidate_row is None:
+                    return None
+                candidate = row_to_job(candidate_row)
+                if candidate["status"] == "running":
+                    await self._finish_attempt(
+                        conn,
+                        candidate,
+                        status="lease_expired",
+                        error_code="lease_expired",
+                        metrics={"lease_expired": True},
+                    )
+                if candidate["attempt_count"] >= candidate["max_attempts"]:
+                    await conn.execute(
+                        """
+                        UPDATE memory_reinterpretation_jobs
+                        SET status = 'dead_letter',
+                            outcome = 'failed',
+                            lease_owner = NULL,
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
+                            last_error_code = 'lease_expired_attempt_limit',
+                            last_error_detail = 'Worker lease expired at the attempt ceiling',
+                            completed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = $1
+                          AND transcript_revision = $2
+                          AND status IN ('pending', 'retry', 'running')
+                        """,
+                        candidate["id"],
+                        candidate["transcript_revision"],
+                    )
+                    return None
+
                 row = await conn.fetchrow(
                     """
-                    WITH candidate AS (
-                        SELECT id
-                        FROM memory_reinterpretation_jobs
-                        WHERE (
-                                status IN ('pending', 'retry')
-                                AND not_before <= NOW()
-                              )
-                           OR (
-                                status = 'running'
-                                AND lease_expires_at < NOW()
-                              )
-                        ORDER BY not_before ASC, created_at ASC
-                        LIMIT 1
-                        FOR UPDATE SKIP LOCKED
-                    )
-                    UPDATE memory_reinterpretation_jobs AS jobs
+                    UPDATE memory_reinterpretation_jobs
                     SET status = 'running',
-                        lease_owner = $1,
-                        lease_token = $2,
-                        lease_expires_at = NOW() + ($3 * INTERVAL '1 second'),
-                        attempt_count = jobs.attempt_count + 1,
+                        lease_owner = $2,
+                        lease_token = $3,
+                        lease_expires_at = NOW() + ($4 * INTERVAL '1 second'),
+                        attempt_count = attempt_count + 1,
                         updated_at = NOW()
-                    FROM candidate
-                    WHERE jobs.id = candidate.id
-                    RETURNING jobs.*
+                    WHERE id = $1
+                      AND transcript_revision = $5
+                      AND status IN ('pending', 'retry', 'running')
+                    RETURNING *
                     """,
+                    candidate["id"],
                     worker_id,
                     lease_token,
                     max(10, lease_seconds),
+                    candidate["transcript_revision"],
                 )
                 if row is None:
                     return None
@@ -313,17 +463,41 @@ class PostgresMemoryReinterpretationRepository:
                 await conn.execute(
                     """
                     INSERT INTO memory_reinterpretation_attempts (
-                        job_id, attempt_number, lease_token, worker_id, status
+                        job_id, transcript_revision, attempt_number,
+                        lease_token, worker_id, status
                     )
-                    VALUES ($1, $2, $3, $4, 'running')
-                    ON CONFLICT (job_id, attempt_number) DO NOTHING
+                    VALUES ($1, $2, $3, $4, $5, 'running')
+                    ON CONFLICT (
+                        job_id, transcript_revision, attempt_number
+                    ) DO NOTHING
                     """,
                     job["id"],
+                    job["transcript_revision"],
                     job["attempt_count"],
                     lease_token,
                     worker_id,
                 )
                 return job
+
+    async def renew_lease(self, job: dict[str, Any], *, lease_seconds: int = 120) -> bool:
+        pool = await self._pool()
+        result = await pool.execute(
+            """
+            UPDATE memory_reinterpretation_jobs
+            SET lease_expires_at = NOW() + ($4 * INTERVAL '1 second'),
+                updated_at = NOW()
+            WHERE id = $1
+              AND lease_token = $2
+              AND transcript_revision = $3
+              AND status = 'running'
+              AND lease_expires_at > NOW()
+            """,
+            job["id"],
+            job["lease_token"],
+            job["transcript_revision"],
+            max(10, lease_seconds),
+        )
+        return result.endswith("1")
 
     async def record_plan(self, job: dict[str, Any], plan: dict[str, Any]) -> bool:
         pool = await self._pool()
@@ -332,11 +506,16 @@ class PostgresMemoryReinterpretationRepository:
             UPDATE memory_reinterpretation_jobs
             SET proposal_plan = $3::jsonb,
                 updated_at = NOW()
-            WHERE id = $1 AND lease_token = $2 AND status = 'running'
+            WHERE id = $1
+              AND lease_token = $2
+              AND transcript_revision = $4
+              AND status = 'running'
+              AND lease_expires_at > NOW()
             """,
             job["id"],
             job["lease_token"],
             _stable_json(plan),
+            job["transcript_revision"],
         )
         return result.endswith("1")
 
@@ -358,7 +537,11 @@ class PostgresMemoryReinterpretationRepository:
                 correction_ids = $5::jsonb,
                 receipt_refs = $6::jsonb,
                 updated_at = NOW()
-            WHERE id = $1 AND lease_token = $2 AND status = 'running'
+            WHERE id = $1
+              AND lease_token = $2
+              AND transcript_revision = $7
+              AND status = 'running'
+              AND lease_expires_at > NOW()
             """,
             job["id"],
             job["lease_token"],
@@ -366,6 +549,7 @@ class PostgresMemoryReinterpretationRepository:
             _stable_json(proposal_ids),
             _stable_json(correction_ids),
             _stable_json(receipt_refs),
+            job["transcript_revision"],
         )
         return result.endswith("1")
 
@@ -420,7 +604,11 @@ class PostgresMemoryReinterpretationRepository:
                         last_error_detail = NULL,
                         completed_at = NOW(),
                         updated_at = NOW()
-                    WHERE id = $1 AND lease_token = $2 AND status = 'running'
+                    WHERE id = $1
+                      AND lease_token = $2
+                      AND transcript_revision = $8
+                      AND status = 'running'
+                      AND lease_expires_at > NOW()
                     """,
                     job["id"],
                     job["lease_token"],
@@ -429,6 +617,7 @@ class PostgresMemoryReinterpretationRepository:
                     _stable_json(proposal_ids),
                     _stable_json(correction_ids),
                     _stable_json(receipt_refs),
+                    job["transcript_revision"],
                 )
                 updated = result.endswith("1")
                 if updated:
@@ -456,7 +645,7 @@ class PostgresMemoryReinterpretationRepository:
         pool = await self._pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute(
+                result = await conn.execute(
                     """
                     UPDATE memory_reinterpretation_jobs
                     SET status = $3,
@@ -473,7 +662,11 @@ class PostgresMemoryReinterpretationRepository:
                         last_error_detail = $6,
                         completed_at = CASE WHEN $3 = 'dead_letter' THEN NOW() ELSE NULL END,
                         updated_at = NOW()
-                    WHERE id = $1 AND lease_token = $2 AND status = 'running'
+                    WHERE id = $1
+                      AND lease_token = $2
+                      AND transcript_revision = $7
+                      AND status = 'running'
+                      AND lease_expires_at > NOW()
                     """,
                     job["id"],
                     job["lease_token"],
@@ -481,7 +674,10 @@ class PostgresMemoryReinterpretationRepository:
                     delay_seconds,
                     error_code[:120],
                     error_detail[:1000],
+                    job["transcript_revision"],
                 )
+                if not result.endswith("1"):
+                    return "lease_lost"
                 await self._finish_attempt(
                     conn,
                     job,
@@ -489,7 +685,7 @@ class PostgresMemoryReinterpretationRepository:
                     error_code=error_code,
                     metrics=metrics,
                 )
-        return status
+                return status
 
     @staticmethod
     async def _finish_attempt(
@@ -503,15 +699,19 @@ class PostgresMemoryReinterpretationRepository:
         await conn.execute(
             """
             UPDATE memory_reinterpretation_attempts
-            SET status = $4,
-                error_code = $5,
-                metrics = $6::jsonb,
+            SET status = $5,
+                error_code = $6,
+                metrics = $7::jsonb,
                 finished_at = NOW()
-            WHERE job_id = $1 AND attempt_number = $2 AND lease_token = $3
+            WHERE job_id = $1
+              AND attempt_number = $2
+              AND lease_token = $3
+              AND transcript_revision = $4
             """,
             job["id"],
             job["attempt_count"],
             job["lease_token"],
+            job["transcript_revision"],
             status,
             error_code,
             _stable_json(metrics or {}),
@@ -568,6 +768,7 @@ class InMemoryMemoryReinterpretationRepository:
         self.max_attempts = max_attempts
         self.jobs: dict[str, dict[str, Any]] = {}
         self.rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self.attempts: list[dict[str, Any]] = []
         self.now = _utc_now()
 
     def set_rows(self, uid: str, session_id: str, rows: list[dict[str, Any]]) -> None:
@@ -609,10 +810,42 @@ class InMemoryMemoryReinterpretationRepository:
         due = self.now + timedelta(seconds=self.debounce_seconds)
         if job_id in self.jobs:
             job = self.jobs[job_id]
+            if job["status"] in TERMINAL_STATUSES:
+                return dict(job)
+            new_hash = canonical_transcript_hash(rows)
+            if job["transcript_hash"] == new_hash:
+                if job["status"] in RUNNABLE_STATUSES:
+                    job["not_before"] = max(job["not_before"], due)
+                    job["updated_at"] = self.now
+                return dict(job)
+            if job["status"] == "running":
+                for attempt in self.attempts:
+                    if (
+                        attempt["job_id"] == job["id"]
+                        and attempt["lease_token"] == job["lease_token"]
+                        and attempt["status"] == "running"
+                    ):
+                        attempt["status"] = "superseded"
+                        attempt["error_code"] = "transcript_revised"
+                        attempt["finished_at"] = self.now
             job["canonical_refs"] = canonical_refs(rows)
-            job["transcript_hash"] = canonical_transcript_hash(rows)
-            if job["status"] in RUNNABLE_STATUSES:
-                job["not_before"] = max(job["not_before"], due)
+            job["transcript_hash"] = new_hash
+            job["transcript_revision"] += 1
+            job["status"] = "pending"
+            job["outcome"] = None
+            job["proposal_plan"] = None
+            job["progress"] = {}
+            job["proposal_ids"] = []
+            job["correction_ids"] = []
+            job["receipt_refs"] = []
+            job["not_before"] = due
+            job["attempt_count"] = 0
+            job["lease_owner"] = None
+            job["lease_token"] = None
+            job["lease_expires_at"] = None
+            job["last_error_code"] = None
+            job["last_error_detail"] = None
+            job["completed_at"] = None
             job["updated_at"] = self.now
             return dict(job)
         job = {
@@ -624,6 +857,7 @@ class InMemoryMemoryReinterpretationRepository:
             "source_identity": str(completion.get("source_identity") or ""),
             "canonical_refs": canonical_refs(rows),
             "transcript_hash": canonical_transcript_hash(rows),
+            "transcript_revision": 1,
             "status": "pending",
             "outcome": None,
             "proposal_plan": None,
@@ -648,7 +882,13 @@ class InMemoryMemoryReinterpretationRepository:
 
     async def record_plan(self, job: dict[str, Any], plan: dict[str, Any]) -> bool:
         current = self.jobs[job["id"]]
-        if current["lease_token"] != job["lease_token"] or current["status"] != "running":
+        if (
+            current["lease_token"] != job["lease_token"]
+            or current["transcript_revision"] != job["transcript_revision"]
+            or current["status"] != "running"
+            or not current["lease_expires_at"]
+            or current["lease_expires_at"] <= self.now
+        ):
             return False
         current["proposal_plan"] = json.loads(_stable_json(plan))
         current["updated_at"] = self.now
@@ -664,7 +904,13 @@ class InMemoryMemoryReinterpretationRepository:
         receipt_refs: list[dict[str, Any]],
     ) -> bool:
         current = self.jobs[job["id"]]
-        if current["lease_token"] != job["lease_token"] or current["status"] != "running":
+        if (
+            current["lease_token"] != job["lease_token"]
+            or current["transcript_revision"] != job["transcript_revision"]
+            or current["status"] != "running"
+            or not current["lease_expires_at"]
+            or current["lease_expires_at"] <= self.now
+        ):
             return False
         current["progress"] = json.loads(_stable_json(progress))
         current["proposal_ids"] = list(proposal_ids)
@@ -683,13 +929,61 @@ class InMemoryMemoryReinterpretationRepository:
         if not candidates:
             return None
         job = sorted(candidates, key=lambda item: (item["not_before"], item["created_at"]))[0]
+        if job["status"] == "running":
+            for attempt in self.attempts:
+                if (
+                    attempt["job_id"] == job["id"]
+                    and attempt["lease_token"] == job["lease_token"]
+                    and attempt["status"] == "running"
+                ):
+                    attempt["status"] = "lease_expired"
+                    attempt["error_code"] = "lease_expired"
+                    attempt["finished_at"] = self.now
+        if job["attempt_count"] >= job["max_attempts"]:
+            job["status"] = "dead_letter"
+            job["outcome"] = "failed"
+            job["lease_owner"] = None
+            job["lease_token"] = None
+            job["lease_expires_at"] = None
+            job["last_error_code"] = "lease_expired_attempt_limit"
+            job["last_error_detail"] = "Worker lease expired at the attempt ceiling"
+            job["completed_at"] = self.now
+            job["updated_at"] = self.now
+            return None
         job["status"] = "running"
         job["lease_owner"] = worker_id
         job["lease_token"] = str(uuid.uuid4())
         job["lease_expires_at"] = self.now + timedelta(seconds=lease_seconds)
         job["attempt_count"] += 1
         job["updated_at"] = self.now
+        self.attempts.append(
+            {
+                "job_id": job["id"],
+                "transcript_revision": job["transcript_revision"],
+                "attempt_number": job["attempt_count"],
+                "lease_token": job["lease_token"],
+                "worker_id": worker_id,
+                "status": "running",
+                "error_code": None,
+                "started_at": self.now,
+                "finished_at": None,
+            }
+        )
         return dict(job)
+
+    async def renew_lease(self, job: dict[str, Any], *, lease_seconds: int = 120) -> bool:
+        current = self.jobs[job["id"]]
+        if (
+            current["status"] != "running"
+            or current["lease_token"] != job["lease_token"]
+            or current["transcript_revision"] != job["transcript_revision"]
+            or not current["lease_expires_at"]
+            or current["lease_expires_at"] <= self.now
+        ):
+            return False
+        current["lease_expires_at"] = self.now + timedelta(seconds=lease_seconds)
+        current["updated_at"] = self.now
+        return True
 
     async def load_canonical_rows(self, job: dict[str, Any]) -> list[dict[str, Any]]:
         foreign = [
@@ -704,7 +998,13 @@ class InMemoryMemoryReinterpretationRepository:
 
     async def finish(self, job: dict[str, Any], **values) -> bool:
         current = self.jobs[job["id"]]
-        if current["lease_token"] != job["lease_token"] or current["status"] != "running":
+        if (
+            current["lease_token"] != job["lease_token"]
+            or current["transcript_revision"] != job["transcript_revision"]
+            or current["status"] != "running"
+            or not current["lease_expires_at"]
+            or current["lease_expires_at"] <= self.now
+        ):
             return False
         current.update(
             {
@@ -722,7 +1022,27 @@ class InMemoryMemoryReinterpretationRepository:
                 "updated_at": self.now,
             }
         )
+        self._finish_memory_attempt(job, values["status"], None)
         return True
+
+    def _finish_memory_attempt(
+        self,
+        job: dict[str, Any],
+        status: str,
+        error_code: Optional[str],
+    ) -> None:
+        for attempt in self.attempts:
+            if (
+                attempt["job_id"] == job["id"]
+                and attempt["attempt_number"] == job["attempt_count"]
+                and attempt["lease_token"] == job["lease_token"]
+                and attempt["transcript_revision"] == job["transcript_revision"]
+                and attempt["status"] == "running"
+            ):
+                attempt["status"] = status
+                attempt["error_code"] = error_code
+                attempt["finished_at"] = self.now
+                return
 
     async def fail_or_retry(
         self,
@@ -734,6 +1054,14 @@ class InMemoryMemoryReinterpretationRepository:
         metrics: Optional[dict[str, Any]] = None,
     ) -> str:
         current = self.jobs[job["id"]]
+        if (
+            current["status"] != "running"
+            or current["lease_token"] != job["lease_token"]
+            or current["transcript_revision"] != job["transcript_revision"]
+            or not current["lease_expires_at"]
+            or current["lease_expires_at"] <= self.now
+        ):
+            return "lease_lost"
         terminal = not retryable or current["attempt_count"] >= current["max_attempts"]
         current["status"] = "dead_letter" if terminal else "retry"
         current["last_error_code"] = error_code
@@ -746,6 +1074,7 @@ class InMemoryMemoryReinterpretationRepository:
             current["completed_at"] = self.now
         else:
             current["not_before"] = self.now + timedelta(seconds=5 * (2 ** (current["attempt_count"] - 1)))
+        self._finish_memory_attempt(job, current["status"], error_code)
         return current["status"]
 
     async def get_for_user(
@@ -761,3 +1090,9 @@ class InMemoryMemoryReinterpretationRepository:
             if job["uid"] == uid and job["conversation_id"] == conversation_id and (not job_id or job["id"] == job_id)
         ]
         return dict(sorted(matches, key=lambda item: item["created_at"], reverse=True)[0]) if matches else None
+
+    async def metrics(self) -> dict[str, Any]:
+        statuses: dict[str, int] = {}
+        for job in self.jobs.values():
+            statuses[job["status"]] = statuses.get(job["status"], 0) + 1
+        return {"jobs_by_status": statuses, "oldest_due_seconds": 0.0}

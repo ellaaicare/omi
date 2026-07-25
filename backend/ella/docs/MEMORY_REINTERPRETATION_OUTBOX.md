@@ -29,8 +29,11 @@ An outbox job is eligible only when the signed completion contains all of:
 
 The idempotency key is the exact tuple `(uid, signed_jti, conversation_id,
 starting_summary_version_id)`. UID comparisons are case-sensitive. A later
-completion for the same tuple refreshes canonical references and transcript
-hash and extends `not_before`; it does not create another job.
+completion for the same tuple does not create another job. An unchanged
+transcript extends `not_before` while the job is pending or retrying. A changed
+transcript increments a durable revision, invalidates its plan/progress and
+lease, and receives fresh Hermes analysis. Terminal jobs and their processed
+transcript references are immutable.
 
 Rejected/noise sessions never post completion. Read-only, locked, general, or
 otherwise `can_reinterpret=false` completions do not enqueue.
@@ -41,6 +44,8 @@ Postgres stores:
 
 - canonical event identifiers and source identities;
 - a deterministic hash of the ordered canonical transcript;
+- a monotonically increasing transcript revision used by every lease, plan,
+  progress, and terminal transition fence;
 - typed Hermes proposal plan and per-proposal progress;
 - proposal, correction, and receipt identifiers;
 - lease, retry, attempt, terminal status, and bounded error metadata.
@@ -70,8 +75,11 @@ An item auto-applies only when all of these are true:
 
 Everything else becomes an idempotent pending `summary_correction` proposal.
 OMI is the only writer. Auto-apply uses the existing summary CAS, canonical
-writeback, correction receipt, and Undo path. Deterministic correction IDs and
-persisted proposal plans make crash-after-apply replay idempotent.
+writeback, correction receipt, and Undo path. Deterministic revision-qualified
+correction IDs and persisted proposal plans make crash-after-apply replay
+idempotent. Workers renew their lease while model and write calls are in
+progress and verify the current lease plus transcript revision immediately
+before each external write.
 
 ## Status API
 
@@ -101,6 +109,8 @@ GET  /v1/ella/internal/memory-reinterpretations/metrics
 2. Confirm the voice proxy and backend share `ELLA_EVENT_LEDGER_TOKEN`; eligible
    completion rejects missing/invalid bearer auth when enqueue is enabled.
 3. Configure a secret `ELLA_MEMORY_REINTERPRETATION_OPERATOR_TOKEN`.
+   Keep `ELLA_MEMORY_REINTERPRETATION_LEASE_SECONDS` above the expected
+   heartbeat interval; the default is 120 seconds.
 4. Set `ELLA_MEMORY_REINTERPRETATION_ENABLED=true` to begin transactional enqueue.
 5. Validate run-once and metrics while
    `ELLA_MEMORY_REINTERPRETATION_WORKER_ENABLED=false`.

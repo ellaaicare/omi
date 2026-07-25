@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS memory_reinterpretation_jobs (
     source_identity TEXT NOT NULL,
     canonical_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
     transcript_hash TEXT NOT NULL,
+    transcript_revision INTEGER NOT NULL DEFAULT 1
+        CHECK (transcript_revision >= 1),
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN (
             'pending',
@@ -53,16 +55,22 @@ CREATE INDEX IF NOT EXISTS memory_reinterpretation_jobs_due_idx
     ON memory_reinterpretation_jobs (not_before, created_at)
     WHERE status IN ('pending', 'retry');
 
+CREATE INDEX IF NOT EXISTS memory_reinterpretation_jobs_expired_lease_idx
+    ON memory_reinterpretation_jobs (lease_expires_at)
+    WHERE status = 'running';
+
 CREATE INDEX IF NOT EXISTS memory_reinterpretation_jobs_uid_conversation_idx
     ON memory_reinterpretation_jobs (uid, conversation_id, created_at DESC);
 
 ALTER TABLE memory_reinterpretation_jobs
     ADD COLUMN IF NOT EXISTS proposal_plan JSONB,
-    ADD COLUMN IF NOT EXISTS progress JSONB NOT NULL DEFAULT '{}'::jsonb;
+    ADD COLUMN IF NOT EXISTS progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS transcript_revision INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS memory_reinterpretation_attempts (
     id BIGSERIAL PRIMARY KEY,
     job_id TEXT NOT NULL REFERENCES memory_reinterpretation_jobs(id) ON DELETE CASCADE,
+    transcript_revision INTEGER NOT NULL DEFAULT 1,
     attempt_number INTEGER NOT NULL,
     lease_token TEXT NOT NULL,
     worker_id TEXT NOT NULL,
@@ -70,9 +78,21 @@ CREATE TABLE IF NOT EXISTS memory_reinterpretation_attempts (
     error_code TEXT,
     metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    finished_at TIMESTAMPTZ,
-    UNIQUE (job_id, attempt_number)
+    finished_at TIMESTAMPTZ
 );
+
+ALTER TABLE memory_reinterpretation_attempts
+    ADD COLUMN IF NOT EXISTS transcript_revision INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE memory_reinterpretation_attempts
+    DROP CONSTRAINT IF EXISTS memory_reinterpretation_attempts_job_id_attempt_number_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_reinterpretation_attempts_generation_attempt_idx
+    ON memory_reinterpretation_attempts (
+        job_id,
+        transcript_revision,
+        attempt_number
+    );
 
 CREATE INDEX IF NOT EXISTS memory_reinterpretation_attempts_job_idx
     ON memory_reinterpretation_attempts (job_id, attempt_number DESC);

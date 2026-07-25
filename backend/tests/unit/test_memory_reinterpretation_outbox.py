@@ -3,6 +3,7 @@ import os
 import sys
 import types
 from datetime import timedelta
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -32,7 +33,10 @@ summary_stub = types.ModuleType("utils.conversations.generic_summary")
 summary_stub.generate_stock_conversation_summary = lambda *args, **kwargs: None
 sys.modules.setdefault("utils.conversations.generic_summary", summary_stub)
 
-from database.memory_reinterpretations import InMemoryMemoryReinterpretationRepository
+from database.memory_reinterpretations import (
+    InMemoryMemoryReinterpretationRepository,
+    PostgresMemoryReinterpretationRepository,
+)
 from ella.routers import corrections, memory_reinterpretation as reinterpretation_router
 from ella.routers.canonical_events import (
     CanonicalEventIn,
@@ -42,11 +46,14 @@ from ella.routers.canonical_events import (
     create_canonical_events_router,
 )
 from ella.routers import canonical_events
+from ella.services import memory_reinterpretation as reinterpretation_service
 from ella.services.memory_reinterpretation import (
     ApplyResult,
     MemoryReinterpretationWorker,
     ReinterpretationPlan,
     ReinterpretationWorkerError,
+    run_worker_loop,
+    worker_runtime_metrics,
 )
 
 UID = "CaseSensitiveUserA"
@@ -186,7 +193,136 @@ def test_duplicate_completion_is_one_job_and_reconnect_extends_debounce_and_hash
         assert job["not_before"] == repository.now + timedelta(seconds=45)
         assert job["not_before"] > original_due
         assert job["transcript_hash"] != original_hash
+        assert job["transcript_revision"] == 2
         assert [ref["event_id"] for ref in job["canonical_refs"]] == ["turn-1", "turn-2"]
+
+    asyncio.run(run())
+
+
+def test_changed_completion_during_running_invalidates_lease_and_stale_finish():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        store, job = await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        claimed = await repository.claim_due("worker-a", lease_seconds=30)
+        assert claimed is not None
+
+        await store.write_batch(
+            [
+                _event(
+                    "turn-2",
+                    "The backpack is beside the door.",
+                    connection_id="connection-b",
+                    started_at="2026-07-24T18:01:20Z",
+                )
+            ]
+        )
+        session_id, completion = _completion()
+        await store.complete_session(session_id, completion)
+        current = repository.jobs[job["id"]]
+
+        assert current["status"] == "pending"
+        assert current["transcript_revision"] == 2
+        assert current["lease_token"] is None
+        assert current["proposal_plan"] is None
+        assert repository.attempts[0]["status"] == "superseded"
+        assert await repository.record_plan(claimed, {"outcome": "no_change", "proposals": []}) is False
+        assert (
+            await repository.finish(
+                claimed,
+                status="no_change",
+                outcome="no_change",
+                proposal_ids=[],
+                correction_ids=[],
+                receipt_refs=[],
+            )
+            is False
+        )
+
+    asyncio.run(run())
+
+
+def test_changed_completion_after_plan_before_retry_forces_fresh_analysis():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        store, job = await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        claimed = await repository.claim_due("worker-a", lease_seconds=30)
+        assert claimed is not None
+        assert await repository.record_plan(
+            claimed,
+            {"outcome": "no_change", "proposals": []},
+        )
+        assert (
+            await repository.fail_or_retry(
+                claimed,
+                error_code="temporary",
+                retryable=True,
+            )
+            == "retry"
+        )
+
+        await store.write_batch(
+            [
+                _event(
+                    "turn-2",
+                    "Actually it is the green backpack.",
+                    connection_id="connection-b",
+                    started_at="2026-07-24T18:01:20Z",
+                )
+            ]
+        )
+        session_id, completion = _completion()
+        await store.complete_session(session_id, completion)
+        current = repository.jobs[job["id"]]
+
+        assert current["status"] == "pending"
+        assert current["transcript_revision"] == 2
+        assert current["proposal_plan"] is None
+        assert current["progress"] == {}
+        assert current["proposal_ids"] == []
+        assert current["correction_ids"] == []
+        assert current["attempt_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_completion_after_terminal_outcome_does_not_rewrite_processed_transcript():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        store, job = await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        claimed = await repository.claim_due("worker-a", lease_seconds=30)
+        assert claimed is not None
+        assert await repository.finish(
+            claimed,
+            status="no_change",
+            outcome="no_change",
+            proposal_ids=[],
+            correction_ids=[],
+            receipt_refs=[],
+        )
+        original = dict(repository.jobs[job["id"]])
+
+        await store.write_batch(
+            [
+                _event(
+                    "turn-2",
+                    "A later reconnect turn.",
+                    connection_id="connection-b",
+                    started_at="2026-07-24T18:01:20Z",
+                )
+            ]
+        )
+        session_id, completion = _completion()
+        await store.complete_session(session_id, completion)
+        current = repository.jobs[job["id"]]
+
+        assert current["status"] == "no_change"
+        assert current["transcript_revision"] == original["transcript_revision"]
+        assert current["transcript_hash"] == original["transcript_hash"]
+        assert current["canonical_refs"] == original["canonical_refs"]
+        assert current["updated_at"] == original["updated_at"]
 
     asyncio.run(run())
 
@@ -258,6 +394,119 @@ def test_postgres_completion_and_enqueue_share_one_transaction(monkeypatch):
     assert repository.called is True
     assert connection.in_transaction is False
     assert result["reinterpretation"]["job_id"] == "job-1"
+
+
+def test_postgres_expired_lease_at_attempt_ceiling_closes_attempt_and_dead_letters():
+    statements = []
+    candidate = {
+        "id": "job-1",
+        "uid": UID,
+        "logical_session_id": SESSION_ID,
+        "conversation_id": CONVERSATION_ID,
+        "starting_summary_version_id": VERSION_ID,
+        "transcript_hash": "hash",
+        "transcript_revision": 3,
+        "status": "running",
+        "lease_token": "expired-lease",
+        "attempt_count": 2,
+        "max_attempts": 2,
+    }
+
+    class Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            statements.append(("fetchrow", query, args))
+            assert "FOR UPDATE SKIP LOCKED" in query
+            return candidate
+
+        async def execute(self, query, *args):
+            statements.append(("execute", query, args))
+            return "UPDATE 1"
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def get_pool():
+        return Pool()
+
+    repository = PostgresMemoryReinterpretationRepository(get_pool, max_attempts=2)
+    result = asyncio.run(repository.claim_due("worker-b"))
+
+    assert result is None
+    executed = [query for kind, query, args in statements if kind == "execute"]
+    assert any("UPDATE memory_reinterpretation_attempts" in query for query in executed)
+    assert any("lease_expired_attempt_limit" in query for query in executed)
+    assert not any("INSERT INTO memory_reinterpretation_attempts" in query for query in executed)
+
+
+def test_postgres_stale_fail_does_not_close_attempt_or_report_retry():
+    statements = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, query, *args):
+            statements.append(query)
+            if "UPDATE memory_reinterpretation_attempts" in query:
+                raise AssertionError("stale worker must not close the attempt")
+            return "UPDATE 0"
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def get_pool():
+        return Pool()
+
+    repository = PostgresMemoryReinterpretationRepository(get_pool)
+    transition = asyncio.run(
+        repository.fail_or_retry(
+            {
+                "id": "job-1",
+                "lease_token": "stale-lease",
+                "transcript_revision": 2,
+                "attempt_count": 1,
+                "max_attempts": 5,
+            },
+            error_code="stale_worker",
+            retryable=True,
+        )
+    )
+
+    assert transition == "lease_lost"
+    assert len(statements) == 1
 
 
 def test_reinterpretation_completion_requires_configured_ledger_bearer(monkeypatch):
@@ -481,6 +730,175 @@ def test_retry_backoff_reaches_dead_letter_at_attempt_limit():
         assert job["attempt_count"] == 2
         assert job["last_error_code"] == "hermes_unavailable"
         assert job["outcome"] == "failed"
+
+    asyncio.run(run())
+
+
+def test_expired_process_lease_dead_letters_at_attempt_ceiling():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(
+            debounce_seconds=0,
+            max_attempts=2,
+        )
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+
+        first = await repository.claim_due("worker-a", lease_seconds=30)
+        assert first is not None
+        repository.now += timedelta(seconds=31)
+        second = await repository.claim_due("worker-b", lease_seconds=30)
+        assert second is not None
+        assert second["attempt_count"] == 2
+        assert repository.attempts[0]["status"] == "lease_expired"
+
+        repository.now += timedelta(seconds=31)
+        assert await repository.claim_due("worker-c", lease_seconds=30) is None
+        job = next(iter(repository.jobs.values()))
+        assert job["status"] == "dead_letter"
+        assert job["attempt_count"] == 2
+        assert job["last_error_code"] == "lease_expired_attempt_limit"
+        assert [attempt["status"] for attempt in repository.attempts] == [
+            "lease_expired",
+            "lease_expired",
+        ]
+
+    asyncio.run(run())
+
+
+def test_stale_worker_cannot_record_retry_or_close_new_attempt():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(
+            debounce_seconds=0,
+            max_attempts=3,
+        )
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        first = await repository.claim_due("worker-a", lease_seconds=30)
+        assert first is not None
+        repository.now += timedelta(seconds=31)
+        second = await repository.claim_due("worker-b", lease_seconds=30)
+        assert second is not None
+
+        transition = await repository.fail_or_retry(
+            first,
+            error_code="stale_worker_failure",
+            retryable=True,
+        )
+        job = next(iter(repository.jobs.values()))
+
+        assert transition == "lease_lost"
+        assert job["status"] == "running"
+        assert job["lease_token"] == second["lease_token"]
+        assert repository.attempts[-1]["status"] == "running"
+
+    asyncio.run(run())
+
+
+def test_worker_verifies_revision_lease_immediately_before_side_effect():
+    class SupersedeAfterPlanRepository(InMemoryMemoryReinterpretationRepository):
+        async def record_plan(self, job, plan):
+            recorded = await super().record_plan(job, plan)
+            current = self.jobs[job["id"]]
+            current["transcript_revision"] += 1
+            current["status"] = "pending"
+            current["lease_owner"] = None
+            current["lease_token"] = None
+            current["lease_expires_at"] = None
+            return recorded
+
+    async def run():
+        repository = SupersedeAfterPlanRepository(debounce_seconds=0)
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+        writes = []
+        worker = MemoryReinterpretationWorker(
+            repository,
+            hermes_client=_Hermes(
+                {
+                    "outcome": "proposals",
+                    "proposals": [
+                        {
+                            "kind": "factual_correction",
+                            "certainty": "confirmed",
+                            "correction_text": "The glasses are in the blue backpack.",
+                            "evidence_event_ids": ["turn-1"],
+                            "evidence_quote": "glasses are actually in the blue backpack",
+                            "corrected_summary": {
+                                "overview": "[Ella] The glasses are in the blue backpack.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            conversation_loader=_loader,
+            correction_writer=lambda **kwargs: writes.append(kwargs),
+        )
+
+        result = await worker.run_once("worker-a")
+
+        assert result["status"] == "lease_lost"
+        assert writes == []
+
+    asyncio.run(run())
+
+
+def test_worker_heartbeat_renews_long_running_lease(monkeypatch):
+    class HeartbeatRepository:
+        def __init__(self):
+            self.calls = []
+
+        async def renew_lease(self, job, *, lease_seconds):
+            self.calls.append((job["id"], job["transcript_revision"], lease_seconds))
+            return False
+
+    async def run():
+        repository = HeartbeatRepository()
+        worker = MemoryReinterpretationWorker(repository, lease_seconds=30)
+
+        async def no_wait(seconds):
+            return None
+
+        monkeypatch.setattr(reinterpretation_service.asyncio, "sleep", no_wait)
+        await worker._heartbeat_lease(
+            {
+                "id": "job-1",
+                "transcript_revision": 4,
+            }
+        )
+
+        assert repository.calls == [("job-1", 4, 30)]
+
+    asyncio.run(run())
+
+
+def test_worker_loop_recovers_after_transient_claim_failure():
+    class FlakyWorker:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_once(self, worker_id):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary postgres outage")
+            return {"status": "ok"}
+
+    async def run():
+        worker = FlakyWorker()
+        sleeps = []
+        before = worker_runtime_metrics()["loop_failures_total"]
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        await run_worker_loop(
+            worker,
+            max_iterations=2,
+            sleep_func=fake_sleep,
+        )
+
+        assert worker.calls == 2
+        assert sleeps == [1.0]
+        assert worker_runtime_metrics()["loop_failures_total"] == before + 1
 
     asyncio.run(run())
 
@@ -792,3 +1210,155 @@ def test_omi_apply_boundary_uses_cas_canonical_receipt_and_idempotent_replay(mon
     assert apply_calls[0]["correction_id"] == "correction-1"
     assert audits[0]["status"] == "submitted"
     assert audits[-1]["status"] == "applied"
+
+
+def test_worker_reinterpretation_receipt_and_authenticated_undo_restore_prior_summary(monkeypatch):
+    conversation = {
+        **_conversation(),
+        "summary_versions": [
+            {
+                "id": VERSION_ID,
+                "title": "Glasses location",
+                "overview": "[Ella] The glasses were near the desk.",
+                "emoji": "👓",
+                "category": "other",
+                "kind": "enriched",
+                "is_active": True,
+            }
+        ],
+    }
+    audit: dict = {}
+
+    class AuditRef:
+        def set(self, payload, merge=False):
+            if merge:
+                audit.update(payload)
+            else:
+                audit.clear()
+                audit.update(payload)
+
+        def get(self):
+            return SimpleNamespace(
+                exists=bool(audit),
+                to_dict=lambda: dict(audit),
+            )
+
+        def collection(self, name):
+            return SimpleNamespace(stream=lambda: [])
+
+    def load_conversation(uid, conversation_id):
+        if uid == UID and conversation_id == CONVERSATION_ID:
+            return conversation
+        return None
+
+    def update_conversation(uid, conversation_id, update):
+        assert uid == UID
+        assert conversation_id == CONVERSATION_ID
+        conversation.update(update)
+
+    async def apply_summary_update(**kwargs):
+        active_id = kwargs["active_summary_version_id"]
+        assert conversation["active_summary_version_id"] == active_id
+        for version in conversation["summary_versions"]:
+            version["is_active"] = False
+        if kwargs["summary_kind"] == "voice_reinterpreted":
+            version_id = "summary-v2"
+        else:
+            assert kwargs["summary_kind"] == "correction_undo"
+            version_id = "summary-undo-v3"
+        version = {
+            "id": version_id,
+            **kwargs["summary"],
+            "kind": kwargs["summary_kind"],
+            "based_on_version_id": active_id,
+            "is_active": True,
+        }
+        if kwargs.get("correction_id"):
+            version["correction_id"] = kwargs["correction_id"]
+        conversation["summary_versions"].append(version)
+        conversation["active_summary_version_id"] = version_id
+        conversation["structured"] = {
+            "title": version.get("title") or "",
+            "overview": version.get("overview") or "",
+            "emoji": version.get("emoji") or "",
+            "category": version.get("category") or "other",
+        }
+        return {
+            "status": "ok",
+            "active_summary_version_id": version_id,
+            "idempotent_replay": False,
+        }
+
+    async def revert_propagations(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(corrections.conversations_db, "get_conversation", load_conversation)
+    monkeypatch.setattr(corrections.conversations_db, "update_conversation", update_conversation)
+    monkeypatch.setattr(corrections, "_audit_ref", lambda *args: AuditRef())
+    monkeypatch.setattr(corrections, "apply_summary_update", apply_summary_update)
+    monkeypatch.setattr(corrections, "_prepare_applied_propagation_rollbacks", lambda *args: [])
+    monkeypatch.setattr(corrections, "_revert_applied_propagations", revert_propagations)
+    monkeypatch.setattr(corrections, "_correction_propagation_counts", lambda *args: (0, 0, "known"))
+
+    async def run_worker():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        await _seed_job(repository)
+        repository.now += timedelta(seconds=1)
+
+        async def conversation_loader(uid, conversation_id):
+            return load_conversation(uid, conversation_id)
+
+        worker = MemoryReinterpretationWorker(
+            repository,
+            hermes_client=_Hermes(
+                {
+                    "outcome": "proposals",
+                    "proposals": [
+                        {
+                            "kind": "factual_correction",
+                            "certainty": "confirmed",
+                            "correction_text": "The glasses are in the blue backpack.",
+                            "evidence_event_ids": ["turn-1"],
+                            "evidence_quote": "glasses are actually in the blue backpack",
+                            "corrected_summary": {
+                                "title": "Glasses in backpack",
+                                "overview": "[Ella] The glasses are in the blue backpack.",
+                                "emoji": "👓",
+                                "category": "other",
+                            },
+                        }
+                    ],
+                }
+            ),
+            conversation_loader=conversation_loader,
+        )
+        result = await worker.run_once("worker-a")
+        return repository, result
+
+    repository, result = asyncio.run(run_worker())
+    job = next(iter(repository.jobs.values()))
+    correction_id = job["correction_ids"][0]
+    assert result["status"] == "applied"
+    assert conversation["active_summary_version_id"] == "summary-v2"
+    assert audit["source"] == "voice-memory-reinterpretation"
+
+    app = FastAPI()
+    app.include_router(corrections.router)
+    app.dependency_overrides[corrections.auth.get_current_user_uid] = lambda: UID
+    client = TestClient(app)
+
+    receipt = client.get(f"/v1/ella/conversations/{CONVERSATION_ID}/corrections/{correction_id}")
+    assert receipt.status_code == 200
+    assert receipt.json()["status"] == "applied"
+    assert receipt.json()["before_version_id"] == VERSION_ID
+    assert receipt.json()["after_version_id"] == "summary-v2"
+
+    undone = client.post(f"/v1/ella/conversations/{CONVERSATION_ID}/corrections/{correction_id}/undo")
+    assert undone.status_code == 200
+    assert undone.json()["status"] == "undone"
+    assert undone.json()["active_version_id"] == "summary-undo-v3"
+    assert undone.json()["undo_version_id"] == "summary-undo-v3"
+    assert conversation["active_summary_version_id"] == "summary-undo-v3"
+    active = next(version for version in conversation["summary_versions"] if version["id"] == "summary-undo-v3")
+    assert active["title"] == "Glasses location"
+    assert active["overview"] == "[Ella] The glasses were near the desk."

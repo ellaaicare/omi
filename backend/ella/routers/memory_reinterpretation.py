@@ -14,7 +14,10 @@ from database.memory_reinterpretations import (
     public_job,
 )
 from ella.routers.canonical_events import _get_pool
-from ella.services.memory_reinterpretation import MemoryReinterpretationWorker
+from ella.services.memory_reinterpretation import (
+    MemoryReinterpretationWorker,
+    worker_runtime_metrics,
+)
 from utils.other import endpoints as auth
 
 
@@ -94,6 +97,8 @@ def create_memory_reinterpretation_router(
         ),
     ) -> dict[str, Any]:
         _require_operator(x_operator_token)
-        return {"ok": True, "metrics": await repository.metrics()}
+        metrics_value = await repository.metrics()
+        metrics_value["worker_runtime"] = worker_runtime_metrics()
+        return {"ok": True, "metrics": metrics_value}
 
     return router
