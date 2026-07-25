@@ -167,7 +167,7 @@ def _safe_json_file(path: str) -> Any:
         return None
 
 
-def _safe_json_url(url: str) -> Any:
+def _safe_json_url(url: str, *, timeout_seconds: float = 5.0) -> Any:
     if not str(url or "").strip():
         return None
     now = time.monotonic()
@@ -181,7 +181,10 @@ def _safe_json_url(url: str) -> Any:
     if HONCHO_PROFILE_MAP_URL_TOKEN:
         headers["Authorization"] = f"Bearer {HONCHO_PROFILE_MAP_URL_TOKEN}"
     try:
-        with urlopen(Request(url, headers=headers), timeout=5) as response:
+        with urlopen(
+            Request(url, headers=headers),
+            timeout=max(0.01, float(timeout_seconds)),
+        ) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, OSError, json.JSONDecodeError, TimeoutError):
         return None
@@ -223,50 +226,98 @@ def _profile_target_from_entry(entry: Any) -> dict[str, str] | None:
     }
 
 
-def _target_from_profile_map(uid: str) -> dict[str, str] | None:
-    uid_norm = str(uid or "").strip().lower()
-    candidates = []
-    inline = _safe_json_loads(HONCHO_PROFILE_MAP_JSON)
-    if inline is not None:
-        candidates.append(inline)
-    url_data = _safe_json_url(HONCHO_PROFILE_MAP_URL)
-    if url_data is not None:
-        candidates.append(url_data)
-    file_data = _safe_json_file(HONCHO_PROFILE_MAP_PATH)
-    if file_data is not None:
-        candidates.append(file_data)
-
-    for data in candidates:
-        if isinstance(data, dict):
-            for key in (uid, uid_norm):
-                if key in data:
-                    target = _profile_target_from_entry(data[key])
-                    if target:
-                        return {**target, "source": "profile_map"}
-            profiles = data.get("profiles") or data.get("users")
-            if isinstance(profiles, list):
-                data = profiles
-        if isinstance(data, list):
-            for entry in data:
-                if not isinstance(entry, dict):
-                    continue
-                entry_uid = str(entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or "").lower()
-                if entry_uid != uid_norm:
-                    continue
-                target = _profile_target_from_entry(entry)
-                if target:
-                    return {**target, "source": "profile_map"}
+def _target_from_profile_map_data(uid: str, data: Any) -> dict[str, str] | None:
+    if isinstance(data, dict):
+        if uid in data:
+            target = _profile_target_from_entry(data[uid])
+            if target:
+                return {**target, "source": "profile_map"}
+        profiles = data.get("profiles") or data.get("users")
+        if isinstance(profiles, list):
+            data = profiles
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            entry_uid = str(
+                entry.get("uid") or entry.get("profile_uid") or entry.get("profileUid") or ""
+            ).strip()
+            if entry_uid != uid:
+                continue
+            target = _profile_target_from_entry(entry)
+            if target:
+                return {**target, "source": "profile_map"}
     return None
 
 
-def _target_from_profile_config(candidate: HonchoFactCandidate) -> dict[str, str] | None:
-    if HONCHO_PROFILE_UID and HONCHO_PROFILE_UID.lower() != candidate.uid.lower():
+def _target_from_local_profile_map(uid: str) -> dict[str, str] | None:
+    uid = str(uid or "").strip()
+    for data in (
+        _safe_json_loads(HONCHO_PROFILE_MAP_JSON),
+        _safe_json_file(HONCHO_PROFILE_MAP_PATH),
+    ):
+        target = _target_from_profile_map_data(uid, data)
+        if target:
+            return target
+    return None
+
+
+def _target_from_remote_profile_map(
+    uid: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, str] | None:
+    return _target_from_profile_map_data(
+        str(uid or "").strip(),
+        _safe_json_url(
+            HONCHO_PROFILE_MAP_URL,
+            timeout_seconds=timeout_seconds,
+        ),
+    )
+
+
+def _target_from_profile_config(uid: str) -> dict[str, str] | None:
+    uid = str(uid or "").strip()
+    if not HONCHO_PROFILE_UID or HONCHO_PROFILE_UID.strip() != uid:
         return None
     data = _safe_json_file(HONCHO_PROFILE_CONFIG_PATH)
     target = _profile_target_from_entry(data)
     if target:
         return {**target, "source": "profile_config"}
     return None
+
+
+def resolve_companion_honcho_target(
+    uid: str,
+    *,
+    remote_timeout_seconds: float = 5.0,
+) -> tuple[dict[str, str] | None, str]:
+    """Resolve an exact user profile without correction-write global fallbacks."""
+    uid = str(uid or "").strip()
+    if not uid:
+        return None, "missing_companion_honcho_target"
+    # Every local exact-UID source must win before remote provisioning I/O.
+    target = (
+        _target_from_local_profile_map(uid)
+        or _target_from_profile_config(uid)
+        or _target_from_remote_profile_map(
+            uid,
+            timeout_seconds=remote_timeout_seconds,
+        )
+    )
+    if not target:
+        return None, "missing_companion_honcho_target"
+    return (
+        {
+            "workspace": target["workspace"],
+            "observer_peer_id": _honcho_resource_id(
+                target.get("observer_peer_id") or "ella-correction-observer"
+            ),
+            "observed_peer_id": target["observed_peer_id"],
+            "source": target.get("source") or "companion_profile",
+        },
+        "",
+    )
 
 
 def _resolve_native_honcho_target(
@@ -293,9 +344,9 @@ def _resolve_native_honcho_target(
             "",
         )
 
-    target = _target_from_profile_map(candidate.uid) or _target_from_profile_config(candidate)
+    target, _ = resolve_companion_honcho_target(candidate.uid)
     if target:
-        observer_peer_id = explicit_observer or target.get("observer_peer_id") or "ella-correction-observer"
+        observer_peer_id = explicit_observer or target["observer_peer_id"]
         return (
             {
                 "workspace": target["workspace"],
