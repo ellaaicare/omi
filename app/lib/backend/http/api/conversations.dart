@@ -311,6 +311,7 @@ class ConversationReinterpretationJob {
     required this.sessionId,
     required this.conversationId,
     required this.status,
+    this.outcome = '',
     required this.correctionIds,
     required this.receipts,
   });
@@ -319,6 +320,7 @@ class ConversationReinterpretationJob {
   final String sessionId;
   final String conversationId;
   final String status;
+  final String outcome;
   final List<String> correctionIds;
   final List<ConversationReinterpretationReceiptReference> receipts;
 
@@ -326,14 +328,15 @@ class ConversationReinterpretationJob {
   bool get isNoChange => status == 'no_change';
   bool get isPendingReview => status == 'pending_review';
   bool get isApplied => status == 'applied';
+  bool get hasTerminalAppliedCorrection => isApplied || (isPendingReview && outcome == 'applied_with_pending');
 
   String? get appliedCorrectionId {
-    for (final receipt in receipts) {
+    for (final receipt in receipts.reversed) {
       if (receipt.status == 'applied' && receipt.conversationId == conversationId) {
         return receipt.correctionId;
       }
     }
-    return correctionIds.isEmpty ? null : correctionIds.first;
+    return correctionIds.isEmpty ? null : correctionIds.last;
   }
 
   static ConversationReinterpretationJob? tryParse(Object? value) {
@@ -342,6 +345,7 @@ class ConversationReinterpretationJob {
     final sessionId = value['session_id']?.toString().trim() ?? '';
     final conversationId = value['conversation_id']?.toString().trim() ?? '';
     final status = value['status']?.toString().trim() ?? '';
+    final outcome = value['outcome']?.toString().trim() ?? '';
     if (jobId.isEmpty || sessionId.isEmpty || conversationId.isEmpty || status.isEmpty) return null;
 
     final rawCorrectionIds = value['correction_ids'];
@@ -360,6 +364,7 @@ class ConversationReinterpretationJob {
       sessionId: sessionId,
       conversationId: conversationId,
       status: status,
+      outcome: outcome,
       correctionIds: correctionIds,
       receipts: receipts,
     );

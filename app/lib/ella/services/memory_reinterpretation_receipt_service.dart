@@ -2,6 +2,15 @@ import 'package:omi/backend/http/api/conversations.dart';
 
 enum MemoryReceiptDiscoveryState { applied, noChange, pendingReview, failed, timeout, sessionMismatch, cancelled }
 
+class MemoryReceiptDiscoveryRequest {
+  const MemoryReceiptDiscoveryRequest({required this.conversationId, required this.sessionId});
+
+  final String conversationId;
+  final String sessionId;
+
+  String get key => '$conversationId:$sessionId';
+}
+
 class MemoryReceiptDiscoveryResult {
   const MemoryReceiptDiscoveryResult(this.state, {this.receipt});
 
@@ -15,12 +24,20 @@ typedef CorrectionReceiptFetcher = Future<ConversationCorrectionReceipt?> Functi
 typedef MemoryReceiptPollDelay = Future<void> Function(Duration duration);
 
 class MemoryReinterpretationReceiptDiscovery {
+  // Production waits 45 seconds before the worker is eligible. A 90-second
+  // window leaves another 45 seconds for worker/API latency and 24 seconds
+  // beyond the observed 66-second successful canary.
+  static const productionDebounce = Duration(seconds: 45);
+  static const defaultMaxWait = Duration(seconds: 90);
+  static const defaultPollInterval = Duration(seconds: 2);
+  static const defaultMaxAttempts = 46;
+
   MemoryReinterpretationReceiptDiscovery({
     LatestReinterpretationFetcher? fetchLatest,
     CorrectionReceiptFetcher? fetchReceipt,
     MemoryReceiptPollDelay? wait,
-    this.maxAttempts = 40,
-    this.pollInterval = const Duration(milliseconds: 750),
+    this.maxAttempts = defaultMaxAttempts,
+    this.pollInterval = defaultPollInterval,
   })  : _fetchLatest = fetchLatest ?? _getLatest,
         _fetchReceipt = fetchReceipt ?? _getReceipt,
         _wait = wait ?? ((duration) => Future<void>.delayed(duration));
@@ -57,22 +74,27 @@ class MemoryReinterpretationReceiptDiscovery {
         if (job.conversationId != conversationId || job.sessionId != sessionId) {
           sawSessionMismatch = true;
         } else {
-          if (job.isPendingReview) {
-            return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.pendingReview);
-          }
-
           final correctionId = job.appliedCorrectionId;
-          if (job.isApplied && correctionId != null) {
+          if (job.hasTerminalAppliedCorrection && correctionId != null) {
             final receipt = await _fetchReceipt(conversationId, correctionId);
             if (shouldContinue?.call() == false) {
               return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.cancelled);
             }
-            if (receipt != null &&
-                receipt.conversationId == conversationId &&
-                receipt.correctionId == correctionId &&
-                receipt.isApplied) {
-              return MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.applied, receipt: receipt);
+            if (receipt != null) {
+              if (receipt.conversationId != conversationId || receipt.correctionId != correctionId) {
+                return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.failed);
+              }
+              if (receipt.isApplied) {
+                return MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.applied, receipt: receipt);
+              }
+              if (!receipt.isPending) {
+                return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.failed);
+              }
             }
+          } else if (job.hasTerminalAppliedCorrection) {
+            return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.failed);
+          } else if (job.isPendingReview) {
+            return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.pendingReview);
           } else if (job.isNoChange) {
             return const MemoryReceiptDiscoveryResult(MemoryReceiptDiscoveryState.noChange);
           } else if (!job.isPending) {

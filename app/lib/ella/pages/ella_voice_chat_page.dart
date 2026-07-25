@@ -41,10 +41,16 @@ import 'package:omi/utils/l10n_extensions.dart';
 /// Flow: Tap orb → always-listen via on-device speech recognition →
 /// auto-detect silence → send text to Ella chat → TTS → play audio → repeat.
 class EllaVoiceChatPage extends StatefulWidget {
-  const EllaVoiceChatPage({super.key, this.sessionScope, this.memoryTitle});
+  const EllaVoiceChatPage({
+    super.key,
+    this.sessionScope,
+    this.memoryTitle,
+    this.onMemorySessionEnded,
+  });
 
   final V2VSessionScope? sessionScope;
   final String? memoryTitle;
+  final ValueChanged<MemoryReceiptDiscoveryRequest>? onMemorySessionEnded;
 
   @visibleForTesting
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
@@ -104,6 +110,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   int _memoryReceiptPollAttempts = 0;
   final MemoryReinterpretationReceiptDiscovery _memoryReceiptDiscovery = MemoryReinterpretationReceiptDiscovery();
   String? _memoryReceiptDiscoveryKey;
+  String? _memorySessionNotificationKey;
 
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
@@ -222,6 +229,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   @override
   void dispose() {
+    _notifyMemorySessionEnded(_activeSessionId);
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
     _memoryReceiptPollTimer?.cancel();
@@ -634,6 +642,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     _activeSessionId = receipt.sessionId;
     _memoryReceiptDiscoveryKey = null;
+    _memorySessionNotificationKey = null;
     _memoryReinterpretationEvent = null;
     _memoryReceiptPollTimer?.cancel();
     _activeV2VProvider = providerName;
@@ -659,10 +668,21 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _beginPostSessionReceiptDiscovery(String sessionId) {
     final scope = _sessionScope;
     if (scope == null || sessionId.isEmpty) return;
-    final discoveryKey = '${scope.conversationId}:$sessionId';
+    final request = MemoryReceiptDiscoveryRequest(conversationId: scope.conversationId, sessionId: sessionId);
+    _notifyMemorySessionEnded(sessionId);
+    final discoveryKey = request.key;
     if (_memoryReceiptDiscoveryKey == discoveryKey) return;
     _memoryReceiptDiscoveryKey = discoveryKey;
-    unawaited(_discoverPostSessionReceipt(scope.conversationId, sessionId, discoveryKey));
+    unawaited(_discoverPostSessionReceipt(request.conversationId, request.sessionId, discoveryKey));
+  }
+
+  void _notifyMemorySessionEnded(String sessionId) {
+    final scope = _sessionScope;
+    if (scope == null || sessionId.isEmpty) return;
+    final request = MemoryReceiptDiscoveryRequest(conversationId: scope.conversationId, sessionId: sessionId);
+    if (_memorySessionNotificationKey == request.key) return;
+    _memorySessionNotificationKey = request.key;
+    widget.onMemorySessionEnded?.call(request);
   }
 
   Future<void> _discoverPostSessionReceipt(String conversationId, String sessionId, String discoveryKey) async {

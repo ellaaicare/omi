@@ -17,7 +17,9 @@ import 'package:omi/backend/schema/folder.dart';
 import 'package:omi/backend/schema/geolocation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
+import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/widgets/memory_correction_receipt.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
@@ -735,26 +737,50 @@ class _TalkAboutMemoryButton extends StatelessWidget {
 
   final ServerConversation conversation;
 
+  Future<void> _openMemoryTalk(BuildContext context) async {
+    MemoryReceiptDiscoveryRequest? endedSession;
+    final displayTitle = parseEllaDisplayValue(conversation.structured.title).text.trim();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => EllaVoiceChatPage(
+          sessionScope: V2VSessionScope.memory(
+            conversationId: conversation.id,
+            expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
+          ),
+          memoryTitle: displayTitle,
+          onMemorySessionEnded: (request) => endedSession = request,
+        ),
+      ),
+    );
+
+    final request = endedSession;
+    if (!context.mounted || request == null) return;
+    final result = await MemoryReinterpretationReceiptDiscovery().discover(
+      conversationId: request.conversationId,
+      sessionId: request.sessionId,
+      shouldContinue: () => context.mounted,
+    );
+    if (!context.mounted || result.receipt == null) return;
+    final receipt = result.receipt!;
+    await showMemoryCorrectionReceiptSheet(
+      context,
+      receipt: receipt,
+      onUndo: () => undoConversationCorrection(
+        conversationId: receipt.conversationId,
+        correctionId: receipt.correctionId,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(18),
-        onTap: () {
+        onTap: () async {
           HapticFeedback.lightImpact();
-          final displayTitle = parseEllaDisplayValue(conversation.structured.title).text.trim();
-          Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => EllaVoiceChatPage(
-                sessionScope: V2VSessionScope.memory(
-                  conversationId: conversation.id,
-                  expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
-                ),
-                memoryTitle: displayTitle,
-              ),
-            ),
-          );
+          await _openMemoryTalk(context);
         },
         child: Ink(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
