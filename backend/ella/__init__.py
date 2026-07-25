@@ -315,6 +315,42 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella canonical events not available: {e}", flush=True)
 
+    # Durable post-session memory reinterpretation outbox and status API
+    try:
+        from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository
+        from ella.routers.canonical_events import _get_pool
+        from ella.routers.memory_reinterpretation import create_memory_reinterpretation_router
+        from ella.services.memory_reinterpretation import (
+            MemoryReinterpretationWorker,
+            start_worker,
+            stop_worker,
+        )
+
+        reinterpretation_repository = PostgresMemoryReinterpretationRepository(_get_pool)
+        reinterpretation_worker = MemoryReinterpretationWorker(reinterpretation_repository)
+
+        async def _start_reinterpretation_worker() -> None:
+            await start_worker(reinterpretation_worker)
+
+        app.include_router(
+            create_memory_reinterpretation_router(
+                reinterpretation_repository,
+                reinterpretation_worker,
+            ),
+            tags=["Memory Reinterpretation"],
+        )
+        app.add_event_handler(
+            "startup",
+            _start_reinterpretation_worker,
+        )
+        app.add_event_handler("shutdown", stop_worker)
+        print(
+            "  🌐 /v1/ella/conversations/*/reinterpretations - Memory reinterpretation status",
+            flush=True,
+        )
+    except ImportError as e:
+        print(f"  ⚠️ Ella memory reinterpretation not available: {e}", flush=True)
+
     # Observer cron runner (proposal-only fact promotion)
     try:
         from ella.routers.observer import router as observer_router
