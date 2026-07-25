@@ -33,4 +33,24 @@ void main() {
     expect(find.text('Use ElevenLabs'), findsOneWidget);
     expect(find.text('Not now'), findsOneWidget);
   });
+
+  testWidgets('memory-scoped failures offer retry or stop without an unscoped fallback', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: V2VFallbackDialog(
+            receipt: receipt,
+            allowStandardFallback: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Use ElevenLabs'), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('Not now'), findsOneWidget);
+  });
 }

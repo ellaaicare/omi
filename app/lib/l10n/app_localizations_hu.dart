@@ -8509,6 +8509,51 @@ class AppLocalizationsHu extends AppLocalizations {
   String get voiceProviderOpenClawDirect => 'OpenClaw Direct';
 
   @override
+  String get memoryTalkAction => 'Talk about this';
+
+  @override
+  String memoryTalkContext(String title) {
+    return 'Talking about: $title';
+  }
+
+  @override
+  String get memoryTalkUnavailable => 'This memory is unavailable for voice right now. Refresh it and try again.';
+
+  @override
+  String get memoryTalkStale => 'This memory changed. Ella is refreshing it before reconnecting.';
+
+  @override
+  String get memoryTalkProviderRequired =>
+      'Choose Grok Native Realtime or Gemini Native Live in Voice settings to talk about this memory.';
+
+  @override
+  String get memoryCorrectionPending => 'Ella is updating this memory';
+
+  @override
+  String get memoryCorrectionApplied => 'Memory updated';
+
+  @override
+  String get memoryCorrectionFailed => 'Ella couldn\'t update this memory';
+
+  @override
+  String get memoryCorrectionReview => 'Review';
+
+  @override
+  String get memoryCorrectionReviewTitle => 'Memory update';
+
+  @override
+  String get memoryCorrectionBefore => 'Before';
+
+  @override
+  String get memoryCorrectionAfter => 'After';
+
+  @override
+  String get memoryCorrectionUndo => 'Undo update';
+
+  @override
+  String get memoryCorrectionUndone => 'Memory update undone';
+
+  @override
   String get ellaAddCaregiverErrorNameRequired => 'Name is required';
 
   @override
@@ -8702,6 +8747,10 @@ class AppLocalizationsHu extends AppLocalizations {
   @override
   String get aiConsentBodyBeforeElevenLabs =>
       '. OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to ';
+
+  @override
+  String get aiConsentMemoryContext =>
+      ' When you choose Talk about this, the selected stored memory, including related people, topics, and dates, is sent through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor.';
 
   @override
   String get aiConsentElevenLabs => 'ElevenLabs';

@@ -15789,6 +15789,90 @@ abstract class AppLocalizations {
   /// **'OpenClaw Direct'**
   String get voiceProviderOpenClawDirect;
 
+  /// Action on a memory that opens a memory-scoped realtime voice session
+  ///
+  /// In en, this message translates to:
+  /// **'Talk about this'**
+  String get memoryTalkAction;
+
+  /// Presentation-only context header for a memory-scoped voice session
+  ///
+  /// In en, this message translates to:
+  /// **'Talking about: {title}'**
+  String memoryTalkContext(String title);
+
+  /// Privacy-preserving missing or non-owned memory scope error
+  ///
+  /// In en, this message translates to:
+  /// **'This memory is unavailable for voice right now. Refresh it and try again.'**
+  String get memoryTalkUnavailable;
+
+  /// Status shown while a stale memory scope is refreshed
+  ///
+  /// In en, this message translates to:
+  /// **'This memory changed. Ella is refreshing it before reconnecting.'**
+  String get memoryTalkStale;
+
+  /// Error shown when the selected voice provider cannot open memory-scoped V2V
+  ///
+  /// In en, this message translates to:
+  /// **'Choose Grok Native Realtime or Gemini Native Live in Voice settings to talk about this memory.'**
+  String get memoryTalkProviderRequired;
+
+  /// Pending memory reinterpretation receipt status
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is updating this memory'**
+  String get memoryCorrectionPending;
+
+  /// Applied memory reinterpretation receipt status
+  ///
+  /// In en, this message translates to:
+  /// **'Memory updated'**
+  String get memoryCorrectionApplied;
+
+  /// Failed memory reinterpretation receipt status
+  ///
+  /// In en, this message translates to:
+  /// **'Ella couldn\'t update this memory'**
+  String get memoryCorrectionFailed;
+
+  /// Action that opens a correction receipt
+  ///
+  /// In en, this message translates to:
+  /// **'Review'**
+  String get memoryCorrectionReview;
+
+  /// Title for the correction receipt review sheet
+  ///
+  /// In en, this message translates to:
+  /// **'Memory update'**
+  String get memoryCorrectionReviewTitle;
+
+  /// Label for the previous memory summary
+  ///
+  /// In en, this message translates to:
+  /// **'Before'**
+  String get memoryCorrectionBefore;
+
+  /// Label for the updated memory summary
+  ///
+  /// In en, this message translates to:
+  /// **'After'**
+  String get memoryCorrectionAfter;
+
+  /// Action that undoes an applied memory correction
+  ///
+  /// In en, this message translates to:
+  /// **'Undo update'**
+  String get memoryCorrectionUndo;
+
+  /// Status shown after a memory correction is undone
+  ///
+  /// In en, this message translates to:
+  /// **'Memory update undone'**
+  String get memoryCorrectionUndone;
+
   /// No description provided for @ellaAddCaregiverErrorNameRequired.
   ///
   /// In en, this message translates to:
@@ -16154,6 +16238,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'. OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to '**
   String get aiConsentBodyBeforeElevenLabs;
+
+  /// Version 3 disclosure for selected stored memory context sent to a named realtime voice processor
+  ///
+  /// In en, this message translates to:
+  /// **' When you choose Talk about this, the selected stored memory, including related people, topics, and dates, is sent through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor.'**
+  String get aiConsentMemoryContext;
 
   /// Generated voice processor named in the locked consent disclosure
   ///

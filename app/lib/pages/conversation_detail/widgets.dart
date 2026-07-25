@@ -16,6 +16,8 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/folder.dart';
 import 'package:omi/backend/schema/geolocation.dart';
 import 'package:omi/backend/schema/structured.dart';
+import 'package:omi/ella/pages/ella_voice_chat_page.dart';
+import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
@@ -710,12 +712,72 @@ class AppResultDetailWidget extends StatelessWidget {
             ),
           if (content.isNotEmpty) ...[
             const SizedBox(height: 18),
-            _CorrectSummaryButton(
-              conversation: conversation,
-              appSummary: content,
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                _TalkAboutMemoryButton(conversation: conversation),
+                _CorrectSummaryButton(
+                  conversation: conversation,
+                  appSummary: content,
+                ),
+              ],
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _TalkAboutMemoryButton extends StatelessWidget {
+  const _TalkAboutMemoryButton({required this.conversation});
+
+  final ServerConversation conversation;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () {
+          HapticFeedback.lightImpact();
+          final displayTitle = parseEllaDisplayValue(conversation.structured.title).text.trim();
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => EllaVoiceChatPage(
+                sessionScope: V2VSessionScope.memory(
+                  conversationId: conversation.id,
+                  expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
+                ),
+                memoryTitle: displayTitle,
+              ),
+            ),
+          );
+        },
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: EllaColors.primary,
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.graphic_eq_rounded, size: 18, color: EllaColors.paper),
+              const SizedBox(width: 8),
+              Text(
+                context.l10n.memoryTalkAction,
+                style: const TextStyle(
+                  color: EllaColors.paper,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

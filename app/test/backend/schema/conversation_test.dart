@@ -77,6 +77,28 @@ void main() {
     expect(conversation.toJson()['processing_error_at'], '2026-07-20T08:05:00.000Z');
   });
 
+  test('preserves the active summary version used by memory-scoped voice', () {
+    final conversation = ServerConversation.fromJson({
+      'id': 'memory-voice-conversation',
+      'created_at': '2026-07-24T08:00:00Z',
+      'structured': {
+        'title': 'Garden memory',
+        'overview': 'A quiet afternoon.',
+        'emoji': '',
+        'category': 'other',
+        'action_items': [],
+        'events': [],
+      },
+      'transcript_segments': [],
+      'apps_results': [],
+      'audio_files': [],
+      'active_summary_version_id': 'summary-v3',
+    });
+
+    expect(conversation.activeSummaryVersionId, 'summary-v3');
+    expect(conversation.toJson()['active_summary_version_id'], 'summary-v3');
+  });
+
   test('treats initial and recovery summary failures as retryable without exposing unrelated errors', () {
     for (final error in ['conversation_summary_failed', 'conversation_summary_recovery_failed']) {
       final conversation = ServerConversation(

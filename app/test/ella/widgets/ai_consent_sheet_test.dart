@@ -38,6 +38,9 @@ void main() {
     expect(disclosure, contains('OpenAI, Groq, and xAI (Grok)'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('response text'));
+    expect(disclosure, contains('selected stored memory'));
+    expect(disclosure, contains('related people, topics, and dates'));
+    expect(disclosure, contains('Google (Gemini) or xAI (Grok) voice processor'));
     expect(find.text('Not now'), findsOneWidget);
   });
 
@@ -53,9 +56,10 @@ void main() {
     final preferences = SharedPreferencesUtil();
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
+    expect(preferences.aiConsentDeferredVersion, isEmpty);
   });
 
-  testWidgets('Not now revokes the current processor contract', (tester) async {
+  testWidgets('Not now defers the current processor contract', (tester) async {
     final preferences = SharedPreferencesUtil();
     preferences.acceptAiConsent();
 
@@ -68,5 +72,6 @@ void main() {
 
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentContractVersion, isEmpty);
+    expect(preferences.isCurrentAiConsentDeferred, isTrue);
   });
 }

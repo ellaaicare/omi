@@ -356,7 +356,7 @@ void main() {
 
     final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
 
-    expect(receiptId, 'ios-private-cloud-sync:voice-ai-processors-v2:receipt-1');
+    expect(receiptId, 'ios-private-cloud-sync:voice-ai-processors-v3:receipt-1');
     expect(transport.values, [true]);
     expect(transport.getCalls, 1);
     expect(SharedPreferencesUtil().hasAccountBoundAiConsent('uid-a'), isTrue);

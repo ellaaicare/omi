@@ -10172,6 +10172,67 @@
   "@voiceProviderOpenClawDirect": {
     "description": "OpenClaw direct provider label"
   },
+  "memoryTalkAction": "Talk about this",
+  "@memoryTalkAction": {
+    "description": "Action on a memory that opens a memory-scoped realtime voice session"
+  },
+  "memoryTalkContext": "Talking about: {title}",
+  "@memoryTalkContext": {
+    "description": "Presentation-only context header for a memory-scoped voice session",
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "memoryTalkUnavailable": "This memory is unavailable for voice right now. Refresh it and try again.",
+  "@memoryTalkUnavailable": {
+    "description": "Privacy-preserving missing or non-owned memory scope error"
+  },
+  "memoryTalkStale": "This memory changed. Ella is refreshing it before reconnecting.",
+  "@memoryTalkStale": {
+    "description": "Status shown while a stale memory scope is refreshed"
+  },
+  "memoryTalkProviderRequired": "Choose Grok Native Realtime or Gemini Native Live in Voice settings to talk about this memory.",
+  "@memoryTalkProviderRequired": {
+    "description": "Error shown when the selected voice provider cannot open memory-scoped V2V"
+  },
+  "memoryCorrectionPending": "Ella is updating this memory",
+  "@memoryCorrectionPending": {
+    "description": "Pending memory reinterpretation receipt status"
+  },
+  "memoryCorrectionApplied": "Memory updated",
+  "@memoryCorrectionApplied": {
+    "description": "Applied memory reinterpretation receipt status"
+  },
+  "memoryCorrectionFailed": "Ella couldn't update this memory",
+  "@memoryCorrectionFailed": {
+    "description": "Failed memory reinterpretation receipt status"
+  },
+  "memoryCorrectionReview": "Review",
+  "@memoryCorrectionReview": {
+    "description": "Action that opens a correction receipt"
+  },
+  "memoryCorrectionReviewTitle": "Memory update",
+  "@memoryCorrectionReviewTitle": {
+    "description": "Title for the correction receipt review sheet"
+  },
+  "memoryCorrectionBefore": "Before",
+  "@memoryCorrectionBefore": {
+    "description": "Label for the previous memory summary"
+  },
+  "memoryCorrectionAfter": "After",
+  "@memoryCorrectionAfter": {
+    "description": "Label for the updated memory summary"
+  },
+  "memoryCorrectionUndo": "Undo update",
+  "@memoryCorrectionUndo": {
+    "description": "Action that undoes an applied memory correction"
+  },
+  "memoryCorrectionUndone": "Memory update undone",
+  "@memoryCorrectionUndone": {
+    "description": "Status shown after a memory correction is undone"
+  },
   "ellaAddCaregiverErrorNameRequired": "Name is required",
   "ellaAddCaregiverErrorEmailRequired": "Email is required",
   "ellaAddCaregiverErrorEmailInvalid": "Please enter a valid email",
@@ -10295,6 +10356,10 @@
   "aiConsentBodyBeforeElevenLabs": ". OpenRouter may route this text to the selected model provider. For live voice, microphone audio may be sent to Google (Gemini), OpenAI, or xAI (Grok). To speak a standard response, Ella sends response text to ",
   "@aiConsentBodyBeforeElevenLabs": {
     "description": "Locked consent body explaining model routing and live voice before naming the TTS processor"
+  },
+  "aiConsentMemoryContext": " When you choose Talk about this, the selected stored memory, including related people, topics, and dates, is sent through Ella's secure backend to the selected Google (Gemini) or xAI (Grok) voice processor.",
+  "@aiConsentMemoryContext": {
+    "description": "Version 3 disclosure for selected stored memory context sent to a named realtime voice processor"
   },
   "aiConsentElevenLabs": "ElevenLabs",
   "@aiConsentElevenLabs": {

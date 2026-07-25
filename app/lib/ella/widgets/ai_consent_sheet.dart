@@ -63,10 +63,7 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bodyStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(
-          color: EllaColors.textSecondary,
-          height: 1.5,
-        );
+    final bodyStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(color: EllaColors.textSecondary, height: 1.5);
     return PopScope(
       canPop: false,
       child: SingleChildScrollView(
@@ -75,22 +72,29 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.aiConsentTitle,
-              style: EllaTextStyles.display,
-            ),
+            Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
             const SizedBox(height: 16),
             Text.rich(
               TextSpan(
                 style: bodyStyle,
                 children: [
                   TextSpan(text: context.l10n.aiConsentBodyIntro),
-                  TextSpan(text: context.l10n.aiConsentDeepgram, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  TextSpan(
+                    text: context.l10n.aiConsentDeepgram,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   TextSpan(text: context.l10n.aiConsentBodyMiddle),
-                  TextSpan(text: context.l10n.aiConsentAiPartners, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  TextSpan(
+                    text: context.l10n.aiConsentAiPartners,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   TextSpan(text: context.l10n.aiConsentBodyBeforeElevenLabs),
-                  TextSpan(text: context.l10n.aiConsentElevenLabs, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  TextSpan(
+                    text: context.l10n.aiConsentElevenLabs,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   TextSpan(text: context.l10n.aiConsentBodyEnd),
+                  TextSpan(text: context.l10n.aiConsentMemoryContext),
                 ],
               ),
             ),
@@ -108,10 +112,7 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
             ),
             const SizedBox(height: 28),
             if (_hasError) ...[
-              Text(
-                context.l10n.somethingWentWrongTryAgain,
-                style: bodyStyle?.copyWith(color: EllaColors.error),
-              ),
+              Text(context.l10n.somethingWentWrongTryAgain, style: bodyStyle?.copyWith(color: EllaColors.error)),
               const SizedBox(height: 12),
             ],
             SizedBox(
@@ -140,7 +141,7 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                 onPressed: _isSubmitting
                     ? null
                     : () {
-                        SharedPreferencesUtil().declineAiConsent();
+                        SharedPreferencesUtil().deferAiConsent();
                         Navigator.of(context).pop(false);
                       },
                 child: Text(
