@@ -8838,4 +8838,28 @@ class AppLocalizationsPl extends AppLocalizations {
   String todayReminderFromSource(String source) {
     return 'From $source';
   }
+
+  @override
+  String get memoryTypeCorrection => 'Type a correction';
+
+  @override
+  String get todayStripReconnecting => 'Reconnecting…';
+
+  @override
+  String get todayStripPhoneSpeaker => 'Phone speaker';
+
+  @override
+  String get todayNecklaceReconnectingTitle => 'The necklace is reconnecting';
+
+  @override
+  String get todayNecklaceReconnectingBody => 'It usually finds its way back on its own.';
+
+  @override
+  String get todayHelpReconnect => 'Help me reconnect';
+
+  @override
+  String get todaySeeAllMemories => 'See all';
+
+  @override
+  String get todayMemoriesEmpty => 'As Ella listens today, your memories will gather here. 🪽';
 }

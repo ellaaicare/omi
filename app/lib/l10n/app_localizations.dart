@@ -16442,6 +16442,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'From {source}'**
   String todayReminderFromSource(String source);
+
+  /// No description provided for @memoryTypeCorrection.
+  ///
+  /// In en, this message translates to:
+  /// **'Type a correction'**
+  String get memoryTypeCorrection;
+
+  /// No description provided for @todayStripReconnecting.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnecting…'**
+  String get todayStripReconnecting;
+
+  /// No description provided for @todayStripPhoneSpeaker.
+  ///
+  /// In en, this message translates to:
+  /// **'Phone speaker'**
+  String get todayStripPhoneSpeaker;
+
+  /// No description provided for @todayNecklaceReconnectingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'The necklace is reconnecting'**
+  String get todayNecklaceReconnectingTitle;
+
+  /// No description provided for @todayNecklaceReconnectingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'It usually finds its way back on its own.'**
+  String get todayNecklaceReconnectingBody;
+
+  /// No description provided for @todayHelpReconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Help me reconnect'**
+  String get todayHelpReconnect;
+
+  /// No description provided for @todaySeeAllMemories.
+  ///
+  /// In en, this message translates to:
+  /// **'See all'**
+  String get todaySeeAllMemories;
+
+  /// No description provided for @todayMemoriesEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'As Ella listens today, your memories will gather here. 🪽'**
+  String get todayMemoriesEmpty;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

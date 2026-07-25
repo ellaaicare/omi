@@ -62,9 +62,8 @@ List<TextSpan> highlightSearchMatches(String text, String searchQuery, {int curr
     spans.add(TextSpan(
       text: text.substring(index, index + searchQuery.length),
       style: TextStyle(
-        backgroundColor: isCurrentResult
-            ? EllaColors.warning.withValues(alpha: 0.85)
-            : EllaColors.teal.withValues(alpha: 0.35),
+        backgroundColor:
+            isCurrentResult ? EllaColors.warning.withValues(alpha: 0.85) : EllaColors.teal.withValues(alpha: 0.35),
         color: EllaColors.ink,
         fontWeight: FontWeight.bold,
       ),

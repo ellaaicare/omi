@@ -728,9 +728,7 @@ class TodayActionableDeviceCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          necklaceConnecting
-                              ? context.l10n.todayNecklaceReconnectingTitle
-                              : context.l10n.todayNecklace,
+                          necklaceConnecting ? context.l10n.todayNecklaceReconnectingTitle : context.l10n.todayNecklace,
                           style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
                         ),
                         const SizedBox(height: 2),
@@ -802,7 +800,6 @@ class TodayActionableDeviceCard extends StatelessWidget {
     );
   }
 }
-
 
 class _RemindersSection extends StatelessWidget {
   const _RemindersSection({required this.reminders});
@@ -1139,7 +1136,6 @@ class _MemoryGridCard extends StatelessWidget {
     );
   }
 }
-
 
 class _RecentMemoriesLoading extends StatelessWidget {
   const _RecentMemoriesLoading();
