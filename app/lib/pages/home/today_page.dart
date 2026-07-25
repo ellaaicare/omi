@@ -708,10 +708,9 @@ class TodayActionableDeviceCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final necklaceIssue = !necklaceConnected;
-    final artwork = EllaHardwareArtwork.forDeviceType(
-      deviceType,
-      necklaceConnecting ? EllaHardwareArtworkState.reconnecting : EllaHardwareArtworkState.off,
-    );
+    // Runtime uses OFF artwork + the live breathing dot for reconnecting; the
+    // baked-dot reconnecting asset is reserved for static contexts (goldens).
+    final artwork = EllaHardwareArtwork.forDeviceType(deviceType, EllaHardwareArtworkState.off);
     return EllaCardSurface(
       child: Padding(
         padding: const EdgeInsets.all(EllaSizes.cardPadding),
@@ -721,7 +720,14 @@ class TodayActionableDeviceCard extends StatelessWidget {
             if (necklaceIssue) ...[
               Row(
                 children: [
-                  if (artwork != null) Image.asset(artwork, width: 52, height: 52),
+                  if (artwork != null)
+                    Stack(
+                      alignment: Alignment.bottomRight,
+                      children: [
+                        Image.asset(artwork, width: 52, height: 52),
+                        if (necklaceConnecting) const EllaBreathingDot(active: true, live: true),
+                      ],
+                    ),
                   if (artwork != null) const SizedBox(width: 14),
                   Expanded(
                     child: Column(
