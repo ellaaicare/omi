@@ -226,6 +226,92 @@ Future<bool> submitConversationCorrection({
   return response.statusCode == 200 || response.statusCode == 201 || response.statusCode == 202;
 }
 
+class ConversationCorrectionSummary {
+  const ConversationCorrectionSummary({this.title = '', this.overview = '', this.emoji = '', this.category = 'other'});
+
+  final String title;
+  final String overview;
+  final String emoji;
+  final String category;
+
+  factory ConversationCorrectionSummary.fromJson(Object? value) {
+    if (value is! Map) return const ConversationCorrectionSummary();
+    return ConversationCorrectionSummary(
+      title: value['title']?.toString() ?? '',
+      overview: value['overview']?.toString() ?? '',
+      emoji: value['emoji']?.toString() ?? '',
+      category: value['category']?.toString() ?? 'other',
+    );
+  }
+}
+
+class ConversationCorrectionReceipt {
+  const ConversationCorrectionReceipt({
+    required this.correctionId,
+    required this.conversationId,
+    required this.status,
+    required this.before,
+    required this.after,
+    this.appliedAt,
+    this.undoneAt,
+  });
+
+  final String correctionId;
+  final String conversationId;
+  final String status;
+  final ConversationCorrectionSummary before;
+  final ConversationCorrectionSummary after;
+  final DateTime? appliedAt;
+  final DateTime? undoneAt;
+
+  bool get isPending => const {'submitted', 'queued', 'processing', 'pending'}.contains(status);
+  bool get isApplied => status == 'applied' && undoneAt == null;
+  bool get isUndone => status == 'undone' || undoneAt != null;
+  bool get isFailed => !isPending && !isApplied && !isUndone;
+
+  factory ConversationCorrectionReceipt.fromJson(Map<String, dynamic> json) => ConversationCorrectionReceipt(
+        correctionId: json['correction_id']?.toString() ?? '',
+        conversationId: json['conversation_id']?.toString() ?? '',
+        status: json['status']?.toString() ?? 'unknown',
+        before: ConversationCorrectionSummary.fromJson(json['before']),
+        after: ConversationCorrectionSummary.fromJson(json['after']),
+        appliedAt: DateTime.tryParse(json['applied_at']?.toString() ?? '')?.toLocal(),
+        undoneAt: DateTime.tryParse(json['undone_at']?.toString() ?? '')?.toLocal(),
+      );
+}
+
+Future<ConversationCorrectionReceipt?> getConversationCorrectionReceipt({
+  required String conversationId,
+  required String correctionId,
+}) async {
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId',
+    headers: {},
+    method: 'GET',
+    body: '',
+  );
+  if (response == null || response.statusCode != 200) return null;
+  final decoded = jsonDecode(response.body);
+  if (decoded is! Map) return null;
+  return ConversationCorrectionReceipt.fromJson(Map<String, dynamic>.from(decoded));
+}
+
+Future<ConversationCorrectionReceipt?> undoConversationCorrection({
+  required String conversationId,
+  required String correctionId,
+}) async {
+  final response = await makeApiCall(
+    url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections/$correctionId/undo',
+    headers: {},
+    method: 'POST',
+    body: jsonEncode({}),
+  );
+  if (response == null || response.statusCode != 200) return null;
+  final decoded = jsonDecode(response.body);
+  if (decoded is! Map) return null;
+  return ConversationCorrectionReceipt.fromJson(Map<String, dynamic>.from(decoded));
+}
+
 Future<bool> deleteConversationServer(String conversationId) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId',

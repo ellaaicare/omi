@@ -85,20 +85,12 @@ class _AppShellState extends State<AppShell> {
     } else if (uri.pathSegments.first == 'wrapped') {
       if (mounted) {
         PlatformManager.instance.mixpanel.track('Wrapped Opened From DeepLink');
-        Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => const Wrapped2025Page(),
-          ),
-        );
+        Navigator.of(context).push(MaterialPageRoute(builder: (context) => const Wrapped2025Page()));
       }
     } else if (uri.pathSegments.first == 'unlimited') {
       if (mounted) {
         PlatformManager.instance.mixpanel.track('Plans Opened From DeepLink');
-        Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (context) => const UsagePage(showUpgradeDialog: true),
-          ),
-        );
+        Navigator.of(context).push(MaterialPageRoute(builder: (context) => const UsagePage(showUpgradeDialog: true)));
       }
     } else if (uri.host == 'todoist' && uri.pathSegments.isNotEmpty && uri.pathSegments.first == 'callback') {
       // Handle Todoist OAuth callback
@@ -174,7 +166,11 @@ class _AppShellState extends State<AppShell> {
   }
 
   Future<void> _handleOAuthCallback(
-      Uri uri, String errorDisplayName, String oauthLogName, Future<void> Function() onSuccess) async {
+    Uri uri,
+    String errorDisplayName,
+    String oauthLogName,
+    Future<void> Function() onSuccess,
+  ) async {
     final error = uri.queryParameters['error'];
     if (error != null) {
       Logger.debug('$oauthLogName OAuth error: $error');
@@ -372,6 +368,11 @@ class _AppShellState extends State<AppShell> {
       await preferences.prepareEllaProvisioningAccount(uid);
       if (!mounted || _consentPromptPresented) return;
       if (preferences.hasAccountBoundAiConsent(uid)) return;
+      if (preferences.hasPriorAccountBoundAiConsent(uid) || preferences.isCurrentAiConsentDeferred) {
+        // Existing users review a new processor contract on their next
+        // explicit voice action rather than at unrelated app startup.
+        return;
+      }
 
       // Legacy local consent is not sufficient for a newly isolated account.
       preferences.declineAiConsent();

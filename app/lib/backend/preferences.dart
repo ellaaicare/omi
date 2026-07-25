@@ -18,7 +18,7 @@ class SharedPreferencesUtil {
   static SharedPreferences? _preferences;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
-  static const String currentAiConsentContractVersion = 'voice-ai-processors-v2';
+  static const String currentAiConsentContractVersion = 'voice-ai-processors-v3';
   static const String currentAiConsentReceiptPrefix = 'ios-private-cloud-sync:$currentAiConsentContractVersion:';
 
   factory SharedPreferencesUtil() {
@@ -210,16 +210,29 @@ class SharedPreferencesUtil {
 
   String get aiConsentContractVersion => getString('aiConsentContractVersion');
 
+  String get aiConsentDeferredVersion => getString('aiConsentDeferredVersion');
+
+  bool get isCurrentAiConsentDeferred => aiConsentDeferredVersion == currentAiConsentContractVersion;
+
   bool hasAccountBoundAiConsent(String uid) =>
       uid.isNotEmpty &&
       aiConsentAccepted &&
       aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) &&
       aiConsentReceiptUid == uid;
 
+  bool hasPriorAccountBoundAiConsent(String uid) =>
+      uid.isNotEmpty &&
+      getBool('aiConsentAccepted', defaultValue: false) &&
+      aiConsentContractVersion.isNotEmpty &&
+      aiConsentContractVersion != currentAiConsentContractVersion &&
+      aiConsentReceiptId.isNotEmpty &&
+      aiConsentReceiptUid == uid;
+
   void acceptAiConsent({String receiptId = '', String uid = ''}) {
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);
+    remove('aiConsentDeferredVersion');
     if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
       saveString('aiConsentReceiptId', receiptId);
       saveString('aiConsentReceiptUid', uid);
@@ -229,12 +242,18 @@ class SharedPreferencesUtil {
     }
   }
 
+  void deferAiConsent() {
+    declineAiConsent();
+    saveString('aiConsentDeferredVersion', currentAiConsentContractVersion);
+  }
+
   void declineAiConsent() {
     aiConsentAccepted = false;
     remove('aiConsentAcceptedAt');
     remove('aiConsentReceiptId');
     remove('aiConsentReceiptUid');
     remove('aiConsentContractVersion');
+    remove('aiConsentDeferredVersion');
   }
 
   // Notification frequency (0-5): 0 = off, 5 = most frequent. Default is 0 (disabled)
@@ -605,6 +624,7 @@ class SharedPreferencesUtil {
       'aiConsentReceiptId',
       'aiConsentReceiptUid',
       'aiConsentContractVersion',
+      'aiConsentDeferredVersion',
     ]) {
       await remove(key);
     }

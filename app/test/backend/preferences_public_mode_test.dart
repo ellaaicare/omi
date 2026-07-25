@@ -62,6 +62,35 @@ void main() {
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
 
+  test('existing v2 account defers v3 until an explicit voice action', () async {
+    SharedPreferences.setMockInitialValues({
+      'aiConsentAccepted': true,
+      'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
+      'aiConsentContractVersion': 'voice-ai-processors-v2',
+      'aiConsentReceiptId': 'ios-private-cloud-sync:voice-ai-processors-v2:receipt-a',
+      'aiConsentReceiptUid': 'uid-a',
+    });
+    await SharedPreferencesUtil.init();
+
+    final preferences = SharedPreferencesUtil();
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.hasPriorAccountBoundAiConsent('uid-a'), isTrue);
+    expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
+  });
+
+  test('deferred v3 remains inactive until acceptance and acceptance is one-time', () {
+    final preferences = SharedPreferencesUtil();
+
+    preferences.deferAiConsent();
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.isCurrentAiConsentDeferred, isTrue);
+
+    preferences.acceptAiConsent();
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.isCurrentAiConsentDeferred, isFalse);
+    expect(preferences.aiConsentContractVersion, 'voice-ai-processors-v3');
+  });
+
   test('receipt-less acceptance clears stale same-account authority', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,

@@ -193,6 +193,7 @@ class ServerConversation {
   final List<String> ellaTags;
   final Map<String, dynamic>? ellaSignal;
   final Map<String, dynamic>? enrichmentState;
+  final String? activeSummaryVersionId;
   final String? processingRetryEnrichmentVectorStatus;
   final String? processingError;
   final DateTime? processingErrorAt;
@@ -239,6 +240,7 @@ class ServerConversation {
     this.ellaTags = const [],
     this.ellaSignal,
     this.enrichmentState,
+    this.activeSummaryVersionId,
     this.processingRetryEnrichmentVectorStatus,
     this.processingError,
     this.processingErrorAt,
@@ -277,6 +279,7 @@ class ServerConversation {
       ellaTags: ((json['ella_tags'] ?? []) as List<dynamic>).map((tag) => tag.toString()).toList(),
       ellaSignal: json['ella_signal'] is Map ? Map<String, dynamic>.from(json['ella_signal']) : null,
       enrichmentState: json['enrichment_state'] is Map ? Map<String, dynamic>.from(json['enrichment_state']) : null,
+      activeSummaryVersionId: json['active_summary_version_id']?.toString(),
       processingRetryEnrichmentVectorStatus: json['processing_retry_enrichment_vector_status'],
       processingError: json['processing_error'],
       processingErrorAt:
@@ -311,6 +314,7 @@ class ServerConversation {
       'ella_tags': ellaTags,
       'ella_signal': ellaSignal,
       'enrichment_state': enrichmentState,
+      'active_summary_version_id': activeSummaryVersionId,
       'processing_retry_enrichment_vector_status': processingRetryEnrichmentVectorStatus,
       'processing_error': processingError,
       'processing_error_at': processingErrorAt?.toUtc().toIso8601String(),

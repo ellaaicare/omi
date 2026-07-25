@@ -16,12 +16,115 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
+enum V2VSessionScopeKind { memory }
+
+@immutable
+class V2VSessionScope {
+  const V2VSessionScope.memory({required this.conversationId, this.expectedActiveSummaryVersionId})
+      : kind = V2VSessionScopeKind.memory;
+
+  final V2VSessionScopeKind kind;
+  final String conversationId;
+  final String? expectedActiveSummaryVersionId;
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind.name,
+        'conversation_id': conversationId,
+        if (expectedActiveSummaryVersionId?.isNotEmpty == true)
+          'expected_active_summary_version_id': expectedActiveSummaryVersionId,
+      };
+
+  V2VSessionScope withExpectedActiveSummaryVersionId(String? value) =>
+      V2VSessionScope.memory(conversationId: conversationId, expectedActiveSummaryVersionId: value);
+}
+
+@immutable
+class V2VResolvedSessionScope {
+  const V2VResolvedSessionScope({
+    required this.kind,
+    required this.conversationId,
+    required this.activeSummaryVersionId,
+    required this.canReinterpret,
+  });
+
+  final V2VSessionScopeKind kind;
+  final String conversationId;
+  final String activeSummaryVersionId;
+  final bool canReinterpret;
+
+  static V2VResolvedSessionScope? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final kind = value['kind']?.toString();
+    final conversationId = value['conversation_id']?.toString().trim() ?? '';
+    final activeSummaryVersionId = value['active_summary_version_id']?.toString().trim() ?? '';
+    final canReinterpret = value['can_reinterpret'];
+    if (kind != V2VSessionScopeKind.memory.name ||
+        conversationId.isEmpty ||
+        activeSummaryVersionId.isEmpty ||
+        canReinterpret is! bool) {
+      return null;
+    }
+    return V2VResolvedSessionScope(
+      kind: V2VSessionScopeKind.memory,
+      conversationId: conversationId,
+      activeSummaryVersionId: activeSummaryVersionId,
+      canReinterpret: canReinterpret,
+    );
+  }
+
+  bool matches(V2VSessionScope requested) => kind == requested.kind && conversationId == requested.conversationId;
+}
+
+@immutable
+class MemoryReinterpretationEvent {
+  const MemoryReinterpretationEvent({
+    required this.state,
+    required this.sessionId,
+    required this.conversationId,
+    required this.correctionId,
+    this.traceId = '',
+    this.status = '',
+    this.pollAfter = const Duration(milliseconds: 750),
+  });
+
+  final String state;
+  final String sessionId;
+  final String conversationId;
+  final String correctionId;
+  final String traceId;
+  final String status;
+  final Duration pollAfter;
+
+  static MemoryReinterpretationEvent? tryParse(Object? value) {
+    if (value is! Map) return null;
+    final state = value['state']?.toString().trim() ?? '';
+    final sessionId = value['session_id']?.toString().trim() ?? '';
+    final conversationId = value['conversation_id']?.toString().trim() ?? '';
+    final correctionId = value['correction_id']?.toString().trim() ?? '';
+    if (state.isEmpty || sessionId.isEmpty || conversationId.isEmpty || correctionId.isEmpty) {
+      return null;
+    }
+    final rawPollAfter = value['poll_after_ms'];
+    final pollAfterMs = rawPollAfter is num ? rawPollAfter.toInt().clamp(500, 5000) : 750;
+    return MemoryReinterpretationEvent(
+      state: state,
+      sessionId: sessionId,
+      conversationId: conversationId,
+      correctionId: correctionId,
+      traceId: value['trace_id']?.toString().trim() ?? '',
+      status: value['status']?.toString().trim() ?? '',
+      pollAfter: Duration(milliseconds: pollAfterMs),
+    );
+  }
+}
+
 /// JSON event from the V2V proxy WebSocket.
 class V2VEvent {
+  const V2VEvent({required this.type, this.text, this.memoryReinterpretation});
+
   final String type;
   final String? text;
-
-  V2VEvent({required this.type, this.text});
+  final MemoryReinterpretationEvent? memoryReinterpretation;
 }
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
@@ -34,6 +137,8 @@ class V2VConnectionReceipt {
     required this.provider,
     required this.stage,
     this.voiceMode = '',
+    this.sessionId = '',
+    this.sessionScope,
     this.httpStatus,
     this.errorCode = '',
   });
@@ -41,15 +146,16 @@ class V2VConnectionReceipt {
   final bool connected;
   final String provider;
   final String voiceMode;
+  final String sessionId;
+  final V2VResolvedSessionScope? sessionScope;
   final V2VConnectionStage stage;
   final int? httpStatus;
   final String errorCode;
 
+  bool get shouldRefreshMemoryScope => stage == V2VConnectionStage.session && errorCode == 'voice_session_scope_stale';
+
   String get safeDetail {
-    final parts = <String>[
-      if (httpStatus != null) 'HTTP $httpStatus',
-      if (errorCode.isNotEmpty) errorCode,
-    ];
+    final parts = <String>[if (httpStatus != null) 'HTTP $httpStatus', if (errorCode.isNotEmpty) errorCode];
     return parts.isEmpty ? stage.name : parts.join(' · ');
   }
 
@@ -58,6 +164,9 @@ class V2VConnectionReceipt {
         'provider': provider,
         'voice_mode': voiceMode,
         'stage': stage.name,
+        if (sessionId.isNotEmpty) 'session_id': sessionId,
+        if (sessionScope != null) 'scope_kind': sessionScope!.kind.name,
+        if (sessionScope != null) 'scope_conversation_id': sessionScope!.conversationId,
         if (httpStatus != null) 'http_status': httpStatus,
         if (errorCode.isNotEmpty) 'error_code': errorCode,
       };
@@ -137,12 +246,19 @@ class V2VClient {
       normalizeProvider(provider) == 'grok-voice' ||
       normalizeProvider(provider) == 'gemini-native-live';
 
-  static String? sessionVoiceMode(String provider) => switch (normalizeProvider(provider)) {
+  static String? sessionVoiceMode(String provider, {bool memoryScoped = false}) =>
+      switch (normalizeProvider(provider)) {
+        'grok-voice' when memoryScoped => 'v4',
         'openclaw-direct' => 'openclaw-direct-v1',
         'openai-native-realtime' => 'openai-native-realtime-v1',
         'gemini-native-live' => 'gemini-native-live-v1',
         _ => null,
       };
+
+  static bool isMemoryScopedProvider(String provider) {
+    final normalized = normalizeProvider(provider);
+    return normalized == 'grok-voice' || normalized == 'gemini-native-live';
+  }
 
   static String providerDisplayName(String provider) => switch (normalizeProvider(provider)) {
         'grok-voice' => 'Grok Native Realtime',
@@ -162,14 +278,30 @@ class V2VClient {
     required String uid,
     required String provider,
     required bool includeUid,
+    V2VSessionScope? sessionScope,
   }) {
     final canonicalProvider = normalizeProvider(provider);
-    final voiceMode = sessionVoiceMode(canonicalProvider);
+    final voiceMode = sessionVoiceMode(canonicalProvider, memoryScoped: sessionScope != null);
     return {
       if (includeUid) 'uid': uid,
       'provider': canonicalProvider,
       if (voiceMode != null) 'voice_mode': voiceMode,
+      if (sessionScope != null) 'session_scope': sessionScope.toJson(),
     };
+  }
+
+  @visibleForTesting
+  static String sessionFailureCode({required int? statusCode, required String body, V2VSessionScope? sessionScope}) {
+    if (sessionScope != null && statusCode == 404) {
+      return 'voice_session_scope_unavailable';
+    }
+    final code = safeErrorCode(body, fallback: 'session_request_failed');
+    if (sessionScope != null &&
+        statusCode == 409 &&
+        (code == 'voice_session_scope_stale' || code == 'voice_session_scope_version_unavailable')) {
+      return 'voice_session_scope_stale';
+    }
+    return code;
   }
 
   @visibleForTesting
@@ -227,7 +359,7 @@ class V2VClient {
   }
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
-  Future<V2VConnectionReceipt> connect({required String provider}) async {
+  Future<V2VConnectionReceipt> connect({required String provider, V2VSessionScope? sessionScope}) async {
     provider = normalizeProvider(provider);
     if (_activeClient != null && _activeClient != this) {
       Logger.debug('[V2V] Closing existing active V2V client before provider=$provider connect');
@@ -242,33 +374,49 @@ class V2VClient {
     }
 
     if (!SharedPreferencesUtil().aiConsentAccepted) {
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        stage: V2VConnectionStage.consent,
-        errorCode: 'ai_consent_required',
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.consent,
+          errorCode: 'ai_consent_required',
+        ),
+      );
     }
 
     if (!isSessionProvider(provider)) {
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        stage: V2VConnectionStage.providerRegistry,
-        errorCode: 'unsupported_provider',
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.providerRegistry,
+          errorCode: 'unsupported_provider',
+        ),
+      );
+    }
+    if (sessionScope != null && !isMemoryScopedProvider(provider)) {
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.providerRegistry,
+          errorCode: 'memory_scope_provider_unsupported',
+        ),
+      );
     }
 
     final uid = SharedPreferencesUtil().uid;
     if (uid.isEmpty) {
       Logger.debug('[V2V] No uid, cannot connect');
       if (_activeClient == this) _activeClient = null;
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        stage: V2VConnectionStage.identity,
-        errorCode: 'missing_authenticated_identity',
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.identity,
+          errorCode: 'missing_authenticated_identity',
+        ),
+      );
     }
 
     final registryFailure = await _validateProviderRegistry(provider);
@@ -278,7 +426,7 @@ class V2VClient {
     }
 
     // 1. Get session token from backend
-    final sessionResult = await _createSession(uid, provider);
+    final sessionResult = await _createSession(uid, provider, sessionScope);
     final sessionData = sessionResult.data;
     if (sessionData == null) {
       if (_activeClient == this) _activeClient = null;
@@ -288,29 +436,50 @@ class V2VClient {
     final token = sessionData['session_token'] as String? ?? '';
     final endpoint = sessionData['voice_endpoint'] as String? ?? '';
     final confirmedProvider = normalizeProvider(sessionData['provider'] as String? ?? provider);
-    final confirmedVoiceMode = sessionData['voice_mode'] as String? ?? sessionVoiceMode(provider) ?? '';
+    final confirmedVoiceMode =
+        sessionData['voice_mode'] as String? ?? sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '';
+    final sessionId = sessionData['session_id']?.toString().trim() ?? '';
+    final confirmedScope = V2VResolvedSessionScope.tryParse(sessionData['session_scope']);
     if (token.isEmpty || endpoint.isEmpty) {
       Logger.debug('[V2V] Invalid session data');
       if (_activeClient == this) _activeClient = null;
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        voiceMode: confirmedVoiceMode,
-        stage: V2VConnectionStage.session,
-        httpStatus: 200,
-        errorCode: 'invalid_session_contract',
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          stage: V2VConnectionStage.session,
+          httpStatus: 200,
+          errorCode: 'invalid_session_contract',
+        ),
+      );
     }
     if (confirmedProvider != provider) {
       if (_activeClient == this) _activeClient = null;
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        voiceMode: confirmedVoiceMode,
-        stage: V2VConnectionStage.session,
-        httpStatus: 200,
-        errorCode: 'provider_mismatch',
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          stage: V2VConnectionStage.session,
+          httpStatus: 200,
+          errorCode: 'provider_mismatch',
+        ),
+      );
+    }
+    if (sessionScope != null &&
+        (sessionId.isEmpty || confirmedScope == null || !confirmedScope.matches(sessionScope))) {
+      if (_activeClient == this) _activeClient = null;
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          stage: V2VConnectionStage.session,
+          httpStatus: 200,
+          errorCode: 'invalid_session_scope',
+        ),
+      );
     }
 
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
@@ -319,13 +488,15 @@ class V2VClient {
     } catch (error) {
       Logger.error('[V2V] Audio session setup failed for provider=$provider');
       if (_activeClient == this) _activeClient = null;
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        voiceMode: confirmedVoiceMode,
-        stage: V2VConnectionStage.audioSession,
-        errorCode: _safeExceptionCode(error, fallback: 'audio_session_failed'),
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          stage: V2VConnectionStage.audioSession,
+          errorCode: _safeExceptionCode(error, fallback: 'audio_session_failed'),
+        ),
+      );
     }
 
     // 3. Connect WebSocket
@@ -333,10 +504,7 @@ class V2VClient {
     Logger.debug('[V2V] Connecting to WebSocket for provider=$provider...');
 
     try {
-      _channel = IOWebSocketChannel.connect(
-        Uri.parse(wsUrl),
-        pingInterval: const Duration(seconds: 30),
-      );
+      _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
 
@@ -362,33 +530,41 @@ class V2VClient {
       final micStarted = await _startMicStream();
       if (!micStarted || !_isConnected) {
         await disconnect();
-        return _completeReceipt(V2VConnectionReceipt(
-          connected: false,
-          provider: provider,
-          voiceMode: confirmedVoiceMode,
-          stage: micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
-          errorCode: micStarted ? 'websocket_closed' : 'microphone_unavailable',
-        ));
+        return _completeReceipt(
+          V2VConnectionReceipt(
+            connected: false,
+            provider: provider,
+            voiceMode: confirmedVoiceMode,
+            stage: micStarted ? V2VConnectionStage.websocket : V2VConnectionStage.microphone,
+            errorCode: micStarted ? 'websocket_closed' : 'microphone_unavailable',
+          ),
+        );
       }
       _connectionAnnounced = true;
       onConnectionChanged?.call(true);
 
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: true,
-        provider: provider,
-        voiceMode: confirmedVoiceMode,
-        stage: V2VConnectionStage.connected,
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: true,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          sessionId: sessionId,
+          sessionScope: confirmedScope,
+          stage: V2VConnectionStage.connected,
+        ),
+      );
     } catch (error) {
       Logger.error('[V2V] WebSocket handshake failed for provider=$provider');
       await disconnect();
-      return _completeReceipt(V2VConnectionReceipt(
-        connected: false,
-        provider: provider,
-        voiceMode: confirmedVoiceMode,
-        stage: V2VConnectionStage.websocket,
-        errorCode: _safeExceptionCode(error, fallback: 'websocket_handshake_failed'),
-      ));
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: confirmedVoiceMode,
+          stage: V2VConnectionStage.websocket,
+          errorCode: _safeExceptionCode(error, fallback: 'websocket_handshake_failed'),
+        ),
+      );
     }
   }
 
@@ -472,16 +648,18 @@ class V2VClient {
 
   Future<void> _configureAudioSession() async {
     final session = await AudioSession.instance;
-    await session.configure(AudioSessionConfiguration(
-      avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-      avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
-          AVAudioSessionCategoryOptions.allowBluetooth |
-          AVAudioSessionCategoryOptions.allowBluetoothA2dp |
-          AVAudioSessionCategoryOptions.allowAirPlay,
-      avAudioSessionMode: AVAudioSessionMode.defaultMode,
-      avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
-      avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
-    ));
+    await session.configure(
+      AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.defaultToSpeaker |
+            AVAudioSessionCategoryOptions.allowBluetooth |
+            AVAudioSessionCategoryOptions.allowBluetoothA2dp |
+            AVAudioSessionCategoryOptions.allowAirPlay,
+        avAudioSessionMode: AVAudioSessionMode.defaultMode,
+        avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+      ),
+    );
     await session.setActive(true);
     Logger.debug('[V2V] Audio session: playAndRecord + defaultToSpeaker + BT + AirPlay');
   }
@@ -520,14 +698,15 @@ class V2VClient {
     return null;
   }
 
-  Future<_V2VSessionResult> _createSession(String uid, String provider) async {
+  Future<_V2VSessionResult> _createSession(String uid, String provider, V2VSessionScope? sessionScope) async {
     try {
       provider = normalizeProvider(provider);
-      final voiceMode = sessionVoiceMode(provider);
+      final voiceMode = sessionVoiceMode(provider, memoryScoped: sessionScope != null);
       final requestBody = buildSessionRequestBody(
         uid: uid,
         provider: provider,
         includeUid: !isHermesProvisioningGateEnabled,
+        sessionScope: sessionScope,
       );
 
       final response = await makeApiCall(
@@ -549,7 +728,7 @@ class V2VClient {
             httpStatus: response?.statusCode,
             errorCode: response == null
                 ? 'session_request_failed'
-                : safeErrorCode(response.body, fallback: 'session_request_failed'),
+                : sessionFailureCode(statusCode: response.statusCode, body: response.body, sessionScope: sessionScope),
           ),
         );
       }
@@ -563,6 +742,8 @@ class V2VClient {
           provider: provider,
           voiceMode: data['voice_mode'] as String? ?? voiceMode ?? '',
           stage: V2VConnectionStage.session,
+          sessionId: data['session_id']?.toString() ?? '',
+          sessionScope: V2VResolvedSessionScope.tryParse(data['session_scope']),
           httpStatus: response.statusCode,
         ),
       );
@@ -572,7 +753,7 @@ class V2VClient {
         receipt: V2VConnectionReceipt(
           connected: false,
           provider: provider,
-          voiceMode: sessionVoiceMode(provider) ?? '',
+          voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
           stage: V2VConnectionStage.session,
           errorCode: _safeExceptionCode(error, fallback: 'session_request_failed'),
         ),
@@ -708,14 +889,16 @@ class V2VClient {
         return false;
       }
 
-      final stream = await _recorder!.startStream(const RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: 24000,
-        numChannels: 1,
-        autoGain: true,
-        echoCancel: true,
-        noiseSuppress: true,
-      ));
+      final stream = await _recorder!.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 24000,
+          numChannels: 1,
+          autoGain: true,
+          echoCancel: true,
+          noiseSuppress: true,
+        ),
+      );
 
       _micChunksSent = 0;
       _micBytesSent = 0;
@@ -984,6 +1167,12 @@ class V2VClient {
           case 'function_calling':
           case 'function_executed':
             onEvent?.call(V2VEvent(type: type, text: text ?? json.toString()));
+            break;
+          case 'memory_reinterpretation':
+            final memoryReinterpretation = MemoryReinterpretationEvent.tryParse(json);
+            if (memoryReinterpretation != null) {
+              onEvent?.call(V2VEvent(type: type, memoryReinterpretation: memoryReinterpretation));
+            }
             break;
           case 'session_end':
             onEvent?.call(V2VEvent(type: 'session_end', text: text));

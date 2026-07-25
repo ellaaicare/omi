@@ -17,9 +17,10 @@ String localizedV2VProviderName(BuildContext context, String provider) {
 }
 
 class V2VFallbackDialog extends StatelessWidget {
-  const V2VFallbackDialog({required this.receipt, super.key});
+  const V2VFallbackDialog({required this.receipt, this.allowStandardFallback = true, super.key});
 
   final V2VConnectionReceipt receipt;
+  final bool allowStandardFallback;
 
   @override
   Widget build(BuildContext context) {
@@ -31,18 +32,18 @@ class V2VFallbackDialog extends StatelessWidget {
         style: EllaTextStyles.display.copyWith(fontSize: 22),
       ),
       content: Text(
-        context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail),
+        allowStandardFallback
+            ? context.l10n.voiceV2vUnavailableBody(receipt.stage.name, receipt.safeDetail)
+            : context.l10n.memoryTalkUnavailable,
         style: EllaTextStyles.body,
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
-          child: Text(context.l10n.notNow),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
-          child: Text(context.l10n.voiceUseElevenLabs),
-        ),
+        TextButton(onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop), child: Text(context.l10n.notNow)),
+        if (allowStandardFallback)
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
+            child: Text(context.l10n.voiceUseElevenLabs),
+          ),
         FilledButton(
           onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
           child: Text(context.l10n.retry),
@@ -54,12 +55,13 @@ class V2VFallbackDialog extends StatelessWidget {
 
 Future<V2VFailureChoice> showV2VFallbackDialog(
   BuildContext context,
-  V2VConnectionReceipt receipt,
-) async {
+  V2VConnectionReceipt receipt, {
+  bool allowStandardFallback = true,
+}) async {
   return await showDialog<V2VFailureChoice>(
         context: context,
         barrierDismissible: false,
-        builder: (_) => V2VFallbackDialog(receipt: receipt),
+        builder: (_) => V2VFallbackDialog(receipt: receipt, allowStandardFallback: allowStandardFallback),
       ) ??
       V2VFailureChoice.stop;
 }

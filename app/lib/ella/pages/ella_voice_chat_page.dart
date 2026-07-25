@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -13,17 +14,22 @@ import 'package:speech_to_text/speech_to_text.dart';
 
 import 'package:uuid/uuid.dart';
 
+import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
-import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
-import 'package:omi/ella/widgets/ella_voice_orb.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
+import 'package:omi/ella/widgets/ella_voice_orb.dart';
+import 'package:omi/ella/widgets/memory_correction_receipt.dart';
+import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
@@ -34,7 +40,17 @@ import 'package:omi/utils/l10n_extensions.dart';
 /// Flow: Tap orb → always-listen via on-device speech recognition →
 /// auto-detect silence → send text to Ella chat → TTS → play audio → repeat.
 class EllaVoiceChatPage extends StatefulWidget {
-  const EllaVoiceChatPage({super.key});
+  const EllaVoiceChatPage({super.key, this.sessionScope, this.memoryTitle});
+
+  final V2VSessionScope? sessionScope;
+  final String? memoryTitle;
+
+  @visibleForTesting
+  static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
+
+  @visibleForTesting
+  static V2VSessionScope refreshedMemoryScope(V2VSessionScope current, String? activeSummaryVersionId) =>
+      current.withExpectedActiveSummaryVersionId(activeSummaryVersionId);
 
   @override
   State<EllaVoiceChatPage> createState() => _EllaVoiceChatPageState();
@@ -78,6 +94,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   /// Track whether we've injected chat messages for the current V2V turn
   bool _v2vTurnInjected = false;
+  late V2VSessionScope? _sessionScope;
+  String _activeSessionId = '';
+  bool _consentPromptActive = false;
+  MemoryReinterpretationEvent? _memoryReinterpretationEvent;
+  ConversationCorrectionReceipt? _memoryCorrectionReceipt;
+  Timer? _memoryReceiptPollTimer;
+  int _memoryReceiptPollAttempts = 0;
 
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
@@ -105,11 +128,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       );
 
   @override
-  bool get wantKeepAlive => true;
+  bool get wantKeepAlive => widget.sessionScope == null;
 
   @override
   void initState() {
     super.initState();
+    _sessionScope = widget.sessionScope;
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
@@ -124,26 +148,28 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       }
     });
     _initSpeech();
+    if (widget.sessionScope != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted && !_voiceModeActive) _activateSelectedVoice();
+        });
+      });
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (widget.sessionScope != null) return;
     // Auto-start listening when user navigates TO the Voice tab (index 2)
     try {
       final homeProvider = Provider.of<HomeProvider>(context);
       final isOnVoiceTab = homeProvider.selectedIndex == 2;
       if (isOnVoiceTab && !_wasOnVoiceTab && !_voiceModeActive) {
         debugPrint('[VoiceChat] Voice tab became active, auto-starting');
-        _voiceModeActive = true;
-        final provider = _effectiveVoiceProvider;
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && _orbState == VoiceOrbState.idle) {
-            if (_isV2VProvider(provider)) {
-              _startV2V(provider);
-            } else {
-              _startListening();
-            }
+            _activateSelectedVoice();
           }
         });
       } else if (!isOnVoiceTab && _wasOnVoiceTab && _voiceModeActive) {
@@ -195,6 +221,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void dispose() {
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
+    _memoryReceiptPollTimer?.cancel();
     _playerSub?.cancel();
     _audioPlayer.dispose();
     _transcriptScrollController.dispose();
@@ -220,23 +247,63 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     });
   }
 
-  Future<void> _onOrbTap() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
-    debugPrint(
-      '[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive, v2v: $_isV2VMode',
+  Future<bool> _ensureVoiceConsent() async {
+    if (SharedPreferencesUtil().aiConsentAccepted) return true;
+    if (_consentPromptActive || !mounted) return false;
+
+    _consentPromptActive = true;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final accepted = await AiConsentSheet.show(
+      context,
+      onAccept: isHermesProvisioningGateEnabled
+          ? () async {
+              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
+              if (receiptId == null) return false;
+              if (mounted) {
+                try {
+                  context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+                } catch (_) {
+                  // The authenticated receipt remains persisted even if this
+                  // route is rendered outside the provisioning provider tree.
+                }
+              }
+              return true;
+            }
+          : null,
     );
+    _consentPromptActive = false;
+    return accepted == true && SharedPreferencesUtil().aiConsentAccepted;
+  }
+
+  Future<void> _activateSelectedVoice() async {
+    if (!await _ensureVoiceConsent() || !mounted) return;
+
+    final provider = _effectiveVoiceProvider;
+    if (_sessionScope != null && !V2VClient.isMemoryScopedProvider(provider)) {
+      setState(() {
+        _voiceModeActive = false;
+        _isV2VMode = false;
+        _orbState = VoiceOrbState.idle;
+        _statusText = context.l10n.memoryTalkProviderRequired;
+      });
+      return;
+    }
+
+    _voiceModeActive = true;
+    if (_isV2VProvider(provider)) {
+      await _startV2V(provider);
+    } else {
+      _isV2VMode = false;
+      await _startListening();
+    }
+  }
+
+  Future<void> _onOrbTap() async {
+    debugPrint('[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive, v2v: $_isV2VMode');
     HapticFeedback.mediumImpact();
 
     if (!_voiceModeActive) {
-      // Resume voice mode — check if V2V provider is selected
-      _voiceModeActive = true;
-      final provider = _effectiveVoiceProvider;
-      if (_isV2VProvider(provider)) {
-        await _startV2V(provider);
-      } else {
-        _isV2VMode = false;
-        await _startListening();
-      }
+      await _activateSelectedVoice();
       return;
     }
 
@@ -310,16 +377,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           context: context,
           builder: (ctx) => AlertDialog(
             backgroundColor: EllaColors.bgSecondary,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(EllaSizes.radiusLarge),
-            ),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.radiusLarge)),
             title: const Text(
               'Microphone Access',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-                color: EllaColors.textPrimary,
-              ),
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: EllaColors.textPrimary),
             ),
             content: const Text(
               'Ella needs microphone access for voice chat. Please enable it in Settings.',
@@ -328,33 +389,22 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text(
-                  'Cancel',
-                  style: TextStyle(
-                    fontSize: 18,
-                    color: EllaColors.textTertiary,
-                  ),
-                ),
+                child: const Text('Cancel', style: TextStyle(fontSize: 18, color: EllaColors.textTertiary)),
               ),
               TextButton(
                 onPressed: () {
                   Navigator.of(ctx).pop();
                   openAppSettings();
                 },
-                child: const Text(
-                  'Open Settings',
-                  style: TextStyle(fontSize: 18, color: EllaColors.primary),
-                ),
+                child: const Text('Open Settings', style: TextStyle(fontSize: 18, color: EllaColors.primary)),
               ),
             ],
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Microphone permission is required for voice chat'),
-          ),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Microphone permission is required for voice chat')));
       }
       return;
     }
@@ -362,11 +412,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final speechStatus = await Permission.speech.request();
     if (!speechStatus.isGranted) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Speech recognition permission is required'),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Speech recognition permission is required')));
       return;
     }
 
@@ -374,21 +422,16 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       await _initSpeech();
       if (!_speechAvailable) {
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Speech recognition is not available on this device'),
-          ),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Speech recognition is not available on this device')));
         return;
       }
     }
 
     // Stop any existing mic recording from CaptureProvider
     if (mounted) {
-      final captureProvider = Provider.of<CaptureProvider>(
-        context,
-        listen: false,
-      );
+      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
       if (captureProvider.recordingState == RecordingState.record) {
         debugPrint('[VoiceChat] Pausing capture recording to free mic');
         await captureProvider.stopStreamRecording();
@@ -474,7 +517,20 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   // --- V2V (Voice-to-Voice) WebSocket mode ---
 
-  Future<void> _startV2V(String provider) async {
+  Future<bool> _refreshMemoryScope() async {
+    final currentScope = _sessionScope;
+    if (currentScope == null) return false;
+    setState(() {
+      _orbState = VoiceOrbState.processing;
+      _statusText = context.l10n.memoryTalkStale;
+    });
+    final refreshed = await getConversationById(currentScope.conversationId);
+    if (!mounted || refreshed == null) return false;
+    _sessionScope = EllaVoiceChatPage.refreshedMemoryScope(currentScope, refreshed.activeSummaryVersionId);
+    return true;
+  }
+
+  Future<void> _startV2V(String provider, {bool allowScopeRefresh = true}) async {
     if (!SharedPreferencesUtil().aiConsentAccepted) return;
     provider = V2VClient.normalizeProvider(provider);
     final providerName = localizedV2VProviderName(context, provider);
@@ -484,10 +540,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     // Stop any existing mic recording from CaptureProvider
     if (mounted) {
-      final captureProvider = Provider.of<CaptureProvider>(
-        context,
-        listen: false,
-      );
+      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
       if (captureProvider.recordingState == RecordingState.record) {
         debugPrint('[VoiceChat] Pausing capture recording for V2V');
         await captureProvider.stopStreamRecording();
@@ -521,7 +574,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       },
     );
 
-    final receipt = await _v2vClient!.connect(provider: provider);
+    final receipt = await _v2vClient!.connect(provider: provider, sessionScope: _sessionScope);
     if (!mounted) return;
 
     if (!receipt.connected) {
@@ -531,13 +584,21 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _isV2VMode = false;
       _v2vClient = null;
       _voiceModeActive = false;
+      if (allowScopeRefresh && receipt.shouldRefreshMemoryScope && await _refreshMemoryScope()) {
+        if (!mounted) return;
+        _voiceModeActive = true;
+        await _startV2V(provider, allowScopeRefresh: false);
+        return;
+      }
       setState(() {
         _orbState = VoiceOrbState.idle;
-        _statusText = receipt.safeDetail;
+        _statusText = _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
+            ? context.l10n.memoryTalkUnavailable
+            : receipt.safeDetail;
         _audioLevel = 0.0;
       });
 
-      final choice = await showV2VFallbackDialog(context, receipt);
+      final choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
       if (!mounted) return;
       switch (choice) {
         case V2VFailureChoice.retry:
@@ -545,6 +606,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           await _startV2V(provider);
           break;
         case V2VFailureChoice.useElevenLabs:
+          if (_sessionScope != null) break;
           _usingElevenLabsFallback = true;
           _voiceModeActive = true;
           setState(() {
@@ -563,6 +625,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       return;
     }
 
+    _activeSessionId = receipt.sessionId;
     _activeV2VProvider = providerName;
     _usingElevenLabsFallback = false;
     setState(() {
@@ -575,6 +638,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     debugPrint('[VoiceChat] Stopping V2V mode');
     await _v2vClient?.disconnect();
     _v2vClient = null;
+    _activeSessionId = '';
     _activeV2VProvider = '';
     _pauseVoiceMode();
   }
@@ -605,7 +669,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         break;
       case 'audio_done':
         // Inject into chat history once per turn (using final transcript)
-        if (!_v2vTurnInjected && _lastUserText.isNotEmpty && _lastEllaText.isNotEmpty) {
+        if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) &&
+            !_v2vTurnInjected &&
+            _lastUserText.isNotEmpty &&
+            _lastEllaText.isNotEmpty) {
           _injectVoiceMessages(_lastUserText, _lastEllaText);
           _v2vTurnInjected = true;
         }
@@ -644,6 +711,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _statusText = 'Generating response...';
         });
         break;
+      case 'memory_reinterpretation':
+        final memoryReinterpretation = event.memoryReinterpretation;
+        if (memoryReinterpretation != null) {
+          _handleMemoryReinterpretation(memoryReinterpretation);
+        }
+        break;
       case 'v2v_debug':
         // Debug info from V2V client — show on screen temporarily
         setState(() {
@@ -668,11 +741,62 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
+  void _handleMemoryReinterpretation(MemoryReinterpretationEvent event) {
+    final scope = _sessionScope;
+    if (scope == null ||
+        event.conversationId != scope.conversationId ||
+        (_activeSessionId.isNotEmpty && event.sessionId != _activeSessionId)) {
+      return;
+    }
+    _memoryReinterpretationEvent = event;
+    _memoryReceiptPollAttempts = 0;
+    _memoryReceiptPollTimer?.cancel();
+    _pollMemoryCorrectionReceipt();
+  }
+
+  Future<void> _pollMemoryCorrectionReceipt() async {
+    final event = _memoryReinterpretationEvent;
+    if (event == null || !mounted) return;
+    _memoryReceiptPollAttempts++;
+
+    final receipt = await getConversationCorrectionReceipt(
+      conversationId: event.conversationId,
+      correctionId: event.correctionId,
+    );
+    if (!mounted || _memoryReinterpretationEvent != event) return;
+    if (receipt != null &&
+        receipt.conversationId == event.conversationId &&
+        receipt.correctionId == event.correctionId) {
+      setState(() => _memoryCorrectionReceipt = receipt);
+    }
+
+    if ((receipt == null || receipt.isPending) && _memoryReceiptPollAttempts < 40) {
+      _memoryReceiptPollTimer = Timer(event.pollAfter, _pollMemoryCorrectionReceipt);
+    }
+  }
+
+  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection() async {
+    final receipt = _memoryCorrectionReceipt;
+    if (receipt == null || !receipt.isApplied) return null;
+    final updated = await undoConversationCorrection(
+      conversationId: receipt.conversationId,
+      correctionId: receipt.correctionId,
+    );
+    if (mounted && updated != null) {
+      setState(() => _memoryCorrectionReceipt = updated);
+    }
+    return updated;
+  }
+
+  void _reviewMemoryCorrection() {
+    final receipt = _memoryCorrectionReceipt;
+    if (receipt == null || !receipt.isApplied) return;
+    showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: _undoMemoryCorrection);
+  }
+
   void _onSpeechResult(SpeechRecognitionResult result) {
     if (!mounted) return;
-    debugPrint(
-      '[VoiceChat] Speech result: final=${result.finalResult}, text="${result.recognizedWords}"',
-    );
+    debugPrint('[VoiceChat] Speech result: final=${result.finalResult}, text="${result.recognizedWords}"');
 
     _currentWords = result.recognizedWords;
 
@@ -700,9 +824,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
     try {
       if (_speech.isListening) {
-        debugPrint(
-          '[VoiceChat] Stopping speech recognizer before response playback',
-        );
+        debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
         await _speech.stop();
         // Let iOS release the recording session before we synthesize/play audio.
         await Future.delayed(const Duration(milliseconds: 150));
@@ -737,7 +859,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       }
 
       // Inject both messages into chat history so Chat tab shows them
-      _injectVoiceMessages(transcript, fullReply);
+      if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
+        _injectVoiceMessages(transcript, fullReply);
+      }
 
       // Store full reply and start typewriter reveal
       _lastEllaText = fullReply;
@@ -749,9 +873,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       });
 
       // Strip emojis before TTS — prevents the TTS engine from reading emoji names aloud
-      final ttsText = _stripEmojis(
-        fullReply.length > 500 ? fullReply.substring(0, 500) : fullReply,
-      );
+      final ttsText = _stripEmojis(fullReply.length > 500 ? fullReply.substring(0, 500) : fullReply);
       debugPrint('[VoiceChat] Synthesizing TTS (${ttsText.length} chars)...');
       final audioPath = await ElevenLabsTts.synthesize(ttsText);
       debugPrint('[VoiceChat] TTS result: $audioPath');
@@ -778,9 +900,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         await _audioPlayer.setFilePath(audioPath);
         await _audioPlayer.play();
       } catch (playbackError, playbackStack) {
-        debugPrint(
-          '[VoiceChat] File playback failed, using on-device TTS: $playbackError\n$playbackStack',
-        );
+        debugPrint('[VoiceChat] File playback failed, using on-device TTS: $playbackError\n$playbackStack');
         await ElevenLabsTts.speakOnDevice(ttsText);
         if (!mounted) return;
         if (_voiceModeActive) {
@@ -875,9 +995,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _typewriterTimer?.cancel();
     _ellaDisplayText = '';
     int charIndex = 0;
-    _typewriterTimer = Timer.periodic(const Duration(milliseconds: 50), (
-      timer,
-    ) {
+    _typewriterTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (!mounted || charIndex >= fullText.length) {
         timer.cancel();
         if (mounted) {
@@ -914,15 +1032,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        automaticallyImplyLeading: false,
+        automaticallyImplyLeading: widget.sessionScope != null,
         backgroundColor: EllaColors.bgPrimary,
-        title: const Text(
-          'Voice Chat',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-            color: EllaColors.textPrimary,
-          ),
+        title: Text(
+          context.l10n.voiceChatTitle,
+          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
         ),
         elevation: 0,
         centerTitle: true,
@@ -931,13 +1045,36 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_sessionScope != null && widget.memoryTitle?.trim().isNotEmpty == true) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: EllaColors.card,
+                    borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                    border: Border.all(color: EllaColors.cardDeep),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.auto_stories_outlined, size: 20, color: EllaColors.primary),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          context.l10n.memoryTalkContext(widget.memoryTitle!.trim()),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const Spacer(flex: 2),
             Center(
-              child: EllaVoiceOrb(
-                state: _orbState,
-                audioLevel: _audioLevel,
-                onTap: _onOrbTap,
-              ),
+              child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
             ),
             const SizedBox(height: 24),
             Center(
@@ -951,10 +1088,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (_orbState == VoiceOrbState.listening) ...[
-                      const EllaBreathingDot(),
-                      const SizedBox(width: 10),
-                    ],
+                    if (_orbState == VoiceOrbState.listening) ...[const EllaBreathingDot(), const SizedBox(width: 10)],
                     Text(
                       _orbState == VoiceOrbState.listening
                           ? _usingElevenLabsFallback
@@ -970,6 +1104,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                 ),
               ),
             ),
+            if (_memoryCorrectionReceipt != null) ...[
+              const SizedBox(height: 12),
+              MemoryCorrectionReceiptChip(receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
+            ],
             const SizedBox(height: 16),
             SizedBox(
               height: 100,
