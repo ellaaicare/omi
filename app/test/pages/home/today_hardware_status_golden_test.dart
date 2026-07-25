@@ -94,7 +94,10 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    // Bounded pumps: the reconnecting state hosts the breathing dot, whose
+    // looped animation never settles.
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
   }
 
   testWidgets('healthy status strip screenshot', (tester) async {
