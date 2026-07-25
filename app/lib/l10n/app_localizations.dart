@@ -16490,6 +16490,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'As Ella listens today, your memories will gather here. 🪽'**
   String get todayMemoriesEmpty;
+
+  /// No description provided for @todayListeningLead.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is listening — '**
+  String get todayListeningLead;
+
+  /// No description provided for @todayListeningLink.
+  ///
+  /// In en, this message translates to:
+  /// **'See what she hears ›'**
+  String get todayListeningLink;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

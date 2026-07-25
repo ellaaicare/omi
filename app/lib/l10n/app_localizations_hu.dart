@@ -8881,4 +8881,10 @@ class AppLocalizationsHu extends AppLocalizations {
 
   @override
   String get todayMemoriesEmpty => 'As Ella listens today, your memories will gather here. 🪽';
+
+  @override
+  String get todayListeningLead => 'Ella is listening — ';
+
+  @override
+  String get todayListeningLink => 'See what she hears ›';
 }
