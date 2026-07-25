@@ -108,8 +108,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   ConversationCorrectionReceipt? _memoryCorrectionReceipt;
   Timer? _memoryReceiptPollTimer;
   int _memoryReceiptPollAttempts = 0;
-  final MemoryReinterpretationReceiptDiscovery _memoryReceiptDiscovery = MemoryReinterpretationReceiptDiscovery();
-  String? _memoryReceiptDiscoveryKey;
   String? _memorySessionNotificationKey;
 
   /// Regex to strip emojis from text before sending to TTS
@@ -233,7 +231,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
     _memoryReceiptPollTimer?.cancel();
-    _memoryReceiptDiscoveryKey = null;
     _playerSub?.cancel();
     _audioPlayer.dispose();
     _transcriptScrollController.dispose();
@@ -583,7 +580,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             _isV2VMode = false;
             _voiceModeActive = false;
           });
-          _beginPostSessionReceiptDiscovery(endedSessionId);
+          _notifyMemorySessionEnded(endedSessionId);
           _activeSessionId = '';
         }
       },
@@ -641,7 +638,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
 
     _activeSessionId = receipt.sessionId;
-    _memoryReceiptDiscoveryKey = null;
     _memorySessionNotificationKey = null;
     _memoryReinterpretationEvent = null;
     _memoryReceiptPollTimer?.cancel();
@@ -659,21 +655,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final endedSessionId = _activeSessionId;
     await _v2vClient?.disconnect();
     _v2vClient = null;
-    _beginPostSessionReceiptDiscovery(endedSessionId);
+    _notifyMemorySessionEnded(endedSessionId);
     _activeSessionId = '';
     _activeV2VProvider = '';
     _pauseVoiceMode();
-  }
-
-  void _beginPostSessionReceiptDiscovery(String sessionId) {
-    final scope = _sessionScope;
-    if (scope == null || sessionId.isEmpty) return;
-    final request = MemoryReceiptDiscoveryRequest(conversationId: scope.conversationId, sessionId: sessionId);
-    _notifyMemorySessionEnded(sessionId);
-    final discoveryKey = request.key;
-    if (_memoryReceiptDiscoveryKey == discoveryKey) return;
-    _memoryReceiptDiscoveryKey = discoveryKey;
-    unawaited(_discoverPostSessionReceipt(request.conversationId, request.sessionId, discoveryKey));
   }
 
   void _notifyMemorySessionEnded(String sessionId) {
@@ -683,20 +668,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (_memorySessionNotificationKey == request.key) return;
     _memorySessionNotificationKey = request.key;
     widget.onMemorySessionEnded?.call(request);
-  }
-
-  Future<void> _discoverPostSessionReceipt(String conversationId, String sessionId, String discoveryKey) async {
-    final result = await _memoryReceiptDiscovery.discover(
-      conversationId: conversationId,
-      sessionId: sessionId,
-      shouldContinue: () => mounted && _memoryReceiptDiscoveryKey == discoveryKey,
-    );
-    if (!mounted || _memoryReceiptDiscoveryKey != discoveryKey) return;
-    debugPrint('[VoiceChat] Memory receipt discovery: ${result.state.name}');
-    final receipt = result.receipt;
-    if (receipt != null && receipt.conversationId == conversationId) {
-      setState(() => _memoryCorrectionReceipt = receipt);
-    }
   }
 
   void _onV2VEvent(V2VEvent event) {

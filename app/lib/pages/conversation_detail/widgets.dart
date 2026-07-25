@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -718,7 +720,7 @@ class AppResultDetailWidget extends StatelessWidget {
               spacing: 10,
               runSpacing: 10,
               children: [
-                _TalkAboutMemoryButton(conversation: conversation),
+                MemoryTalkButton(conversation: conversation),
                 _CorrectSummaryButton(
                   conversation: conversation,
                   appSummary: content,
@@ -732,15 +734,68 @@ class AppResultDetailWidget extends StatelessWidget {
   }
 }
 
-class _TalkAboutMemoryButton extends StatelessWidget {
-  const _TalkAboutMemoryButton({required this.conversation});
+typedef MemoryTalkRouteOpener = Future<void> Function(
+  BuildContext context,
+  ServerConversation conversation,
+  ValueChanged<MemoryReceiptDiscoveryRequest> onMemorySessionEnded,
+);
+
+class MemoryTalkButton extends StatefulWidget {
+  const MemoryTalkButton({
+    required this.conversation,
+    this.routeOpener,
+    this.receiptDiscovery,
+    super.key,
+  });
 
   final ServerConversation conversation;
+  final MemoryTalkRouteOpener? routeOpener;
+  final MemoryReinterpretationReceiptDiscovery? receiptDiscovery;
 
-  Future<void> _openMemoryTalk(BuildContext context) async {
-    MemoryReceiptDiscoveryRequest? endedSession;
+  @override
+  State<MemoryTalkButton> createState() => _MemoryTalkButtonState();
+}
+
+class _MemoryTalkButtonState extends State<MemoryTalkButton> {
+  late MemoryReinterpretationReceiptDiscovery _receiptDiscovery;
+  String? _activeDiscoveryKey;
+  MemoryReceiptDiscoveryResult? _discoveryResult;
+  ConversationCorrectionReceipt? _receipt;
+
+  ServerConversation get conversation => widget.conversation;
+
+  @override
+  void initState() {
+    super.initState();
+    _receiptDiscovery = widget.receiptDiscovery ?? MemoryReinterpretationReceiptDiscovery();
+  }
+
+  @override
+  void didUpdateWidget(covariant MemoryTalkButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.receiptDiscovery != widget.receiptDiscovery) {
+      _receiptDiscovery = widget.receiptDiscovery ?? MemoryReinterpretationReceiptDiscovery();
+    }
+    if (oldWidget.conversation.id != conversation.id) {
+      _activeDiscoveryKey = null;
+      _discoveryResult = null;
+      _receipt = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _activeDiscoveryKey = null;
+    super.dispose();
+  }
+
+  Future<void> _openDefaultVoiceRoute(
+    BuildContext context,
+    ServerConversation conversation,
+    ValueChanged<MemoryReceiptDiscoveryRequest> onMemorySessionEnded,
+  ) {
     final displayTitle = parseEllaDisplayValue(conversation.structured.title).text.trim();
-    await Navigator.of(context).push(
+    return Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => EllaVoiceChatPage(
           sessionScope: V2VSessionScope.memory(
@@ -748,63 +803,107 @@ class _TalkAboutMemoryButton extends StatelessWidget {
             expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
           ),
           memoryTitle: displayTitle,
-          onMemorySessionEnded: (request) => endedSession = request,
+          onMemorySessionEnded: onMemorySessionEnded,
         ),
-      ),
-    );
-
-    final request = endedSession;
-    if (!context.mounted || request == null) return;
-    final result = await MemoryReinterpretationReceiptDiscovery().discover(
-      conversationId: request.conversationId,
-      sessionId: request.sessionId,
-      shouldContinue: () => context.mounted,
-    );
-    if (!context.mounted || result.receipt == null) return;
-    final receipt = result.receipt!;
-    await showMemoryCorrectionReceiptSheet(
-      context,
-      receipt: receipt,
-      onUndo: () => undoConversationCorrection(
-        conversationId: receipt.conversationId,
-        correctionId: receipt.correctionId,
       ),
     );
   }
 
+  Future<void> _openMemoryTalk() async {
+    final openRoute = widget.routeOpener ?? _openDefaultVoiceRoute;
+    await openRoute(context, conversation, _handleMemorySessionEnded);
+  }
+
+  void _handleMemorySessionEnded(MemoryReceiptDiscoveryRequest request) {
+    if (request.conversationId != conversation.id || request.sessionId.isEmpty) return;
+    if (_activeDiscoveryKey == request.key) return;
+    _activeDiscoveryKey = request.key;
+    _discoveryResult = null;
+    unawaited(_discoverReceipt(request));
+  }
+
+  Future<void> _discoverReceipt(MemoryReceiptDiscoveryRequest request) async {
+    final discoveryKey = request.key;
+    final result = await _receiptDiscovery.discover(
+      conversationId: request.conversationId,
+      sessionId: request.sessionId,
+      shouldContinue: () => mounted && _activeDiscoveryKey == discoveryKey,
+    );
+    if (!mounted || _activeDiscoveryKey != discoveryKey) return;
+    setState(() {
+      _discoveryResult = result;
+      if (result.receipt != null && result.receipt!.conversationId == conversation.id) {
+        _receipt = result.receipt;
+      }
+    });
+  }
+
+  Future<ConversationCorrectionReceipt?> _undoMemoryCorrection() async {
+    final receipt = _receipt;
+    if (receipt == null || !receipt.isApplied) return null;
+    final updated = await undoConversationCorrection(
+      conversationId: receipt.conversationId,
+      correctionId: receipt.correctionId,
+    );
+    if (mounted && updated != null && _receipt?.correctionId == receipt.correctionId) {
+      setState(() => _receipt = updated);
+    }
+    return updated;
+  }
+
+  void _reviewMemoryCorrection() {
+    final receipt = _receipt;
+    if (receipt == null || !receipt.isApplied) return;
+    showMemoryCorrectionReceiptSheet(context, receipt: receipt, onUndo: _undoMemoryCorrection);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: () async {
-          HapticFeedback.lightImpact();
-          await _openMemoryTalk(context);
-        },
-        child: Ink(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: EllaColors.primary,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: ValueKey('memory-talk-${conversation.id}'),
             borderRadius: BorderRadius.circular(18),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.graphic_eq_rounded, size: 18, color: EllaColors.paper),
-              const SizedBox(width: 8),
-              Text(
-                context.l10n.memoryTalkAction,
-                style: const TextStyle(
-                  color: EllaColors.paper,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
+            onTap: () async {
+              HapticFeedback.lightImpact();
+              await _openMemoryTalk();
+            },
+            child: Ink(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: EllaColors.primary,
+                borderRadius: BorderRadius.circular(18),
               ),
-            ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.graphic_eq_rounded, size: 18, color: EllaColors.paper),
+                  const SizedBox(width: 8),
+                  Text(
+                    context.l10n.memoryTalkAction,
+                    style: const TextStyle(
+                      color: EllaColors.paper,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
-      ),
+        if (_discoveryResult?.receipt != null && _receipt != null) ...[
+          const SizedBox(height: 10),
+          MemoryCorrectionReceiptChip(
+            key: ValueKey('memory-receipt-${conversation.id}'),
+            receipt: _receipt!,
+            onReview: _reviewMemoryCorrection,
+          ),
+        ],
+      ],
     );
   }
 }
