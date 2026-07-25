@@ -508,19 +508,17 @@ class _WhisperPill extends StatelessWidget {
                   constraints: const BoxConstraints(minHeight: EllaSizes.minTouchTarget),
                   child: Padding(
                     padding: const EdgeInsets.only(left: 20),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            context.l10n.todayListeningButton,
-                            style: EllaTextStyles.secondary.copyWith(
-                              color: EllaColors.tealDeep,
-                              fontWeight: FontWeight.w700,
-                            ),
+                    child: Text.rich(
+                      TextSpan(
+                        style: EllaTextStyles.secondary.copyWith(color: EllaColors.inkSoft),
+                        children: [
+                          TextSpan(text: context.l10n.todayListeningLead),
+                          TextSpan(
+                            text: context.l10n.todayListeningLink,
+                            style: const TextStyle(color: EllaColors.tealDeep, fontWeight: FontWeight.w700),
                           ),
-                        ),
-                        const Icon(Icons.chevron_right_rounded, color: EllaColors.tealDeep),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),

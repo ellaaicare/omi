@@ -10463,5 +10463,7 @@
   "todayNecklaceReconnectingBody": "It usually finds its way back on its own.",
   "todayHelpReconnect": "Help me reconnect",
   "todaySeeAllMemories": "See all",
-  "todayMemoriesEmpty": "As Ella listens today, your memories will gather here. 🪽"
+  "todayMemoriesEmpty": "As Ella listens today, your memories will gather here. 🪽",
+  "todayListeningLead": "Ella is listening — ",
+  "todayListeningLink": "See what she hears ›"
 }
