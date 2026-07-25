@@ -51,6 +51,7 @@ from ella.services.memory_reinterpretation import (
     ApplyResult,
     MemoryReinterpretationWorker,
     ReinterpretationPlan,
+    ReinterpretationProposal,
     ReinterpretationWorkerError,
     run_worker_loop,
     worker_runtime_metrics,
@@ -672,6 +673,85 @@ def test_worker_preserves_zero_to_many_proposal_order_and_only_auto_applies_expl
         assert job["receipt_refs"][0]["correction_id"] == job["correction_ids"][0]
 
     asyncio.run(run())
+
+
+def test_pending_proposal_ingest_dedupes_within_revision_and_separates_new_revision(monkeypatch):
+    from ella.services import proposal_ingest
+
+    proposals_by_key = {}
+
+    def get_by_key(profile_uid, idempotency_key):
+        return proposals_by_key.get((profile_uid, idempotency_key))
+
+    def save(proposal):
+        proposals_by_key[(proposal.profile_uid, proposal.idempotency_key)] = proposal
+        return proposal
+
+    monkeypatch.setattr(proposal_ingest.proposals_db, "get_proposal_by_idempotency_key", get_by_key)
+    monkeypatch.setattr(proposal_ingest.proposals_db, "save_proposal", save)
+
+    base_job = {
+        "id": "job-revision-boundary",
+        "uid": UID,
+        "conversation_id": CONVERSATION_ID,
+        "starting_summary_version_id": VERSION_ID,
+        "transcript_hash": "revision-1-hash",
+        "transcript_revision": 1,
+    }
+    revision_1 = ReinterpretationProposal(
+        kind="ambiguous_reinterpretation",
+        certainty="ambiguous",
+        correction_text="The glasses may be in the blue backpack.",
+        evidence_event_ids=["turn-1"],
+        evidence_quote="blue backpack",
+    )
+    revision_2 = ReinterpretationProposal(
+        kind="ambiguous_reinterpretation",
+        certainty="ambiguous",
+        correction_text="The glasses may instead be beside the front door.",
+        evidence_event_ids=["turn-2"],
+        evidence_quote="beside the front door",
+    )
+
+    first_id = asyncio.run(
+        reinterpretation_service._create_pending_proposal(
+            job=base_job,
+            proposal=revision_1,
+            proposal_id="fallback-revision-1",
+            proposal_index=0,
+        )
+    )
+    retry_id = asyncio.run(
+        reinterpretation_service._create_pending_proposal(
+            job=base_job,
+            proposal=revision_1,
+            proposal_id="different-fallback-must-not-be-used",
+            proposal_index=0,
+        )
+    )
+    newer_job = {
+        **base_job,
+        "transcript_revision": 2,
+        "transcript_hash": "revision-2-hash",
+    }
+    newer_id = asyncio.run(
+        reinterpretation_service._create_pending_proposal(
+            job=newer_job,
+            proposal=revision_2,
+            proposal_id="fallback-revision-2",
+            proposal_index=0,
+        )
+    )
+
+    assert retry_id == first_id
+    assert newer_id != first_id
+    assert len(proposals_by_key) == 2
+    revision_1_saved = proposals_by_key[(UID, "memory-reinterpretation:job-revision-boundary:revision:1:proposal:0")]
+    revision_2_saved = proposals_by_key[(UID, "memory-reinterpretation:job-revision-boundary:revision:2:proposal:0")]
+    assert revision_1_saved.payload["description"] == revision_1.correction_text
+    assert revision_2_saved.payload["description"] == revision_2.correction_text
+    assert revision_1_saved.trace_id.endswith("revision:1:proposal:0")
+    assert revision_2_saved.trace_id.endswith("revision:2:proposal:0")
 
 
 def test_stale_starting_version_is_typed_conflict_before_hermes_call():

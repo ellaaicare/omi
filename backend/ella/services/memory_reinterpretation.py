@@ -318,13 +318,14 @@ async def _create_pending_proposal(
 ) -> str:
     from ella.services import proposal_ingest
 
+    revision_trace = f"memory-reinterpretation:{job['id']}:revision:{job['transcript_revision']}"
     claims = {
         "sub": f"omi-worker:{job['uid']}",
         "profile_uid": job["uid"],
         "role": "system",
         "external_provider": "memory-reinterpretation-worker",
         "grant_id": "memory-reinterpretation-worker",
-        "trace_id": f"memory-reinterpretation:{job['id']}",
+        "trace_id": f"{revision_trace}:proposal:{proposal_index}",
         "scopes": ["proposals:write"],
         "allowed_tools": ["memory_reinterpretation_propose"],
     }
@@ -349,7 +350,7 @@ async def _create_pending_proposal(
             "source": "memory-scoped-voice-session",
             "write_policy": "proposal_only",
         },
-        idempotency_key=f"memory-reinterpretation:{job['id']}:proposal:{proposal_index}",
+        idempotency_key=f"{revision_trace}:proposal:{proposal_index}",
     )
     created = result.get("proposal") or {}
     return str(created.get("proposal_id") or proposal_id)
