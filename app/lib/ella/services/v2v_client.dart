@@ -359,17 +359,47 @@ class V2VClient {
   }
 
   /// Start a V2V session: get session token, connect WebSocket, start audio.
-  Future<V2VConnectionReceipt> connect({required String provider, V2VSessionScope? sessionScope}) async {
+  Future<V2VConnectionReceipt> connect({
+    required String provider,
+    V2VSessionScope? sessionScope,
+    bool Function()? shouldContinue,
+  }) async {
     provider = normalizeProvider(provider);
+
+    Future<V2VConnectionReceipt?> cancelIfRequested(
+      V2VConnectionStage stage, {
+      String voiceMode = '',
+    }) async {
+      if (shouldContinue == null || shouldContinue()) return null;
+      Logger.debug('[V2V] Cancelling stale connect for provider=$provider stage=${stage.name}');
+      await disconnect();
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: voiceMode,
+          stage: stage,
+          errorCode: 'connection_cancelled',
+        ),
+      );
+    }
+
+    final initialCancellation = await cancelIfRequested(V2VConnectionStage.providerRegistry);
+    if (initialCancellation != null) return initialCancellation;
+
     if (_activeClient != null && _activeClient != this) {
       Logger.debug('[V2V] Closing existing active V2V client before provider=$provider connect');
       await _activeClient!.disconnect();
+      final cancellation = await cancelIfRequested(V2VConnectionStage.providerRegistry);
+      if (cancellation != null) return cancellation;
     }
     _activeClient = this;
 
     if (_isConnected || _channel != null || _recorder != null) {
       Logger.debug('[V2V] connect() called with existing session state, disconnecting first');
       await disconnect();
+      final cancellation = await cancelIfRequested(V2VConnectionStage.providerRegistry);
+      if (cancellation != null) return cancellation;
       _activeClient = this;
     }
 
@@ -420,6 +450,8 @@ class V2VClient {
     }
 
     final registryFailure = await _validateProviderRegistry(provider);
+    final registryCancellation = await cancelIfRequested(V2VConnectionStage.providerRegistry);
+    if (registryCancellation != null) return registryCancellation;
     if (registryFailure != null) {
       if (_activeClient == this) _activeClient = null;
       return _completeReceipt(registryFailure);
@@ -427,6 +459,11 @@ class V2VClient {
 
     // 1. Get session token from backend
     final sessionResult = await _createSession(uid, provider, sessionScope);
+    final sessionCancellation = await cancelIfRequested(
+      V2VConnectionStage.session,
+      voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
+    );
+    if (sessionCancellation != null) return sessionCancellation;
     final sessionData = sessionResult.data;
     if (sessionData == null) {
       if (_activeClient == this) _activeClient = null;
@@ -485,6 +522,11 @@ class V2VClient {
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
       await _configureAudioSession();
+      final cancellation = await cancelIfRequested(
+        V2VConnectionStage.audioSession,
+        voiceMode: confirmedVoiceMode,
+      );
+      if (cancellation != null) return cancellation;
     } catch (error) {
       Logger.error('[V2V] Audio session setup failed for provider=$provider');
       if (_activeClient == this) _activeClient = null;
@@ -507,6 +549,11 @@ class V2VClient {
       _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
+      final websocketCancellation = await cancelIfRequested(
+        V2VConnectionStage.websocket,
+        voiceMode: confirmedVoiceMode,
+      );
+      if (websocketCancellation != null) return websocketCancellation;
 
       // 3. Listen for messages from proxy
       _isConnected = true;
@@ -528,6 +575,11 @@ class V2VClient {
 
       // 4. Start recording mic audio and streaming to WebSocket
       final micStarted = await _startMicStream();
+      final microphoneCancellation = await cancelIfRequested(
+        V2VConnectionStage.microphone,
+        voiceMode: confirmedVoiceMode,
+      );
+      if (microphoneCancellation != null) return microphoneCancellation;
       if (!micStarted || !_isConnected) {
         await disconnect();
         return _completeReceipt(

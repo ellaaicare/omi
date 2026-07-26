@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -72,6 +74,40 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('voice-modal-root')), findsOneWidget);
+  });
+
+  testWidgets('startup blocks route back and End waits for delayed cancellation before closing', (tester) async {
+    final ended = Completer<bool>();
+    var endCalls = 0;
+    await tester.pumpWidget(
+      app(
+        voiceActive: true,
+        onEnd: () {
+          endCalls++;
+          return ended.future;
+        },
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('open-voice-modal')));
+    await tester.pumpAndSettle();
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('voice-modal-root')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('voice-modal-end')));
+    await tester.pump();
+    expect(endCalls, 1);
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byKey(const ValueKey('voice-modal-root')), findsOneWidget);
+
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('voice-modal-root')), findsOneWidget);
+
+    ended.complete(true);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('voice-modal-root')), findsNothing);
   });
 
   testWidgets('inactive voice closes and returns without calling End', (tester) async {

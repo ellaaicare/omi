@@ -235,6 +235,21 @@ void main() {
       expect(receipt.errorCode, 'missing_authenticated_identity');
       await client.disconnect();
     });
+
+    test('cancelled startup stops before provider or session work begins', () async {
+      final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
+
+      final receipt = await client.connect(
+        provider: 'grok-voice',
+        shouldContinue: () => false,
+      );
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.providerRegistry);
+      expect(receipt.errorCode, 'connection_cancelled');
+      expect(client.isConnected, isFalse);
+      await client.disconnect();
+    });
   });
 
   group('V2VClient proxy event mapping', () {

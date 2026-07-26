@@ -24,6 +24,7 @@ import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/services/voice_session_startup_guard.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
@@ -98,6 +99,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
+  final VoiceSessionStartupGuard _voiceStartupGuard = VoiceSessionStartupGuard();
   bool _isV2VMode = false;
   String _activeV2VProvider = '';
   bool _usingElevenLabsFallback = false;
@@ -231,6 +233,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void dispose() {
     _notifyMemorySessionEnded(_activeSessionId);
+    _voiceStartupGuard.dispose();
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
     _memoryReceiptPollTimer?.cancel();
@@ -240,8 +243,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (_speech.isListening) {
       _speech.stop();
     }
-    _v2vClient?.disconnect();
+    final client = _v2vClient;
     _v2vClient = null;
+    if (client != null) unawaited(client.disconnect());
     super.dispose();
   }
 
@@ -301,14 +305,33 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       return;
     }
 
-    _voiceModeActive = true;
     if (_isV2VProvider(provider)) {
-      await _startV2V(provider);
+      final startupGeneration = _beginV2VStartup(provider);
+      await _startV2V(provider, startupGeneration: startupGeneration);
     } else {
-      _isV2VMode = false;
+      setState(() {
+        _voiceModeActive = true;
+        _isV2VMode = false;
+      });
       await _startListening();
     }
   }
+
+  int _beginV2VStartup(String provider) {
+    final startupGeneration = _voiceStartupGuard.begin();
+    final providerName = localizedV2VProviderName(context, V2VClient.normalizeProvider(provider));
+    setState(() {
+      _voiceModeActive = true;
+      _isV2VMode = true;
+      _usingElevenLabsFallback = false;
+      _orbState = VoiceOrbState.processing;
+      _statusText = context.l10n.voiceV2vConnecting(providerName);
+      _audioLevel = 0.0;
+    });
+    return startupGeneration;
+  }
+
+  bool _isCurrentV2VStartup(int startupGeneration) => mounted && _voiceStartupGuard.isCurrent(startupGeneration);
 
   Future<void> _onOrbTap() async {
     debugPrint('[VoiceChat] Orb tapped, state: $_orbState, voiceMode: $_voiceModeActive, v2v: $_isV2VMode');
@@ -347,8 +370,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
-  void _pauseVoiceMode() {
+  void _pauseVoiceMode({bool cancelStartup = true}) {
     debugPrint('[VoiceChat] Pausing voice mode');
+    if (cancelStartup) _voiceStartupGuard.cancel();
     _voiceModeActive = false;
     _isV2VMode = false;
     _typewriterTimer?.cancel();
@@ -529,34 +553,35 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   // --- V2V (Voice-to-Voice) WebSocket mode ---
 
-  Future<bool> _refreshMemoryScope() async {
+  Future<bool> _refreshMemoryScope(int startupGeneration) async {
     final currentScope = _sessionScope;
-    if (currentScope == null) return false;
+    if (currentScope == null || !_isCurrentV2VStartup(startupGeneration)) return false;
     setState(() {
       _orbState = VoiceOrbState.processing;
       _statusText = context.l10n.memoryTalkStale;
     });
     final refreshed = await getConversationById(currentScope.conversationId);
-    if (!mounted || refreshed == null) return false;
+    if (!_isCurrentV2VStartup(startupGeneration) || refreshed == null) return false;
     _sessionScope = EllaVoiceChatPage.refreshedMemoryScope(currentScope, refreshed.activeSummaryVersionId);
     return true;
   }
 
-  Future<void> _startV2V(String provider, {bool allowScopeRefresh = true}) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<void> _startV2V(
+    String provider, {
+    required int startupGeneration,
+    bool allowScopeRefresh = true,
+  }) async {
+    if (!SharedPreferencesUtil().aiConsentAccepted || !_isCurrentV2VStartup(startupGeneration)) return;
     provider = V2VClient.normalizeProvider(provider);
     final providerName = localizedV2VProviderName(context, provider);
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
-    _isV2VMode = true;
-    _usingElevenLabsFallback = false;
 
     // Stop any existing mic recording from CaptureProvider
-    if (mounted) {
-      final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
-      if (captureProvider.recordingState == RecordingState.record) {
-        debugPrint('[VoiceChat] Pausing capture recording for V2V');
-        await captureProvider.stopStreamRecording();
-      }
+    final captureProvider = Provider.of<CaptureProvider>(context, listen: false);
+    if (captureProvider.recordingState == RecordingState.record) {
+      debugPrint('[VoiceChat] Pausing capture recording for V2V');
+      await captureProvider.stopStreamRecording();
+      if (!_isCurrentV2VStartup(startupGeneration)) return;
     }
 
     setState(() {
@@ -569,14 +594,21 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     try {
       await _audioPlayer.stop();
     } catch (_) {}
+    if (!_isCurrentV2VStartup(startupGeneration)) return;
 
-    _v2vClient = V2VClient(
-      onEvent: _onV2VEvent,
+    late final V2VClient client;
+    client = V2VClient(
+      onEvent: (event) {
+        if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return;
+        _onV2VEvent(event);
+      },
       onConnectionChanged: (connected) {
-        if (!mounted) return;
+        if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return;
         if (!connected && _isV2VMode) {
           final endedSessionId = _activeSessionId;
           debugPrint('[VoiceChat] V2V disconnected unexpectedly');
+          _voiceStartupGuard.cancel();
+          _v2vClient = null;
           setState(() {
             _orbState = VoiceOrbState.idle;
             _statusText = 'Disconnected — Tap to Reconnect';
@@ -588,24 +620,39 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
       },
     );
+    if (!_isCurrentV2VStartup(startupGeneration)) {
+      await client.disconnect();
+      return;
+    }
+    _v2vClient = client;
 
-    final receipt = await _v2vClient!.connect(provider: provider, sessionScope: _sessionScope);
-    if (!mounted) return;
+    final receipt = await client.connect(
+      provider: provider,
+      sessionScope: _sessionScope,
+      shouldContinue: () => _isCurrentV2VStartup(startupGeneration) && identical(_v2vClient, client),
+    );
+    if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
+      await client.disconnect();
+      return;
+    }
 
     if (!receipt.connected) {
       debugPrint('[VoiceChat] V2V connect failed: ${receipt.toDebugFields()}');
-      await _v2vClient?.disconnect();
-      if (!mounted) return;
-      _isV2VMode = false;
       _v2vClient = null;
-      _voiceModeActive = false;
-      if (allowScopeRefresh && receipt.shouldRefreshMemoryScope && await _refreshMemoryScope()) {
-        if (!mounted) return;
-        _voiceModeActive = true;
-        await _startV2V(provider, allowScopeRefresh: false);
+      await client.disconnect();
+      if (!_isCurrentV2VStartup(startupGeneration)) return;
+      if (allowScopeRefresh && receipt.shouldRefreshMemoryScope && await _refreshMemoryScope(startupGeneration)) {
+        await _startV2V(
+          provider,
+          startupGeneration: startupGeneration,
+          allowScopeRefresh: false,
+        );
         return;
       }
+      _voiceStartupGuard.complete(startupGeneration);
       setState(() {
+        _isV2VMode = false;
+        _voiceModeActive = false;
         _orbState = VoiceOrbState.idle;
         _statusText = _sessionScope != null && receipt.errorCode == 'voice_session_scope_unavailable'
             ? context.l10n.memoryTalkUnavailable
@@ -613,23 +660,26 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         _audioLevel = 0.0;
       });
 
+      if (!mounted) return;
       final choice = await showV2VFallbackDialog(context, receipt, allowStandardFallback: _sessionScope == null);
       if (!mounted) return;
       switch (choice) {
         case V2VFailureChoice.retry:
-          _voiceModeActive = true;
-          await _startV2V(provider);
+          final retryGeneration = _beginV2VStartup(provider);
+          await _startV2V(provider, startupGeneration: retryGeneration);
           break;
         case V2VFailureChoice.useElevenLabs:
           if (_sessionScope != null) break;
           _usingElevenLabsFallback = true;
-          _voiceModeActive = true;
           setState(() {
+            _voiceModeActive = true;
+            _isV2VMode = false;
             _statusText = context.l10n.voiceElevenLabsFallbackActive;
           });
           await _startListening();
           break;
         case V2VFailureChoice.stop:
+          _voiceStartupGuard.cancel();
           _usingElevenLabsFallback = false;
           _activeV2VProvider = '';
           setState(() {
@@ -640,6 +690,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       return;
     }
 
+    _voiceStartupGuard.complete(startupGeneration);
     _activeSessionId = receipt.sessionId;
     _memorySessionNotificationKey = null;
     _memoryReinterpretationEvent = null;
@@ -655,20 +706,28 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<void> _stopV2V() async {
     debugPrint('[VoiceChat] Stopping V2V mode');
+    _voiceStartupGuard.cancel();
     final endedSessionId = _activeSessionId;
-    await _v2vClient?.disconnect();
+    final client = _v2vClient;
     _v2vClient = null;
+    _voiceModeActive = false;
+    _isV2VMode = false;
+    if (client != null) await client.disconnect();
     _notifyMemorySessionEnded(endedSessionId);
     _activeSessionId = '';
     _activeV2VProvider = '';
-    _pauseVoiceMode();
+    _pauseVoiceMode(cancelStartup: false);
   }
 
   bool get _hasActiveVoiceSession =>
-      _voiceModeActive || _isV2VMode || _speech.isListening || _orbState != VoiceOrbState.idle;
+      _voiceStartupGuard.isStarting ||
+      _voiceModeActive ||
+      _isV2VMode ||
+      _speech.isListening ||
+      _orbState != VoiceOrbState.idle;
 
   Future<bool> _endModalVoiceSession() async {
-    if (_isV2VMode || _v2vClient != null) {
+    if (_voiceStartupGuard.isStarting || _isV2VMode || _v2vClient != null) {
       await _stopV2V();
     } else {
       _voiceModeActive = false;
