@@ -415,10 +415,12 @@ def _register_routers(app) -> None:
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
-            from ella.routers.voice import router as voice_router
+            from ella.routers.voice import entitlement_router, router as voice_router
 
             app.include_router(voice_router, tags=["Ella Voice"])
+            app.include_router(entitlement_router, tags=["Ella Voice"])
             print("  🌐 /v1/voice/* - Voice session endpoints", flush=True)
+            print("  🌐 /v1/entitlement - Voice entitlement state", flush=True)
         except ImportError as e:
             print(f"  ⚠️ Voice endpoints not available: {e}", flush=True)
 
