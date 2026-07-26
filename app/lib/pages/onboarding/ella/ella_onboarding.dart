@@ -9,7 +9,9 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/auth.dart';
 import 'package:omi/pages/onboarding/ella/ella_connect.dart';
@@ -23,6 +25,14 @@ import 'package:omi/utils/platform/platform_manager.dart';
 class EllaOnboarding extends StatefulWidget {
   const EllaOnboarding({super.key});
 
+  @visibleForTesting
+  static bool shouldPresentVoiceConsent({
+    required bool hasCurrentConsent,
+    required bool hasPriorAccountConsent,
+    required bool deferredCurrentConsent,
+  }) =>
+      !hasCurrentConsent && !hasPriorAccountConsent && !deferredCurrentConsent;
+
   @override
   State<EllaOnboarding> createState() => _EllaOnboardingState();
 }
@@ -31,6 +41,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
   bool _isSignedIn = false;
+  bool _isCompletingOnboarding = false;
 
   @override
   void initState() {
@@ -86,7 +97,37 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     setState(() => _currentPage = page);
   }
 
-  void _completeOnboarding() {
+  Future<void> _completeOnboarding() async {
+    if (_isCompletingOnboarding) return;
+    setState(() => _isCompletingOnboarding = true);
+
+    final preferences = SharedPreferencesUtil();
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (isHermesProvisioningGateEnabled && uid.isNotEmpty) {
+      await preferences.prepareEllaProvisioningAccount(uid);
+    }
+    if (!mounted) return;
+    final shouldPresentVoiceConsent = EllaOnboarding.shouldPresentVoiceConsent(
+      hasCurrentConsent:
+          isHermesProvisioningGateEnabled ? preferences.hasAccountBoundAiConsent(uid) : preferences.aiConsentAccepted,
+      hasPriorAccountConsent: uid.isNotEmpty && preferences.hasPriorAccountBoundAiConsent(uid),
+      deferredCurrentConsent: preferences.isCurrentAiConsentDeferred,
+    );
+    if (shouldPresentVoiceConsent && mounted) {
+      await AiConsentSheet.show(
+        context,
+        onAccept: isHermesProvisioningGateEnabled
+            ? () async {
+                final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
+                if (receiptId == null) return false;
+                if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+                return true;
+              }
+            : null,
+      );
+    }
+    if (!mounted) return;
+
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
