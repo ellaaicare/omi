@@ -16422,7 +16422,7 @@ abstract class AppLocalizations {
   /// No description provided for @todayWhispersHistory.
   ///
   /// In en, this message translates to:
-  /// **'See what Ella has whispered'**
+  /// **'See whispers'**
   String get todayWhispersHistory;
 
   /// No description provided for @todayRemindersTitle.
@@ -16502,6 +16502,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'See what she hears ›'**
   String get todayListeningLink;
+
+  /// No description provided for @todayReadMore.
+  ///
+  /// In en, this message translates to:
+  /// **'Read more'**
+  String get todayReadMore;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
