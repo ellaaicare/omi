@@ -238,6 +238,19 @@ def test_revoke_supersedes_prior_grant():
     assert revoked["account_deletion"]["path"] == "/v1/users/delete-account"
 
 
+def test_account_deletion_receipt_is_opaque_and_completed():
+    receipt = consent.build_account_deletion_receipt(
+        now=lambda: datetime(2026, 7, 26, 20, 15, tzinfo=timezone.utc)
+    )
+
+    assert receipt["request_id"].startswith("aidel_")
+    assert len(receipt["request_id"]) == len("aidel_") + 32
+    assert receipt["status"] == "completed"
+    assert receipt["scope"] == "account_and_user_data"
+    assert receipt["server_completed_at"] == "2026-07-26T20:15:00+00:00"
+    assert "uid" not in receipt
+
+
 def test_receipts_are_user_scoped():
     repository = consent.InMemoryConsentRepository()
     service = _service(repository)

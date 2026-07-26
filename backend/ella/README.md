@@ -292,7 +292,9 @@ immutable receipt subcollection; callers cannot submit or select another UID.
 - `GET /v1/users/ai-consent/receipts/{receipt_id}` verifies a receipt only
   within the authenticated user's path.
 - Account/data deletion remains `DELETE /v1/users/delete-account`; deletion
-  also removes the user's consent receipt subcollection.
+  also removes the user's consent receipt subcollection and returns a
+  non-identifying synchronous completion receipt with request ID and server
+  completion time.
 
 Exact-policy grants are required at the Ella chat stream, Hermes onboarding
 ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,

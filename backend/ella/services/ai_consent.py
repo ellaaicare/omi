@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Optional, Protocol
@@ -146,6 +147,19 @@ ACCOUNT_DELETION_CONTRACT = {
     "path": "/v1/users/delete-account",
     "scope": "account_and_user_data",
 }
+
+
+def build_account_deletion_receipt(
+    *,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, str]:
+    """Return a non-identifying receipt for a completed synchronous deletion."""
+    return {
+        "request_id": f"aidel_{secrets.token_hex(16)}",
+        "status": "completed",
+        "scope": ACCOUNT_DELETION_CONTRACT["scope"],
+        "server_completed_at": now().astimezone(timezone.utc).isoformat(),
+    }
 
 
 class ConsentPolicyMismatch(ValueError):
