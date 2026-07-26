@@ -19,14 +19,8 @@ class EllaInviteLinkController extends ChangeNotifier {
     return true;
   }
 
-  String consume() {
-    final code = _pendingCode;
-    _pendingCode = '';
-    return code;
-  }
-
-  @visibleForTesting
   void clear() {
+    if (_pendingCode.isEmpty) return;
     _pendingCode = '';
     notifyListeners();
   }
@@ -34,16 +28,26 @@ class EllaInviteLinkController extends ChangeNotifier {
 
 @visibleForTesting
 String extractEllaInviteCode(Uri uri) {
-  final isInviteHost = uri.host.toLowerCase() == 'invite';
-  final inviteIndex = uri.pathSegments.indexWhere((segment) => segment.toLowerCase() == 'invite');
-  final isInvitePath = inviteIndex >= 0;
-  if (!isInviteHost && !isInvitePath) return '';
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme == 'https') {
+    if (uri.host.toLowerCase() != 'ella-ai-care.com' || (uri.path != '/invite' && uri.path != '/invite/')) {
+      return '';
+    }
+    return normalizeEllaInviteCode(_fragmentParameters(uri.fragment)['c'] ?? '');
+  }
 
-  final queryCode = uri.queryParameters['code'] ?? uri.queryParameters['invite'];
-  final pathCode = inviteIndex >= 0 && inviteIndex + 1 < uri.pathSegments.length
-      ? uri.pathSegments[inviteIndex + 1]
-      : isInviteHost && uri.pathSegments.isNotEmpty
-          ? uri.pathSegments.first
-          : '';
-  return normalizeEllaInviteCode(queryCode ?? pathCode);
+  if (scheme != 'omi' || uri.host.toLowerCase() != 'invite') return '';
+  final fragmentCode = _fragmentParameters(uri.fragment)['c'];
+  final queryCode = uri.queryParameters['c'] ?? uri.queryParameters['code'];
+  final pathCode = uri.pathSegments.isEmpty ? '' : uri.pathSegments.first;
+  return normalizeEllaInviteCode(fragmentCode ?? queryCode ?? pathCode);
+}
+
+Map<String, String> _fragmentParameters(String fragment) {
+  if (fragment.isEmpty) return const {};
+  try {
+    return Uri.splitQueryString(fragment);
+  } on FormatException {
+    return const {};
+  }
 }

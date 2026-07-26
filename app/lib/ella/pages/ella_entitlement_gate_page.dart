@@ -36,7 +36,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     EllaInviteLinkController.instance.addListener(_acceptPendingLink);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final pendingCode = EllaInviteLinkController.instance.consume();
+      final pendingCode = EllaInviteLinkController.instance.pendingCode;
       if (pendingCode.isNotEmpty) {
         _setCode(pendingCode);
       } else {
@@ -58,7 +58,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
 
   void _acceptPendingLink() {
     if (!mounted) return;
-    final code = EllaInviteLinkController.instance.consume();
+    final code = EllaInviteLinkController.instance.pendingCode;
     if (code.isEmpty) return;
     _setCode(code);
     context.read<EllaEntitlementProvider>().acceptInviteLink(code);
@@ -82,7 +82,19 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
 
   Future<void> _redeem() async {
     FocusScope.of(context).unfocus();
-    await context.read<EllaEntitlementProvider>().redeem(_codeController.text);
+    final provider = context.read<EllaEntitlementProvider>();
+    await provider.redeem(_codeController.text);
+    if (!mounted || !provider.canProvision) return;
+    EllaInviteLinkController.instance.clear();
+    provider.clearInviteCode();
+    _codeController.clear();
+  }
+
+  void _clearInviteCode() {
+    EllaInviteLinkController.instance.clear();
+    context.read<EllaEntitlementProvider>().clearInviteCode();
+    _codeController.clear();
+    setState(() => _showCodeEntry = false);
   }
 
   Future<void> _signOut() async {
@@ -98,7 +110,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
   Widget build(BuildContext context) {
     return Consumer<EllaEntitlementProvider>(
       builder: (context, provider, _) {
-        if (provider.isActive) return widget.readyChild;
+        if (provider.canProvision) return widget.readyChild;
 
         if (provider.state == EllaEntitlementLoadState.loading || provider.state == EllaEntitlementLoadState.idle) {
           return _AccessShell(
@@ -124,6 +136,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
         }
 
         final entitlement = provider.entitlement;
+        final supportCode = provider.supportCode.isNotEmpty ? provider.supportCode : provider.correlationId;
         if (entitlement?.status == EllaEntitlementStatus.suspended) {
           return _AccessShell(
             icon: const Icon(Icons.pause_circle_outline_rounded, color: EllaColors.tealDeep, size: 36),
@@ -132,6 +145,20 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
             primaryLabel: context.l10n.retry,
             onPrimary: provider.retry,
             onSignOut: _signOut,
+            supportCode: supportCode,
+          );
+        }
+
+        if (entitlement?.status == EllaEntitlementStatus.revoked ||
+            entitlement?.status == EllaEntitlementStatus.expired) {
+          return _AccessShell(
+            icon: const Icon(Icons.mark_email_read_outlined, color: EllaColors.tealDeep, size: 36),
+            title: context.l10n.ellaAccessNeedsCheckTitle,
+            body: context.l10n.ellaAccessNeedsCheckBody,
+            primaryLabel: context.l10n.retry,
+            onPrimary: provider.retry,
+            onSignOut: _signOut,
+            supportCode: supportCode,
           );
         }
 
@@ -163,7 +190,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (provider.inviteError != null) ...[
-                _InviteMessage(reason: provider.inviteError!),
+                _InviteMessage(reason: provider.inviteError!, retryAfterSeconds: provider.retryAfterSeconds),
                 const SizedBox(height: 16),
               ],
               Semantics(
@@ -207,8 +234,21 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
                       borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
                       borderSide: const BorderSide(color: EllaColors.tealDeep, width: 2),
                     ),
+                    suffixIcon: _codeController.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: context.l10n.clear,
+                            onPressed: _clearInviteCode,
+                            icon: const Icon(Icons.close_rounded),
+                          ),
                   ),
-                  onChanged: provider.acceptInviteLink,
+                  onChanged: (value) {
+                    if (normalizeEllaInviteCode(value) != EllaInviteLinkController.instance.pendingCode) {
+                      EllaInviteLinkController.instance.clear();
+                    }
+                    provider.acceptInviteLink(value);
+                    setState(() {});
+                  },
                   onSubmitted: (_) => _redeem(),
                 ),
               ),
@@ -250,9 +290,10 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
 }
 
 class _InviteMessage extends StatelessWidget {
-  const _InviteMessage({required this.reason});
+  const _InviteMessage({required this.reason, this.retryAfterSeconds});
 
   final EllaInviteRedemptionError reason;
+  final int? retryAfterSeconds;
 
   @override
   Widget build(BuildContext context) {
@@ -260,6 +301,8 @@ class _InviteMessage extends StatelessWidget {
       EllaInviteRedemptionError.invalid => context.l10n.ellaInviteInvalidBody,
       EllaInviteRedemptionError.expired => context.l10n.ellaInviteExpiredBody,
       EllaInviteRedemptionError.capacity => context.l10n.ellaInviteCapacityBody,
+      EllaInviteRedemptionError.rateLimited when retryAfterSeconds != null =>
+        context.l10n.ellaInviteRateLimitedWithRetryBody(retryAfterSeconds!),
       EllaInviteRedemptionError.rateLimited => context.l10n.ellaInviteRateLimitedBody,
     };
     return Container(
@@ -292,6 +335,7 @@ class _AccessShell extends StatelessWidget {
     this.primaryLabel,
     this.onPrimary,
     this.child,
+    this.supportCode = '',
   });
 
   final Widget icon;
@@ -301,6 +345,7 @@ class _AccessShell extends StatelessWidget {
   final VoidCallback? onPrimary;
   final VoidCallback onSignOut;
   final Widget? child;
+  final String supportCode;
 
   @override
   Widget build(BuildContext context) {
@@ -328,6 +373,34 @@ class _AccessShell extends StatelessWidget {
                       Text(title, style: EllaTextStyles.display, textAlign: TextAlign.center),
                       const SizedBox(height: 12),
                       Text(body, style: EllaTextStyles.secondary, textAlign: TextAlign.center),
+                      if (supportCode.isNotEmpty) ...[
+                        const SizedBox(height: 20),
+                        Semantics(
+                          button: true,
+                          label: context.l10n.copy,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                            onTap: () async {
+                              await Clipboard.setData(ClipboardData(text: supportCode));
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.copied)));
+                            },
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                              decoration: BoxDecoration(
+                                color: EllaColors.paper,
+                                borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                              ),
+                              child: Text(
+                                supportCode,
+                                style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       if (child != null) ...[const SizedBox(height: 24), child!],
                       if (primaryLabel != null && onPrimary != null) ...[
                         const SizedBox(height: 24),

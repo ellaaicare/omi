@@ -16563,6 +16563,18 @@ abstract class AppLocalizations {
   /// **'Your connection may need a moment. Try again when you are ready.'**
   String get ellaAccessUnavailableBody;
 
+  /// No description provided for @ellaAccessNeedsCheckTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your invitation needs a quick check'**
+  String get ellaAccessNeedsCheckTitle;
+
+  /// No description provided for @ellaAccessNeedsCheckBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Please email our team and include the support code below.'**
+  String get ellaAccessNeedsCheckBody;
+
   /// No description provided for @ellaWaitlistTitle.
   ///
   /// In en, this message translates to:
@@ -16658,6 +16670,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Let’s pause for a moment before trying that code again.'**
   String get ellaInviteRateLimitedBody;
+
+  /// Invite redemption backoff using the authoritative server retry time
+  ///
+  /// In en, this message translates to:
+  /// **'Let’s pause for a moment. Try again in {seconds} seconds.'**
+  String ellaInviteRateLimitedWithRetryBody(int seconds);
 
   /// No description provided for @ellaProvisioningTimeoutTitle.
   ///

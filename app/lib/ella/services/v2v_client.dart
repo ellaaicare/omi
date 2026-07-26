@@ -121,13 +121,25 @@ class MemoryReinterpretationEvent {
 
 /// JSON event from the V2V proxy WebSocket.
 class V2VEvent {
-  const V2VEvent({required this.type, this.text, this.policyReason, this.resetsAt, this.memoryReinterpretation});
+  const V2VEvent({
+    required this.type,
+    this.text,
+    this.policyReason,
+    this.resetsAt,
+    this.memoryReinterpretation,
+    this.quotaState,
+    this.quota,
+    this.turnBoundary = false,
+  });
 
   final String type;
   final String? text;
   final EllaVoicePolicyReason? policyReason;
   final DateTime? resetsAt;
   final MemoryReinterpretationEvent? memoryReinterpretation;
+  final String? quotaState;
+  final EllaQuota? quota;
+  final bool turnBoundary;
 }
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
@@ -869,11 +881,11 @@ class V2VClient {
   }
 
   static EllaVoicePolicyReason? _eventPolicyReason(Map<String, dynamic> json) {
-    for (final key in ['reason', 'termination_reason', 'denial_reason', 'code']) {
+    for (final key in ['reason', 'termination_reason', 'denial_reason', 'code', 'state']) {
       final reason = parseEllaVoicePolicyReason(json[key]);
       if (reason != null) return reason;
     }
-    for (final key in ['detail', 'error', 'data']) {
+    for (final key in ['detail', 'error', 'data', 'quota']) {
       final value = json[key];
       if (value is Map) {
         final reason = _eventPolicyReason(value.map((key, value) => MapEntry(key.toString(), value)));
@@ -886,10 +898,24 @@ class V2VClient {
   @visibleForTesting
   static EllaVoicePolicyReason? policyReasonFromEvent(Map<String, dynamic> json) => _eventPolicyReason(json);
 
+  @visibleForTesting
+  static V2VEvent? quotaEventFromEvent(Map<String, dynamic> json) {
+    if (json['type']?.toString() != 'quota_state') return null;
+    final quotaValue = json['quota'];
+    return V2VEvent(
+      type: 'quota_state',
+      quotaState: json['state']?.toString().trim().toLowerCase(),
+      quota: quotaValue is Map ? EllaQuota.fromJson(quotaValue) : null,
+      policyReason: _eventPolicyReason(json),
+      resetsAt: _eventResetsAt(json),
+      turnBoundary: json['turn_boundary'] == true,
+    );
+  }
+
   static DateTime? _eventResetsAt(Map<String, dynamic> json) {
     final direct = DateTime.tryParse(json['resets_at']?.toString() ?? '')?.toLocal();
     if (direct != null) return direct;
-    for (final key in ['detail', 'error', 'data']) {
+    for (final key in ['detail', 'error', 'data', 'quota']) {
       final value = json[key];
       if (value is Map) {
         final parsed = _eventResetsAt(value.map((key, value) => MapEntry(key.toString(), value)));
@@ -1255,6 +1281,10 @@ class V2VClient {
             if (memoryReinterpretation != null) {
               onEvent?.call(V2VEvent(type: type, memoryReinterpretation: memoryReinterpretation));
             }
+            break;
+          case 'quota_state':
+            final quotaEvent = quotaEventFromEvent(json);
+            if (quotaEvent != null) onEvent?.call(quotaEvent);
             break;
           case 'session_end':
             onEvent?.call(

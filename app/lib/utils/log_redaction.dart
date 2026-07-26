@@ -22,12 +22,14 @@ String redactUrlForLogs(String value) {
   for (final entry in uri.queryParameters.entries) {
     sanitizedQuery[entry.key] = _isSensitiveKey(entry.key) ? redactedLogValue : entry.value;
   }
-  return uri
+  final sanitized = uri
       .replace(
         userInfo: uri.userInfo.isEmpty ? null : redactedLogValue,
         queryParameters: sanitizedQuery.isEmpty ? null : sanitizedQuery,
+        fragment: '',
       )
       .toString();
+  return sanitized.endsWith('#') ? sanitized.substring(0, sanitized.length - 1) : sanitized;
 }
 
 Map<String, String> redactHeadersForLogs(Map<String, String> headers) => {

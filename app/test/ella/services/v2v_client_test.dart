@@ -40,13 +40,38 @@ void main() {
         EllaVoicePolicyReason.quotaMonthly,
       );
       expect(
-        V2VClient.policyReasonFromEvent({
-          'type': 'error',
-          'code': 'websocket_closed',
-          'message': 'quota_daily',
-        }),
+        V2VClient.policyReasonFromEvent({'type': 'error', 'code': 'websocket_closed', 'message': 'quota_daily'}),
         isNull,
       );
+    });
+
+    test('quota_state frames preserve authoritative warning and boundary stop data', () {
+      final warning = V2VClient.quotaEventFromEvent({
+        'type': 'quota_state',
+        'state': 'soft_warning',
+        'quota': {
+          'daily_used_s': 2400,
+          'daily_limit_s': 2700,
+          'monthly_used_s': 2400,
+          'monthly_limit_s': 43200,
+          'max_session_s': 1200,
+          'resets_at': '2026-07-27T07:00:00Z',
+        },
+      });
+      final stop = V2VClient.quotaEventFromEvent({
+        'type': 'quota_state',
+        'state': 'quota_daily',
+        'turn_boundary': true,
+        'quota': {'resets_at': '2026-07-27T07:00:00Z'},
+      });
+
+      expect(warning?.quotaState, 'soft_warning');
+      expect(warning?.quota?.dailyUsedSeconds, 2400);
+      expect(warning?.policyReason, isNull);
+      expect(stop?.policyReason, EllaVoicePolicyReason.quotaDaily);
+      expect(stop?.turnBoundary, isTrue);
+      expect(stop?.resetsAt, isNotNull);
+      expect(V2VClient.quotaEventFromEvent({'type': 'transcript'}), isNull);
     });
   });
 
@@ -298,10 +323,7 @@ void main() {
     test('cancelled startup stops before provider or session work begins', () async {
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 
-      final receipt = await client.connect(
-        provider: 'grok-voice',
-        shouldContinue: () => false,
-      );
+      final receipt = await client.connect(provider: 'grok-voice', shouldContinue: () => false);
 
       expect(receipt.connected, isFalse);
       expect(receipt.stage, V2VConnectionStage.providerRegistry);

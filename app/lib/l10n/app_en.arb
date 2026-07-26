@@ -10476,6 +10476,8 @@
   "ellaAccessPausedBody": "Your other Ella features are still here. Try again later or contact the person who arranged your access.",
   "ellaAccessUnavailableTitle": "Ella could not check access just now",
   "ellaAccessUnavailableBody": "Your connection may need a moment. Try again when you are ready.",
+  "ellaAccessNeedsCheckTitle": "Your invitation needs a quick check",
+  "ellaAccessNeedsCheckBody": "Please email our team and include the support code below.",
   "ellaWaitlistTitle": "You’re on the list",
   "ellaWaitlistBody": "Thanks for joining us. Ella is opening to a small group at a time. We’ll let you know when a place is ready.",
   "ellaEnterInviteCode": "Enter an invite code",
@@ -10492,6 +10494,15 @@
   "ellaInviteExpiredBody": "This invitation has reached its end date. The person who shared it can send a new one.",
   "ellaInviteCapacityBody": "Ella is welcoming a few people at a time. You’re on the list, and we’ll let you know when a place opens.",
   "ellaInviteRateLimitedBody": "Let’s pause for a moment before trying that code again.",
+  "ellaInviteRateLimitedWithRetryBody": "Let’s pause for a moment. Try again in {seconds} seconds.",
+  "@ellaInviteRateLimitedWithRetryBody": {
+    "description": "Invite redemption backoff using the authoritative server retry time",
+    "placeholders": {
+      "seconds": {
+        "type": "int"
+      }
+    }
+  },
   "ellaProvisioningTimeoutTitle": "Ella needs another moment",
   "ellaProvisioningTimeoutBody": "Setup is taking longer than usual. Nothing you entered was lost. Try again when you are ready.",
   "ellaProvisioningConnectionTitle": "Setup is waiting for a connection",

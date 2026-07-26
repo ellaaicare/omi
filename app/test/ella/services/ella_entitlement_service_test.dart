@@ -29,10 +29,7 @@ void main() {
     });
 
     test('rejects unknown entitlement status instead of guessing a user state', () {
-      expect(
-        () => EllaEntitlement.fromJson(const {'status': 'mystery', 'quota': {}}),
-        throwsFormatException,
-      );
+      expect(() => EllaEntitlement.fromJson(const {'status': 'mystery', 'quota': {}}), throwsFormatException);
     });
 
     test('parses every typed invite error shape', () {
@@ -51,6 +48,44 @@ void main() {
         expect(parseInviteRedemptionError(jsonEncode(entry.value)), entry.key);
       }
       expect(parseInviteRedemptionError('{"code":"provider_unavailable"}'), isNull);
+    });
+
+    test('preserves bounded retry and safe support metadata without retaining opaque values', () {
+      final failure = parseInviteRedemptionFailure(
+        jsonEncode({
+          'detail': {
+            'code': 'rate_limited',
+            'retry_after_s': 75,
+            'support_code': 'SUP-4F2A',
+            'correlation_id': 'corr_123',
+          },
+        }),
+      );
+
+      expect(failure?.reason, EllaInviteRedemptionError.rateLimited);
+      expect(failure?.retryAfterSeconds, 75);
+      expect(failure?.supportCode, 'SUP-4F2A');
+      expect(failure?.correlationId, 'corr_123');
+
+      final unsafe = EllaEntitlement.fromJson(const {
+        'status': 'revoked',
+        'quota': {},
+        'support_code': 'Bearer secret token',
+        'correlation_id': 'corr-safe',
+      });
+      expect(unsafe.supportCode, isEmpty);
+      expect(unsafe.correlationId, 'corr-safe');
+    });
+
+    test('invited and active are the only entitlement states allowed to provision', () {
+      for (final status in EllaEntitlementStatus.values) {
+        final entitlement = EllaEntitlement.fromJson({'status': status.name, 'quota': const {}});
+        expect(
+          entitlement.canProvision,
+          status == EllaEntitlementStatus.invited || status == EllaEntitlementStatus.active,
+          reason: status.name,
+        );
+      }
     });
 
     test('parses only the five policy reasons as policy outcomes', () {

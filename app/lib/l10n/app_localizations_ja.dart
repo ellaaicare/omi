@@ -8750,6 +8750,12 @@ class AppLocalizationsJa extends AppLocalizations {
   String get ellaAccessUnavailableBody => 'Your connection may need a moment. Try again when you are ready.';
 
   @override
+  String get ellaAccessNeedsCheckTitle => 'Your invitation needs a quick check';
+
+  @override
+  String get ellaAccessNeedsCheckBody => 'Please email our team and include the support code below.';
+
+  @override
   String get ellaWaitlistTitle => 'You’re on the list';
 
   @override
@@ -8802,6 +8808,9 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get ellaInviteRateLimitedBody => 'Let’s pause for a moment before trying that code again.';
+
+  @override
+  String ellaInviteRateLimitedWithRetryBody(int seconds) => 'Let’s pause for a moment. Try again in $seconds seconds.';
 
   @override
   String get ellaProvisioningTimeoutTitle => 'Ella needs another moment';

@@ -133,6 +133,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   EllaVoicePolicyReason? _policyReason;
   DateTime? _policyResetsAt;
   DateTime? _voiceSessionStartedAt;
+  EllaQuota? _liveQuota;
+  bool _authoritativeSoftWarning = false;
   Timer? _quotaClock;
   bool _endingForPolicy = false;
 
@@ -387,6 +389,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _audioLevel = 0.0;
       _policyReason = null;
       _policyResetsAt = null;
+      _liveQuota = null;
+      _authoritativeSoftWarning = false;
     });
     return startupGeneration;
   }
@@ -776,6 +780,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _activeSessionId = '';
     _activeV2VProvider = '';
     _voiceSessionStartedAt = null;
+    _liveQuota = null;
+    _authoritativeSoftWarning = false;
     _quotaClock?.cancel();
     _pauseVoiceMode(cancelStartup: false);
   }
@@ -892,6 +898,16 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _handleMemoryReinterpretation(memoryReinterpretation);
         }
         break;
+      case 'quota_state':
+        if (event.policyReason != null) {
+          _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
+          break;
+        }
+        setState(() {
+          _liveQuota = event.quota ?? _liveQuota;
+          _authoritativeSoftWarning = event.quotaState == 'soft_warning';
+        });
+        break;
       case 'v2v_debug':
         // Debug info from V2V client — show on screen temporarily
         setState(() {
@@ -932,6 +948,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _activeSessionId = '';
     _activeV2VProvider = '';
     _voiceSessionStartedAt = null;
+    _authoritativeSoftWarning = false;
     _quotaClock?.cancel();
     if (client != null) unawaited(client.disconnect());
     if (mounted) {
@@ -955,6 +972,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   EllaQuota? _visibleQuota(BuildContext context) {
     if (widget.demoState != null) return widget.demoState!.quota;
+    if (_liveQuota != null) return _liveQuota;
     if (!isEllaEntitlementGateEnabled) return null;
     return context.watch<EllaEntitlementProvider>().quota;
   }
@@ -1297,7 +1315,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
               textAlign: TextAlign.center,
             ),
           ],
-          if (quota?.isSoftWarning == true && policyReason == null) ...[
+          if ((_authoritativeSoftWarning || quota?.isSoftWarning == true) && policyReason == null) ...[
             const SizedBox(height: 12),
             _VoiceLimitNotice(text: context.l10n.ellaVoiceSoftWarning),
           ],

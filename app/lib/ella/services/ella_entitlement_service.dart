@@ -64,12 +64,15 @@ class EllaQuota {
 
 @immutable
 class EllaEntitlement {
-  const EllaEntitlement({required this.status, required this.quota});
+  const EllaEntitlement({required this.status, required this.quota, this.supportCode = '', this.correlationId = ''});
 
   final EllaEntitlementStatus status;
   final EllaQuota quota;
+  final String supportCode;
+  final String correlationId;
 
   bool get isActive => status == EllaEntitlementStatus.active;
+  bool get canProvision => status == EllaEntitlementStatus.invited || status == EllaEntitlementStatus.active;
 
   factory EllaEntitlement.fromJson(Map<String, dynamic> json) {
     final rawStatus = json['status']?.toString().trim().toLowerCase();
@@ -77,14 +80,42 @@ class EllaEntitlement {
     if (status == null) {
       throw const FormatException('Unknown entitlement status');
     }
-    return EllaEntitlement(status: status, quota: EllaQuota.fromJson(json['quota']));
+    return EllaEntitlement(
+      status: status,
+      quota: EllaQuota.fromJson(json['quota']),
+      supportCode: _safeDiagnosticValue(json, 'support_code'),
+      correlationId: _safeDiagnosticValue(json, 'correlation_id'),
+    );
   }
 }
 
 class EllaInviteRedemptionException implements Exception {
-  const EllaInviteRedemptionException(this.reason);
+  const EllaInviteRedemptionException(
+    this.reason, {
+    this.retryAfterSeconds,
+    this.supportCode = '',
+    this.correlationId = '',
+  });
 
   final EllaInviteRedemptionError reason;
+  final int? retryAfterSeconds;
+  final String supportCode;
+  final String correlationId;
+}
+
+@immutable
+class EllaInviteRedemptionFailure {
+  const EllaInviteRedemptionFailure({
+    required this.reason,
+    this.retryAfterSeconds,
+    this.supportCode = '',
+    this.correlationId = '',
+  });
+
+  final EllaInviteRedemptionError reason;
+  final int? retryAfterSeconds;
+  final String supportCode;
+  final String correlationId;
 }
 
 abstract class EllaEntitlementTransport {
@@ -130,8 +161,15 @@ class EllaEntitlementHttpTransport implements EllaEntitlementTransport {
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return _decodeEntitlement(response.body);
     }
-    final reason = parseInviteRedemptionError(response.body);
-    if (reason != null) throw EllaInviteRedemptionException(reason);
+    final failure = parseInviteRedemptionFailure(response.body);
+    if (failure != null) {
+      throw EllaInviteRedemptionException(
+        failure.reason,
+        retryAfterSeconds: failure.retryAfterSeconds,
+        supportCode: failure.supportCode,
+        correlationId: failure.correlationId,
+      );
+    }
     throw const FormatException('Unknown invite redemption response');
   }
 }
@@ -143,7 +181,7 @@ EllaEntitlement _decodeEntitlement(String body) {
 }
 
 @visibleForTesting
-EllaInviteRedemptionError? parseInviteRedemptionError(String body) {
+EllaInviteRedemptionFailure? parseInviteRedemptionFailure(String body) {
   Object? decoded;
   try {
     decoded = jsonDecode(body);
@@ -160,14 +198,26 @@ EllaInviteRedemptionError? parseInviteRedemptionError(String body) {
     (_, String error) => error,
     _ => decoded['code'],
   };
-  return switch (rawCode?.toString().trim().toLowerCase()) {
+  final reason = switch (rawCode?.toString().trim().toLowerCase()) {
     'invalid' => EllaInviteRedemptionError.invalid,
     'expired' => EllaInviteRedemptionError.expired,
     'capacity' => EllaInviteRedemptionError.capacity,
     'rate_limited' => EllaInviteRedemptionError.rateLimited,
     _ => null,
   };
+  if (reason == null) return null;
+  final json = decoded.map((key, value) => MapEntry(key.toString(), value));
+  final retryAfterSeconds = _intValueOrNull(_nestedValue(json, 'retry_after_s'));
+  return EllaInviteRedemptionFailure(
+    reason: reason,
+    retryAfterSeconds: retryAfterSeconds?.clamp(1, 3600),
+    supportCode: _safeDiagnosticValue(json, 'support_code'),
+    correlationId: _safeDiagnosticValue(json, 'correlation_id'),
+  );
 }
+
+@visibleForTesting
+EllaInviteRedemptionError? parseInviteRedemptionError(String body) => parseInviteRedemptionFailure(body)?.reason;
 
 EllaVoicePolicyReason? parseEllaVoicePolicyReason(Object? value) => switch (value?.toString().trim().toLowerCase()) {
       'quota_daily' => EllaVoicePolicyReason.quotaDaily,
@@ -190,6 +240,31 @@ int _intValue(Object? value) {
   if (value is int) return value.clamp(0, 1 << 31);
   if (value is num) return value.round().clamp(0, 1 << 31);
   return int.tryParse(value?.toString() ?? '')?.clamp(0, 1 << 31) ?? 0;
+}
+
+int? _intValueOrNull(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.round();
+  return int.tryParse(value?.toString() ?? '');
+}
+
+Object? _nestedValue(Map<String, dynamic> json, String key) {
+  final direct = json[key];
+  if (direct != null) return direct;
+  for (final nestedKey in ['detail', 'error', 'data']) {
+    final nested = json[nestedKey];
+    if (nested is Map) {
+      final value = _nestedValue(nested.map((key, value) => MapEntry(key.toString(), value)), key);
+      if (value != null) return value;
+    }
+  }
+  return null;
+}
+
+String _safeDiagnosticValue(Map<String, dynamic> json, String key) {
+  final value = _nestedValue(json, key)?.toString().trim() ?? '';
+  if (value.length > 64 || !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(value)) return '';
+  return value;
 }
 
 extension _FirstOrNull<T> on Iterable<T> {

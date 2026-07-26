@@ -10,6 +10,7 @@ import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -34,6 +35,13 @@ class EllaOnboarding extends StatefulWidget {
     required bool deferredCurrentConsent,
   }) =>
       !hasCurrentConsent && !hasPriorAccountConsent && !deferredCurrentConsent;
+
+  @visibleForTesting
+  static bool shouldStartProvisioningDirectly({
+    required bool provisioningGateEnabled,
+    required bool entitlementGateEnabled,
+  }) =>
+      provisioningGateEnabled && !entitlementGateEnabled;
 
   @override
   State<EllaOnboarding> createState() => _EllaOnboardingState();
@@ -67,7 +75,12 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
   Future<void> _onSignedIn() async {
     setState(() => _isSignedIn = true);
-    if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
+    if (EllaOnboarding.shouldStartProvisioningDirectly(
+      provisioningGateEnabled: isHermesProvisioningGateEnabled,
+      entitlementGateEnabled: isEllaEntitlementGateEnabled,
+    )) {
+      unawaited(_startHermesProvisioning());
+    }
   }
 
   Future<void> _startHermesProvisioning() async {
@@ -133,7 +146,12 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
+      if (EllaOnboarding.shouldStartProvisioningDirectly(
+        provisioningGateEnabled: isHermesProvisioningGateEnabled,
+        entitlementGateEnabled: isEllaEntitlementGateEnabled,
+      )) {
+        unawaited(_startHermesProvisioning());
+      }
     }
     _routeToAuthenticatedHome();
   }
@@ -194,7 +212,9 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       ),
     );
     if (isEllaEntitlementGateEnabled) {
-      return EllaEntitlementGatePage(readyChild: onboarding);
+      return EllaEntitlementGatePage(
+        readyChild: isHermesProvisioningGateEnabled ? EllaProvisioningGatePage(readyChild: onboarding) : onboarding,
+      );
     }
     return onboarding;
   }
