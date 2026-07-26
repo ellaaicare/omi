@@ -10466,5 +10466,6 @@
   "todayMemoriesEmpty": "As Ella listens today, your memories will gather here. 🪽",
   "todayListeningLead": "Ella is listening — ",
   "todayListeningLink": "See what she hears ›",
-  "todayReadMore": "Read more"
+  "todayReadMore": "Read more",
+  "voiceModalEndAction": "End"
 }

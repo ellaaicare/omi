@@ -16508,6 +16508,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Read more'**
   String get todayReadMore;
+
+  /// No description provided for @voiceModalEndAction.
+  ///
+  /// In en, this message translates to:
+  /// **'End'**
+  String get voiceModalEndAction;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

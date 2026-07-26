@@ -8878,4 +8878,7 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get todayReadMore => 'Read more';
+
+  @override
+  String get voiceModalEndAction => 'End';
 }

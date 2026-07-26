@@ -29,6 +29,7 @@ import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/ella/widgets/memory_correction_receipt.dart';
 import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
+import 'package:omi/ella/widgets/voice_modal_scaffold.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/home_provider.dart';
@@ -46,11 +47,13 @@ class EllaVoiceChatPage extends StatefulWidget {
     this.sessionScope,
     this.memoryTitle,
     this.onMemorySessionEnded,
+    this.modalPresentation = false,
   });
 
   final V2VSessionScope? sessionScope;
   final String? memoryTitle;
   final ValueChanged<MemoryReceiptDiscoveryRequest>? onMemorySessionEnded;
+  final bool modalPresentation;
 
   @visibleForTesting
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
@@ -661,6 +664,31 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _pauseVoiceMode();
   }
 
+  bool get _hasActiveVoiceSession =>
+      _voiceModeActive || _isV2VMode || _speech.isListening || _orbState != VoiceOrbState.idle;
+
+  Future<bool> _endModalVoiceSession() async {
+    if (_isV2VMode || _v2vClient != null) {
+      await _stopV2V();
+    } else {
+      _voiceModeActive = false;
+      _typewriterTimer?.cancel();
+      if (_speech.isListening) {
+        try {
+          await _speech.stop();
+        } catch (_) {}
+      }
+      try {
+        await _audioPlayer.stop();
+      } catch (_) {}
+      try {
+        await ElevenLabsTts.stopOnDevice();
+      } catch (_) {}
+      _pauseVoiceMode();
+    }
+    return !_hasActiveVoiceSession;
+  }
+
   void _notifyMemorySessionEnded(String sessionId) {
     final scope = _sessionScope;
     if (scope == null || sessionId.isEmpty) return;
@@ -1056,6 +1084,120 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Widget build(BuildContext context) {
     super.build(context);
 
+    final body = SafeArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_sessionScope != null && widget.memoryTitle?.trim().isNotEmpty == true) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: EllaColors.card,
+                  borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                  border: Border.all(color: EllaColors.cardDeep),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.auto_stories_outlined, size: 20, color: EllaColors.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        context.l10n.memoryTalkContext(widget.memoryTitle!.trim()),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          const Spacer(flex: 2),
+          Center(
+            child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
+          ),
+          const SizedBox(height: 24),
+          Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: EllaColors.card,
+                borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
+                border: Border.all(color: EllaColors.cardDeep),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_orbState == VoiceOrbState.listening) ...[const EllaBreathingDot(), const SizedBox(width: 10)],
+                  Text(
+                    _orbState == VoiceOrbState.listening
+                        ? _usingElevenLabsFallback
+                            ? context.l10n.voiceElevenLabsFallbackActive
+                            : _isV2VMode && _activeV2VProvider.isNotEmpty
+                                ? context.l10n.voiceV2vActive(_activeV2VProvider)
+                                : context.l10n.voiceListening
+                        : _statusText,
+                    style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_memoryCorrectionReceipt != null) ...[
+            const SizedBox(height: 12),
+            MemoryCorrectionReceiptChip(receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
+          ],
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 100,
+            width: double.infinity,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
+                  ? const SizedBox.shrink()
+                  : SingleChildScrollView(
+                      controller: _transcriptScrollController,
+                      child: Column(
+                        children: [
+                          if (_lastUserText.isNotEmpty)
+                            Opacity(
+                              opacity: 0.6,
+                              child: Text(
+                                _lastUserText,
+                                style: EllaTextStyles.secondary,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
+                            const SizedBox(height: 8),
+                          if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
+                            Text(
+                              _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
+                              style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
+                              textAlign: TextAlign.center,
+                            ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+          const Spacer(flex: 3),
+        ],
+      ),
+    );
+    if (widget.modalPresentation) {
+      return VoiceModalScaffold(
+        voiceActive: _hasActiveVoiceSession,
+        onEnd: _endModalVoiceSession,
+        title: context.l10n.voiceChatTitle,
+        child: body,
+      );
+    }
+
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
@@ -1068,111 +1210,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         elevation: 0,
         centerTitle: true,
       ),
-      body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_sessionScope != null && widget.memoryTitle?.trim().isNotEmpty == true) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: EllaColors.card,
-                    borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
-                    border: Border.all(color: EllaColors.cardDeep),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.auto_stories_outlined, size: 20, color: EllaColors.primary),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          context.l10n.memoryTalkContext(widget.memoryTitle!.trim()),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-            const Spacer(flex: 2),
-            Center(
-              child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
-            ),
-            const SizedBox(height: 24),
-            Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: EllaColors.card,
-                  borderRadius: BorderRadius.circular(EllaSizes.radiusCircular),
-                  border: Border.all(color: EllaColors.cardDeep),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (_orbState == VoiceOrbState.listening) ...[const EllaBreathingDot(), const SizedBox(width: 10)],
-                    Text(
-                      _orbState == VoiceOrbState.listening
-                          ? _usingElevenLabsFallback
-                              ? context.l10n.voiceElevenLabsFallbackActive
-                              : _isV2VMode && _activeV2VProvider.isNotEmpty
-                                  ? context.l10n.voiceV2vActive(_activeV2VProvider)
-                                  : context.l10n.voiceListening
-                          : _statusText,
-                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (_memoryCorrectionReceipt != null) ...[
-              const SizedBox(height: 12),
-              MemoryCorrectionReceiptChip(receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
-            ],
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 100,
-              width: double.infinity,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
-                    ? const SizedBox.shrink()
-                    : SingleChildScrollView(
-                        controller: _transcriptScrollController,
-                        child: Column(
-                          children: [
-                            if (_lastUserText.isNotEmpty)
-                              Opacity(
-                                opacity: 0.6,
-                                child: Text(
-                                  _lastUserText,
-                                  style: EllaTextStyles.secondary,
-                                  textAlign: TextAlign.center,
-                                ),
-                              ),
-                            if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
-                              const SizedBox(height: 8),
-                            if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
-                              Text(
-                                _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
-                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
-                                textAlign: TextAlign.center,
-                              ),
-                          ],
-                        ),
-                      ),
-              ),
-            ),
-            const Spacer(flex: 3),
-          ],
-        ),
-      ),
+      body: body,
     );
   }
 }
