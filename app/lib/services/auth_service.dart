@@ -44,52 +44,28 @@ class AuthService {
 
   /// Google Sign In using the standard google_sign_in package (iOS, Android)
   Future<UserCredential?> signInWithGoogleMobile() async {
-    Logger.debug('Using standard Google Sign In for mobile');
-
     // Trigger the authentication flow
-    final GoogleSignInAccount? googleUser = await GoogleSignIn(
-      scopes: ['profile', 'email'],
-    ).signIn();
-    Logger.debug('Google User: $googleUser');
-
+    final GoogleSignInAccount? googleUser = await GoogleSignIn(scopes: ['profile', 'email']).signIn();
     // Obtain the auth details from the request
     final GoogleSignInAuthentication? googleAuth = await googleUser?.authentication;
-    Logger.debug('Google Auth: $googleAuth');
     if (googleAuth == null) {
-      Logger.debug('Failed to sign in with Google: googleAuth is NULL');
       Logger.error('An error occurred while signing in. Please try again later. (Error: 40001)');
       return null;
     }
 
     // Create a new credential
     if (googleAuth.accessToken == null && googleAuth.idToken == null) {
-      Logger.debug('Failed to sign in with Google: accessToken, idToken are NULL');
       Logger.error('An error occurred while signing in. Please try again later. (Error: 40002)');
       return null;
     }
-    final credential = GoogleAuthProvider.credential(
-      accessToken: googleAuth.accessToken,
-      idToken: googleAuth.idToken,
-    );
+    final credential = GoogleAuthProvider.credential(accessToken: googleAuth.accessToken, idToken: googleAuth.idToken);
 
     // Once signed in, return the UserCredential
-    debugPrint('=== FIREBASE SIGN-IN ATTEMPT ===');
-    debugPrint('accessToken: ${googleAuth.accessToken != null ? "present" : "null"}');
-    debugPrint('idToken: ${googleAuth.idToken != null ? "present (${googleAuth.idToken!.length} chars)" : "null"}');
     try {
       var result = await FirebaseAuth.instance.signInWithCredential(credential);
-      debugPrint('Firebase sign-in SUCCESS: uid=${result.user?.uid}');
       await _updateUserPreferences(result, 'google');
       return result;
-    } catch (e) {
-      debugPrint('=== FIREBASE SIGN-IN FAILED ===');
-      debugPrint('Error type: ${e.runtimeType}');
-      debugPrint('Error: $e');
-      if (e is FirebaseAuthException) {
-        debugPrint('Firebase code: ${e.code}');
-        debugPrint('Firebase message: ${e.message}');
-      }
-      debugPrint('=== END FIREBASE ERROR ===');
+    } catch (_) {
       rethrow;
     }
   }
@@ -112,14 +88,11 @@ class AuthService {
   Future<UserCredential?> signInWithAppleMobile() async {
     try {
       // Sign out the current user first
-      Logger.debug('Signing out current user...');
       await FirebaseAuth.instance.signOut();
-      Logger.debug('User signed out successfully.');
 
       final rawNonce = generateNonce();
       final nonce = sha256ofString(rawNonce);
 
-      Logger.debug('Requesting Apple credential...');
       final appleCredential = await SignInWithApple.getAppleIDCredential(
         scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
         nonce: nonce,
@@ -137,13 +110,10 @@ class AuthService {
       );
 
       // Sign in the user with Firebase.
-      Logger.debug('Attempting to sign in with Firebase...');
       UserCredential userCred = await FirebaseAuth.instance.signInWithCredential(oauthCredential);
-      Logger.debug('Firebase sign-in successful.');
 
       // Extract name from Apple credential (only available on first sign-in)
       if (appleCredential.givenName != null && appleCredential.givenName!.isNotEmpty) {
-        Logger.debug('Apple provided name: ${appleCredential.givenName} ${appleCredential.familyName ?? ""}');
         SharedPreferencesUtil().givenName = appleCredential.givenName!;
         if (appleCredential.familyName != null && appleCredential.familyName!.isNotEmpty) {
           SharedPreferencesUtil().familyName = appleCredential.familyName!;
@@ -156,22 +126,15 @@ class AuthService {
         try {
           await userCred.user?.updateProfile(displayName: fullName);
           await userCred.user?.reload();
-        } catch (e) {
-          Logger.debug('Failed to update Firebase profile with Apple name: $e');
-        }
+        } catch (_) {}
       }
 
       await _updateUserPreferences(userCred, 'apple');
 
       return userCred;
-    } on FirebaseAuthException catch (e) {
-      Logger.debug('FirebaseAuthException: ${e.code} - ${e.message}');
-      if (e.code == 'invalid-credential') {
-        Logger.debug('Please check Firebase console configuration for Apple Sign In.');
-      }
+    } on FirebaseAuthException {
       return null;
     } catch (e) {
-      Logger.debug('Error during Apple Sign In: $e');
       Logger.handle(e, null, message: 'An error occurred while signing in. Please try again later.');
       return null;
     }
@@ -214,8 +177,7 @@ class AuthService {
         }
       }
       return newToken?.token;
-    } catch (e) {
-      Logger.debug(e.toString());
+    } catch (_) {
       return SharedPreferencesUtil().authToken;
     }
   }
@@ -228,14 +190,10 @@ class AuthService {
       final state = _generateState();
       const redirectUri = 'omi://auth/callback';
 
-      Logger.debug('Starting OAuth flow for provider: $provider');
-
       final authUrl = '${Env.apiBaseUrl}v1/auth/authorize'
           '?provider=$provider'
           '&redirect_uri=${Uri.encodeComponent(redirectUri)}'
           '&state=$state';
-
-      Logger.debug('Authorization URL: $authUrl');
 
       // Set up listeners before launching URL
       final appLinks = AppLinks();
@@ -245,7 +203,6 @@ class AuthService {
       // Listen via app_links
       linkSubscription = appLinks.uriLinkStream.listen(
         (Uri uri) {
-          Logger.debug('Received callback URI via app_links: $uri');
           if (uri.scheme == 'omi' && uri.host == 'auth' && uri.path == '/callback') {
             if (!completer.isCompleted) {
               linkSubscription.cancel();
@@ -254,7 +211,6 @@ class AuthService {
           }
         },
         onError: (error) {
-          Logger.debug('App link error: $error');
           if (!completer.isCompleted) {
             linkSubscription.cancel();
             completer.completeError(error);
@@ -266,7 +222,6 @@ class AuthService {
       _deepLinkChannel.setMethodCallHandler((call) async {
         if (call.method == 'onDeepLink') {
           final urlString = call.arguments as String;
-          Logger.debug('Received callback URI via method channel: $urlString');
           final uri = Uri.parse(urlString);
           if (uri.scheme == 'omi' && uri.host == 'auth' && uri.path == '/callback') {
             if (!completer.isCompleted) {
@@ -279,10 +234,7 @@ class AuthService {
       });
 
       // Now launch the URL
-      final launched = await launchUrl(
-        Uri.parse(authUrl),
-        mode: LaunchMode.externalApplication,
-      );
+      final launched = await launchUrl(Uri.parse(authUrl), mode: LaunchMode.externalApplication);
 
       if (!launched) {
         linkSubscription.cancel();
@@ -324,10 +276,8 @@ class AuthService {
       // Update user profile and local storage after successful sign-in
       await _updateUserPreferences(credential, provider);
 
-      Logger.debug('Firebase authentication successful');
       return credential;
     } catch (e) {
-      Logger.debug('OAuth authentication error: $e');
       Logger.handle(e, StackTrace.current, message: 'Authentication failed');
       return null;
     }
@@ -339,9 +289,7 @@ class AuthService {
 
       final response = await http.post(
         Uri.parse('${Env.apiBaseUrl}v1/auth/token'),
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: {
           'grant_type': 'authorization_code',
           'code': code,
@@ -350,17 +298,12 @@ class AuthService {
         },
       );
 
-      Logger.debug('Token exchange response status: ${response.statusCode}');
-      Logger.debug('Token exchange response body: ${response.body}');
-
       if (response.statusCode == 200) {
         return json.decode(response.body);
       } else {
-        Logger.debug('Token exchange failed: ${response.body}');
         return null;
       }
-    } catch (e) {
-      Logger.debug('Token exchange error: $e');
+    } catch (_) {
       return null;
     }
   }
@@ -372,7 +315,6 @@ class AuthService {
 
     // Use custom token if enabled and available
     if (useCustomToken && customToken != null) {
-      Logger.debug('Signing in with Firebase custom token from $provider');
       return await FirebaseAuth.instance.signInWithCustomToken(customToken);
     }
 
@@ -380,19 +322,11 @@ class AuthService {
     final idToken = oauthCredentials['id_token'];
     final accessToken = oauthCredentials['access_token'];
 
-    Logger.debug('Signing in with $provider OAuth credentials');
-
     if (provider == 'google') {
-      final credential = GoogleAuthProvider.credential(
-        idToken: idToken,
-        accessToken: accessToken,
-      );
+      final credential = GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
       return await FirebaseAuth.instance.signInWithCredential(credential);
     } else if (provider == 'apple') {
-      final credential = OAuthProvider('apple.com').credential(
-        idToken: idToken,
-        accessToken: accessToken,
-      );
+      final credential = OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
       return await FirebaseAuth.instance.signInWithCredential(credential);
     } else {
       throw Exception('Unsupported provider: $provider');
@@ -453,22 +387,12 @@ class AuthService {
         try {
           await user.updateProfile(displayName: fullName);
           await user.reload();
-        } catch (e) {
-          Logger.debug('Failed to update Firebase profile: $e');
-        }
+        } catch (_) {}
       }
-
-      Logger.debug('Updated user preferences:');
-      Logger.debug('Email: ${SharedPreferencesUtil().email}');
-      Logger.debug('Given Name: ${SharedPreferencesUtil().givenName}');
-      Logger.debug('Family Name: ${SharedPreferencesUtil().familyName}');
-      Logger.debug('UID: ${SharedPreferencesUtil().uid}');
 
       // Restore onboarding state from server
       await _restoreOnboardingState();
-    } catch (e) {
-      Logger.debug('Error updating user preferences: $e');
-    }
+    } catch (_) {}
   }
 
   /// Public wrapper for _restoreOnboardingState — used by MobileApp self-healing.
@@ -491,11 +415,8 @@ class AuthService {
           SharedPreferencesUtil().userPrimaryLanguage = serverLanguage;
           SharedPreferencesUtil().hasSetPrimaryLanguage = true;
         }
-        Logger.debug('Restored onboarding state from server: completed=${state['completed']}');
       }
-    } catch (e) {
-      Logger.debug('Error restoring onboarding state: $e');
-    }
+    } catch (_) {}
   }
 
   Future<void> updateGivenName(String fullName) async {
@@ -508,7 +429,6 @@ class AuthService {
       }
 
       if (user == null) {
-        Logger.debug('Firebase user is null, skipping Firebase profile update');
         return;
       }
 
@@ -516,21 +436,14 @@ class AuthService {
       // Skip Firebase updateProfile on Windows due to known crashes and threading issues
       // https://github.com/firebase/flutterfire/issues/13340
       // https://github.com/firebase/flutterfire/issues/12725
-      if (PlatformService.isWindows) {
-        Logger.debug('Skipping Firebase updateProfile on Windows due to known platform issues');
-      } else {
+      if (!PlatformService.isWindows) {
         try {
-          Logger.debug('Attempting to update Firebase user profile...');
-
           // Web and other desktop platforms may still have issues, so use timeout
           if (kIsWeb || PlatformService.isDesktop) {
-            Logger.debug('Desktop/Web platform detected - attempting updateProfile with caution');
-
             // Try with a timeout to prevent hanging
             await user.updateProfile(displayName: fullName).timeout(
               const Duration(seconds: 5),
               onTimeout: () {
-                Logger.debug('updateProfile timed out on desktop platform');
                 throw TimeoutException('updateProfile timed out', const Duration(seconds: 5));
               },
             );
@@ -539,23 +452,16 @@ class AuthService {
           }
           await user.reload();
           user = FirebaseAuth.instance.currentUser;
-        } catch (updateError) {
-          Logger.debug('Firebase updateProfile failed (this is expected on windows): $updateError');
-        }
+        } catch (_) {}
       }
-    } catch (e) {
-      Logger.debug('Error in updateGivenName: $e');
-
+    } catch (_) {
       // Ensure SharedPreferences are updated even if everything else fails
       try {
         SharedPreferencesUtil().givenName = fullName.split(' ')[0];
         if (fullName.split(' ').length > 1) {
           SharedPreferencesUtil().familyName = fullName.split(' ').sublist(1).join(' ');
         }
-        Logger.debug('SharedPreferences updated despite error');
-      } catch (prefError) {
-        Logger.debug('Failed to update SharedPreferences: $prefError');
-      }
+      } catch (_) {}
     }
   }
 
@@ -578,19 +484,12 @@ class AuthService {
       final state = _generateState();
       const redirectUri = 'omi://auth/callback';
 
-      Logger.debug('Starting OAuth linking flow for provider: $provider');
-
       final authUrl = '${Env.apiBaseUrl}v1/auth/authorize'
           '?provider=$provider'
           '&redirect_uri=${Uri.encodeComponent(redirectUri)}'
           '&state=$state';
 
-      Logger.debug('Authorization URL: $authUrl');
-
-      final launched = await launchUrl(
-        Uri.parse(authUrl),
-        mode: LaunchMode.externalApplication,
-      );
+      final launched = await launchUrl(Uri.parse(authUrl), mode: LaunchMode.externalApplication);
 
       if (!launched) {
         throw Exception('Failed to launch authentication URL');
@@ -603,14 +502,12 @@ class AuthService {
 
       linkSubscription = appLinks.uriLinkStream.listen(
         (Uri uri) {
-          Logger.debug('Received callback URI: $uri');
           if (uri.scheme == 'omi' && uri.host == 'auth' && uri.path == '/callback') {
             linkSubscription.cancel();
             completer.complete(uri.toString());
           }
         },
         onError: (error) {
-          Logger.debug('App link error: $error');
           linkSubscription.cancel();
           completer.completeError(error);
         },
@@ -653,7 +550,6 @@ class AuthService {
         // Update user preferences after successful linking
         await _updateUserPreferences(result, provider);
 
-        Logger.debug('Firebase account linking successful');
         return result;
       } catch (e) {
         if (e is FirebaseAuthException && e.code == 'credential-already-in-use') {
@@ -663,7 +559,6 @@ class AuthService {
         rethrow;
       }
     } catch (e) {
-      Logger.debug('OAuth linking error: $e');
       Logger.handle(e, StackTrace.current, message: 'Account linking failed');
       rethrow;
     }
@@ -675,15 +570,9 @@ class AuthService {
     final accessToken = oauthCredentials['access_token'];
 
     if (provider == 'google') {
-      return GoogleAuthProvider.credential(
-        idToken: idToken,
-        accessToken: accessToken,
-      );
+      return GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
     } else if (provider == 'apple') {
-      return OAuthProvider('apple.com').credential(
-        idToken: idToken,
-        accessToken: accessToken,
-      );
+      return OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
     } else {
       throw Exception('Unsupported provider: $provider');
     }

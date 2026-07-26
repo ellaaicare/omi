@@ -1,10 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'package:crypto/crypto.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 
 import 'package:omi/utils/debugging/crash_reporter.dart';
-import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/log_redaction.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
 class CrashlyticsManager implements CrashReporter {
@@ -27,49 +30,56 @@ class CrashlyticsManager implements CrashReporter {
   }
 
   @override
-  void identifyUser(String email, String name, String userId) {
-    PlatformService.executeIfSupported(
-      true,
-      () async {
-        await FirebaseCrashlytics.instance.setUserIdentifier(userId);
-        if (email.isNotEmpty) {
-          await FirebaseCrashlytics.instance.setCustomKey('user_email', email);
-        }
-        if (name.isNotEmpty) {
-          await FirebaseCrashlytics.instance.setCustomKey('user_name', name);
-        }
-      },
-    );
+  void identifyUser(String userId) {
+    PlatformService.executeIfSupported(true, () async {
+      await FirebaseCrashlytics.instance.setUserIdentifier(pseudonymousCrashUserId(userId));
+    });
   }
 
   @override
   void logInfo(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log(message));
+    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log(redactSensitiveLogText(message)));
   }
 
   @override
   void logError(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('ERROR: $message'));
+    PlatformService.executeIfSupported(
+      true,
+      () => FirebaseCrashlytics.instance.log(redactSensitiveLogText('ERROR: $message')),
+    );
   }
 
   @override
   void logWarn(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('WARN: $message'));
+    PlatformService.executeIfSupported(
+      true,
+      () => FirebaseCrashlytics.instance.log(redactSensitiveLogText('WARN: $message')),
+    );
   }
 
   @override
   void logDebug(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('DEBUG: $message'));
+    PlatformService.executeIfSupported(
+      true,
+      () => FirebaseCrashlytics.instance.log(redactSensitiveLogText('DEBUG: $message')),
+    );
   }
 
   @override
   void logVerbose(String message) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.log('VERBOSE: $message'));
+    PlatformService.executeIfSupported(
+      true,
+      () => FirebaseCrashlytics.instance.log(redactSensitiveLogText('VERBOSE: $message')),
+    );
   }
 
   @override
   void setUserAttribute(String key, String value) {
-    PlatformService.executeIfSupported(true, () => FirebaseCrashlytics.instance.setCustomKey(key, value));
+    if (_isPersonalCrashKey(key)) return;
+    PlatformService.executeIfSupported(
+      true,
+      () => FirebaseCrashlytics.instance.setCustomKey(key, redactSensitiveLogText(value)),
+    );
   }
 
   @override
@@ -84,10 +94,17 @@ class CrashlyticsManager implements CrashReporter {
     await PlatformService.executeIfSupportedAsync(true, () async {
       if (userAttributes != null) {
         for (final entry in userAttributes.entries) {
-          await FirebaseCrashlytics.instance.setCustomKey(entry.key, entry.value);
+          if (_isPersonalCrashKey(entry.key)) continue;
+          final value = entry.key.toLowerCase().contains('url')
+              ? redactUrlForLogs(entry.value)
+              : redactSensitiveLogText(entry.value);
+          await FirebaseCrashlytics.instance.setCustomKey(entry.key, value);
         }
       }
-      await FirebaseCrashlytics.instance.recordError(exception, stackTrace);
+      await FirebaseCrashlytics.instance.recordError(
+        Exception(redactedCrashExceptionMessage(exception)),
+        stackTrace,
+      );
     });
   }
 
@@ -98,4 +115,22 @@ class CrashlyticsManager implements CrashReporter {
 
   @override
   bool get isSupported => true;
+}
+
+@visibleForTesting
+String pseudonymousCrashUserId(String userId) {
+  if (userId.trim().isEmpty) return '';
+  return sha256.convert(utf8.encode('ella-crash-v1:${userId.trim()}')).toString();
+}
+
+String redactedCrashExceptionMessage(Object exception) => redactSensitiveLogText(exception.toString());
+
+bool _isPersonalCrashKey(String key) {
+  final normalized = key.toLowerCase().replaceAll(RegExp('[^a-z0-9]+'), '_');
+  return normalized.contains('email') ||
+      normalized.contains('name') ||
+      normalized == 'uid' ||
+      normalized.contains('user_id') ||
+      normalized.contains('token') ||
+      normalized.contains('authorization');
 }

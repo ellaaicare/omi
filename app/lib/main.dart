@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:ui';
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:awesome_notifications/awesome_notifications.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -46,6 +44,7 @@ import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
+import 'package:omi/providers/ella_entitlement_provider.dart';
 import 'package:omi/providers/folder_provider.dart';
 import 'package:omi/providers/goals_provider.dart';
 import 'package:omi/providers/home_provider.dart';
@@ -77,7 +76,6 @@ import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/debugging/crashlytics_manager.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 import 'package:omi/utils/platform/platform_service.dart';
@@ -150,8 +148,8 @@ Future _init() async {
       // Firebase may already be initialized by native SDK (macOS)
       debugPrint('Firebase already initialized.');
     }
-  } catch (e) {
-    debugPrint('Firebase init error (continuing): $e');
+  } catch (_) {
+    debugPrint('Firebase initialization unavailable; continuing.');
   }
 
   await PlatformManager.initializeServices();
@@ -164,10 +162,7 @@ Future _init() async {
 
   await SharedPreferencesUtil.init();
 
-  // DEBUG: Log Firebase Auth state before getIdToken
-  Logger.debug('DEBUG main: Before getIdToken - currentUser=${FirebaseAuth.instance.currentUser?.uid}');
   bool isAuth = (await AuthService.instance.getIdToken()) != null;
-  Logger.debug('DEBUG main: After getIdToken - isAuth=$isAuth, currentUser=${FirebaseAuth.instance.currentUser?.uid}');
   if (F.env == Environment.prod && !SharedPreferencesUtil.isPublicBuild) {
     SharedPreferencesUtil().clearDemoStateForAccountBuild();
   }
@@ -182,18 +177,22 @@ Future _init() async {
 
   await CrashlyticsManager.init();
   if (isAuth) {
-    PlatformManager.instance.crashReporter.identifyUser(
-      FirebaseAuth.instance.currentUser?.email ?? '',
-      SharedPreferencesUtil().fullName,
-      SharedPreferencesUtil().uid,
-    );
+    PlatformManager.instance.crashReporter.identifyUser(SharedPreferencesUtil().uid);
   }
   FlutterError.onError = (FlutterErrorDetails details) {
-    FirebaseCrashlytics.instance.recordFlutterFatalError(details);
+    FirebaseCrashlytics.instance.recordError(
+      Exception(redactedCrashExceptionMessage(details.exception)),
+      details.stack,
+      fatal: true,
+    );
   };
 
   PlatformDispatcher.instance.onError = (error, stack) {
-    FirebaseCrashlytics.instance.recordError(error, stack, fatal: true);
+    FirebaseCrashlytics.instance.recordError(
+      Exception(redactedCrashExceptionMessage(error)),
+      stack,
+      fatal: true,
+    );
     return true;
   };
 
@@ -228,7 +227,13 @@ void main() {
 
     await _init();
     runApp(const MyApp());
-  }, (error, stack) => FirebaseCrashlytics.instance.recordError(error, stack, fatal: true));
+  }, (error, stack) {
+    FirebaseCrashlytics.instance.recordError(
+      Exception(redactedCrashExceptionMessage(error)),
+      stack,
+      fatal: true,
+    );
+  });
 }
 
 class MyApp extends StatefulWidget {
@@ -309,6 +314,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       providers: [
         ListenableProvider(create: (context) => ConnectivityProvider()),
         ChangeNotifierProvider(create: (context) => AuthenticationProvider()),
+        ChangeNotifierProvider(create: (context) => EllaEntitlementProvider()),
         ChangeNotifierProvider(create: (context) => EllaProvisioningProvider()),
         ChangeNotifierProvider(create: (context) => ConversationProvider()),
         ListenableProvider(create: (context) => AppProvider()),
@@ -319,13 +325,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           update: (BuildContext context, value, MessageProvider? previous) =>
               (previous?..updateAppProvider(value)) ?? MessageProvider(),
         ),
-        ChangeNotifierProxyProvider4<
-          ConversationProvider,
-          MessageProvider,
-          PeopleProvider,
-          UsageProvider,
-          CaptureProvider
-        >(
+        ChangeNotifierProxyProvider4<ConversationProvider, MessageProvider, PeopleProvider, UsageProvider,
+            CaptureProvider>(
           create: (context) => CaptureProvider(),
           update: (BuildContext context, conversation, message, people, usage, CaptureProvider? previous) =>
               (previous?..updateProviderInstances(conversation, message, people, usage)) ?? CaptureProvider(),

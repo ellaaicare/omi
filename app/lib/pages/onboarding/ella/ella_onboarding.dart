@@ -9,7 +9,9 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/home/page.dart';
@@ -158,7 +160,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       );
     }
 
-    return Scaffold(
+    final onboarding = Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       body: Stack(
         children: [
@@ -191,6 +193,10 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
         ],
       ),
     );
+    if (isEllaEntitlementGateEnabled) {
+      return EllaEntitlementGatePage(readyChild: onboarding);
+    }
+    return onboarding;
   }
 }
 

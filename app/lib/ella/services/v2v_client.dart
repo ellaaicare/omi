@@ -12,6 +12,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -120,10 +121,12 @@ class MemoryReinterpretationEvent {
 
 /// JSON event from the V2V proxy WebSocket.
 class V2VEvent {
-  const V2VEvent({required this.type, this.text, this.memoryReinterpretation});
+  const V2VEvent({required this.type, this.text, this.policyReason, this.resetsAt, this.memoryReinterpretation});
 
   final String type;
   final String? text;
+  final EllaVoicePolicyReason? policyReason;
+  final DateTime? resetsAt;
   final MemoryReinterpretationEvent? memoryReinterpretation;
 }
 
@@ -153,6 +156,8 @@ class V2VConnectionReceipt {
   final String errorCode;
 
   bool get shouldRefreshMemoryScope => stage == V2VConnectionStage.session && errorCode == 'voice_session_scope_stale';
+  EllaVoicePolicyReason? get policyReason => parseEllaVoicePolicyReason(errorCode);
+  bool get isPolicyDenial => policyReason != null;
 
   String get safeDetail {
     final parts = <String>[if (httpStatus != null) 'HTTP $httpStatus', if (errorCode.isNotEmpty) errorCode];
@@ -366,10 +371,7 @@ class V2VClient {
   }) async {
     provider = normalizeProvider(provider);
 
-    Future<V2VConnectionReceipt?> cancelIfRequested(
-      V2VConnectionStage stage, {
-      String voiceMode = '',
-    }) async {
+    Future<V2VConnectionReceipt?> cancelIfRequested(V2VConnectionStage stage, {String voiceMode = ''}) async {
       if (shouldContinue == null || shouldContinue()) return null;
       Logger.debug('[V2V] Cancelling stale connect for provider=$provider stage=${stage.name}');
       await disconnect();
@@ -522,10 +524,7 @@ class V2VClient {
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
       await _configureAudioSession();
-      final cancellation = await cancelIfRequested(
-        V2VConnectionStage.audioSession,
-        voiceMode: confirmedVoiceMode,
-      );
+      final cancellation = await cancelIfRequested(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
       if (cancellation != null) return cancellation;
     } catch (error) {
       Logger.error('[V2V] Audio session setup failed for provider=$provider');
@@ -869,6 +868,37 @@ class V2VClient {
     return null;
   }
 
+  static EllaVoicePolicyReason? _eventPolicyReason(Map<String, dynamic> json) {
+    for (final key in ['reason', 'termination_reason', 'denial_reason', 'code']) {
+      final reason = parseEllaVoicePolicyReason(json[key]);
+      if (reason != null) return reason;
+    }
+    for (final key in ['detail', 'error', 'data']) {
+      final value = json[key];
+      if (value is Map) {
+        final reason = _eventPolicyReason(value.map((key, value) => MapEntry(key.toString(), value)));
+        if (reason != null) return reason;
+      }
+    }
+    return null;
+  }
+
+  @visibleForTesting
+  static EllaVoicePolicyReason? policyReasonFromEvent(Map<String, dynamic> json) => _eventPolicyReason(json);
+
+  static DateTime? _eventResetsAt(Map<String, dynamic> json) {
+    final direct = DateTime.tryParse(json['resets_at']?.toString() ?? '')?.toLocal();
+    if (direct != null) return direct;
+    for (final key in ['detail', 'error', 'data']) {
+      final value = json[key];
+      if (value is Map) {
+        final parsed = _eventResetsAt(value.map((key, value) => MapEntry(key.toString(), value)));
+        if (parsed != null) return parsed;
+      }
+    }
+    return null;
+  }
+
   static bool _isUserTranscriptEvent(String type) {
     final normalized = type.toLowerCase();
     return normalized == 'user_transcript' ||
@@ -935,7 +965,7 @@ class V2VClient {
       final hasPermission = await _recorder!.hasPermission();
       if (!hasPermission) {
         Logger.error('[V2V] Mic permission denied');
-        onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic permission denied'));
+        onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic permission denied'));
         await _recorder?.dispose();
         _recorder = null;
         return false;
@@ -973,11 +1003,11 @@ class V2VClient {
       _micMuted = false;
       _micSuspendedForPlayback = false;
       Logger.debug('[V2V] Mic gate open: recording at 24kHz');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic active'));
+      onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic active'));
       return true;
     } catch (error) {
       Logger.error('[V2V] Mic start failed: ${error.runtimeType}');
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic unavailable'));
+      onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic unavailable'));
       return false;
     }
   }
@@ -1008,7 +1038,7 @@ class V2VClient {
     }
 
     Logger.debug('[V2V] Mic gate cooldown: ${_postPlaybackMicCooldown.inMilliseconds}ms');
-    onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Mic gate cooldown'));
+    onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Mic gate cooldown'));
     await Future.delayed(_postPlaybackMicCooldown);
     await _micGateFuture;
 
@@ -1050,7 +1080,7 @@ class V2VClient {
     });
 
     if (_chunkCount == 1) {
-      onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
+      onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Streaming response audio'));
       Logger.debug('[V2V] First audio chunk, streaming playback gate active');
     }
 
@@ -1148,7 +1178,7 @@ class V2VClient {
       _isPlaying = false;
       _streamPlaybackStartedAt = null;
       await _resumeMicAfterPlayback();
-      onEvent?.call(V2VEvent(type: 'playback_complete'));
+      onEvent?.call(const V2VEvent(type: 'playback_complete'));
     } finally {
       _finishingPlayback = false;
     }
@@ -1163,7 +1193,7 @@ class V2VClient {
     _streamPlaybackStartedAt = null;
     await _resumeMicAfterPlayback();
 
-    onEvent?.call(V2VEvent(type: 'playback_complete'));
+    onEvent?.call(const V2VEvent(type: 'playback_complete'));
   }
 
   // --- WebSocket message handling ---
@@ -1197,7 +1227,7 @@ class V2VClient {
 
         if (_isAudioDoneEvent(type)) {
           _scheduleFinishPlayback(type);
-          onEvent?.call(V2VEvent(type: 'audio_done'));
+          onEvent?.call(const V2VEvent(type: 'audio_done'));
           return;
         }
 
@@ -1210,11 +1240,11 @@ class V2VClient {
           case 'speech_started':
             if (_isPlaying || _micMuted || _micSuspendedForPlayback || _streamPlaybackStarted) {
               Logger.debug('[V2V] Ignoring speech_started while playback gate is active');
-              onEvent?.call(V2VEvent(type: 'v2v_debug', text: 'Ignoring speech_started during response'));
+              onEvent?.call(const V2VEvent(type: 'v2v_debug', text: 'Ignoring speech_started during response'));
               break;
             }
             interruptPlayback();
-            onEvent?.call(V2VEvent(type: 'speech_started'));
+            onEvent?.call(const V2VEvent(type: 'speech_started'));
             break;
           case 'function_calling':
           case 'function_executed':
@@ -1227,12 +1257,26 @@ class V2VClient {
             }
             break;
           case 'session_end':
-            onEvent?.call(V2VEvent(type: 'session_end', text: text));
+            onEvent?.call(
+              V2VEvent(
+                type: 'session_end',
+                text: text,
+                policyReason: _eventPolicyReason(json),
+                resetsAt: _eventResetsAt(json),
+              ),
+            );
             disconnect();
             break;
           case 'error':
             Logger.error('[V2V] Server error: ${json['message'] ?? text}');
-            onEvent?.call(V2VEvent(type: 'error', text: json['message'] as String? ?? text));
+            onEvent?.call(
+              V2VEvent(
+                type: 'error',
+                text: json['message'] as String? ?? text,
+                policyReason: _eventPolicyReason(json),
+                resetsAt: _eventResetsAt(json),
+              ),
+            );
             break;
           default:
             Logger.debug('[V2V] Unknown event: $type');

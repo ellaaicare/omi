@@ -4,8 +4,52 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
 import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 
 void main() {
+  group('typed voice policy outcomes', () {
+    test('session issuance receipt distinguishes policy denial from provider failure', () {
+      const policyReceipt = V2VConnectionReceipt(
+        connected: false,
+        provider: 'grok-voice',
+        stage: V2VConnectionStage.session,
+        httpStatus: 429,
+        errorCode: 'quota_daily',
+      );
+      const technicalReceipt = V2VConnectionReceipt(
+        connected: false,
+        provider: 'grok-voice',
+        stage: V2VConnectionStage.session,
+        httpStatus: 503,
+        errorCode: 'provider_unavailable',
+      );
+
+      expect(policyReceipt.isPolicyDenial, isTrue);
+      expect(policyReceipt.policyReason, EllaVoicePolicyReason.quotaDaily);
+      expect(technicalReceipt.isPolicyDenial, isFalse);
+      expect(technicalReceipt.policyReason, isNull);
+    });
+
+    test('session close parses nested typed reason without using human message text', () {
+      expect(
+        V2VClient.policyReasonFromEvent({
+          'type': 'session_end',
+          'detail': {'termination_reason': 'quota_monthly'},
+          'message': 'Session finished',
+        }),
+        EllaVoicePolicyReason.quotaMonthly,
+      );
+      expect(
+        V2VClient.policyReasonFromEvent({
+          'type': 'error',
+          'code': 'websocket_closed',
+          'message': 'quota_daily',
+        }),
+        isNull,
+      );
+    });
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

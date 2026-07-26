@@ -4,10 +4,11 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_legal_links.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class AiConsentSheet extends StatefulWidget {
-  static final Uri privacyPolicyUri = Uri.parse('https://ella-ai-care.com/privacy');
+  static final Uri privacyPolicyUri = EllaLegalLinks.privacy;
 
   const AiConsentSheet({super.key, this.onAccept});
 
@@ -93,8 +94,10 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     ),
                     if (_hasError) ...[
                       const SizedBox(height: 12),
-                      Text(context.l10n.somethingWentWrongTryAgain,
-                          style: bodyStyle?.copyWith(color: EllaColors.error)),
+                      Text(
+                        context.l10n.somethingWentWrongTryAgain,
+                        style: bodyStyle?.copyWith(color: EllaColors.error),
+                      ),
                     ],
                   ],
                 ),

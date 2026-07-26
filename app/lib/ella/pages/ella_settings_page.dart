@@ -21,6 +21,7 @@ import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_legal_links.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
@@ -360,13 +361,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             EllaSettingsRow(
               icon: Icons.privacy_tip,
               title: context.l10n.ellaSettingsPrivacy,
-              onTap: () => launchUrl(Uri.parse('https://ella-ai-care.com/legal/privacy')),
+              onTap: () => launchUrl(EllaLegalLinks.privacy),
             ),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.description,
               title: context.l10n.ellaSettingsTerms,
-              onTap: () => launchUrl(Uri.parse('https://ella-ai-care.com/legal/terms')),
+              onTap: () => launchUrl(EllaLegalLinks.terms),
             ),
             const SizedBox(height: 8),
             EllaSettingsRow(

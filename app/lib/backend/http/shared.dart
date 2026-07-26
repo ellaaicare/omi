@@ -10,6 +10,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/log_redaction.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 class ApiClient {
@@ -77,10 +78,7 @@ Future<http.StreamedResponse> makeRawApiCall({
   required String method,
   Map<String, String> headers = const {},
 }) async {
-  final builtHeaders = await buildHeaders(
-    requireAuthCheck: _isRequiredAuthCheck(url),
-    fromHeaders: headers,
-  );
+  final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
   var request = http.Request(method, Uri.parse(url));
   request.headers.addAll(builtHeaders);
   return HttpPoolManager.instance.sendStreaming(request);
@@ -96,10 +94,7 @@ Future<http.Response?> makeApiCall({
 }) async {
   try {
     final bool requireAuthCheck = _isRequiredAuthCheck(url);
-    Map<String, String> builtHeaders = await buildHeaders(
-      requireAuthCheck: requireAuthCheck,
-      fromHeaders: headers,
-    );
+    Map<String, String> builtHeaders = await buildHeaders(requireAuthCheck: requireAuthCheck, fromHeaders: headers);
 
     final effectiveTimeout =
         timeout ?? (method == 'GET' ? ApiClient.requestTimeoutRead : ApiClient.requestTimeoutWrite);
@@ -115,10 +110,7 @@ Future<http.Response?> makeApiCall({
       Logger.log('Token expired on 1st attempt');
       SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
       if (SharedPreferencesUtil().authToken.isNotEmpty) {
-        builtHeaders = await buildHeaders(
-          requireAuthCheck: requireAuthCheck,
-          fromHeaders: headers,
-        );
+        builtHeaders = await buildHeaders(requireAuthCheck: requireAuthCheck, fromHeaders: headers);
         response = await HttpPoolManager.instance.send(
           () => _buildRequest(url, builtHeaders, body, method),
           timeout: effectiveTimeout,
@@ -127,30 +119,35 @@ Future<http.Response?> makeApiCall({
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {
           await AuthService.instance.signOut();
-          Logger.handle(Exception('Authentication failed. Please sign in again.'), StackTrace.current,
-              message: 'Authentication failed. Please sign in again.');
+          Logger.handle(
+            Exception('Authentication failed. Please sign in again.'),
+            StackTrace.current,
+            message: 'Authentication failed. Please sign in again.',
+          );
         }
       } else {
         await AuthService.instance.signOut();
-        Logger.handle(Exception('Authentication failed. Please sign in again.'), StackTrace.current,
-            message: 'Authentication failed. Please sign in again.');
+        Logger.handle(
+          Exception('Authentication failed. Please sign in again.'),
+          StackTrace.current,
+          message: 'Authentication failed. Please sign in again.',
+        );
       }
     }
 
     return response;
   } catch (e, stackTrace) {
     Logger.debug('HTTP request failed: $e, $stackTrace');
-    PlatformManager.instance.crashReporter.reportCrash(e, stackTrace, userAttributes: {'url': url, 'method': method});
+    PlatformManager.instance.crashReporter.reportCrash(
+      e,
+      stackTrace,
+      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
+    );
     return null;
   }
 }
 
-http.Request _buildRequest(
-  String url,
-  Map<String, String> headers,
-  String body,
-  String method,
-) {
+http.Request _buildRequest(String url, Map<String, String> headers, String body, String method) {
   final request = http.Request(method, Uri.parse(url));
   request.headers.addAll(headers);
   if (method != 'GET' && body.isNotEmpty) {
@@ -169,10 +166,7 @@ Future<http.Response> makeMultipartApiCall({
   String method = 'POST',
 }) async {
   try {
-    final builtHeaders = await buildHeaders(
-      requireAuthCheck: _isRequiredAuthCheck(url),
-      fromHeaders: headers,
-    );
+    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
 
     var request = http.MultipartRequest(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -181,12 +175,7 @@ Future<http.Response> makeMultipartApiCall({
     for (var file in files) {
       var stream = http.ByteStream(file.openRead());
       var length = await file.length();
-      var multipartFile = http.MultipartFile(
-        fileFieldName,
-        stream,
-        length,
-        filename: basename(file.path),
-      );
+      var multipartFile = http.MultipartFile(fileFieldName, stream, length, filename: basename(file.path));
       request.files.add(multipartFile);
     }
 
@@ -194,7 +183,11 @@ Future<http.Response> makeMultipartApiCall({
     return await http.Response.fromStream(streamedResponse);
   } catch (e, stackTrace) {
     Logger.debug('Multipart HTTP request failed: $e, $stackTrace');
-    PlatformManager.instance.crashReporter.reportCrash(e, stackTrace, userAttributes: {'url': url, 'method': method});
+    PlatformManager.instance.crashReporter.reportCrash(
+      e,
+      stackTrace,
+      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
+    );
     rethrow;
   }
 }
@@ -206,10 +199,7 @@ Stream<String> makeStreamingApiCall({
   String method = 'POST',
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(
-      requireAuthCheck: _isRequiredAuthCheck(url),
-      fromHeaders: headers,
-    );
+    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
 
     var request = http.Request(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -253,7 +243,11 @@ Stream<String> makeStreamingApiCall({
     }
   } catch (e, stackTrace) {
     Logger.error('Streaming request error: $e');
-    PlatformManager.instance.crashReporter.reportCrash(e, stackTrace, userAttributes: {'url': url, 'method': method});
+    PlatformManager.instance.crashReporter.reportCrash(
+      e,
+      stackTrace,
+      userAttributes: {'url': redactUrlForLogs(url), 'method': method},
+    );
   }
 }
 
@@ -265,10 +259,7 @@ Stream<String> makeMultipartStreamingApiCall({
   String fileFieldName = 'files',
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(
-      requireAuthCheck: _isRequiredAuthCheck(url),
-      fromHeaders: headers,
-    );
+    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
 
     var request = http.MultipartRequest('POST', Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -312,7 +303,11 @@ Stream<String> makeMultipartStreamingApiCall({
     }
   } catch (e, stackTrace) {
     Logger.error('Multipart streaming request error: $e');
-    PlatformManager.instance.crashReporter.reportCrash(e, stackTrace, userAttributes: {'url': url, 'method': 'POST'});
+    PlatformManager.instance.crashReporter.reportCrash(
+      e,
+      stackTrace,
+      userAttributes: {'url': redactUrlForLogs(url), 'method': 'POST'},
+    );
   }
 }
 
@@ -338,13 +333,16 @@ dynamic extractContentFromResponse(
   } else {
     Logger.debug('Error fetching data: ${response?.statusCode}');
     // TODO: handle error, better specially for script migration
-    PlatformManager.instance.crashReporter
-        .reportCrash(Exception('Error fetching data: ${response?.statusCode}'), StackTrace.current, userAttributes: {
-      'response_null': (response == null).toString(),
-      'response_status_code': response?.statusCode.toString() ?? '',
-      'is_embedding': isEmbedding.toString(),
-      'is_function_calling': isFunctionCalling.toString(),
-    });
+    PlatformManager.instance.crashReporter.reportCrash(
+      Exception('Error fetching data: ${response?.statusCode}'),
+      StackTrace.current,
+      userAttributes: {
+        'response_null': (response == null).toString(),
+        'response_status_code': response?.statusCode.toString() ?? '',
+        'is_embedding': isEmbedding.toString(),
+        'is_function_calling': isFunctionCalling.toString(),
+      },
+    );
     return null;
   }
 }

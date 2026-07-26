@@ -8920,4 +8920,219 @@ class AppLocalizationsEl extends AppLocalizations {
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
+
+  @override
+  String get ellaAccessCheckingTitle => 'Checking your Ella access';
+
+  @override
+  String get ellaAccessCheckingBody => 'This should only take a moment.';
+
+  @override
+  String get ellaAccessPausedTitle => 'Voice access is paused';
+
+  @override
+  String get ellaAccessPausedBody =>
+      'Your other Ella features are still here. Try again later or contact the person who arranged your access.';
+
+  @override
+  String get ellaAccessUnavailableTitle => 'Ella could not check access just now';
+
+  @override
+  String get ellaAccessUnavailableBody => 'Your connection may need a moment. Try again when you are ready.';
+
+  @override
+  String get ellaWaitlistTitle => 'You’re on the list';
+
+  @override
+  String get ellaWaitlistBody =>
+      'Thanks for joining us. Ella is opening to a small group at a time. We’ll let you know when a place is ready.';
+
+  @override
+  String get ellaEnterInviteCode => 'Enter an invite code';
+
+  @override
+  String get ellaInviteEntryTitle => 'Use your Ella invite';
+
+  @override
+  String get ellaInviteEntryBody =>
+      'Enter the code from your invitation. You can also paste it or open the invitation link.';
+
+  @override
+  String get ellaInviteReadyTitle => 'Your invite is ready';
+
+  @override
+  String get ellaInviteReadyBody => 'We filled in the code from your invitation. Check it, then confirm to continue.';
+
+  @override
+  String get ellaInviteCodeFieldLabel => 'Invite code';
+
+  @override
+  String get ellaInviteCodeHint => 'ELLA7K9Q';
+
+  @override
+  String get ellaInviteCodeHelp =>
+      'Capital letters and numbers are easiest to read. Spaces and dashes are handled for you.';
+
+  @override
+  String get ellaPasteInviteCode => 'Paste code';
+
+  @override
+  String get ellaConfirmInviteCode => 'Confirm invite';
+
+  @override
+  String get ellaInviteInvalidBody =>
+      'The code we received does not match an invite. Check the letters and numbers, or paste it from your invitation.';
+
+  @override
+  String get ellaInviteExpiredBody =>
+      'This invitation has reached its end date. The person who shared it can send a new one.';
+
+  @override
+  String get ellaInviteCapacityBody =>
+      'Ella is welcoming a few people at a time. You’re on the list, and we’ll let you know when a place opens.';
+
+  @override
+  String get ellaInviteRateLimitedBody => 'Let’s pause for a moment before trying that code again.';
+
+  @override
+  String get ellaProvisioningTimeoutTitle => 'Ella needs another moment';
+
+  @override
+  String get ellaProvisioningTimeoutBody =>
+      'Setup is taking longer than usual. Nothing you entered was lost. Try again when you are ready.';
+
+  @override
+  String get ellaProvisioningConnectionTitle => 'Setup is waiting for a connection';
+
+  @override
+  String get ellaProvisioningConnectionBody =>
+      'Ella will continue when the connection is ready. You can also try again now.';
+
+  @override
+  String get ellaProvisioningPausedTitle => 'Setup is paused';
+
+  @override
+  String get ellaProvisioningPausedBody =>
+      'Ella could not finish setup yet. Try again if the button is available, or use the support code below.';
+
+  @override
+  String ellaVoiceTimeRemaining(String time) {
+    return 'About $time left';
+  }
+
+  @override
+  String get ellaVoiceSoftWarning =>
+      'You are nearing today’s voice time. Ella can finish this conversation, then may need a short rest.';
+
+  @override
+  String get ellaVoiceDailyRestTitle => 'A short rest for Ella';
+
+  @override
+  String get ellaVoiceDailyRestBody => 'Ella needs a short rest — you can talk again tomorrow.';
+
+  @override
+  String get ellaVoiceMonthlyRestTitle => 'Monthly voice time used';
+
+  @override
+  String get ellaVoiceMonthlyRestBody =>
+      'This month’s voice time is complete. Ella can talk again after the monthly reset.';
+
+  @override
+  String get ellaVoiceConcurrentTitle => 'Ella is already in a conversation';
+
+  @override
+  String get ellaVoiceConcurrentBody => 'End the other voice conversation, then try again here.';
+
+  @override
+  String get ellaVoicePausedTitle => 'Voice conversations are paused';
+
+  @override
+  String get ellaVoicePausedBody =>
+      'You can still use Ella’s other features. Try again later or contact the person who arranged your access.';
+
+  @override
+  String get ellaVoiceSessionCompleteTitle => 'This conversation is complete';
+
+  @override
+  String get ellaVoiceSessionCompleteBody =>
+      'Ella has reached the conversation-time limit. Start a new voice conversation whenever you are ready.';
+
+  @override
+  String get ellaVoiceTechnicalFailure => 'The voice connection needs a moment. Tap to try again.';
+
+  @override
+  String get ellaDemoAccessTitle => 'Access and voice-limit states';
+
+  @override
+  String get ellaDemoAccessBody =>
+      'Open every invite, waitlist, setup, quota, and connection state without calling a live service.';
+
+  @override
+  String get ellaDemoAccessEntryBody => 'Review all new invite and quota screens offline.';
+
+  @override
+  String get ellaDemoActiveTitle => 'Access confirmed — onboarding continues';
+
+  @override
+  String get ellaDemoStateWaitlist => 'Waitlist — no entitlement';
+
+  @override
+  String get ellaDemoStateInviteEntry => 'Invite — code entry';
+
+  @override
+  String get ellaDemoStateInviteLink => 'Invite — link or QR prefilled';
+
+  @override
+  String get ellaDemoStateActive => 'Entitled — continue';
+
+  @override
+  String get ellaDemoStateInvalidCode => 'Invite — code not recognized';
+
+  @override
+  String get ellaDemoStateExpiredCode => 'Invite — end date reached';
+
+  @override
+  String get ellaDemoStateCapacity => 'Invite — capacity reached';
+
+  @override
+  String get ellaDemoStateRateLimited => 'Invite — retry pause';
+
+  @override
+  String get ellaDemoStateSuspended => 'Entitlement — suspended';
+
+  @override
+  String get ellaDemoStateRevoked => 'Entitlement — revoked';
+
+  @override
+  String get ellaDemoStateExpiredEntitlement => 'Entitlement — expired';
+
+  @override
+  String get ellaDemoStateProvisioningTimeout => 'Setup — taking longer';
+
+  @override
+  String get ellaDemoStateQuotaWarning => 'Voice — gentle 80% warning';
+
+  @override
+  String get ellaDemoStateQuotaDaily => 'Voice — daily rest';
+
+  @override
+  String get ellaDemoStateQuotaMonthly => 'Voice — monthly reset';
+
+  @override
+  String get ellaDemoStateQuotaConcurrent => 'Voice — another conversation active';
+
+  @override
+  String get ellaDemoStateQuotaSuspended => 'Voice — access paused';
+
+  @override
+  String get ellaDemoStateSessionMaximum => 'Voice — conversation-time limit';
+
+  @override
+  String get ellaDemoStateTechnicalFailure => 'Voice — technical connection issue';
+
+  @override
+  String get todayPhoneOnly => 'Phone only';
+
+  @override
+  String get ellaVoiceDemoPreview => 'Demo preview — voice is not active';
 }
