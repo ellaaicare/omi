@@ -91,6 +91,16 @@ def _json_list(value: Any) -> list[str]:
     return []
 
 
+def _merge_provider_request_ids(*values: Any) -> list[str]:
+    merged: list[str] = []
+    for value in values:
+        for item in _json_list(value) if not isinstance(value, list) else [str(item) for item in value]:
+            normalized = item.strip()
+            if normalized and normalized not in merged:
+                merged.append(normalized)
+    return merged[-50:]
+
+
 def quota_state(
     entitlement: dict[str, Any],
     *,
@@ -250,6 +260,8 @@ async def _expire_stale_sessions(conn: asyncpg.Connection, now: datetime) -> Non
             mode=row["mode"],
             started_at=row["accepted_at"],
             ended_at=now,
+            input_audio_s=_as_float(row.get("input_audio_s")),
+            output_audio_s=_as_float(row.get("output_audio_s")),
             connection_s=connection_s,
             input_audio_bytes=row["input_audio_bytes"],
             output_audio_bytes=row["output_audio_bytes"],
@@ -258,6 +270,7 @@ async def _expire_stale_sessions(conn: asyncpg.Connection, now: datetime) -> Non
             provider_request_ids=_json_list(row["provider_request_ids"]),
             termination_reason="lease_expired",
             normalized_error_code="session_lease_expired",
+            estimated_cost_microusd=_as_int(row.get("estimated_cost_microusd")),
         )
 
 
@@ -287,6 +300,7 @@ async def _usage_rollup(
         """
         SELECT
             COALESCE(SUM(EXTRACT(EPOCH FROM ($2 - accepted_at))), 0) AS active_s,
+            COALESCE(SUM(estimated_cost_microusd), 0) AS active_cost_microusd,
             COUNT(*) AS active_count
         FROM voice_active_sessions
         WHERE uid = $1
@@ -295,11 +309,14 @@ async def _usage_rollup(
         now,
     )
     active_s = _as_float(active["active_s"] if active else 0)
+    active_cost_microusd = _as_int(active["active_cost_microusd"] if active else 0)
     return {
         "daily_used_s": _as_float(row["daily_used_s"] if row else 0) + active_s,
         "monthly_used_s": _as_float(row["monthly_used_s"] if row else 0) + active_s,
-        "daily_cost_microusd": _as_int(row["daily_cost_microusd"] if row else 0),
-        "monthly_cost_microusd": _as_int(row["monthly_cost_microusd"] if row else 0),
+        "daily_cost_microusd": _as_int(row["daily_cost_microusd"] if row else 0)
+        + active_cost_microusd,
+        "monthly_cost_microusd": _as_int(row["monthly_cost_microusd"] if row else 0)
+        + active_cost_microusd,
         "active_count": _as_int(active["active_count"] if active else 0),
         "daily_resets_at": (day_start + timedelta(days=1)).isoformat(),
         "monthly_resets_at": _next_month(now).isoformat(),
@@ -543,6 +560,8 @@ async def accept_session(
                 code = "entitlement_stale"
             elif entitlement["status"] != "active":
                 code = entitlement["status"]
+            elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
+                code = "expired"
             else:
                 code = await _kill_switch_code(conn, uid, provider)
             if not code and provider not in set(entitlement.get("provider_allowlist") or []):
@@ -648,6 +667,8 @@ async def update_session(
     *,
     uid: str,
     session_id: str,
+    input_audio_s: float,
+    output_audio_s: float,
     input_audio_bytes: int,
     output_audio_bytes: int,
     tool_calls: int,
@@ -685,42 +706,58 @@ async def update_session(
                 code = "entitlement_stale"
             elif entitlement["status"] != "active":
                 code = entitlement["status"]
+            elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
+                code = "expired"
             else:
                 code = await _kill_switch_code(conn, uid, active["provider"])
 
-            await conn.execute(
+            provider_ids = _merge_provider_request_ids(
+                active.get("provider_request_ids"),
+                provider_request_ids,
+            )
+            updated_row = await conn.fetchrow(
                 """
                 UPDATE voice_active_sessions
                 SET last_seen_at = $3,
                     input_audio_bytes = GREATEST(input_audio_bytes, $4),
                     output_audio_bytes = GREATEST(output_audio_bytes, $5),
-                    tool_calls = GREATEST(tool_calls, $6),
-                    reconnects = GREATEST(reconnects, $7),
-                    provider_request_ids = $8::jsonb
+                    input_audio_s = GREATEST(input_audio_s, $6),
+                    output_audio_s = GREATEST(output_audio_s, $7),
+                    tool_calls = GREATEST(tool_calls, $8),
+                    reconnects = GREATEST(reconnects, $9),
+                    provider_request_ids = $10::jsonb,
+                    estimated_cost_microusd = GREATEST(estimated_cost_microusd, $11)
                 WHERE session_id = $1 AND uid = $2
+                RETURNING *
                 """,
                 session_id,
                 uid,
                 now,
                 max(0, input_audio_bytes),
                 max(0, output_audio_bytes),
+                Decimal(str(max(0, input_audio_s))),
+                Decimal(str(max(0, output_audio_s))),
                 max(0, tool_calls),
                 max(0, reconnects),
-                json.dumps(provider_request_ids),
+                json.dumps(provider_ids),
+                max(0, estimated_cost_microusd),
             )
+            updated = _record_dict(updated_row)
             rollup = await _usage_rollup(conn, uid, now)
             session_used_s = max(0.0, (now - active["accepted_at"]).total_seconds())
             quota = _quota_payload(entitlement, rollup)
             quota["session_used_s"] = round(session_used_s, 3)
-            quota["audio_bytes"] = max(0, input_audio_bytes) + max(0, output_audio_bytes)
+            quota["audio_bytes"] = _as_int(updated.get("input_audio_bytes")) + _as_int(
+                updated.get("output_audio_bytes")
+            )
             quota_code, soft_warning = quota_state(
                 entitlement,
                 daily_used_s=rollup["daily_used_s"],
                 monthly_used_s=rollup["monthly_used_s"],
                 session_used_s=session_used_s,
                 audio_bytes=quota["audio_bytes"],
-                daily_cost_used_microusd=rollup["daily_cost_microusd"] + estimated_cost_microusd,
-                monthly_cost_used_microusd=rollup["monthly_cost_microusd"] + estimated_cost_microusd,
+                daily_cost_used_microusd=rollup["daily_cost_microusd"],
+                monthly_cost_used_microusd=rollup["monthly_cost_microusd"],
             )
             if not code and quota_code not in {"ok", "soft_warning"}:
                 code = quota_code
@@ -768,6 +805,11 @@ async def complete_session(
             if not active_row:
                 return None
             active = _record_dict(active_row)
+            provider_ids = _merge_provider_request_ids(
+                active.get("provider_request_ids"),
+                provider_request_ids,
+            )
+            server_connection_s = max(0.0, (now - active["accepted_at"]).total_seconds())
             event_type = (
                 "session_completed"
                 if termination_reason in {"client_disconnect", "signoff", "completed"}
@@ -785,17 +827,20 @@ async def complete_session(
                 mode=active["mode"],
                 started_at=active["accepted_at"],
                 ended_at=now,
-                input_audio_s=input_audio_s,
-                output_audio_s=output_audio_s,
-                connection_s=connection_s,
-                input_audio_bytes=input_audio_bytes,
-                output_audio_bytes=output_audio_bytes,
-                tool_calls=tool_calls,
-                reconnects=reconnects,
-                provider_request_ids=provider_request_ids,
+                input_audio_s=max(_as_float(active.get("input_audio_s")), input_audio_s),
+                output_audio_s=max(_as_float(active.get("output_audio_s")), output_audio_s),
+                connection_s=server_connection_s,
+                input_audio_bytes=max(_as_int(active.get("input_audio_bytes")), input_audio_bytes),
+                output_audio_bytes=max(_as_int(active.get("output_audio_bytes")), output_audio_bytes),
+                tool_calls=max(_as_int(active.get("tool_calls")), tool_calls),
+                reconnects=max(_as_int(active.get("reconnects")), reconnects),
+                provider_request_ids=provider_ids,
                 termination_reason=termination_reason,
                 normalized_error_code=normalized_error_code,
-                estimated_cost_microusd=estimated_cost_microusd,
+                estimated_cost_microusd=max(
+                    _as_int(active.get("estimated_cost_microusd")),
+                    estimated_cost_microusd,
+                ),
             )
 
 

@@ -26,21 +26,10 @@ CREATE TABLE IF NOT EXISTS voice_entitlements (
         CHECK (max_audio_bytes_per_session > 0),
     max_audio_bytes_per_minute BIGINT NOT NULL DEFAULT 6000000
         CHECK (max_audio_bytes_per_minute > 0),
-    provider_allowlist TEXT[] NOT NULL DEFAULT ARRAY[
-        'grok-voice',
-        'gemini-live',
-        'gemini-native-live'
-    ],
+    provider_allowlist TEXT[] NOT NULL DEFAULT ARRAY['grok-voice'],
     model_allowlist TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-    mode_allowlist TEXT[] NOT NULL DEFAULT ARRAY[
-        'v4',
-        'gemini-live',
-        'gemini-native-live-v1',
-        'gemini-zero-live-v1',
-        'gemini-lite-live-v1',
-        'gemini-full-live-v1'
-    ],
-    fallback_policy JSONB NOT NULL DEFAULT '{"enabled": true, "order": ["grok-voice", "gemini-live"]}'::jsonb,
+    mode_allowlist TEXT[] NOT NULL DEFAULT ARRAY['v4'],
+    fallback_policy JSONB NOT NULL DEFAULT '{"enabled": false, "order": []}'::jsonb,
     operator_note TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -67,12 +56,29 @@ CREATE TABLE IF NOT EXISTS voice_active_sessions (
     mode TEXT NOT NULL,
     accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    input_audio_s NUMERIC(14, 3) NOT NULL DEFAULT 0 CHECK (input_audio_s >= 0),
+    output_audio_s NUMERIC(14, 3) NOT NULL DEFAULT 0 CHECK (output_audio_s >= 0),
     input_audio_bytes BIGINT NOT NULL DEFAULT 0 CHECK (input_audio_bytes >= 0),
     output_audio_bytes BIGINT NOT NULL DEFAULT 0 CHECK (output_audio_bytes >= 0),
     tool_calls INTEGER NOT NULL DEFAULT 0 CHECK (tool_calls >= 0),
     reconnects INTEGER NOT NULL DEFAULT 0 CHECK (reconnects >= 0),
-    provider_request_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+    provider_request_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    estimated_cost_microusd BIGINT NOT NULL DEFAULT 0
+        CHECK (estimated_cost_microusd >= 0)
 );
+
+ALTER TABLE voice_active_sessions
+    ADD COLUMN IF NOT EXISTS input_audio_s NUMERIC(14, 3) NOT NULL DEFAULT 0
+        CHECK (input_audio_s >= 0),
+    ADD COLUMN IF NOT EXISTS output_audio_s NUMERIC(14, 3) NOT NULL DEFAULT 0
+        CHECK (output_audio_s >= 0),
+    ADD COLUMN IF NOT EXISTS estimated_cost_microusd BIGINT NOT NULL DEFAULT 0
+        CHECK (estimated_cost_microusd >= 0);
+
+ALTER TABLE voice_entitlements
+    ALTER COLUMN provider_allowlist SET DEFAULT ARRAY['grok-voice'],
+    ALTER COLUMN mode_allowlist SET DEFAULT ARRAY['v4'],
+    ALTER COLUMN fallback_policy SET DEFAULT '{"enabled": false, "order": []}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS voice_active_sessions_uid_idx
     ON voice_active_sessions (uid, last_seen_at DESC);

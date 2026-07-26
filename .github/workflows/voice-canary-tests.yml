@@ -1,0 +1,80 @@
+name: Voice Canary Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/migrations/008_create_voice_canary_controls.sql"
+      - "backend/scripts/voice_canary_admin.py"
+      - "backend/tests/postgres/test_voice_canary_postgres.py"
+      - "backend/tests/unit/test_voice_canary.py"
+      - "backend/tests/unit/test_voice_proxy_auth.py"
+      - "backend/test.sh"
+      - ".github/workflows/voice-canary-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/migrations/008_create_voice_canary_controls.sql"
+      - "backend/scripts/voice_canary_admin.py"
+      - "backend/tests/postgres/test_voice_canary_postgres.py"
+      - "backend/tests/unit/test_voice_canary.py"
+      - "backend/tests/unit/test_voice_proxy_auth.py"
+      - "backend/test.sh"
+      - ".github/workflows/voice-canary-tests.yml"
+
+jobs:
+  voice-canary:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: voice_canary_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d voice_canary_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/voice_canary_test
+      ENCRYPTION_SECRET: omi_ci_voice_canary_test_only
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install
+          "asyncpg==0.31.0"
+          "fastapi==0.112.0"
+          "firebase-admin==6.5.0"
+          "httpx==0.28.0"
+          "PyJWT==2.9.0"
+          "pytest==8.3.2"
+          "websockets==12.0"
+
+      - name: Run voice canary unit and PostgreSQL failure-path tests
+        run: >-
+          pytest
+          tests/unit/test_voice_canary.py
+          tests/unit/test_voice_proxy_auth.py
+          tests/postgres/test_voice_canary_postgres.py
+          -v

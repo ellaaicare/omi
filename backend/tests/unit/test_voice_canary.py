@@ -10,9 +10,12 @@ from fastapi import HTTPException
 conversations_module = ModuleType("database.conversations")
 conversations_module._decrypt_conversation_data = lambda value, uid=None: value
 sys.modules.setdefault("database.conversations", conversations_module)
+sys.modules.setdefault("database.proposals", ModuleType("database.proposals"))
+sys.modules.setdefault("websockets", ModuleType("websockets"))
 
 from database import voice_canary
 from ella.routers import voice
+from scripts import voice_canary_admin
 
 
 def _entitlement(**overrides):
@@ -159,3 +162,12 @@ def test_entitlement_contract_defaults_are_canary_numbers():
     assert voice_canary.DEFAULT_MAX_SESSION_S == 20 * 60
     assert voice_canary.DEFAULT_MAX_CONCURRENT == 1
     assert datetime.now(timezone.utc).tzinfo is not None
+
+
+def test_operator_defaults_are_grok_only_and_have_no_fallback():
+    assert voice_canary_admin.DEFAULT_PROVIDERS == ["grok-voice"]
+    assert voice_canary_admin.DEFAULT_MODES == ["v4"]
+    assert voice_canary_admin.DEFAULT_FALLBACK_POLICY == {
+        "enabled": False,
+        "order": [],
+    }

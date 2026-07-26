@@ -493,6 +493,8 @@ class VoiceCanaryAcceptRequest(BaseModel):
 class VoiceCanaryHeartbeatRequest(BaseModel):
     uid: str
     session_id: str
+    input_audio_s: float = 0
+    output_audio_s: float = 0
     input_audio_bytes: int = 0
     output_audio_bytes: int = 0
     tool_calls: int = 0
@@ -1139,6 +1141,8 @@ async def heartbeat_voice_canary_session(
     decision = await voice_canary_db.update_session(
         uid=principal.uid,
         session_id=principal.session_id,
+        input_audio_s=body.input_audio_s,
+        output_audio_s=body.output_audio_s,
         input_audio_bytes=body.input_audio_bytes,
         output_audio_bytes=body.output_audio_bytes,
         tool_calls=body.tool_calls,

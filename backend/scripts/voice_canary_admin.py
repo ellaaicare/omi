@@ -14,15 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from database import voice_canary
 
 
-DEFAULT_PROVIDERS = ["grok-voice", "gemini-live", "gemini-native-live"]
-DEFAULT_MODES = [
-    "v4",
-    "gemini-live",
-    "gemini-native-live-v1",
-    "gemini-zero-live-v1",
-    "gemini-lite-live-v1",
-    "gemini-full-live-v1",
-]
+DEFAULT_PROVIDERS = ["grok-voice"]
+DEFAULT_MODES = ["v4"]
+DEFAULT_FALLBACK_POLICY = {"enabled": False, "order": []}
 
 
 def _json_default(value: Any) -> str:
@@ -43,9 +37,10 @@ async def _grant(args: argparse.Namespace) -> None:
             INSERT INTO voice_entitlements (
                 uid, status, plan, daily_limit_s, monthly_limit_s,
                 max_session_s, max_concurrent, soft_limit_ratio,
-                provider_allowlist, mode_allowlist, operator_note
+                provider_allowlist, mode_allowlist, fallback_policy, operator_note
             ) VALUES (
-                $1, 'active', $2, $3, $4, $5, $6, $7, $8::text[], $9::text[], $10
+                $1, 'active', $2, $3, $4, $5, $6, $7, $8::text[], $9::text[],
+                $10::jsonb, $11
             )
             ON CONFLICT (uid) DO UPDATE SET
                 status = 'active',
@@ -58,6 +53,7 @@ async def _grant(args: argparse.Namespace) -> None:
                 soft_limit_ratio = EXCLUDED.soft_limit_ratio,
                 provider_allowlist = EXCLUDED.provider_allowlist,
                 mode_allowlist = EXCLUDED.mode_allowlist,
+                fallback_policy = EXCLUDED.fallback_policy,
                 operator_note = EXCLUDED.operator_note,
                 updated_at = NOW()
             RETURNING *
@@ -71,6 +67,7 @@ async def _grant(args: argparse.Namespace) -> None:
             args.soft_warning_percent / 100,
             args.provider,
             args.mode,
+            json.dumps(DEFAULT_FALLBACK_POLICY),
             args.note,
         )
     _print({"action": "grant", "entitlement": dict(row)})

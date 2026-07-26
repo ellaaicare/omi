@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 sys.modules.setdefault("websockets", ModuleType("websockets"))
+sys.modules.setdefault("database.proposals", ModuleType("database.proposals"))
 conversations_module = ModuleType("database.conversations")
 conversations_module._decrypt_conversation_data = lambda value, uid=None: value
 sys.modules.setdefault("database.conversations", conversations_module)
