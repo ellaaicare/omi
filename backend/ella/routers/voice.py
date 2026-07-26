@@ -2011,7 +2011,7 @@ async def search_omi_conversations(request: Request):
                         date_filter_end = target.replace(hour=23, minute=59, second=59)
                         date_parsed = True
                         # Remove date part from query for keyword matching
-                        remaining = query_lower[: date_match.start()] + query_lower[date_match.end() :]
+                        remaining = query_lower[:date_match.start()] + query_lower[date_match.end():]
                         keyword_terms = [t for t in remaining.split() if t]
                     except ValueError:
                         pass
@@ -2091,16 +2091,14 @@ async def search_omi_conversations(request: Request):
                 else:
                     ts = str(created)[:16]
 
-            results.append(
-                {
-                    "title": structured.get("title", "Untitled"),
-                    "overview": structured.get("overview", ""),
-                    "emoji": structured.get("emoji", ""),
-                    "category": structured.get("category", ""),
-                    "timestamp": ts,
-                    "score": score,
-                }
-            )
+            results.append({
+                "title": structured.get("title", "Untitled"),
+                "overview": structured.get("overview", ""),
+                "emoji": structured.get("emoji", ""),
+                "category": structured.get("category", ""),
+                "timestamp": ts,
+                "score": score,
+            })
 
         logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
         return {"results": results, "total_searched": len(convos), "query": query}
@@ -2163,14 +2161,14 @@ SEARCH_POLICY = {
 
 # Which source keys map to which request-level source names
 _SOURCE_TO_POLICY_KEYS = {
-    "timeline": ["timeline"],
-    "channel": ["timeline"],
+    "timeline":  ["timeline"],
+    "channel":   ["timeline"],
     "workspace": ["workspace"],
-    "omi": ["omi_full", "omi_meta"],
-    "memories": ["memories"],
-    "voice": ["voice"],
-    "honcho": ["honcho"],
-    "scanner": ["scanner"],
+    "omi":       ["omi_full", "omi_meta"],
+    "memories":  ["memories"],
+    "voice":     ["voice"],
+    "honcho":    ["honcho"],
+    "scanner":   ["scanner"],
 }
 
 
@@ -2591,18 +2589,18 @@ async def _search_canonical_timeline(
                     score,
                     ts or datetime.min,
                     {
-                        "source": "timeline",
-                        "title": f"{channel} {role}".strip(),
-                        "content": text[:700],
-                        "timestamp": ts_text,
-                        "score": score + role_boost,
-                        "metadata": {
-                            "provenance": "canonical_event",
-                            "channel": channel,
-                            "provider": provider,
-                            "role": role,
-                            "session_id": row["session_id"] or "",
-                        },
+                "source": "timeline",
+                "title": f"{channel} {role}".strip(),
+                "content": text[:700],
+                "timestamp": ts_text,
+                "score": score + role_boost,
+                "metadata": {
+                    "provenance": "canonical_event",
+                    "channel": channel,
+                    "provider": provider,
+                    "role": role,
+                    "session_id": row["session_id"] or "",
+                },
                     },
                 )
             )
@@ -2648,19 +2646,19 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         score = 120 if confidence == "high" else 70
         return [
             {
-                "source": "voice_memory",
-                "title": top.get("title") or "Hermes Voice Memory",
-                "content": answer[:900],
-                "timestamp": top.get("timestamp") or "",
-                "score": score,
-                "metadata": {
-                    "provenance": "hermes_voice_memory",
-                    "path": data.get("path"),
-                    "confidence": confidence,
-                    "latency_ms": data.get("latency_ms"),
-                    "source_ref": top.get("source_ref"),
-                    "channel": top.get("channel"),
-                },
+            "source": "voice_memory",
+            "title": top.get("title") or "Hermes Voice Memory",
+            "content": answer[:900],
+            "timestamp": top.get("timestamp") or "",
+            "score": score,
+            "metadata": {
+                "provenance": "hermes_voice_memory",
+                "path": data.get("path"),
+                "confidence": confidence,
+                "latency_ms": data.get("latency_ms"),
+                "source_ref": top.get("source_ref"),
+                "channel": top.get("channel"),
+            },
             }
         ]
     except Exception as e:
@@ -2963,25 +2961,25 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
         structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
         results.append(
             {
-                "source": "omi",
-                "title": title,
-                "content": content[:1400],
-                "timestamp": _canonical_event_timestamp(event),
-                "score": score + (55 if window_start else 45),
-                "metadata": {
-                    "provenance": "canonical_event",
-                    "fallback": False,
-                    "event_id": event.get("event_id"),
-                    "source_identity": event.get("source_identity"),
-                    "channel": event.get("channel"),
-                    "provider": event.get("provider"),
-                    "emoji": structured.get("emoji", ""),
-                    "category": structured.get("category", ""),
-                    "time_window_applied": bool(window_start and window_end),
-                    "time_window_start_utc": window_start.isoformat() if window_start else "",
-                    "time_window_end_utc": window_end.isoformat() if window_end else "",
-                    "timestamp_timezone": "America/Los_Angeles",
-                },
+            "source": "omi",
+            "title": title,
+            "content": content[:1400],
+            "timestamp": _canonical_event_timestamp(event),
+            "score": score + (55 if window_start else 45),
+            "metadata": {
+                "provenance": "canonical_event",
+                "fallback": False,
+                "event_id": event.get("event_id"),
+                "source_identity": event.get("source_identity"),
+                "channel": event.get("channel"),
+                "provider": event.get("provider"),
+                "emoji": structured.get("emoji", ""),
+                "category": structured.get("category", ""),
+                "time_window_applied": bool(window_start and window_end),
+                "time_window_start_utc": window_start.isoformat() if window_start else "",
+                "time_window_end_utc": window_end.isoformat() if window_end else "",
+                "timestamp_timezone": "America/Los_Angeles",
+            },
             }
         )
     return results
@@ -3215,19 +3213,19 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
 
             results.append(
                 {
-                    "source": "omi",
-                    "title": structured.get("title", "Untitled"),
-                    "content": overview_text,
-                    "timestamp": ts,
-                    "score": score + 18,
-                    "metadata": {
-                        "provenance": "firestore_legacy_omi",
-                        "fallback": True,
-                        "emoji": structured.get("emoji", ""),
-                        "category": structured.get("category", ""),
-                        "has_transcript_detail": bool(transcript_text and full_access),
-                        "timestamp_timezone": "America/Los_Angeles",
-                    },
+                "source": "omi",
+                "title": structured.get("title", "Untitled"),
+                "content": overview_text,
+                "timestamp": ts,
+                "score": score + 18,
+                "metadata": {
+                    "provenance": "firestore_legacy_omi",
+                    "fallback": True,
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "has_transcript_detail": bool(transcript_text and full_access),
+                    "timestamp_timezone": "America/Los_Angeles",
+                },
                 }
             )
 
@@ -3291,15 +3289,15 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
             display_content = mem.get("structured_memory", "") or mem.get("content", "")
             results.append(
                 {
-                    "source": "memories",
-                    "title": (mem.get("category", "") or "Memory").title(),
-                    "content": (display_content or "")[:500],
-                    "timestamp": ts,
-                    "score": score,
-                    "metadata": {
-                        "category": mem.get("category", ""),
-                        "id": mem.get("id", ""),
-                    },
+                "source": "memories",
+                "title": (mem.get("category", "") or "Memory").title(),
+                "content": (display_content or "")[:500],
+                "timestamp": ts,
+                "score": score,
+                "metadata": {
+                    "category": mem.get("category", ""),
+                    "id": mem.get("id", ""),
+                },
                 }
             )
 
@@ -3468,17 +3466,17 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
                     (
                         score,
                         {
-                            "source": "scanner",
-                            "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
-                            "content": (display_content or "")[:500],
-                            "timestamp": ts,
-                            "score": score,
-                            "metadata": {
-                                "category": row["category"] or "",
-                                "urgency": row["urgency"] or "",
-                                "escalated": row["escalated"],
-                                "id": str(row["id"]),
-                            },
+                    "source": "scanner",
+                    "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
+                    "content": (display_content or "")[:500],
+                    "timestamp": ts,
+                    "score": score,
+                    "metadata": {
+                        "category": row["category"] or "",
+                        "urgency": row["urgency"] or "",
+                        "escalated": row["escalated"],
+                        "id": str(row["id"]),
+                    },
                         },
                     )
                 )
