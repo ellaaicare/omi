@@ -8865,7 +8865,7 @@ class AppLocalizationsEl extends AppLocalizations {
   String get todayListeningButton => 'Ella is listening — See what she hears';
 
   @override
-  String get todayWhispersHistory => 'See what Ella has whispered';
+  String get todayWhispersHistory => 'See whispers';
 
   @override
   String get todayRemindersTitle => 'TODAY’S REMINDERS';
@@ -8907,4 +8907,7 @@ class AppLocalizationsEl extends AppLocalizations {
 
   @override
   String get todayListeningLink => 'See what she hears ›';
+
+  @override
+  String get todayReadMore => 'Read more';
 }
