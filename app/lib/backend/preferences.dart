@@ -19,8 +19,12 @@ class SharedPreferencesUtil {
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
-  static const String currentAiConsentContractVersion = 'voice-ai-processors-v3';
-  static const String currentAiConsentReceiptPrefix = 'ios-private-cloud-sync:$currentAiConsentContractVersion:';
+  static const bool _requiresAccountBoundAiConsent =
+      bool.fromEnvironment('ELLA_HERMES_PROVISIONING_GATE', defaultValue: true);
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v4';
+  static const String currentAiConsentProcessorSetHash =
+      'sha256:bd055957a43a28cf8d47d1daf2e161fa36b29bfc48842b322e87087ac5ae2261';
+  static const String currentAiConsentReceiptPrefix = 'ios-ai-consent:$currentAiConsentContractVersion:';
 
   factory SharedPreferencesUtil() {
     return _instance;
@@ -198,8 +202,13 @@ class SharedPreferencesUtil {
 
   set aiConsentAccepted(bool value) => saveBool('aiConsentAccepted', value);
 
-  bool get aiConsentAccepted =>
-      getBool('aiConsentAccepted', defaultValue: false) && aiConsentContractVersion == currentAiConsentContractVersion;
+  bool get aiConsentAccepted {
+    final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
+        aiConsentContractVersion == currentAiConsentContractVersion &&
+        aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
+    if (!accepted || !_requiresAccountBoundAiConsent) return accepted;
+    return uid.isNotEmpty && aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) && aiConsentReceiptUid == uid;
+  }
 
   set aiConsentAcceptedAt(String value) => saveString('aiConsentAcceptedAt', value);
 
@@ -210,6 +219,12 @@ class SharedPreferencesUtil {
   String get aiConsentReceiptUid => getString('aiConsentReceiptUid');
 
   String get aiConsentContractVersion => getString('aiConsentContractVersion');
+
+  String get aiConsentProcessorSetHash => getString('aiConsentProcessorSetHash');
+
+  String get aiConsentClientVersion => getString('aiConsentClientVersion');
+
+  String get aiConsentLocale => getString('aiConsentLocale');
 
   String get aiConsentDeferredVersion => getString('aiConsentDeferredVersion');
 
@@ -229,10 +244,18 @@ class SharedPreferencesUtil {
       aiConsentReceiptId.isNotEmpty &&
       aiConsentReceiptUid == uid;
 
-  void acceptAiConsent({String receiptId = '', String uid = ''}) {
+  void acceptAiConsent({
+    String receiptId = '',
+    String uid = '',
+    String clientVersion = '',
+    String locale = '',
+  }) {
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);
+    saveString('aiConsentProcessorSetHash', currentAiConsentProcessorSetHash);
+    saveString('aiConsentClientVersion', clientVersion);
+    saveString('aiConsentLocale', locale);
     remove('aiConsentDeferredVersion');
     if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
       saveString('aiConsentReceiptId', receiptId);
@@ -254,6 +277,9 @@ class SharedPreferencesUtil {
     remove('aiConsentReceiptId');
     remove('aiConsentReceiptUid');
     remove('aiConsentContractVersion');
+    remove('aiConsentProcessorSetHash');
+    remove('aiConsentClientVersion');
+    remove('aiConsentLocale');
     remove('aiConsentDeferredVersion');
   }
 
@@ -625,6 +651,9 @@ class SharedPreferencesUtil {
       'aiConsentReceiptId',
       'aiConsentReceiptUid',
       'aiConsentContractVersion',
+      'aiConsentProcessorSetHash',
+      'aiConsentClientVersion',
+      'aiConsentLocale',
       'aiConsentDeferredVersion',
     ]) {
       await remove(key);

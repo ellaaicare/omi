@@ -16515,10 +16515,16 @@ abstract class AppLocalizations {
   /// **'End'**
   String get voiceModalEndAction;
 
+  /// No description provided for @ellaAuthDataDisclosure.
+  ///
+  /// In en, this message translates to:
+  /// **'Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.'**
+  String get ellaAuthDataDisclosure;
+
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'When you enable listening or voice, live microphone audio from your iPhone or necklace goes through Ella\'s secure backend to Deepgram for speech-to-text. To create summaries or answers, transcript and derived text may go to OpenRouter, Google (Gemini), OpenAI, Groq, or xAI (Grok); OpenRouter may route text to the selected model provider. Live voice may send microphone audio to Google (Gemini), OpenAI, or xAI (Grok), while standard spoken replies send response text to ElevenLabs. Talk about this sends the selected stored memory, including related people, topics, and dates, through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor; Ella sends data only to the provider needed for the feature you choose, and summaries are shared only with family members you choose.'**
+  /// **'Ella sends only the data needed for a feature through its secure backend. Speech transcription sends live or stored microphone audio to Deepgram. Answers, summaries, and memory assistance send messages, transcripts, and selected memory context through Ella\'s self-hosted Hermes agent runtime and Honcho memory service, and may send that text to OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok; OpenRouter may route it to the selected model provider. Live voice may send microphone audio and selected context to Google Gemini, OpenAI, or xAI Grok. Spoken replies use Ella\'s own voice service and may send response text to ElevenLabs as a fallback. Google Firebase processes account and service metadata for authentication and infrastructure. Summaries are shared only with family members you choose.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16526,6 +16532,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Full processor details in Privacy Policy'**
   String get aiConsentProcessorDetailsLink;
+
+  /// No description provided for @aiConsentNoSharingBeforeAllow.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will not send audio, transcripts, messages, or memory context to these AI processors until you choose Allow. Not now keeps listening and AI features off. You can review or revoke this permission in Settings.'**
+  String get aiConsentNoSharingBeforeAllow;
+
+  /// No description provided for @aiConsentRevokeAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Revoke AI permission'**
+  String get aiConsentRevokeAction;
+
+  /// No description provided for @aiConsentDeleteDataAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete my account and data'**
+  String get aiConsentDeleteDataAction;
+
+  /// No description provided for @aiConsentAllowedStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Allowed for this account'**
+  String get aiConsentAllowedStatus;
+
+  /// No description provided for @aiConsentNotAllowedStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Not allowed — AI sharing is off'**
+  String get aiConsentNotAllowedStatus;
+
+  /// No description provided for @aiConsentRevokeSyncFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.'**
+  String get aiConsentRevokeSyncFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

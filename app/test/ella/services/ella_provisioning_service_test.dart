@@ -158,6 +158,8 @@ void main() {
       'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
       'aiConsentReceiptUid': 'uid-a',
       'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'aiConsentProcessorSetHash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      'uid': 'uid-a',
     });
     await SharedPreferencesUtil.init();
     final preferences = SharedPreferencesUtil();
@@ -348,19 +350,25 @@ void main() {
   });
 
   test('AI consent becomes account-bound only after private cloud sync acknowledgement', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(updateResult: true, confirmedEnabled: true);
     final service = EllaAiConsentService(
       transport: transport,
       receiptIdFactory: () => 'receipt-1',
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
     );
 
     final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
 
-    expect(receiptId, 'ios-private-cloud-sync:voice-ai-processors-v3:receipt-1');
+    expect(receiptId, '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1');
     expect(transport.values, [true]);
     expect(transport.getCalls, 1);
     expect(SharedPreferencesUtil().hasAccountBoundAiConsent('uid-a'), isTrue);
     expect(SharedPreferencesUtil().aiConsentReceiptId, receiptId);
+    expect(SharedPreferencesUtil().aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
+    expect(SharedPreferencesUtil().aiConsentClientVersion, '1.0.528+804');
+    expect(SharedPreferencesUtil().aiConsentLocale, 'en-US');
     expect(
       SharedPreferencesUtil().aiConsentContractVersion,
       SharedPreferencesUtil.currentAiConsentContractVersion,
@@ -372,6 +380,8 @@ void main() {
     final service = EllaAiConsentService(
       transport: transport,
       receiptIdFactory: () => 'receipt-1',
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
     );
 
     final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
@@ -379,6 +389,29 @@ void main() {
     expect(receiptId, isNull);
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
+  });
+
+  test('revocation stops local authority before requesting the server update', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+    );
+    final transport = _FakeConsentTransport(updateResult: false, confirmedEnabled: true);
+    final service = EllaAiConsentService(
+      transport: transport,
+      receiptIdFactory: () => 'unused',
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final synced = await service.revokePrivateCloudSync();
+
+    expect(synced, isFalse);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+    expect(transport.values, [false]);
   });
 }
 

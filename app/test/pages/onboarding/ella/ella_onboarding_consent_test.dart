@@ -26,14 +26,14 @@ void main() {
       );
     });
 
-    test('existing user with a stale contract waits for explicit voice use', () {
+    test('material processor change requests renewed consent during onboarding', () {
       expect(
         EllaOnboarding.shouldPresentVoiceConsent(
           hasCurrentConsent: false,
           hasPriorAccountConsent: true,
           deferredCurrentConsent: false,
         ),
-        isFalse,
+        isTrue,
       );
     });
 
@@ -46,6 +46,11 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('provisioning remains stopped until current consent exists', () {
+      expect(EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: false), isFalse);
+      expect(EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: true), isTrue);
     });
   });
 }

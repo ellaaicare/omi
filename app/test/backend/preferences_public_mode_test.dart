@@ -25,17 +25,27 @@ void main() {
 
   test('accepting AI consent persists acceptance and a timestamp', () {
     final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
 
-    preferences.acceptAiConsent();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+      clientVersion: '1.0.528+804',
+      locale: 'en-US',
+    );
 
     expect(preferences.aiConsentAccepted, isTrue);
     expect(DateTime.tryParse(preferences.aiConsentAcceptedAt), isNotNull);
     expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
+    expect(preferences.aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
+    expect(preferences.aiConsentClientVersion, '1.0.528+804');
+    expect(preferences.aiConsentLocale, 'en-US');
 
     preferences.declineAiConsent();
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentAcceptedAt, isEmpty);
     expect(preferences.aiConsentContractVersion, isEmpty);
+    expect(preferences.aiConsentProcessorSetHash, isEmpty);
   });
 
   test('legacy and stale processor consent receipts fail closed', () async {
@@ -48,6 +58,7 @@ void main() {
     await SharedPreferencesUtil.init();
 
     final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isFalse);
 
@@ -62,12 +73,12 @@ void main() {
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
 
-  test('existing v2 account defers v3 until an explicit voice action', () async {
+  test('existing v3 account requires v4 before any AI action', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentContractVersion': 'voice-ai-processors-v2',
-      'aiConsentReceiptId': 'ios-private-cloud-sync:voice-ai-processors-v2:receipt-a',
+      'aiConsentContractVersion': 'voice-ai-processors-v3',
+      'aiConsentReceiptId': 'ios-private-cloud-sync:voice-ai-processors-v3:receipt-a',
       'aiConsentReceiptUid': 'uid-a',
     });
     await SharedPreferencesUtil.init();
@@ -78,20 +89,24 @@ void main() {
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
   });
 
-  test('deferred v3 remains inactive until acceptance and acceptance is one-time', () {
+  test('deferred v4 remains inactive until account-bound acceptance', () {
     final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
 
     preferences.deferAiConsent();
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.isCurrentAiConsentDeferred, isTrue);
 
-    preferences.acceptAiConsent();
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+    );
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'voice-ai-processors-v3');
+    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v4');
   });
 
-  test('receipt-less acceptance clears stale same-account authority', () async {
+  test('receipt-less acceptance clears stale authority and remains fail closed', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
@@ -104,9 +119,38 @@ void main() {
     final preferences = SharedPreferencesUtil();
     preferences.acceptAiConsent();
 
-    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentReceiptId, isEmpty);
     expect(preferences.aiConsentReceiptUid, isEmpty);
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isFalse);
+  });
+
+  test('account switch invalidates otherwise current processor consent', () {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+    );
+    expect(preferences.aiConsentAccepted, isTrue);
+
+    preferences.uid = 'uid-b';
+
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.hasAccountBoundAiConsent('uid-b'), isFalse);
+  });
+
+  test('processor hash change fails closed even when version and receipt look current', () async {
+    SharedPreferences.setMockInitialValues({
+      'uid': 'uid-a',
+      'aiConsentAccepted': true,
+      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'aiConsentProcessorSetHash': 'sha256:stale',
+      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      'aiConsentReceiptUid': 'uid-a',
+    });
+    await SharedPreferencesUtil.init();
+
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
 }

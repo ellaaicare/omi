@@ -87,7 +87,7 @@ class ConsentBottomSheet extends StatelessWidget {
 
                 // Main message
                 Text(
-                  context.l10n.consentDataMessage,
+                  context.l10n.ellaAuthDataDisclosure,
                   style: const TextStyle(
                     color: EllaColors.textPrimary,
                     fontSize: 16,

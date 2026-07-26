@@ -25,6 +25,7 @@ import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/capture/connect.dart';
+import 'package:omi/pages/settings/delete_account.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
@@ -173,8 +174,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _openListeningConsent() async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    var revokeSynced = true;
     final accepted = await AiConsentSheet.show(
       context,
+      reviewMode: true,
       onAccept: isHermesProvisioningGateEnabled
           ? () async {
               final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
@@ -183,6 +186,12 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               return true;
             }
           : null,
+      onDecline: () async {
+        revokeSynced = await EllaAiConsentService().revokePrivateCloudSync();
+      },
+      onRequestDeletion: () async {
+        await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DeleteAccount()));
+      },
     );
     if (!mounted) return;
     final captureProvider = context.read<CaptureProvider>();
@@ -191,6 +200,13 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     } else {
       await captureProvider.stopStreamDeviceRecording();
       await captureProvider.stopStreamRecording();
+    }
+    if (!mounted) return;
+    setState(() {});
+    if (!revokeSynced) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.aiConsentRevokeSyncFailed)),
+      );
     }
   }
 
@@ -310,7 +326,16 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
             // CAPTURE section
             _buildSectionHeader(context.l10n.ellaCaptureSection),
-            EllaSettingsRow(icon: Icons.hearing, title: context.l10n.listeningAndConsent, onTap: _openListeningConsent),
+            EllaSettingsRow(
+              icon: Icons.hearing,
+              title: context.l10n.listeningAndConsent,
+              subtitle: SharedPreferencesUtil().hasAccountBoundAiConsent(
+                FirebaseAuth.instance.currentUser?.uid ?? '',
+              )
+                  ? context.l10n.aiConsentAllowedStatus
+                  : context.l10n.aiConsentNotAllowedStatus,
+              onTap: _openListeningConsent,
+            ),
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.record_voice_over_rounded,

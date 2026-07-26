@@ -238,16 +238,20 @@ void main() {
       await client.disconnect();
     });
 
-    test('accepted v3 consent passes the mic gate before identity validation', () async {
+    test('accepted account-bound v4 consent passes the mic gate before identity validation', () async {
       final preferences = SharedPreferencesUtil();
-      preferences.acceptAiConsent();
+      preferences.uid = 'uid-a';
+      preferences.acceptAiConsent(
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+        uid: 'uid-a',
+      );
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 
       final receipt = await client.connect(provider: 'grok-voice');
 
       expect(receipt.connected, isFalse);
-      expect(receipt.stage, V2VConnectionStage.identity);
-      expect(receipt.errorCode, 'missing_authenticated_identity');
+      expect(receipt.stage, isNot(V2VConnectionStage.consent));
+      expect(receipt.errorCode, isNot('ai_consent_required'));
       await client.disconnect();
     });
 
