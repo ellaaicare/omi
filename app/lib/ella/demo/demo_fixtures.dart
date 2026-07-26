@@ -10,7 +10,8 @@ class DemoFixtures {
   static const dailySummaryId = 'demo-daily-recap';
 
   static const dailyRecap =
-      "Mom had a good day. She did her crossword with coffee, found the scissors (kitchen drawer, as usual), and spent the afternoon in the garden with Margaret — the tomatoes are coming in early. She's looking forward to dinner with David on Tuesday and asked about it twice, because she's excited.";
+      'Good morning, Margaret. The scissors turned up right where we thought — the kitchen drawer. '
+      'You put them back beside the tape.';
 
   static List<ServerConversation> conversations({DateTime? now}) {
     final base = now ?? DateTime.now();
@@ -22,24 +23,24 @@ class DemoFixtures {
         title: 'Found the scissors',
         startedAt: day.add(const Duration(hours: 11, minutes: 32)),
         duration: const Duration(minutes: 3, seconds: 12),
-        overview: 'They were in the kitchen drawer, next to the tape.',
+        overview: 'Right where we thought — the kitchen drawer.',
         emoji: '✂️',
       ),
       _conversation(
         id: gardenConversationId,
-        title: 'A walk past the roses',
-        startedAt: day.add(const Duration(hours: 14, minutes: 15)),
+        title: 'A walk with Rose',
+        startedAt: day.subtract(const Duration(days: 1)).add(const Duration(hours: 14, minutes: 15)),
         duration: const Duration(minutes: 12, seconds: 4),
         overview: 'The long way home along Elm — warm air, roses in bloom.',
-        emoji: '🚶',
+        emoji: '🌿',
       ),
       _conversation(
         id: 'demo-phone-call-with-david',
-        title: 'Phone call with David',
+        title: 'Dinner with David',
         startedAt: day.subtract(const Duration(days: 1)).add(const Duration(hours: 17, minutes: 40)),
         duration: const Duration(minutes: 1, seconds: 8),
         overview: "Dinner set for Tuesday at six; he'll pick you up at a quarter to.",
-        emoji: '📞',
+        emoji: '🍽️',
       ),
       _conversation(
         id: 'demo-tuesday-dinner-plans',

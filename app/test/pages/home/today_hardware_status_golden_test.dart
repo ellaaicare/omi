@@ -28,8 +28,10 @@ void main() {
         .load();
   });
 
-  Future<void> pumpHardwareCard(
+  Future<void> pumpStatusSurfaces(
     WidgetTester tester, {
+    required bool necklaceConnected,
+    required bool necklaceConnecting,
     required bool headsetConnected,
     required bool usesPhoneSpeaker,
   }) async {
@@ -38,6 +40,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
+    final actionable = !necklaceConnected || usesPhoneSpeaker;
     await tester.pumpWidget(
       MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -54,16 +57,29 @@ void main() {
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(EllaSizes.screenPadding),
-              child: TodayHardwareStatusCard(
-                necklaceConnected: true,
-                necklaceConnecting: false,
-                batteryLevel: 96,
-                deviceType: DeviceType.omi,
-                fallbackDeviceImagePath: 'assets/images/omi-devkit-without-rope.png',
-                headsetConnected: headsetConnected,
-                audioOutputName: 'Ella headset',
-                usesPhoneSpeaker: usesPhoneSpeaker,
-                onOpenNecklace: () {},
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TodayStatusStrip(
+                    necklaceConnected: necklaceConnected,
+                    necklaceConnecting: necklaceConnecting,
+                    batteryLevel: 96,
+                    deviceType: DeviceType.omi,
+                    headsetConnected: headsetConnected,
+                    audioOutputName: 'Ella headset',
+                    onTap: () {},
+                  ),
+                  if (actionable) ...[
+                    const SizedBox(height: EllaSizes.cardGap),
+                    TodayActionableDeviceCard(
+                      necklaceConnected: necklaceConnected,
+                      necklaceConnecting: necklaceConnecting,
+                      deviceType: DeviceType.omi,
+                      usesPhoneSpeaker: usesPhoneSpeaker,
+                      onReconnect: () {},
+                    ),
+                  ],
+                ],
               ),
             ),
           ),
@@ -78,16 +94,33 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    // Bounded pumps: the reconnecting state hosts the breathing dot, whose
+    // looped animation never settles.
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
   }
 
-  testWidgets('connected hardware card screenshot', (tester) async {
-    await pumpHardwareCard(tester, headsetConnected: true, usesPhoneSpeaker: false);
-    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ux_1098_hardware_connected.png'));
+  testWidgets('healthy status strip screenshot', (tester) async {
+    await pumpStatusSurfaces(
+      tester,
+      necklaceConnected: true,
+      necklaceConnecting: false,
+      headsetConnected: true,
+      usesPhoneSpeaker: false,
+    );
+    expect(find.byType(TodayActionableDeviceCard), findsNothing);
+    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ux_1106_status_strip_healthy.png'));
   });
 
-  testWidgets('phone speaker warning screenshot', (tester) async {
-    await pumpHardwareCard(tester, headsetConnected: false, usesPhoneSpeaker: true);
-    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ux_1098_phone_speaker_warning.png'));
+  testWidgets('actionable reconnecting with loudspeaker warning screenshot', (tester) async {
+    await pumpStatusSurfaces(
+      tester,
+      necklaceConnected: false,
+      necklaceConnecting: true,
+      headsetConnected: false,
+      usesPhoneSpeaker: true,
+    );
+    expect(find.text('Headset is off — Ella will speak from the phone.'), findsOneWidget);
+    await expectLater(find.byType(MaterialApp), matchesGoldenFile('goldens/ux_1106_actionable_devices.png'));
   });
 }

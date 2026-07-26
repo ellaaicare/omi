@@ -50,3 +50,64 @@ The 120% and 150% text-size checks are captured in `today-120.png` and `today-15
 - Claim gate: Whispers-off copy explicitly states that listening and remembering continue; no new safety, monitoring, emergency, diagnosis, dementia, fall-detection, or memory-improvement claim was introduced.
 
 Final status: **PASS**, with the two connected-device activation limitations documented above.
+
+---
+
+# Ella Today Density Rebalance — Design QA
+
+## Visual truth
+
+- Healthy source: `/Users/greg/repos/ella/design-reference/exports/today-rebalance-a-healthy.png`
+- Large-text source: `/Users/greg/repos/ella/design-reference/exports/today-rebalance-e-dynamic-type.png`
+- Source size: 804×1748 px (402×874 pt at @2x)
+- Source notes: `/Users/greg/repos/ella/design-reference/NOTES.md`
+
+## Verified implementation
+
+- Device: Codex iPhone 17 Pro Max
+- OS: iOS 26.5
+- App viewport: 440×956 pt at @3x
+- Raw capture: `design-qa-evidence/implementation-healthy-iphone17promax-raw.png` (1320×2868 px)
+- Standard-text capture: `design-qa-evidence/implementation-healthy-final.jpg`
+- Accessibility-text capture: `design-qa-evidence/implementation-dynamic-type-final.jpg`
+- Comparison captures normalize both source and implementation to 368×800 px for a like-for-like visual review while preserving the raw simulator capture above.
+
+## State under test
+
+- Thursday, July 24 at 9:41
+- Healthy hardware: necklace 96%, Ella headset connected
+- Whispers enabled
+- Healthy daily note for Margaret
+- Featured memory plus two compact recent-memory cards
+- Standard Dynamic Type and Accessibility Medium Dynamic Type
+
+The deterministic state is enabled only by the compile-time `ELLA_TODAY_DESIGN_PREVIEW` flag used for simulator QA. Normal builds retain the existing production state and data flow.
+
+## Comparison
+
+- Healthy full view: `design-qa-evidence/comparison-healthy-final.jpg`
+- Large-text full view: `design-qa-evidence/comparison-dynamic-type-final.jpg`
+- Healthy source crop: `design-qa-evidence/source-healthy-368x800.png`
+- Large-text source crop: `design-qa-evidence/source-dynamic-type-368x800.png`
+
+The final pass checked the hardware strip, daily-note typography and inline link, read-aloud action, whisper pill, recent-memory hierarchy, card borders/radii, spacing, colors, and source artwork. The implementation keeps Ella's existing persistent bottom navigation, which the static design export does not depict; the scroll view provides bottom padding and was verified through the full card grid.
+
+## Interaction and runtime checks
+
+- Whispers switch toggled off and back on; labels and values updated correctly.
+- Read aloud toggled to Stop and back to Read aloud.
+- Home content scrolled through the two-up memory grid without clipping or losing access behind the persistent navigation.
+- Accessibility Medium rendered without overflow.
+- Final simulator build and launch completed successfully; dependency warnings only, with no app build errors or crash/error screen.
+
+## Fixes made during QA
+
+- Matched the reference daily-note and memory fixture content.
+- Kept “Read more” inline with the Fraunces note typography.
+- Matched the compact “See whispers” link copy.
+- Regenerated every localization implementation after adding the new localized copy.
+- Removed the development ribbon from final evidence by verifying the production scheme in Debug configuration.
+
+## Result
+
+passed
