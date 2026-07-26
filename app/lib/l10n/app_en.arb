@@ -10445,7 +10445,7 @@
   "todayVoiceOnPhone": "Playing from the phone",
   "todayHeadsetFallbackWarning": "Headset is off — Ella will speak from the phone.",
   "todayListeningButton": "Ella is listening — See what she hears",
-  "todayWhispersHistory": "See what Ella has whispered",
+  "todayWhispersHistory": "See whispers",
   "todayRemindersTitle": "TODAY’S REMINDERS",
   "todayReminderFromConversation": "From a conversation",
   "todayReminderFromSource": "From {source}",
@@ -10465,5 +10465,6 @@
   "todaySeeAllMemories": "See all",
   "todayMemoriesEmpty": "As Ella listens today, your memories will gather here. 🪽",
   "todayListeningLead": "Ella is listening — ",
-  "todayListeningLink": "See what she hears ›"
+  "todayListeningLink": "See what she hears ›",
+  "todayReadMore": "Read more"
 }

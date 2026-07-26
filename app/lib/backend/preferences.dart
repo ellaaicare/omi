@@ -18,6 +18,7 @@ class SharedPreferencesUtil {
   static SharedPreferences? _preferences;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
+  static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
   static const String currentAiConsentContractVersion = 'voice-ai-processors-v3';
   static const String currentAiConsentReceiptPrefix = 'ios-private-cloud-sync:$currentAiConsentContractVersion:';
 
@@ -187,7 +188,7 @@ class SharedPreferencesUtil {
 
   set demoMode(bool value) => saveBool('demoMode', value);
 
-  bool get demoMode => getBool('demoMode', defaultValue: false);
+  bool get demoMode => isTodayDesignPreview || getBool('demoMode', defaultValue: false);
 
   set publicMode(bool value) {
     if (!isPublicBuild) saveBool('publicMode', value);

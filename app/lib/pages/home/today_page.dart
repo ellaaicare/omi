@@ -10,6 +10,7 @@ import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
+import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/hardware/ella_hardware_artwork.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
@@ -90,7 +91,9 @@ class TodayPageState extends State<TodayPage> {
 
   Future<void> _loadDailySummary() async {
     try {
-      final summaries = await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
+      final summaries = SharedPreferencesUtil.isTodayDesignPreview
+          ? DemoFixtures.dailySummaries(now: DateTime(2025, 7, 24, 9, 41))
+          : await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
       if (!mounted) return;
       setState(() {
         _dailySummary = summaries.isEmpty ? null : summaries.first;
@@ -171,7 +174,7 @@ class TodayPageState extends State<TodayPage> {
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
+    final now = SharedPreferencesUtil.isTodayDesignPreview ? DateTime(2025, 7, 24, 9, 41) : DateTime.now();
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
     final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
@@ -357,24 +360,21 @@ class _DailyNoteCard extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.tealDeep),
                 )
               else
-                Text(
-                  preview,
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(text: hasMore ? '${preview.replaceFirst(RegExp(r'[.!?]$'), '')}… ' : preview),
+                      if (hasMore)
+                        TextSpan(
+                          text: context.l10n.todayReadMore,
+                          style: const TextStyle(color: EllaColors.tealDeep, fontWeight: FontWeight.w600),
+                        ),
+                    ],
+                  ),
                   style: EllaTextStyles.noteBody,
                   maxLines: enlarged ? null : 6,
                   overflow: enlarged ? TextOverflow.visible : TextOverflow.ellipsis,
                 ),
-              if (hasMore) ...[
-                const SizedBox(height: 8),
-                const Text(
-                  'Read more',
-                  style: TextStyle(
-                    fontFamily: EllaTextStyles.uiFont,
-                    color: EllaColors.tealDeep,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
               const SizedBox(height: 18),
               Wrap(
                 spacing: 12,
