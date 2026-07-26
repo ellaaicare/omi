@@ -59,6 +59,8 @@ def _token(
         "voice_mode": "v4",
         "isolated_runtime": isolated,
         "jti": f"session-{uid}",
+        "correlation_id": f"correlation-{uid}",
+        "entitlement_revision": 3,
         "aud": voice.VOICE_SESSION_AUDIENCE,
         "iss": "omi-backend",
         "iat": now - timedelta(minutes=2),
@@ -118,6 +120,8 @@ def test_voice_session_token_has_firebase_subject_and_proxy_audience():
     assert claims["uid"] == "uid-a"
     assert claims["isolated_runtime"] is True
     assert claims["jti"]
+    assert claims["correlation_id"]
+    assert claims["entitlement_revision"] == 1
 
 
 def test_voice_session_token_binds_memory_scope_without_memory_content():
@@ -923,9 +927,7 @@ def test_canonical_startup_and_search_require_exact_uid_and_matching_signed_memo
                     continue
                 row_scope = row["source_ref"].get("scope_kind")
                 row_conversation = row["source_ref"].get("conversation_id")
-                if row_scope != "memory" or (
-                    scope_kind == "memory" and row_conversation == conversation_id
-                ):
+                if row_scope != "memory" or (scope_kind == "memory" and row_conversation == conversation_id):
                     visible.append(row)
             return visible
 

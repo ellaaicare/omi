@@ -19,25 +19,30 @@ import asyncio
 import base64
 import hmac
 import json
-import os
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from typing import Any, List, Literal, Optional
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import httpx
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
 from ella.services.provisioning import ProvisioningError, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.voice_canary_alerts import (
+    VOICE_SPEND_ANOMALY_MICROUSD,
+    send_canary_alert,
+)
 from ella.services.voice_honcho import (
     fetch_voice_honcho_context,
     resolve_voice_honcho_target,
@@ -59,12 +64,17 @@ verify_firebase_token = None  # Will be implemented when integrating with Fireba
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/voice", tags=["voice"])
+entitlement_router = APIRouter(tags=["voice"])
 
 # Configuration
 ELLA_VOICE_ENDPOINT = os.getenv("ELLA_VOICE_ENDPOINT", "wss://voice.ella-ai-care.com/ws")
 ELLA_SESSION_SECRET = os.getenv("ELLA_SESSION_SECRET", "")
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
-SESSION_EXPIRY_HOURS = int(os.getenv("ELLA_SESSION_EXPIRY_HOURS", "1"))
+SESSION_EXPIRY_MINUTES = int(os.getenv("ELLA_SESSION_EXPIRY_MINUTES", "25"))
+VOICE_CANARY_ENFORCEMENT_ENABLED = os.getenv(
+    "ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 XAI_TTS_VOICE_ID = os.getenv("XAI_TTS_VOICE_ID", "eve")
@@ -117,6 +127,8 @@ class VoiceProxyPrincipal:
     provider: str
     voice_mode: str
     isolated_runtime: bool
+    entitlement_revision: int = 0
+    correlation_id: str = ""
     scope_kind: Optional[str] = None
     conversation_id: Optional[str] = None
     active_summary_version_id: Optional[str] = None
@@ -163,6 +175,8 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
                     "voice_mode",
                     "provider",
                     "isolated_runtime",
+                    "entitlement_revision",
+                    "correlation_id",
                 ]
             },
         )
@@ -193,6 +207,8 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
             provider=str(claims.get("provider") or ""),
             voice_mode=str(claims.get("voice_mode") or ""),
             isolated_runtime=False,
+            entitlement_revision=0,
+            correlation_id=str(claims.get("jti") or ""),
         )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail={"code": "voice_session_expired"}) from exc
@@ -209,6 +225,9 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         or not str(claims.get("provider") or "").strip()
         or not str(claims.get("voice_mode") or "").strip()
         or not isinstance(claims.get("isolated_runtime"), bool)
+        or not isinstance(claims.get("entitlement_revision"), int)
+        or claims.get("entitlement_revision", 0) < 1
+        or not str(claims.get("correlation_id") or "").strip()
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
@@ -237,13 +256,11 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         provider=str(claims.get("provider") or ""),
         voice_mode=str(claims.get("voice_mode") or ""),
         isolated_runtime=claims.get("isolated_runtime") is True,
+        entitlement_revision=claims["entitlement_revision"],
+        correlation_id=str(claims["correlation_id"]),
         scope_kind=scope_kind,
         conversation_id=str(claims.get("conversation_id") or "").strip() or None,
-        active_summary_version_id=(
-            str(claims.get("active_summary_version_id"))
-            if scope_kind == "memory"
-            else None
-        ),
+        active_summary_version_id=(str(claims.get("active_summary_version_id")) if scope_kind == "memory" else None),
         can_reinterpret=claims.get("can_reinterpret") is True,
     )
 
@@ -290,14 +307,10 @@ async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
         if target:
             _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE.pop(uid, None)
             return target, reason
-        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
-            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
-        )
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
         return None, reason
     except asyncio.TimeoutError:
-        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
-            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
-        )
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
         logger.warning(
             "[FLOW:VOICE-HONCHO] target resolution timed out uid=%s timeout=%.3fs",
             uid,
@@ -305,9 +318,7 @@ async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
         )
         return None, "honcho_profile_resolution_timeout"
     except Exception as exc:
-        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = (
-            time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
-        )
+        _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE[uid] = time.monotonic() + VOICE_HONCHO_PROFILE_NEGATIVE_CACHE_TTL_SECONDS
         logger.warning(
             "[FLOW:VOICE-HONCHO] target resolution degraded uid=%s error=%s",
             uid,
@@ -364,6 +375,7 @@ V2V_PROVIDERS = {
         "description": "Voice-to-voice via Grok Realtime API, sub-second latency",
         "default_mode": "v4",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "model": os.getenv("XAI_GROK_VOICE_MODEL", "grok-voice-think-fast-1.0"),
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
     "gemini-live": {
@@ -371,6 +383,7 @@ V2V_PROVIDERS = {
         "description": "Compatibility label for older app builds; use gemini-native-live for provider-native voice",
         "default_mode": "gemini-live",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",  # Same proxy, different mode
+        "model": os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"),
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
     "gemini-native-live": {
@@ -378,6 +391,7 @@ V2V_PROVIDERS = {
         "description": "Provider-native Gemini Live speech-to-speech through Ella voice proxy",
         "default_mode": "gemini-native-live-v1",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "model": os.getenv("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"),
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
     "openai-native-realtime": {
@@ -385,6 +399,7 @@ V2V_PROVIDERS = {
         "description": "Provider-native OpenAI Realtime speech-to-speech through Ella voice proxy",
         "default_mode": "openai-native-realtime-v1",
         "endpoint_env": "ELLA_VOICE_ENDPOINT",
+        "model": os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime"),
         "key_check": lambda: bool(ELLA_SESSION_SECRET),
     },
 }
@@ -455,6 +470,8 @@ class VoiceSessionResponse(BaseModel):
     voice_mode: str
     session_id: str
     session_scope: Optional[dict] = None
+    quota_state: str = "ok"
+    quota: Optional[dict] = None
 
 
 class VoiceConfigResponse(BaseModel):
@@ -464,6 +481,60 @@ class VoiceConfigResponse(BaseModel):
     channels: int = 1
     encoding: str = "pcm_int16"
     byte_order: str = "little_endian"
+
+
+class VoiceCanaryAcceptRequest(BaseModel):
+    uid: str
+    session_id: str
+    correlation_id: str
+    model: str = ""
+
+
+class VoiceCanaryHeartbeatRequest(BaseModel):
+    uid: str
+    session_id: str
+    input_audio_bytes: int = 0
+    output_audio_bytes: int = 0
+    tool_calls: int = 0
+    reconnects: int = 0
+    provider_request_ids: list[str] = Field(default_factory=list)
+    estimated_cost_microusd: int = 0
+
+
+class VoiceCanaryCompleteRequest(VoiceCanaryHeartbeatRequest):
+    input_audio_s: float = 0
+    output_audio_s: float = 0
+    connection_s: float = 0
+    termination_reason: str = "completed"
+    normalized_error_code: Optional[str] = None
+
+
+def _voice_policy_status(code: str) -> int:
+    if code == "rate_limited":
+        return 429
+    if code in {"concurrent", "voice_session_replayed", "entitlement_stale"}:
+        return 409
+    if code in {"voice_session_not_active"}:
+        return 404
+    if code in {"voice_disabled", "user_disabled", "provider_disabled"}:
+        return 503
+    return 403
+
+
+def _voice_policy_payload(decision: voice_canary_db.VoicePolicyDecision) -> dict[str, Any]:
+    entitlement = decision.entitlement or {}
+    return {
+        "allowed": decision.allowed,
+        "state": decision.code,
+        "quota": decision.quota,
+        "entitlement_revision": entitlement.get("revision"),
+        "limits": {
+            "max_session_s": entitlement.get("max_session_s"),
+            "max_audio_bytes_per_session": entitlement.get("max_audio_bytes_per_session"),
+            "max_audio_bytes_per_minute": entitlement.get("max_audio_bytes_per_minute"),
+            "soft_limit_ratio": float(entitlement.get("soft_limit_ratio") or 0),
+        },
+    }
 
 
 DEFAULT_ELEVENLABS_VOICE_ID = "pFZP5JQG7iQjIQuC4Bku"
@@ -531,11 +602,7 @@ def _load_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> Optional[dic
                 type(exc).__name__,
             )
 
-    occurred_at = (
-        conversation.get("started_at")
-        or conversation.get("created_at")
-        or conversation.get("finished_at")
-    )
+    occurred_at = conversation.get("started_at") or conversation.get("created_at") or conversation.get("finished_at")
     title = str(structured.get("title") or "Untitled memory").strip()
     overview = str(structured.get("overview") or "").strip()
     topic_query = " ".join(
@@ -681,6 +748,8 @@ def create_session_token(
     provider: str = "grok-voice",
     isolated_runtime: bool = False,
     session_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    entitlement_revision: int = 1,
     session_scope: Optional[dict[str, Any]] = None,
 ) -> str:
     """
@@ -702,6 +771,8 @@ def create_session_token(
 
     if not ELLA_SESSION_SECRET:
         raise HTTPException(status_code=500, detail="Session secret not configured")
+    if VOICE_CANARY_ENFORCEMENT_ENABLED and entitlement_revision < 1:
+        raise ValueError("active voice entitlement revision required")
 
     if session_scope:
         scope_pair_error = _memory_scoped_voice_provider_mode_error(provider, voice_mode)
@@ -720,7 +791,9 @@ def create_session_token(
         "callback_url": f"{ELLA_API_BASE}/v1/ella/voice-session",
         "aud": VOICE_SESSION_AUDIENCE,
         "jti": session_id or str(uuid.uuid4()),
-        "exp": datetime.utcnow() + timedelta(hours=SESSION_EXPIRY_HOURS),
+        "correlation_id": correlation_id or str(uuid.uuid4()),
+        "entitlement_revision": entitlement_revision,
+        "exp": datetime.utcnow() + timedelta(minutes=SESSION_EXPIRY_MINUTES),
         "iat": datetime.utcnow(),
         "iss": "omi-backend",
     }
@@ -895,6 +968,7 @@ async def create_voice_session(
         )
 
     provider_info = V2V_PROVIDERS[provider]
+    provider_model = str(provider_info.get("model") or "")
 
     # Resolve and validate the complete scoped pair before memory lookup or
     # provider setup. Unscoped sessions retain their existing behavior.
@@ -914,28 +988,42 @@ async def create_voice_session(
             detail=f"Provider {provider!r} is not configured (missing API key)",
         )
 
-    memory_scope = (
-        await _resolve_voice_memory_scope(uid, requested_scope)
-        if requested_scope
-        else None
-    )
+    memory_scope = await _resolve_voice_memory_scope(uid, requested_scope) if requested_scope else None
 
     _start = time.time()
+    session_id = str(uuid.uuid4())
+    correlation_id = str(uuid.uuid4())
+    entitlement_revision = 1
+    quota_state = "ok"
+    quota: dict[str, Any] = {}
+    if VOICE_CANARY_ENFORCEMENT_ENABLED:
+        policy = await voice_canary_db.evaluate_issuance(
+            uid=uid,
+            provider=provider,
+            model=provider_model,
+            mode=resolved_mode,
+            correlation_id=correlation_id,
+        )
+        if not policy.allowed:
+            raise HTTPException(
+                status_code=_voice_policy_status(policy.code),
+                detail=policy.detail(),
+            )
+        entitlement_revision = int((policy.entitlement or {})["revision"])
+        quota_state = policy.code
+        quota = policy.quota
 
     # Look up user display name from DB
     user_display_name = None
     try:
         pool = await _get_pool()
-        row = await pool.fetchrow(
-            "SELECT name FROM users WHERE omi_uid = $1", uid
-        )
+        row = await pool.fetchrow("SELECT name FROM users WHERE omi_uid = $1", uid)
         if row:
             user_display_name = row["name"]
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-SESSION] name lookup failed for {uid}: {e}")
 
     try:
-        session_id = str(uuid.uuid4())
         token = create_session_token(
             uid=uid,
             firebase_uid=uid,
@@ -944,6 +1032,8 @@ async def create_voice_session(
             provider=provider,
             isolated_runtime=isolated_runtime,
             session_id=session_id,
+            correlation_id=correlation_id,
+            entitlement_revision=entitlement_revision,
             session_scope=memory_scope,
         )
 
@@ -954,14 +1044,14 @@ async def create_voice_session(
         _elapsed = int((time.time() - _start) * 1000)
         print(
             f"[FLOW:VOICE-SESSION] uid={uid} provider={provider} mode={resolved_mode} "
-            f"endpoint={endpoint} expiry={SESSION_EXPIRY_HOURS}h latency={_elapsed}ms",
+            f"endpoint={endpoint} expiry={SESSION_EXPIRY_MINUTES}m latency={_elapsed}ms",
             flush=True,
         )
 
         return VoiceSessionResponse(
             session_token=token,
             voice_endpoint=endpoint_with_mode,
-            expires_in=SESSION_EXPIRY_HOURS * 3600,
+            expires_in=SESSION_EXPIRY_MINUTES * 60,
             audio_format={
                 "sample_rate": 24000,
                 "channels": 1,
@@ -971,6 +1061,8 @@ async def create_voice_session(
             provider=provider,
             voice_mode=resolved_mode,
             session_id=session_id,
+            quota_state=quota_state,
+            quota=quota,
             session_scope=(
                 {
                     "kind": memory_scope["kind"],
@@ -988,6 +1080,119 @@ async def create_voice_session(
     except Exception as e:
         logger.error(f"[FLOW:VOICE-SESSION] uid={uid} provider={provider} error={e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@entitlement_router.get("/v1/entitlement")
+@router.get("/entitlement")
+async def get_voice_entitlement(
+    authenticated_uid: str = Depends(auth.get_current_user_uid),
+):
+    """Return the stable frontend contract without exposing operator notes."""
+    return await voice_canary_db.get_entitlement_contract(authenticated_uid)
+
+
+@router.post("/canary/accept")
+async def accept_voice_canary_session(
+    body: VoiceCanaryAcceptRequest,
+    request: Request,
+):
+    """Re-check policy and atomically claim the JWT jti before provider setup."""
+    principal = authenticate_voice_proxy_request(request, body.uid)
+    if body.session_id != principal.session_id or body.correlation_id != principal.correlation_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "voice_session_claim_mismatch"},
+        )
+    if not VOICE_CANARY_ENFORCEMENT_ENABLED:
+        return {"allowed": True, "state": "enforcement_disabled", "quota": {}, "limits": {}}
+    decision = await voice_canary_db.accept_session(
+        uid=principal.uid,
+        session_id=principal.session_id,
+        correlation_id=principal.correlation_id,
+        entitlement_revision=principal.entitlement_revision,
+        provider=principal.provider,
+        model=body.model,
+        mode=principal.voice_mode,
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=_voice_policy_status(decision.code),
+            detail=decision.detail(),
+        )
+    return _voice_policy_payload(decision)
+
+
+@router.post("/canary/heartbeat")
+async def heartbeat_voice_canary_session(
+    body: VoiceCanaryHeartbeatRequest,
+    request: Request,
+):
+    """Update absolute counters and return the current typed quota state."""
+    principal = authenticate_voice_proxy_request(request, body.uid)
+    if body.session_id != principal.session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "voice_session_claim_mismatch"},
+        )
+    if not VOICE_CANARY_ENFORCEMENT_ENABLED:
+        return {"allowed": True, "state": "enforcement_disabled", "quota": {}, "limits": {}}
+    decision = await voice_canary_db.update_session(
+        uid=principal.uid,
+        session_id=principal.session_id,
+        input_audio_bytes=body.input_audio_bytes,
+        output_audio_bytes=body.output_audio_bytes,
+        tool_calls=body.tool_calls,
+        reconnects=body.reconnects,
+        provider_request_ids=body.provider_request_ids,
+        estimated_cost_microusd=body.estimated_cost_microusd,
+    )
+    if body.estimated_cost_microusd >= VOICE_SPEND_ANOMALY_MICROUSD:
+        asyncio.create_task(
+            send_canary_alert(
+                "spend_anomaly",
+                uid=principal.uid,
+                code=decision.code,
+                details={
+                    "provider": principal.provider,
+                    "estimated_cost_microusd": body.estimated_cost_microusd,
+                    "daily_used_s": decision.quota.get("daily_used_s"),
+                    "monthly_used_s": decision.quota.get("monthly_used_s"),
+                },
+            )
+        )
+    return _voice_policy_payload(decision)
+
+
+@router.post("/canary/complete")
+async def complete_voice_canary_session(
+    body: VoiceCanaryCompleteRequest,
+    request: Request,
+):
+    """Release concurrency and append one terminal content-free ledger event."""
+    principal = authenticate_voice_proxy_request(request, body.uid)
+    if body.session_id != principal.session_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "voice_session_claim_mismatch"},
+        )
+    if not VOICE_CANARY_ENFORCEMENT_ENABLED:
+        return {"recorded": False, "state": "enforcement_disabled"}
+    event_id = await voice_canary_db.complete_session(
+        uid=principal.uid,
+        session_id=principal.session_id,
+        input_audio_s=body.input_audio_s,
+        output_audio_s=body.output_audio_s,
+        connection_s=body.connection_s,
+        input_audio_bytes=body.input_audio_bytes,
+        output_audio_bytes=body.output_audio_bytes,
+        tool_calls=body.tool_calls,
+        reconnects=body.reconnects,
+        provider_request_ids=body.provider_request_ids,
+        termination_reason=body.termination_reason,
+        normalized_error_code=body.normalized_error_code,
+        estimated_cost_microusd=body.estimated_cost_microusd,
+    )
+    return {"recorded": event_id is not None, "event_id": event_id}
 
 
 @router.get("/config", response_model=VoiceConfigResponse)
@@ -1056,7 +1261,10 @@ async def synthesize_speech(
                 )
             _elapsed = int((time.time() - _start) * 1000)
             if response.status_code != 200:
-                print(f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms", flush=True)
+                print(
+                    f"[FLOW:VOICE-TTS] ERROR provider={provider} status={response.status_code} latency={_elapsed}ms",
+                    flush=True,
+                )
                 raise HTTPException(status_code=502, detail=f"ella-tts error: {response.status_code}")
             audio_size = len(response.content)
             print(f"[FLOW:VOICE-TTS] OK provider={provider} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
@@ -1078,7 +1286,10 @@ async def synthesize_speech(
             print(f"[FLOW:VOICE-TTS] ERROR provider=xai-tts key_missing=true", flush=True)
             raise HTTPException(status_code=500, detail="XAI_API_KEY not configured")
         voice_id = request.voice_id if request.voice_id != DEFAULT_ELEVENLABS_VOICE_ID else XAI_TTS_VOICE_ID
-        print(f"[FLOW:VOICE-TTS] provider=xai-tts voice={voice_id} language={XAI_TTS_LANGUAGE} text_len={text_len}", flush=True)
+        print(
+            f"[FLOW:VOICE-TTS] provider=xai-tts voice={voice_id} language={XAI_TTS_LANGUAGE} text_len={text_len}",
+            flush=True,
+        )
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -1141,7 +1352,10 @@ async def synthesize_speech(
     # --- Reject unknown providers (no silent fallbacks) ---
     if provider != "elevenlabs":
         print(f"[FLOW:VOICE-TTS] ERROR unknown provider={provider!r}", flush=True)
-        raise HTTPException(status_code=400, detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, xai-tts, grok-voice, gemini-live")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown TTS provider: {provider!r}. Valid: elevenlabs, fish-audio, fish-audio-s1, fish-audio-s2, kokoro, inworld, xai-tts, grok-voice, gemini-live",
+        )
 
     # --- ElevenLabs ---
     if not ELEVENLABS_API_KEY:
@@ -1170,11 +1384,17 @@ async def synthesize_speech(
         _elapsed = int((time.time() - _start) * 1000)
 
         if response.status_code != 200:
-            print(f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}", flush=True)
+            print(
+                f"[FLOW:VOICE-TTS] ERROR provider=elevenlabs status={response.status_code} latency={_elapsed}ms body={response.text[:200]}",
+                flush=True,
+            )
             raise HTTPException(status_code=502, detail=f"ElevenLabs error: {response.status_code}")
 
         audio_size = len(response.content)
-        print(f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms", flush=True)
+        print(
+            f"[FLOW:VOICE-TTS] OK provider=elevenlabs voice={request.voice_id} audio_bytes={audio_size} latency={_elapsed}ms",
+            flush=True,
+        )
 
         return Response(content=response.content, media_type="audio/mpeg")
 
@@ -1219,8 +1439,6 @@ async def voice_health():
 # ============================================================================
 
 
-
-
 async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
     """Fetch recent OMI conversation summaries from Firestore for voice context.
     Returns formatted string of recent conversations (title + overview)."""
@@ -1228,17 +1446,20 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
         # Direct Firestore query — simpler than get_conversations() to avoid
         # composite index requirements (discarded + created_at needs index)
         from google.cloud import firestore
+
         db = firestore.Client()
         convos_ref = (
-            db.collection("users").document(uid).collection("conversations")
+            db.collection("users")
+            .document(uid)
+            .collection("conversations")
             .order_by("created_at", direction=firestore.Query.DESCENDING)
             .limit(limit)
         )
         convos = [doc.to_dict() for doc in convos_ref.stream()]
-        
+
         if not convos:
             return ""
-        
+
         parts = []
         for c in convos:
             structured = c.get("structured", {})
@@ -1246,7 +1467,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
             overview = structured.get("overview", "")
             emoji = structured.get("emoji", "")
             created = c.get("created_at")
-            
+
             # Format timestamp
             ts = ""
             if created:
@@ -1254,7 +1475,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
                     ts = created.strftime("%b %d %I:%M %p")
                 else:
                     ts = str(created)[:16]
-            
+
             entry = f"- {emoji} {title}"
             if overview:
                 # Truncate long overviews
@@ -1263,7 +1484,7 @@ async def _fetch_recent_conversations(uid: str, limit: int = 5) -> str:
             if ts:
                 entry += f" ({ts})"
             parts.append(entry)
-        
+
         return "\n".join(parts)
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Conversation fetch failed: {e}")
@@ -1280,15 +1501,15 @@ async def _fetch_memory_context(
     Returns formatted string of relevant memory snippets."""
     if not gateway_token:
         return ""
-    
+
     headers = {
         "Authorization": f"Bearer {gateway_token}",
         "Content-Type": "application/json",
     }
-    
+
     results_all = []
     queries = [f"{user_name} recent activity today schedule important"]
-    
+
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             for query in queries:
@@ -1302,6 +1523,7 @@ async def _fetch_memory_context(
                         data = resp.json()
                         if data.get("ok"):
                             import json as json_mod
+
                             results_text = data["result"]["content"][0]["text"]
                             results = json_mod.loads(results_text).get("results", [])
                             for r in results[:3]:
@@ -1315,10 +1537,10 @@ async def _fetch_memory_context(
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-CONTEXT] Memory context fetch failed: {e}")
         return ""
-    
+
     if not results_all:
         return ""
-    
+
     # Sort by score, deduplicate, take top 5
     results_all.sort(key=lambda x: x[1], reverse=True)
     seen = set()
@@ -1330,8 +1552,9 @@ async def _fetch_memory_context(
             unique.append(snippet)
         if len(unique) >= 5:
             break
-    
+
     return "\n---\n".join(unique)
+
 
 def _extract_caregiver_section(user_profile: str) -> str:
     """Extract caregiver-relevant notes from USER.md content."""
@@ -1599,11 +1822,7 @@ async def get_voice_context(request: Request):
         "recent_conversations": recent_conversations,
         "memory_context": memory_context,
         "honcho_context": str(honcho_context_result.get("context") or ""),
-        "honcho_status": {
-            key: value
-            for key, value in honcho_context_result.items()
-            if key != "context"
-        },
+        "honcho_status": {key: value for key, value in honcho_context_result.items() if key != "context"},
         "memory_scope": memory_scope,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
@@ -1718,12 +1937,12 @@ async def search_omi_conversations(request: Request):
         date_filter_start = None
         date_filter_end = None
         keyword_terms = []
-        
+
         query_lower = query.lower().strip()
-        
+
         # Date patterns: "march 8", "march 8th", "3/8", "yesterday", "last week", "today"
         date_parsed = False
-        
+
         if "yesterday" in query_lower:
             d = now - timedelta(days=1)
             date_filter_start = d.replace(hour=0, minute=0, second=0)
@@ -1748,15 +1967,34 @@ async def search_omi_conversations(request: Request):
         else:
             # Try "month day" pattern: "march 8", "march 8th", "mar 8"
             month_names = {
-                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
-                "nov": 11, "november": 11, "dec": 12, "december": 12,
+                "jan": 1,
+                "january": 1,
+                "feb": 2,
+                "february": 2,
+                "mar": 3,
+                "march": 3,
+                "apr": 4,
+                "april": 4,
+                "may": 5,
+                "jun": 6,
+                "june": 6,
+                "jul": 7,
+                "july": 7,
+                "aug": 8,
+                "august": 8,
+                "sep": 9,
+                "september": 9,
+                "oct": 10,
+                "october": 10,
+                "nov": 11,
+                "november": 11,
+                "dec": 12,
+                "december": 12,
             }
             date_match = re_mod.search(
                 r"(january|february|march|april|may|june|july|august|september|october|november|december|"
                 r"jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})(?:st|nd|rd|th)?",
-                query_lower
+                query_lower,
             )
             if date_match:
                 month_str = date_match.group(1)
@@ -1773,24 +2011,26 @@ async def search_omi_conversations(request: Request):
                         date_filter_end = target.replace(hour=23, minute=59, second=59)
                         date_parsed = True
                         # Remove date part from query for keyword matching
-                        remaining = query_lower[:date_match.start()] + query_lower[date_match.end():]
+                        remaining = query_lower[: date_match.start()] + query_lower[date_match.end() :]
                         keyword_terms = [t for t in remaining.split() if t]
                     except ValueError:
                         pass
-        
+
         if not date_parsed:
             keyword_terms = query_lower.split()
 
         keyword_terms = _expand_query_terms(_significant_query_terms(" ".join(keyword_terms)))
         keyword_terms = _normalized_query_terms(" ".join(keyword_terms))
-        
+
         logger.info(f"[FLOW:VOICE-SEARCH] date_filter={date_filter_start}->{date_filter_end}, keywords={keyword_terms}")
-        
+
         # Fetch conversations — use date filter if we have one, otherwise get last 100
         if date_filter_start and date_filter_end:
             # Firestore query with date range
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .where("created_at", ">=", date_filter_start)
                 .where("created_at", "<=", date_filter_end)
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
@@ -1798,29 +2038,31 @@ async def search_omi_conversations(request: Request):
             )
         else:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
                 .limit(100)
             )
         convos = [doc.to_dict() for doc in convos_ref.stream()]
-        
+
         # Client-side keyword match (skip if only date search with no keywords)
         matches = []
-        
+
         for c in convos:
             structured = c.get("structured", {})
             title = (structured.get("title", "") or "").lower()
             overview = (structured.get("overview", "") or "").lower()
             category = (structured.get("category", "") or "").lower()
-            
+
             # Include formatted date in searchable text
             created = c.get("created_at")
             date_str = ""
             if created and hasattr(created, "strftime"):
                 date_str = created.strftime("%B %d %Y %b %A").lower()  # "march 18 2026 mar monday"
-            
+
             searchable = f"{title} {overview} {category} {date_str}"
-            
+
             if keyword_terms:
                 # Score: how many keyword terms match
                 score = _keyword_score(searchable, keyword_terms)
@@ -1829,11 +2071,11 @@ async def search_omi_conversations(request: Request):
             else:
                 # Date-only search — return all conversations from that date
                 matches.append((1, c))
-        
+
         # Sort by score (desc), then by recency
         matches.sort(key=lambda x: x[0], reverse=True)
         matches = matches[:limit]
-        
+
         results = []
         for score, c in matches:
             structured = c.get("structured", {})
@@ -1848,19 +2090,21 @@ async def search_omi_conversations(request: Request):
                     ts = created.strftime("%Y-%m-%d %I:%M %p")
                 else:
                     ts = str(created)[:16]
-            
-            results.append({
-                "title": structured.get("title", "Untitled"),
-                "overview": structured.get("overview", ""),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "timestamp": ts,
-                "score": score,
-            })
-        
+
+            results.append(
+                {
+                    "title": structured.get("title", "Untitled"),
+                    "overview": structured.get("overview", ""),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "timestamp": ts,
+                    "score": score,
+                }
+            )
+
         logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
         return {"results": results, "total_searched": len(convos), "query": query}
-    
+
     except Exception as e:
         logger.error(f"[FLOW:VOICE-SEARCH] Error: {e}")
         return {"results": [], "error": str(e), "query": query}
@@ -1875,22 +2119,58 @@ async def search_omi_conversations(request: Request):
 # Privacy policy: maps agent_role -> source -> access level
 # True = full access, False = no access, "own" = own data only, "full" = full
 SEARCH_POLICY = {
-    "user":      {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": "own"},
-    "caregiver": {"timeline": True, "workspace": True, "omi_full": False, "omi_meta": True, "memories": False, "voice": False, "honcho": False, "scanner": "full"},
-    "scanner":   {"timeline": False, "workspace": False, "omi_full": False, "omi_meta": False, "memories": False, "voice": False, "honcho": False, "scanner": False},
-    "voice":     {"timeline": True, "workspace": True, "omi_full": True, "omi_meta": True, "memories": True, "voice": True, "honcho": True, "scanner": False},
+    "user": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": True,
+        "omi_meta": True,
+        "memories": True,
+        "voice": True,
+        "honcho": True,
+        "scanner": "own",
+    },
+    "caregiver": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": False,
+        "omi_meta": True,
+        "memories": False,
+        "voice": False,
+        "honcho": False,
+        "scanner": "full",
+    },
+    "scanner": {
+        "timeline": False,
+        "workspace": False,
+        "omi_full": False,
+        "omi_meta": False,
+        "memories": False,
+        "voice": False,
+        "honcho": False,
+        "scanner": False,
+    },
+    "voice": {
+        "timeline": True,
+        "workspace": True,
+        "omi_full": True,
+        "omi_meta": True,
+        "memories": True,
+        "voice": True,
+        "honcho": True,
+        "scanner": False,
+    },
 }
 
 # Which source keys map to which request-level source names
 _SOURCE_TO_POLICY_KEYS = {
-    "timeline":  ["timeline"],
-    "channel":   ["timeline"],
+    "timeline": ["timeline"],
+    "channel": ["timeline"],
     "workspace": ["workspace"],
-    "omi":       ["omi_full", "omi_meta"],
-    "memories":  ["memories"],
-    "voice":     ["voice"],
-    "honcho":    ["honcho"],
-    "scanner":   ["scanner"],
+    "omi": ["omi_full", "omi_meta"],
+    "memories": ["memories"],
+    "voice": ["voice"],
+    "honcho": ["honcho"],
+    "scanner": ["scanner"],
 }
 
 
@@ -1998,14 +2278,66 @@ def _snippet_around_terms(text: str, terms: list, max_chars: int = 900) -> str:
 
 def _normalized_query_terms(query: str) -> list[str]:
     stop = {
-        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
-        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
-        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
-        "memory", "memories", "after", "before", "else", "went", "go", "this",
-        "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "afternoon", "evening", "today",
-        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
-        "caught", "find", "pull", "about",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "in",
+        "on",
+        "of",
+        "for",
+        "with",
+        "what",
+        "where",
+        "when",
+        "who",
+        "why",
+        "how",
+        "did",
+        "do",
+        "does",
+        "i",
+        "me",
+        "my",
+        "you",
+        "greg",
+        "plato",
+        "tell",
+        "check",
+        "latest",
+        "recent",
+        "memory",
+        "memories",
+        "after",
+        "before",
+        "else",
+        "went",
+        "go",
+        "this",
+        "omi",
+        "conversation",
+        "conversations",
+        "transcript",
+        "transcripts",
+        "summary",
+        "summaries",
+        "morning",
+        "afternoon",
+        "evening",
+        "today",
+        "yesterday",
+        "raw",
+        "happened",
+        "happen",
+        "heard",
+        "hear",
+        "catch",
+        "caught",
+        "find",
+        "pull",
+        "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     filtered = [t for t in terms if len(t) > 2 and t not in stop]
@@ -2016,14 +2348,66 @@ def _significant_query_terms(query: str) -> list[str]:
     """Return only evidence-bearing terms; unlike _normalized_query_terms,
     this may return an empty list for broad temporal questions."""
     stop = {
-        "the", "a", "an", "and", "or", "to", "in", "on", "of", "for", "with",
-        "what", "where", "when", "who", "why", "how", "did", "do", "does", "i",
-        "me", "my", "you", "greg", "plato", "tell", "check", "latest", "recent",
-        "memory", "memories", "after", "before", "else", "went", "go", "this",
-        "omi", "conversation", "conversations", "transcript", "transcripts",
-        "summary", "summaries", "morning", "afternoon", "evening", "today",
-        "yesterday", "raw", "happened", "happen", "heard", "hear", "catch",
-        "caught", "find", "pull", "about",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "in",
+        "on",
+        "of",
+        "for",
+        "with",
+        "what",
+        "where",
+        "when",
+        "who",
+        "why",
+        "how",
+        "did",
+        "do",
+        "does",
+        "i",
+        "me",
+        "my",
+        "you",
+        "greg",
+        "plato",
+        "tell",
+        "check",
+        "latest",
+        "recent",
+        "memory",
+        "memories",
+        "after",
+        "before",
+        "else",
+        "went",
+        "go",
+        "this",
+        "omi",
+        "conversation",
+        "conversations",
+        "transcript",
+        "transcripts",
+        "summary",
+        "summaries",
+        "morning",
+        "afternoon",
+        "evening",
+        "today",
+        "yesterday",
+        "raw",
+        "happened",
+        "happen",
+        "heard",
+        "hear",
+        "catch",
+        "caught",
+        "find",
+        "pull",
+        "about",
     }
     terms = [t.strip(".,?!:;()[]{}\"'’‘“”").lower() for t in query.split()]
     return [t for t in terms if len(t) > 2 and t not in stop]
@@ -2202,20 +2586,26 @@ async def _search_canonical_timeline(
             ts = row["started_at"]
             ts_text = ts.strftime("%Y-%m-%d %I:%M %p") if ts else ""
             role_boost = 15 if role == "user" else 3
-            matches.append((score, ts or datetime.min, {
-                "source": "timeline",
-                "title": f"{channel} {role}".strip(),
-                "content": text[:700],
-                "timestamp": ts_text,
-                "score": score + role_boost,
-                "metadata": {
-                    "provenance": "canonical_event",
-                    "channel": channel,
-                    "provider": provider,
-                    "role": role,
-                    "session_id": row["session_id"] or "",
-                },
-            }))
+            matches.append(
+                (
+                    score,
+                    ts or datetime.min,
+                    {
+                        "source": "timeline",
+                        "title": f"{channel} {role}".strip(),
+                        "content": text[:700],
+                        "timestamp": ts_text,
+                        "score": score + role_boost,
+                        "metadata": {
+                            "provenance": "canonical_event",
+                            "channel": channel,
+                            "provider": provider,
+                            "role": role,
+                            "session_id": row["session_id"] or "",
+                        },
+                    },
+                )
+            )
         matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
         return [m[2] for m in matches[:limit]]
     except Exception as e:
@@ -2256,21 +2646,23 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         top = sources[0] if sources else {}
         confidence = data.get("confidence") or "medium"
         score = 120 if confidence == "high" else 70
-        return [{
-            "source": "voice_memory",
-            "title": top.get("title") or "Hermes Voice Memory",
-            "content": answer[:900],
-            "timestamp": top.get("timestamp") or "",
-            "score": score,
-            "metadata": {
-                "provenance": "hermes_voice_memory",
-                "path": data.get("path"),
-                "confidence": confidence,
-                "latency_ms": data.get("latency_ms"),
-                "source_ref": top.get("source_ref"),
-                "channel": top.get("channel"),
-            },
-        }]
+        return [
+            {
+                "source": "voice_memory",
+                "title": top.get("title") or "Hermes Voice Memory",
+                "content": answer[:900],
+                "timestamp": top.get("timestamp") or "",
+                "score": score,
+                "metadata": {
+                    "provenance": "hermes_voice_memory",
+                    "path": data.get("path"),
+                    "confidence": confidence,
+                    "latency_ms": data.get("latency_ms"),
+                    "source_ref": top.get("source_ref"),
+                    "channel": top.get("channel"),
+                },
+            }
+        ]
     except Exception as e:
         logger.warning(f"[FLOW:VOICE-MEMORY] lookup error: {e}")
         return []
@@ -2569,36 +2961,36 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
     for score, _started_sort, event, title, content in matches[:limit]:
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
         structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
-        results.append({
-            "source": "omi",
-            "title": title,
-            "content": content[:1400],
-            "timestamp": _canonical_event_timestamp(event),
-            "score": score + (55 if window_start else 45),
-            "metadata": {
-                "provenance": "canonical_event",
-                "fallback": False,
-                "event_id": event.get("event_id"),
-                "source_identity": event.get("source_identity"),
-                "channel": event.get("channel"),
-                "provider": event.get("provider"),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "time_window_applied": bool(window_start and window_end),
-                "time_window_start_utc": window_start.isoformat() if window_start else "",
-                "time_window_end_utc": window_end.isoformat() if window_end else "",
-                "timestamp_timezone": "America/Los_Angeles",
-            },
-        })
+        results.append(
+            {
+                "source": "omi",
+                "title": title,
+                "content": content[:1400],
+                "timestamp": _canonical_event_timestamp(event),
+                "score": score + (55 if window_start else 45),
+                "metadata": {
+                    "provenance": "canonical_event",
+                    "fallback": False,
+                    "event_id": event.get("event_id"),
+                    "source_identity": event.get("source_identity"),
+                    "channel": event.get("channel"),
+                    "provider": event.get("provider"),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "time_window_applied": bool(window_start and window_end),
+                    "time_window_start_utc": window_start.isoformat() if window_start else "",
+                    "time_window_end_utc": window_end.isoformat() if window_end else "",
+                    "timestamp_timezone": "America/Los_Angeles",
+                },
+            }
+        )
     return results
 
 
 async def _search_omi_canonical_first(uid: str, query: str, limit: int, full_access: bool) -> list:
     canonical_results = await _search_canonical_omi_events(uid, query, limit, full_access)
     if canonical_results:
-        logger.info(
-            f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}"
-        )
+        logger.info(f"[FLOW:UNIFIED-SEARCH] uid={uid} omi_source=canonical_event results={len(canonical_results)}")
         return canonical_results
 
     logger.warning(
@@ -2684,10 +3076,29 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             keyword_terms = [t for t in query_lower.replace("last month", "").split() if t]
         else:
             month_names = {
-                "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
-                "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
-                "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
-                "nov": 11, "november": 11, "dec": 12, "december": 12,
+                "jan": 1,
+                "january": 1,
+                "feb": 2,
+                "february": 2,
+                "mar": 3,
+                "march": 3,
+                "apr": 4,
+                "april": 4,
+                "may": 5,
+                "jun": 6,
+                "june": 6,
+                "jul": 7,
+                "july": 7,
+                "aug": 8,
+                "august": 8,
+                "sep": 9,
+                "september": 9,
+                "oct": 10,
+                "october": 10,
+                "nov": 11,
+                "november": 11,
+                "dec": 12,
+                "december": 12,
             }
             date_match = _re.search(
                 r"(january|february|march|april|may|june|july|august|september|october|"
@@ -2721,7 +3132,9 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
         # --- Firestore query ---
         if date_filter_start and date_filter_end:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .where("created_at", ">=", date_filter_start)
                 .where("created_at", "<=", date_filter_end)
                 .order_by("created_at", direction=_fs.Query.DESCENDING)
@@ -2729,7 +3142,9 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
             )
         else:
             convos_ref = (
-                db.collection("users").document(uid).collection("conversations")
+                db.collection("users")
+                .document(uid)
+                .collection("conversations")
                 .order_by("created_at", direction=_fs.Query.DESCENDING)
                 .limit(100)
             )
@@ -2798,21 +3213,23 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
                         + snippet
                     )[:1400]
 
-            results.append({
-                "source": "omi",
-                "title": structured.get("title", "Untitled"),
-                "content": overview_text,
-                "timestamp": ts,
-                "score": score + 18,
-                "metadata": {
-                    "provenance": "firestore_legacy_omi",
-                    "fallback": True,
-                    "emoji": structured.get("emoji", ""),
-                    "category": structured.get("category", ""),
-                    "has_transcript_detail": bool(transcript_text and full_access),
-                    "timestamp_timezone": "America/Los_Angeles",
-                },
-            })
+            results.append(
+                {
+                    "source": "omi",
+                    "title": structured.get("title", "Untitled"),
+                    "content": overview_text,
+                    "timestamp": ts,
+                    "score": score + 18,
+                    "metadata": {
+                        "provenance": "firestore_legacy_omi",
+                        "fallback": True,
+                        "emoji": structured.get("emoji", ""),
+                        "category": structured.get("category", ""),
+                        "has_transcript_detail": bool(transcript_text and full_access),
+                        "timestamp_timezone": "America/Los_Angeles",
+                    },
+                }
+            )
 
         return results
 
@@ -2835,7 +3252,9 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
 
         # Fetch recent memories sorted by scoring (same pattern as database/memories.py)
         memories_ref = (
-            db.collection("users").document(uid).collection("memories")
+            db.collection("users")
+            .document(uid)
+            .collection("memories")
             .order_by("scoring", direction=_fs.Query.DESCENDING)
             .order_by("created_at", direction=_fs.Query.DESCENDING)
             .limit(100)
@@ -2870,17 +3289,19 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
                     ts = str(created)[:16]
 
             display_content = mem.get("structured_memory", "") or mem.get("content", "")
-            results.append({
-                "source": "memories",
-                "title": (mem.get("category", "") or "Memory").title(),
-                "content": (display_content or "")[:500],
-                "timestamp": ts,
-                "score": score,
-                "metadata": {
-                    "category": mem.get("category", ""),
-                    "id": mem.get("id", ""),
-                },
-            })
+            results.append(
+                {
+                    "source": "memories",
+                    "title": (mem.get("category", "") or "Memory").title(),
+                    "content": (display_content or "")[:500],
+                    "timestamp": ts,
+                    "score": score,
+                    "metadata": {
+                        "category": mem.get("category", ""),
+                        "id": mem.get("id", ""),
+                    },
+                }
+            )
 
         return results
 
@@ -3043,19 +3464,24 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
                     ts = row["created_at"].strftime("%Y-%m-%d %I:%M %p")
 
                 display_content = result_data.get("summary", row["transcript_preview"] or "")
-                matches.append((score, {
-                    "source": "scanner",
-                    "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
-                    "content": (display_content or "")[:500],
-                    "timestamp": ts,
-                    "score": score,
-                    "metadata": {
-                        "category": row["category"] or "",
-                        "urgency": row["urgency"] or "",
-                        "escalated": row["escalated"],
-                        "id": str(row["id"]),
-                    },
-                }))
+                matches.append(
+                    (
+                        score,
+                        {
+                            "source": "scanner",
+                            "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
+                            "content": (display_content or "")[:500],
+                            "timestamp": ts,
+                            "score": score,
+                            "metadata": {
+                                "category": row["category"] or "",
+                                "urgency": row["urgency"] or "",
+                                "escalated": row["escalated"],
+                                "id": str(row["id"]),
+                            },
+                        },
+                    )
+                )
 
         matches.sort(key=lambda x: x[0], reverse=True)
         return [m[1] for m in matches[:limit]]
