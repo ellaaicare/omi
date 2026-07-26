@@ -24,6 +24,7 @@ from ella.services.provisioning import (
     retained_compatibility_receipt,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
+from ella.services.ai_consent import require_current_ai_consent
 from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.onboarding")
@@ -100,7 +101,7 @@ def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
     return payload.dict()
 
 
-@router.post("/ensure")
+@router.post("/ensure", dependencies=[Depends(require_current_ai_consent)])
 async def ensure_onboarding(
     payload: OnboardingEnsureRequest,
     background_tasks: BackgroundTasks,

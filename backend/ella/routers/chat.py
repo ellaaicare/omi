@@ -37,6 +37,7 @@ from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEve
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from ella.services.ai_consent import require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime, runtime_bindings_enabled
 from utils.ella.canonical_context import (
@@ -896,7 +897,7 @@ async def _stream_hermes_chat(
 async def ella_chat_stream(
     request: EllaChatRequest,
     raw_request: Request,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(require_current_ai_consent),
     x_ella_debug_level: str = Header(None, alias="X-Ella-Debug-Level"),
     x_ella_client_type: str = Header(None, alias="X-Ella-Client-Type"),
     x_ella_client_version: str = Header(None, alias="X-Ella-Client-Version"),

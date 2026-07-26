@@ -67,6 +67,7 @@ N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
 )
 ELLA_API_BASE = os.getenv("ELLA_API_BASE", "https://api.ella-ai-care.com")
 ELLA_INTERNAL_VOICE_TTS_URL = os.getenv("ELLA_INTERNAL_VOICE_TTS_URL", "http://127.0.0.1:8000/v1/voice/tts")
+ELLA_INTERNAL_VOICE_TTS_TOKEN = os.getenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", "")
 
 # Consolidate queue when this many non-debug items are pending
 CONSOLIDATION_THRESHOLD = int(os.getenv("CONSOLIDATION_THRESHOLD", "3"))
@@ -1636,10 +1637,14 @@ async def synthesize_audio(
         for candidate in provider_candidates:
             provider = candidate
             try:
+                headers = {"X-TTS-Provider": candidate}
+                if ELLA_INTERNAL_VOICE_TTS_TOKEN:
+                    headers["X-Ella-Internal-Token"] = ELLA_INTERNAL_VOICE_TTS_TOKEN
+                    headers["X-Ella-Subject-Uid"] = req.uid
                 response = await client.post(
                     ELLA_INTERNAL_VOICE_TTS_URL,
                     json=payload,
-                    headers={"X-TTS-Provider": candidate},
+                    headers=headers,
                     timeout=30.0,
                 )
             except httpx.TimeoutException:
