@@ -20,6 +20,30 @@ void main() {
         home: Scaffold(body: AiConsentSheet()),
       );
 
+  testWidgets('presents as a bounded sheet with Not now always visible', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => AiConsentSheet.show(context),
+              child: const Text('Show consent'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Show consent'));
+    await tester.pumpAndSettle();
+
+    final screenHeight = tester.view.physicalSize.height / tester.view.devicePixelRatio;
+    expect(tester.getSize(find.byType(AiConsentSheet)).height, lessThanOrEqualTo(screenHeight * 0.7));
+    expect(find.text('Not now').hitTestable(), findsOneWidget);
+  });
+
   testWidgets('names every voice processor and explains routed data before acceptance', (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
@@ -35,12 +59,12 @@ void main() {
     expect(disclosure, contains('OpenAI'));
     expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI (Grok)'));
-    expect(disclosure, contains('OpenAI, Groq, and xAI (Grok)'));
     expect(disclosure, contains('ElevenLabs'));
     expect(disclosure, contains('response text'));
     expect(disclosure, contains('selected stored memory'));
     expect(disclosure, contains('related people, topics, and dates'));
     expect(disclosure, contains('Google (Gemini) or xAI (Grok) voice processor'));
+    expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
   });
 

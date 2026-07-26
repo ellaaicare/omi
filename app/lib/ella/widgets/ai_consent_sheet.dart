@@ -22,7 +22,7 @@ class AiConsentSheet extends StatefulWidget {
       useSafeArea: true,
       backgroundColor: EllaColors.paper,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      builder: (_) => AiConsentSheet(onAccept: onAccept),
+      builder: (_) => FractionallySizedBox(heightFactor: 0.68, child: AiConsentSheet(onAccept: onAccept)),
     );
   }
 
@@ -66,93 +66,85 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     final bodyStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(color: EllaColors.textSecondary, height: 1.5);
     return PopScope(
       canPop: false,
-      child: SingleChildScrollView(
-        padding: EdgeInsets.fromLTRB(24, 16, 24, 44 + MediaQuery.paddingOf(context).bottom),
+      child: Padding(
+        padding: EdgeInsets.only(bottom: 12 + MediaQuery.paddingOf(context).bottom),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
-            const SizedBox(height: 16),
-            Text.rich(
-              TextSpan(
-                style: bodyStyle,
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
+                    const SizedBox(height: 16),
+                    Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
+                    const SizedBox(height: 14),
+                    Text.rich(
+                      TextSpan(
+                        text: context.l10n.aiConsentProcessorDetailsLink,
+                        style: bodyStyle?.copyWith(
+                          color: EllaColors.primary,
+                          decoration: TextDecoration.underline,
+                          decorationColor: EllaColors.primary,
+                        ),
+                        recognizer: TapGestureRecognizer()..onTap = () => launchUrl(AiConsentSheet.privacyPolicyUri),
+                      ),
+                    ),
+                    if (_hasError) ...[
+                      const SizedBox(height: 12),
+                      Text(context.l10n.somethingWentWrongTryAgain,
+                          style: bodyStyle?.copyWith(color: EllaColors.error)),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Column(
                 children: [
-                  TextSpan(text: context.l10n.aiConsentBodyIntro),
-                  TextSpan(
-                    text: context.l10n.aiConsentDeepgram,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: FilledButton(
+                      onPressed: _isSubmitting ? null : _accept,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: EllaColors.tealDeep,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
+                      ),
+                      child: _isSubmitting
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.paper),
+                            )
+                          : Text(context.l10n.allowAndContinue, style: const TextStyle(fontSize: 17)),
+                    ),
                   ),
-                  TextSpan(text: context.l10n.aiConsentBodyMiddle),
-                  TextSpan(
-                    text: context.l10n.aiConsentAiPartners,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: TextButton(
+                      onPressed: _isSubmitting
+                          ? null
+                          : () {
+                              SharedPreferencesUtil().deferAiConsent();
+                              Navigator.of(context).pop(false);
+                            },
+                      child: Text(
+                        context.l10n.notNow,
+                        style: const TextStyle(
+                          fontSize: 17,
+                          color: EllaColors.inkSoft,
+                          decoration: TextDecoration.underline,
+                          decorationColor: EllaColors.inkSoft,
+                        ),
+                      ),
+                    ),
                   ),
-                  TextSpan(text: context.l10n.aiConsentBodyBeforeElevenLabs),
-                  TextSpan(
-                    text: context.l10n.aiConsentElevenLabs,
-                    style: const TextStyle(fontWeight: FontWeight.w700),
-                  ),
-                  TextSpan(text: context.l10n.aiConsentBodyEnd),
-                  TextSpan(text: context.l10n.aiConsentMemoryContext),
                 ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text.rich(
-              TextSpan(
-                text: context.l10n.privacyPolicy,
-                style: bodyStyle?.copyWith(
-                  color: EllaColors.primary,
-                  decoration: TextDecoration.underline,
-                  decorationColor: EllaColors.primary,
-                ),
-                recognizer: TapGestureRecognizer()..onTap = () => launchUrl(AiConsentSheet.privacyPolicyUri),
-              ),
-            ),
-            const SizedBox(height: 28),
-            if (_hasError) ...[
-              Text(context.l10n.somethingWentWrongTryAgain, style: bodyStyle?.copyWith(color: EllaColors.error)),
-              const SizedBox(height: 12),
-            ],
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: FilledButton(
-                onPressed: _isSubmitting ? null : _accept,
-                style: FilledButton.styleFrom(
-                  backgroundColor: EllaColors.tealDeep,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(EllaSizes.cardRadius)),
-                ),
-                child: _isSubmitting
-                    ? const SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: EllaColors.paper),
-                      )
-                    : Text(context.l10n.allowAndContinue, style: const TextStyle(fontSize: 17)),
-              ),
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: TextButton(
-                onPressed: _isSubmitting
-                    ? null
-                    : () {
-                        SharedPreferencesUtil().deferAiConsent();
-                        Navigator.of(context).pop(false);
-                      },
-                child: Text(
-                  context.l10n.notNow,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    color: EllaColors.inkSoft,
-                    decoration: TextDecoration.underline,
-                    decorationColor: EllaColors.inkSoft,
-                  ),
-                ),
               ),
             ),
           ],

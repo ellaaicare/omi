@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +9,6 @@ import 'package:collection/collection.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_provider_utilities/flutter_provider_utilities.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
@@ -23,8 +21,8 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/models/custom_stt_config.dart';
-import 'package:omi/models/stt_provider.dart';
 import 'package:omi/providers/calendar_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/message_provider.dart';
@@ -40,7 +38,6 @@ import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/image/image_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
-import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 import 'package:omi/main.dart';
@@ -124,6 +121,7 @@ class CaptureProvider extends ChangeNotifier
 
   List<int> _systemAudioBuffer = [];
   bool _systemAudioCaching = true;
+  Future<bool>? _systemAudioStartFuture;
 
   bool _isLoadingInProgressConversation = false;
 
@@ -1036,11 +1034,29 @@ class CaptureProvider extends ChangeNotifier
     await _socket?.stop(reason: 'stop stream device recording');
   }
 
-  Future<void> streamSystemAudioRecording() async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<bool> streamSystemAudioRecording() {
+    final activeStart = _systemAudioStartFuture;
+    if (activeStart != null) return activeStart;
+
+    late final Future<bool> trackedStart;
+    trackedStart = _streamSystemAudioRecording().whenComplete(() {
+      if (identical(_systemAudioStartFuture, trackedStart)) {
+        _systemAudioStartFuture = null;
+      }
+    });
+    _systemAudioStartFuture = trackedStart;
+    return trackedStart;
+  }
+
+  Future<bool> _streamSystemAudioRecording() async {
     if (!PlatformService.isDesktop) {
       notifyError('System audio recording is only available on macOS and Windows.');
-      return;
+      return false;
+    }
+
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      final context = MyApp.navigatorKey.currentContext;
+      if (context == null || !await AiConsentCoordinator.ensure(context)) return false;
     }
 
     // User wants to record - enable auto-resume after wake
@@ -1058,8 +1074,10 @@ class CaptureProvider extends ChangeNotifier
     bool permissionsGranted = await _checkAndRequestSystemAudioPermissions();
     if (permissionsGranted) {
       await _startSystemAudioCapture();
+      return recordingState == RecordingState.systemAudioRecord;
     } else {
       updateRecordingState(RecordingState.stop);
+      return false;
     }
   }
 
