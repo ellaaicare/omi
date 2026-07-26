@@ -751,6 +751,12 @@ class MemoryTalkButton extends StatefulWidget {
   final MemoryTalkRouteOpener? routeOpener;
   final MemoryReinterpretationReceiptDiscovery? receiptDiscovery;
 
+  @visibleForTesting
+  static V2VSessionScope sessionScopeFor(ServerConversation conversation) => V2VSessionScope.memory(
+        conversationId: conversation.id,
+        expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
+      );
+
   @override
   State<MemoryTalkButton> createState() => _MemoryTalkButtonState();
 }
@@ -794,15 +800,22 @@ class _MemoryTalkButtonState extends State<MemoryTalkButton> {
     ValueChanged<MemoryReceiptDiscoveryRequest> onMemorySessionEnded,
   ) {
     final displayTitle = parseEllaDisplayValue(conversation.structured.title).text.trim();
-    return Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => EllaVoiceChatPage(
-          sessionScope: V2VSessionScope.memory(
-            conversationId: conversation.id,
-            expectedActiveSummaryVersionId: conversation.activeSummaryVersionId,
-          ),
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      useSafeArea: true,
+      backgroundColor: EllaColors.bgPrimary,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      clipBehavior: Clip.antiAlias,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: 0.94,
+        child: EllaVoiceChatPage(
+          sessionScope: MemoryTalkButton.sessionScopeFor(conversation),
           memoryTitle: displayTitle,
           onMemorySessionEnded: onMemorySessionEnded,
+          modalPresentation: true,
         ),
       ),
     );

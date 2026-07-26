@@ -16509,6 +16509,12 @@ abstract class AppLocalizations {
   /// **'Read more'**
   String get todayReadMore;
 
+  /// No description provided for @voiceModalEndAction.
+  ///
+  /// In en, this message translates to:
+  /// **'End'**
+  String get voiceModalEndAction;
+
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:

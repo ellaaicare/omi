@@ -45,16 +45,16 @@ ConversationCorrectionReceipt appliedReceipt() => const ConversationCorrectionRe
       after: ConversationCorrectionSummary(title: 'After'),
     );
 
-class _FakeMemoryVoiceRoute extends StatefulWidget {
-  const _FakeMemoryVoiceRoute({required this.onSessionEnded});
+class _FakeMemoryVoiceSheet extends StatefulWidget {
+  const _FakeMemoryVoiceSheet({required this.onSessionEnded});
 
   final ValueChanged<MemoryReceiptDiscoveryRequest> onSessionEnded;
 
   @override
-  State<_FakeMemoryVoiceRoute> createState() => _FakeMemoryVoiceRouteState();
+  State<_FakeMemoryVoiceSheet> createState() => _FakeMemoryVoiceSheetState();
 }
 
-class _FakeMemoryVoiceRouteState extends State<_FakeMemoryVoiceRoute> {
+class _FakeMemoryVoiceSheetState extends State<_FakeMemoryVoiceSheet> {
   @override
   void dispose() {
     widget.onSessionEnded(
@@ -87,9 +87,14 @@ Widget app({
       body: MemoryTalkButton(
         conversation: memoryConversation(),
         receiptDiscovery: discovery,
-        routeOpener: (context, _, onSessionEnded) => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => _FakeMemoryVoiceRoute(onSessionEnded: onSessionEnded),
+        routeOpener: (context, _, onSessionEnded) => showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          isDismissible: false,
+          enableDrag: false,
+          builder: (_) => FractionallySizedBox(
+            heightFactor: 0.94,
+            child: _FakeMemoryVoiceSheet(onSessionEnded: onSessionEnded),
           ),
         ),
       ),
@@ -98,7 +103,21 @@ Widget app({
 }
 
 void main() {
-  testWidgets('discovers a delayed receipt after the memory voice route is popped', (tester) async {
+  test('memory modal keeps the exact conversation and summary version scope', () {
+    final conversation = ServerConversation(
+      id: conversationId,
+      createdAt: DateTime.utc(2026, 7, 24),
+      structured: Structured('A seeded memory', 'The selected memory overview'),
+      activeSummaryVersionId: 'summary-v4',
+    );
+
+    final scope = MemoryTalkButton.sessionScopeFor(conversation);
+
+    expect(scope.conversationId, conversationId);
+    expect(scope.expectedActiveSummaryVersionId, 'summary-v4');
+  });
+
+  testWidgets('discovers a delayed receipt after the memory voice sheet closes', (tester) async {
     final delayedJob = Completer<ConversationReinterpretationJob?>();
     final discovery = MemoryReinterpretationReceiptDiscovery(
       fetchLatest: (_) => delayedJob.future,
@@ -111,11 +130,11 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('memory-talk-$conversationId')));
     await tester.pumpAndSettle();
 
-    expect(find.byType(_FakeMemoryVoiceRoute), findsOneWidget);
+    expect(find.byType(_FakeMemoryVoiceSheet), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('end-memory-session')));
     await tester.pumpAndSettle();
 
-    expect(find.byType(_FakeMemoryVoiceRoute), findsNothing);
+    expect(find.byType(_FakeMemoryVoiceSheet), findsNothing);
     expect(find.byType(MemoryCorrectionReceiptChip), findsNothing);
 
     delayedJob.complete(appliedJob());

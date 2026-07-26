@@ -8723,6 +8723,9 @@ class AppLocalizationsKo extends AppLocalizations {
   String get todayReadMore => 'Read more';
 
   @override
+  String get voiceModalEndAction => 'End';
+
+  @override
   String get aiConsentCompactSummary =>
       'When you enable listening or voice, live microphone audio from your iPhone or necklace goes through Ella\'s secure backend to Deepgram for speech-to-text. To create summaries or answers, transcript and derived text may go to OpenRouter, Google (Gemini), OpenAI, Groq, or xAI (Grok); OpenRouter may route text to the selected model provider. Live voice may send microphone audio to Google (Gemini), OpenAI, or xAI (Grok), while standard spoken replies send response text to ElevenLabs. Talk about this sends the selected stored memory, including related people, topics, and dates, through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor; Ella sends data only to the provider needed for the feature you choose, and summaries are shared only with family members you choose.';
 
