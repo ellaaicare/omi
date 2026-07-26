@@ -223,6 +223,21 @@ void main() {
       await client.disconnect();
     });
 
+    test('declined current consent blocks before V2V identity or session requests', () async {
+      final preferences = SharedPreferencesUtil();
+      preferences.uid = 'uid-a';
+      preferences.deferAiConsent();
+      final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
+
+      final receipt = await client.connect(provider: 'grok-voice');
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.consent);
+      expect(receipt.errorCode, 'ai_consent_required');
+      expect(client.isConnected, isFalse);
+      await client.disconnect();
+    });
+
     test('accepted v3 consent passes the mic gate before identity validation', () async {
       final preferences = SharedPreferencesUtil();
       preferences.acceptAiConsent();
