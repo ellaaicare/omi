@@ -52,16 +52,20 @@ Typed issuance/termination states are `no_entitlement`, `invited`, `suspended`,
 1. Apply `backend/migrations/008_create_voice_canary_controls.sql`.
 2. Configure `ELLA_VOICE_ALERT_WEBHOOK_URL` and provider cost estimates.
 3. Grant the initial disposable test account, then the named canary UIDs.
-4. Deploy OMI with `ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED=true` and
+4. Deploy OMI's modern token issuer with
+   `ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED=false` and
    `ELLA_SESSION_EXPIRY_MINUTES=25`.
-5. Deploy the proxy with the same session/service secrets and control URL.
-6. Exercise denial, one successful session, concurrency, daily hard stop,
+5. Wait the full 25-minute legacy-token window, or require clients to reconnect
+   and obtain a modern token.
+6. Confirm `ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS=false` on OMI and the proxy,
+   then deploy both services with canary enforcement enabled.
+7. Exercise denial, one successful session, concurrency, daily hard stop,
    global/user/provider switches, ledger rollup, and alert delivery.
-7. After 25 minutes, set `ELLA_ALLOW_LEGACY_VOICE_SESSION_TOKENS=false` on both
-   services.
 
 Do not deploy step 4 before the migration and grants. The secure default denies
-every UID without an active entitlement.
+every UID without an active entitlement. There is no proxy-first compatibility
+bridge because the canary control plane requires signed session ID, correlation
+ID, and entitlement revision claims.
 
 ## One-operator commands
 
