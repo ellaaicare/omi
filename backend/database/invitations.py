@@ -585,25 +585,6 @@ async def _redeem_locked_invitation(
             correlation_id=correlation_id,
         )
 
-    expires_at = invitation.get("expires_at")
-    if expires_at and expires_at <= now:
-        await _record_failure(
-            conn,
-            invitation_id=invitation_id,
-            uid_ref_hmac=uid_ref_hmac,
-            source_ref_hmac=source_ref_hmac,
-            failure_code="expired",
-            support_code=support_code,
-            correlation_id=correlation_id,
-            now=now,
-            config=config,
-        )
-        return _failure(
-            "expired",
-            support_code=support_code,
-            correlation_id=correlation_id,
-        )
-
     if (
         invitation["state"] != "sent"
         or invitation["delivery_state"] != "sent"
@@ -622,6 +603,25 @@ async def _redeem_locked_invitation(
         )
         return _failure(
             "invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+
+    expires_at = invitation.get("expires_at")
+    if expires_at and expires_at <= now:
+        await _record_failure(
+            conn,
+            invitation_id=invitation_id,
+            uid_ref_hmac=uid_ref_hmac,
+            source_ref_hmac=source_ref_hmac,
+            failure_code="expired",
+            support_code=support_code,
+            correlation_id=correlation_id,
+            now=now,
+            config=config,
+        )
+        return _failure(
+            "expired",
             support_code=support_code,
             correlation_id=correlation_id,
         )

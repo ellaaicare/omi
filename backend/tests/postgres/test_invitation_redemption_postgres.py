@@ -190,6 +190,14 @@ def test_same_uid_retry_is_idempotent_and_returns_same_entitlement():
         assert first["revision"] == second["revision"] == 1
         assert (await voice_canary.get_entitlement_contract("uid-other"))["status"] == "none"
         async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_invitations
+                SET expires_at = NOW() - INTERVAL '1 minute'
+                WHERE id = $1::uuid
+                """,
+                invitation_id,
+            )
             assert await conn.fetchval("SELECT COUNT(*) FROM voice_entitlements WHERE uid = 'uid-retry'") == 1
             assert (
                 await conn.fetchval(
@@ -242,6 +250,9 @@ def test_same_uid_retry_is_idempotent_and_returns_same_entitlement():
         assert "ABCD-2345" not in serialized
         assert "ABCD2345" not in serialized
         assert "192.0.2.10" not in serialized
+        with pytest.raises(invitations.InviteRedemptionFailure) as error:
+            await _redeem("uid-other", "ABCD-2345", source="192.0.2.11")
+        assert error.value.code == "invalid"
 
     asyncio.run(_run_with_database(scenario))
 
