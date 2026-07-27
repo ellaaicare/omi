@@ -304,3 +304,97 @@ def test_runtime_ingestion_identity_includes_event_revision():
     insert_query = pool.calls[0][0]
     assert "event_revision" in insert_query
     assert "ON CONFLICT" in insert_query
+
+
+class _InteractionClaimConnection:
+    def __init__(self, *, running_other=False):
+        self.running_other = running_other
+        self.scope_id = uuid.uuid4()
+        self.queries = []
+
+    def transaction(self):
+        return _AsyncContext(self)
+
+    async def fetchrow(self, query, *args):
+        self.queries.append((query, args))
+        if "SELECT i.*" in query:
+            return {
+                "id": args[0],
+                "scope_id": self.scope_id,
+                "status": "pending",
+            }
+        if "UPDATE ella_runtime_interactions" in query:
+            return {
+                "id": args[0],
+                "scope_id": self.scope_id,
+                "status": "running",
+                "previous_response_id": args[1],
+            }
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        self.queries.append((query, args))
+        if "status = 'running'" in query:
+            return 1 if self.running_other else None
+        if "status = 'completed'" in query:
+            return "response-previous"
+        raise AssertionError(query)
+
+
+def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_claim():
+    interaction_id = str(uuid.uuid4())
+    connection = _InteractionClaimConnection()
+    result = asyncio.run(
+        EllaProvisioningRepository(_Pool(connection)).claim_runtime_interaction(interaction_id)
+    )
+
+    assert result["status"] == "running"
+    assert result["previous_response_id"] == "response-previous"
+    joined = "\n".join(query for query, _args in connection.queries)
+    assert "FOR UPDATE OF s, i" in joined
+    assert "ORDER BY completed_at DESC, created_at DESC, id DESC" in joined
+
+    blocked_connection = _InteractionClaimConnection(running_other=True)
+    blocked = asyncio.run(
+        EllaProvisioningRepository(_Pool(blocked_connection)).claim_runtime_interaction(
+            str(uuid.uuid4())
+        )
+    )
+    assert blocked is None
+    assert not any(
+        "UPDATE ella_runtime_interactions" in query
+        for query, _args in blocked_connection.queries
+    )
+
+
+def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
+    pool = _LookupPool(
+        {
+            "id": uuid.uuid4(),
+            "status": "internal_canary",
+            "active": True,
+            "revision": 3,
+        }
+    )
+    binding_id = str(uuid.uuid4())
+    result = asyncio.run(
+        EllaProvisioningRepository(pool).promote_cloud_binding(
+            uid="synthetic-user",
+            binding_id=binding_id,
+            expected_revision=2,
+            target_status="internal_canary",
+        )
+    )
+
+    query, args = pool.calls[0]
+    assert result["status"] == "internal_canary"
+    assert "u.omi_uid = $2" in query
+    assert "b.status = 'shadow'" in query
+    assert "b.active = false" in query
+    assert "b.revision = $3" in query
+    assert args == (
+        uuid.UUID(binding_id),
+        "synthetic-user",
+        2,
+        "internal_canary",
+    )

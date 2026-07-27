@@ -1,5 +1,4 @@
 import asyncio
-
 import pytest
 
 from ella.services import hermes_cloud
@@ -10,6 +9,7 @@ from ella.services.hermes_cloud import (
     HermesCloudPoolManager,
     estimate_turn_cost_microusd,
 )
+from ella.services.hermes_cloud_policy import ApprovedRuntimeManifest
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_from_binding
 
@@ -57,9 +57,12 @@ def _binding():
         "prompt_pack_version": "prompt-v1",
         "model_policy_version": "models-v1",
         "prompt_artifact_receipt": {
+            "schema_version": "ella-hermes-cloud-approval-v1",
             "prompt_pack_version": "prompt-v1",
             "model_policy_version": "models-v1",
-            "review_receipt": "https://github.com/ellaaicare/ella-ai/issues/1124",
+            "policy_commit_sha": "b" * 40,
+            "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/issues/1124",
+            "approval_manifest_sha256": "c" * 64,
             "soul_sha256": artifact_hash,
             "observed_soul_sha256": artifact_hash,
             "agents_sha256": artifact_hash,
@@ -91,6 +94,7 @@ def cloud_env(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_API_URL_SYNTHETIC", "https://cloud.example.test")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC", "cloud-secret")
     monkeypatch.setenv("ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC", "honcho-secret")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
 
 
 def test_preflight_requires_exact_model_capabilities_and_tools(cloud_env):
@@ -195,6 +199,8 @@ def test_responses_api_uses_distinct_session_headers_and_idempotency(cloud_env):
             user_input="Synthetic hello",
             instructions="Synthetic only",
             previous_response_id="response-previous",
+            max_output_tokens=128,
+            max_tool_calls=0,
         )
     )
 
@@ -204,10 +210,13 @@ def test_responses_api_uses_distinct_session_headers_and_idempotency(cloud_env):
     assert headers["X-Hermes-Session-Id"] == "single-interaction-id"
     assert headers["Idempotency-Key"] == "request-id"
     assert fake.calls[0][2]["json"]["previous_response_id"] == "response-previous"
+    assert fake.calls[0][2]["json"]["max_output_tokens"] == 128
+    assert fake.calls[0][2]["json"]["max_tool_calls"] == 0
 
 
 def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
     responses = {}
+    effects = []
 
     def create_response(kwargs):
         return Response(201, {"id": kwargs["json"]["id"]})
@@ -224,7 +233,10 @@ def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
         HonchoCloudProvisionClient(
             base_url="https://honcho.example.test",
             http_client_factory=lambda **kwargs: fake,
-        ).ensure_profile(_binding())
+        ).ensure_profile(
+            _binding(),
+            on_side_effect=lambda effect: asyncio.sleep(0, result=effects.append(effect)),
+        )
     )
 
     assert result == {
@@ -235,6 +247,14 @@ def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
     payloads = [call[2]["json"] for call in fake.calls]
     assert "synthetic" not in str(payloads).lower()
     assert all(call[2]["headers"]["Authorization"] == "Bearer honcho-secret" for call in fake.calls)
+    assert [effect["state"] for effect in effects] == [
+        "planned",
+        "confirmed",
+        "planned",
+        "confirmed",
+        "planned",
+        "confirmed",
+    ]
 
 
 def test_cost_estimator_requires_normalized_rates(monkeypatch):
@@ -249,7 +269,7 @@ def test_cost_estimator_requires_normalized_rates(monkeypatch):
     assert estimate_turn_cost_microusd({"input_tokens": 3, "output_tokens": 2}) == 7
 
 
-def test_pool_registration_persists_reviewed_prompt_receipt():
+def test_pool_registration_persists_server_approved_prompt_receipt():
     class Repository:
         def __init__(self):
             self.kwargs = None
@@ -275,9 +295,37 @@ def test_pool_registration_persists_reviewed_prompt_receipt():
                 },
             )
 
+    artifact_hash = "a" * 64
+    manifest = ApprovedRuntimeManifest(
+        policy_commit_sha="b" * 40,
+        lane_s_review_url="https://github.com/ellaaicare/ella-ai/pull/1127",
+        prompt_pack_version="prompt-v1",
+        model_policy_version="models-v1",
+        expected_model="model-a",
+        allowed_tools=(),
+        required_capabilities=("responses_api", "session_key_header"),
+        artifact_sha256={
+            "soul": artifact_hash,
+            "agents": artifact_hash,
+            "model_policy": artifact_hash,
+        },
+        manifest_sha256="c" * 64,
+    )
+
+    class ManifestStore:
+        def load(self):
+            return manifest
+
     repository = Repository()
     candidate = {
-        **_binding(),
+        "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+        "observed_prompt_artifacts": {
+            "soul_sha256": artifact_hash,
+            "agents_sha256": artifact_hash,
+            "model_policy_sha256": artifact_hash,
+        },
         "runtime_instance_id": "instance-a",
         "profile_name": "pool-instance-a",
         "agent_id": "hermes-cloud",
@@ -285,11 +333,53 @@ def test_pool_registration_persists_reviewed_prompt_receipt():
         "voice_policy_version": "voice-v1",
     }
     result = asyncio.run(
-        HermesCloudPoolManager(repository=repository, cloud_client=Cloud()).register(candidate)
+        HermesCloudPoolManager(
+            repository=repository,
+            cloud_client=Cloud(),
+            manifest_store=ManifestStore(),
+        ).register(candidate)
     )
 
     assert result["status"] == "pool_available"
-    assert repository.kwargs["prompt_artifact_receipt"] == candidate["prompt_artifact_receipt"]
+    assert repository.kwargs["prompt_artifact_receipt"]["policy_commit_sha"] == "b" * 40
+    assert repository.kwargs["prompt_artifact_receipt"]["approval_manifest_sha256"] == "c" * 64
+    assert "expected_model" not in candidate
+
+
+def test_pool_registration_rejects_missing_server_approval_manifest():
+    class Repository:
+        async def register_cloud_pool_binding(self, **kwargs):
+            raise AssertionError("unapproved candidate must not be registered")
+
+    class MissingManifest:
+        def load(self):
+            raise ProvisioningError("hermes_cloud_approval_manifest_missing", retryable=False)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudPoolManager(
+                repository=Repository(),
+                manifest_store=MissingManifest(),
+            ).register({"observed_prompt_artifacts": {}})
+        )
+    assert error.value.code == "hermes_cloud_approval_manifest_missing"
+
+
+def test_pool_registration_rejects_candidate_policy_self_attestation():
+    class Repository:
+        async def register_cloud_pool_binding(self, **kwargs):
+            raise AssertionError("candidate policy must not be registered")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudPoolManager(repository=Repository()).register(
+                {
+                    "expected_model": "candidate-controlled",
+                    "observed_prompt_artifacts": {},
+                }
+            )
+        )
+    assert error.value.code == "hermes_cloud_candidate_policy_forbidden"
 
 
 def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud_env):
@@ -298,7 +388,7 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
         "id": "binding-a",
         "omi_uid": "synthetic-user",
         "provider": "hermes_cloud",
-        "status": "shadow",
+        "status": "internal_canary",
         "active": True,
         "health_state": "healthy",
         "profile_name": "synthetic-profile",
@@ -328,6 +418,87 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     with pytest.raises(ProvisioningError) as error:
         runtime_from_binding(binding, "synthetic-user")
     assert error.value.code == "cloud_binding_contains_local_runtime"
+
+
+@pytest.mark.parametrize(
+    ("body_update", "expected_code"),
+    [
+        ({"model": "other-model"}, "hermes_cloud_returned_model_mismatch"),
+        ({"usage": {"input_tokens": 3}}, "invalid_hermes_cloud_usage"),
+    ],
+)
+def test_responses_api_fails_closed_on_model_or_usage_drift(
+    cloud_env,
+    body_update,
+    expected_code,
+):
+    url = "https://cloud.example.test/v1/responses"
+    body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            }
+        ],
+    }
+    body.update(body_update)
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **kwargs: FakeClient({url: Response(200, body)})
+            ).create_response(
+                _binding(),
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+            )
+        )
+    assert error.value.code == expected_code
+
+
+def test_responses_api_enforces_tool_allowlist_and_hard_count(cloud_env):
+    url = "https://cloud.example.test/v1/responses"
+    body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "output": [
+            {"type": "function_call", "name": "honcho_recall"},
+            {"type": "function_call", "name": "honcho_recall"},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            },
+        ],
+    }
+    binding = _binding()
+    binding["allowed_tools"] = ["honcho_recall"]
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **kwargs: FakeClient({url: Response(200, body)})
+            ).create_response(
+                binding,
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=1,
+            )
+        )
+    assert error.value.code == "hermes_cloud_tool_budget_exceeded"
 
 
 def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch):

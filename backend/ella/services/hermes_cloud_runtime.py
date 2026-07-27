@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -11,11 +12,56 @@ from typing import Any, Optional
 from database import voice_canary as voice_canary_db
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
 from ella.routers.canonical_events import CanonicalEventIn, CanonicalEventStore
-from ella.services.hermes_cloud import HermesCloudClient, estimate_turn_cost_microusd
-from ella.services.provisioning import ProvisioningError
+from ella.services.hermes_cloud import (
+    HermesCloudClient,
+    estimate_max_turn_cost_microusd,
+    estimate_turn_cost_microusd,
+)
+from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
 HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
+DEFAULT_MAX_INPUT_TOKENS = 8192
+DEFAULT_MAX_OUTPUT_TOKENS = 1024
+DEFAULT_MAX_TOOL_CALLS = 2
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ProvisioningError("hermes_cloud_turn_budget_invalid", retryable=False) from exc
+    if not minimum <= value <= maximum:
+        raise ProvisioningError("hermes_cloud_turn_budget_invalid", retryable=False)
+    return value
+
+
+def _turn_budget(runtime: IsolatedRuntime) -> dict[str, int]:
+    max_tool_calls = min(
+        len(runtime.allowed_tools),
+        _bounded_env_int(
+            "ELLA_HERMES_CLOUD_MAX_TOOL_CALLS",
+            DEFAULT_MAX_TOOL_CALLS,
+            0,
+            32,
+        ),
+    )
+    return {
+        "max_input_tokens": _bounded_env_int(
+            "ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS",
+            DEFAULT_MAX_INPUT_TOKENS,
+            256,
+            262144,
+        ),
+        "max_output_tokens": _bounded_env_int(
+            "ELLA_HERMES_CLOUD_MAX_OUTPUT_TOKENS",
+            DEFAULT_MAX_OUTPUT_TOKENS,
+            1,
+            32768,
+        ),
+        "max_tool_calls": max_tool_calls,
+    }
 
 
 @dataclass(frozen=True)
@@ -112,12 +158,16 @@ class HermesCloudRuntimeService:
         cloud_client: Optional[HermesCloudClient] = None,
         voice_policy: Any = voice_canary_db,
         cost_estimator: Any = estimate_turn_cost_microusd,
+        max_cost_estimator: Any = estimate_max_turn_cost_microusd,
+        allow_shadow: bool = False,
     ):
         self.repository = repository
         self.event_store = event_store
         self.cloud_client = cloud_client or HermesCloudClient()
         self.voice_policy = voice_policy
         self.cost_estimator = cost_estimator
+        self.max_cost_estimator = max_cost_estimator
+        self.allow_shadow = allow_shadow
 
     async def run_turn(
         self,
@@ -126,6 +176,11 @@ class HermesCloudRuntimeService:
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+        assert_cloud_identity_gate(request.uid)
+        if runtime.status == "shadow" and not self.allow_shadow:
+            raise ProvisioningError("hermes_cloud_shadow_not_routable", retryable=False)
+        if not request.client_interaction_id.strip():
+            raise ProvisioningError("client_interaction_id_required", retryable=False)
         source_identity, user_event_id, assistant_event_id = _event_identity(request)
         request_hash = _request_hash(request)
         scope = await self.repository.get_or_create_runtime_scope(
@@ -133,6 +188,7 @@ class HermesCloudRuntimeService:
             binding_id=runtime.binding_id,
             role="user",
             channel=request.channel,
+            allow_shadow=self.allow_shadow,
         )
         try:
             interaction = await self.repository.get_or_create_runtime_interaction(
@@ -201,6 +257,10 @@ class HermesCloudRuntimeService:
         lease_open = False
         provider_response_ids: list[str] = []
         estimated_cost = 0
+        reserved_cost = 0
+        reservation_settled = False
+        provider_started = False
+        actual_tool_calls = 0
         termination_reason = "provider_error"
         normalized_error = "hermes_cloud_turn_failed"
         try:
@@ -247,6 +307,20 @@ class HermesCloudRuntimeService:
                 raise ProvisioningError(admission.code, retryable=False)
             lease_open = True
 
+            budget = _turn_budget(runtime)
+            reserved_cost = self.max_cost_estimator(
+                max_input_tokens=budget["max_input_tokens"],
+                max_output_tokens=budget["max_output_tokens"],
+            )
+            reservation = await self.voice_policy.reserve_session_cost(
+                uid=request.uid,
+                session_id=str(claimed["hermes_session_id"]),
+                reservation_microusd=reserved_cost,
+            )
+            if not reservation.allowed:
+                raise ProvisioningError(reservation.code, retryable=False)
+
+            provider_started = True
             turn = await self.cloud_client.create_response(
                 {
                     "expected_model": runtime.expected_model,
@@ -260,9 +334,26 @@ class HermesCloudRuntimeService:
                 previous_response_id=claimed.get("previous_response_id"),
                 base_url=runtime.gateway_url,
                 token=runtime.gateway_token,
+                max_output_tokens=budget["max_output_tokens"],
+                max_tool_calls=budget["max_tool_calls"],
             )
             provider_response_ids = [turn.response_id]
+            actual_tool_calls = turn.tool_calls
             estimated_cost = self.cost_estimator(turn.usage)
+            if estimated_cost > reserved_cost:
+                raise ProvisioningError("hermes_cloud_cost_reservation_exceeded", retryable=False)
+            await self.voice_policy.settle_session_cost(
+                uid=request.uid,
+                session_id=str(claimed["hermes_session_id"]),
+                actual_cost_microusd=estimated_cost,
+                tool_calls=turn.tool_calls,
+            )
+            reservation_settled = True
+            await self.repository.record_runtime_provider_receipt(
+                interaction_id=str(claimed["id"]),
+                provider_response_id=turn.response_id,
+                usage=turn.usage,
+            )
             quota = await self.voice_policy.update_session(
                 uid=request.uid,
                 session_id=str(claimed["hermes_session_id"]),
@@ -270,7 +361,7 @@ class HermesCloudRuntimeService:
                 output_audio_s=0,
                 input_audio_bytes=0,
                 output_audio_bytes=0,
-                tool_calls=0,
+                tool_calls=turn.tool_calls,
                 reconnects=0,
                 provider_request_ids=provider_response_ids,
                 estimated_cost_microusd=estimated_cost,
@@ -354,6 +445,19 @@ class HermesCloudRuntimeService:
             raise ProvisioningError(normalized_error, retryable=True) from exc
         finally:
             if lease_open:
+                if reserved_cost and not reservation_settled:
+                    if provider_started:
+                        await self.voice_policy.settle_session_cost(
+                            uid=request.uid,
+                            session_id=str(claimed["hermes_session_id"]),
+                            actual_cost_microusd=reserved_cost,
+                            tool_calls=actual_tool_calls,
+                        )
+                    else:
+                        await self.voice_policy.release_session_cost(
+                            uid=request.uid,
+                            session_id=str(claimed["hermes_session_id"]),
+                        )
                 await self.voice_policy.complete_session(
                     uid=request.uid,
                     session_id=str(claimed["hermes_session_id"]),
@@ -362,10 +466,14 @@ class HermesCloudRuntimeService:
                     connection_s=0,
                     input_audio_bytes=0,
                     output_audio_bytes=0,
-                    tool_calls=0,
+                    tool_calls=actual_tool_calls,
                     reconnects=0,
                     provider_request_ids=provider_response_ids,
                     termination_reason=termination_reason,
                     normalized_error_code=normalized_error or None,
-                    estimated_cost_microusd=estimated_cost,
+                    estimated_cost_microusd=(
+                        estimated_cost
+                        if reservation_settled
+                        else reserved_cost if provider_started else 0
+                    ),
                 )

@@ -24,6 +24,11 @@ ALTER TABLE ella_runtime_bindings
     ADD COLUMN quarantined_at TIMESTAMPTZ,
     ADD COLUMN quarantine_reason TEXT;
 
+ALTER TABLE ella_provisioning_jobs
+    ADD COLUMN external_side_effects JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN rollback_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN manual_intervention_at TIMESTAMPTZ;
+
 UPDATE ella_runtime_bindings
 SET status = CASE WHEN active THEN 'active' ELSE 'disabled' END;
 
@@ -36,7 +41,7 @@ ALTER TABLE ella_runtime_bindings
     ADD CONSTRAINT ella_runtime_bindings_user_id_fkey
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE,
     ADD CONSTRAINT ella_runtime_bindings_claim_job_id_fkey
-    FOREIGN KEY (claim_job_id) REFERENCES ella_provisioning_jobs(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    FOREIGN KEY (claim_job_id) REFERENCES ella_provisioning_jobs(id) ON DELETE SET NULL ON UPDATE CASCADE,
     ADD CONSTRAINT ella_runtime_bindings_status_check
     CHECK (status IN (
         'pool_available', 'claiming', 'shadow', 'internal_canary',
@@ -74,7 +79,7 @@ ALTER TABLE ella_runtime_bindings
                 AND honcho_workspace IS NOT NULL
                 AND observed_peer IS NOT NULL
                 AND observer_peer IS NOT NULL
-                AND active = true
+                AND active = (status <> 'shadow')
             )
             OR status IN ('quarantined', 'disabled')
         )

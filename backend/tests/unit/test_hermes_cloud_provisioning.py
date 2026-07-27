@@ -23,8 +23,18 @@ class FakeRepository:
         self.jobs = []
         self.claims = 0
         self.delivered_alerts = []
+        self.side_effects = []
+        self.rollbacks = []
+        self.call_order = []
+
+    async def get_cloud_pool_admission_policy(self):
+        self.call_order.append("admission_policy")
+        if self.pool_empty:
+            return None
+        return {"provider": "hermes_cloud", "model": "model-a"}
 
     async def claim_cloud_pool_binding(self, **kwargs):
+        self.call_order.append("pool_claim")
         self.claims += 1
         if self.pool_empty:
             return None
@@ -55,8 +65,20 @@ class FakeRepository:
 
     async def quarantine_cloud_pool_claim(self, **kwargs):
         self.quarantined.append(kwargs)
+        return {"status": "quarantined"}
 
     async def update_job(self, **kwargs):
+        self.jobs.append(kwargs)
+        return kwargs
+
+    async def record_cloud_side_effect(self, **kwargs):
+        self.side_effects.append(kwargs["effect"])
+
+    async def get_cloud_side_effects(self, job_id):
+        return list(self.side_effects)
+
+    async def record_cloud_rollback(self, **kwargs):
+        self.rollbacks.append(kwargs)
         self.jobs.append(kwargs)
         return kwargs
 
@@ -79,16 +101,37 @@ class FakeCloud:
 
 
 class FakeHoncho:
-    def __init__(self):
+    def __init__(self, *, cleanup_error=None):
         self.calls = []
+        self.cleanup_calls = []
+        self.cleanup_error = cleanup_error
 
-    async def ensure_profile(self, binding):
+    async def ensure_profile(self, binding, *, on_side_effect):
         self.calls.append(binding)
+        await on_side_effect(
+            {
+                "kind": "honcho_workspace",
+                "workspace": "workspace-a",
+            }
+        )
+        await on_side_effect(
+            {
+                "kind": "honcho_peer",
+                "workspace": "workspace-a",
+                "peer": "user-a",
+            }
+        )
         return {
             "workspace": "workspace-a",
             "observed_peer": "user-a",
             "observer_peer": "companion-a",
         }
+
+    async def cleanup_profile(self, binding, side_effects):
+        self.cleanup_calls.append((binding, side_effects))
+        if self.cleanup_error:
+            raise self.cleanup_error
+        return {"status": "cleaned", "content_free": True}
 
 
 class FakeAlert:
@@ -104,7 +147,7 @@ async def allow_runtime(**kwargs):
     return SimpleNamespace(
         allowed=True,
         code="ok",
-        entitlement={"revision": 3},
+        entitlement={"revision": 3, "status": "invited"},
     )
 
 
@@ -123,6 +166,7 @@ def _job():
 
 def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
     cloud = FakeCloud()
     honcho = FakeHoncho()
@@ -139,10 +183,12 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
     asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
 
     assert repository.claims == 1
+    assert repository.call_order == ["admission_policy", "pool_claim"]
     assert len(cloud.calls) == 1
     assert len(honcho.calls) == 1
     assert len(repository.finalized) == 1
     assert repository.finalized[0]["status"] == "shadow"
+    assert repository.finalized[0]["health_receipt"]["admission_revision"] == 3
     assert repository.quarantined == []
     assert repository.jobs[-1]["state"] == "ready"
     assert alert.calls[0]["available"] == 1
@@ -151,6 +197,7 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
 
 def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
     coordinator = ProvisioningCoordinator(
         repository,
@@ -168,10 +215,12 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     assert repository.finalized == []
     assert repository.quarantined[0]["reason"] == "hermes_cloud_tool_drift"
     assert repository.jobs[-1]["state"] == "blocked"
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "cleaned"
 
 
 def test_empty_pool_emits_durable_low_water_and_stays_retryable(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository(pool_empty=True)
     alert = FakeAlert()
     coordinator = ProvisioningCoordinator(
@@ -190,3 +239,79 @@ def test_empty_pool_emits_durable_low_water_and_stays_retryable(monkeypatch):
     assert repository.jobs[-1]["error_code"] == "runtime_pool_empty"
     assert repository.jobs[-1]["retryable"] is True
     assert alert.calls[0]["available"] == 0
+    assert repository.claims == 0
+
+
+def test_entitlement_denial_happens_before_pool_claim_or_vendor_side_effect(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+
+    async def deny_runtime(**kwargs):
+        repository.call_order.append("entitlement_denied")
+        return SimpleNamespace(allowed=False, code="no_entitlement", entitlement=None)
+
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=deny_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.call_order == ["admission_policy", "entitlement_denied"]
+    assert repository.claims == 0
+    assert cloud.calls == []
+    assert honcho.calls == []
+    assert repository.jobs[-1]["error_code"] == "runtime_admission_no_entitlement"
+
+
+def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    honcho = FakeHoncho()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(
+            error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)
+        ),
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(repository.side_effects) == 2
+    assert len(honcho.cleanup_calls) == 1
+    assert len(repository.quarantined) == 1
+    assert repository.rollbacks[-1]["state"] == "retryable"
+
+
+def test_cleanup_failure_requires_manual_intervention(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(
+            error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)
+        ),
+        honcho_client=FakeHoncho(cleanup_error=RuntimeError("cleanup failed")),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.rollbacks[-1]["state"] == "manual_intervention"
+    assert repository.rollbacks[-1]["retryable"] is False
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "manual_intervention"

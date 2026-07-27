@@ -68,6 +68,11 @@ REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS = (
     "quarantined_at",
     "quarantine_reason",
 )
+REQUIRED_CLOUD_PROVISIONING_JOB_COLUMNS = (
+    "external_side_effects",
+    "rollback_receipt",
+    "manual_intervention_at",
+)
 REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_claim_job_id_fkey",
     "ella_runtime_bindings_status_check",
@@ -191,6 +196,18 @@ class EllaProvisioningRepository:
                     ORDER BY required.column_name
                 ) AS missing_columns,
                 ARRAY(
+                    SELECT required.column_name
+                    FROM unnest($5::text[]) AS required(column_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'ella_provisioning_jobs'
+                          AND column_name = required.column_name
+                    )
+                    ORDER BY required.column_name
+                ) AS missing_job_columns,
+                ARRAY(
                     SELECT required.constraint_name
                     FROM unnest($4::text[]) AS required(constraint_name)
                     WHERE NOT EXISTS (
@@ -212,12 +229,16 @@ class EllaProvisioningRepository:
             list(REQUIRED_CLOUD_RUNTIME_INDEXES),
             list(REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS),
             list(REQUIRED_CLOUD_RUNTIME_CONSTRAINTS),
+            list(REQUIRED_CLOUD_PROVISIONING_JOB_COLUMNS),
         )
         missing: list[str] = []
         if row:
             missing.extend(f"table:{name}" for name in (row["missing_tables"] or []))
             missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
             missing.extend(f"column:ella_runtime_bindings.{name}" for name in (row["missing_columns"] or []))
+            missing.extend(
+                f"column:ella_provisioning_jobs.{name}" for name in (row["missing_job_columns"] or [])
+            )
             missing.extend(f"constraint:{name}" for name in (row["missing_constraints"] or []))
             if row["binding_user_nullable"] != "YES":
                 missing.append("column:ella_runtime_bindings.user_id_nullable")
@@ -447,10 +468,9 @@ class EllaProvisioningRepository:
                 error_detail = '{}'::jsonb,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
-              AND state <> 'ready'
-              AND state <> 'blocked'
+              AND state NOT IN ('ready', 'blocked', 'rolling_back', 'manual_intervention')
               AND (
-                    state <> 'provisioning'
+                    state NOT IN ('provisioning', 'retryable')
                     OR updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
                   )
             RETURNING *
@@ -458,6 +478,26 @@ class EllaProvisioningRepository:
             uuid.UUID(str(job_id)),
         )
         return _row_dict(row)
+
+    async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT DISTINCT expected_model, model_policy_version
+            FROM ella_runtime_bindings
+            WHERE provider = 'hermes_cloud'
+              AND status = 'pool_available'
+              AND health_state = 'healthy'
+              AND active = false
+              AND user_id IS NULL
+            """
+        )
+        if not rows:
+            return None
+        policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
+        if len(policies) != 1 or not all(next(iter(policies))):
+            raise RuntimePoolClaimError("runtime_pool_policy_ambiguous")
+        model, policy = next(iter(policies))
+        return {"provider": "hermes_cloud", "model": model, "model_policy_version": policy}
 
     async def register_cloud_pool_binding(
         self,
@@ -710,7 +750,7 @@ class EllaProvisioningRepository:
                         status = $5,
                         health_state = 'healthy',
                         health_receipt = $6::jsonb,
-                        active = true,
+                        active = ($5 <> 'shadow'),
                         claimed_at = CURRENT_TIMESTAMP,
                         claim_lease_expires_at = NULL,
                         revision = revision + 1,
@@ -736,6 +776,93 @@ class EllaProvisioningRepository:
                 result = dict(activated)
                 result["omi_uid"] = uid
                 return result
+
+    async def record_cloud_side_effect(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        claim_token: str,
+        effect: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Append one receipt-owned external artifact before the next side effect."""
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                binding = await connection.fetchrow(
+                    """
+                    SELECT b.id
+                    FROM ella_runtime_bindings b
+                    JOIN users u ON u.id = b.user_id
+                    WHERE u.omi_uid = $1
+                      AND b.claim_job_id = $2
+                      AND b.claim_token = $3
+                      AND b.status = 'claiming'
+                    FOR UPDATE
+                    """,
+                    uid,
+                    uuid.UUID(str(job_id)),
+                    uuid.UUID(str(claim_token)),
+                )
+                if not binding:
+                    raise RuntimePoolClaimError("runtime_pool_claim_lost")
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_provisioning_jobs
+                    SET external_side_effects = external_side_effects || $2::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    RETURNING *
+                    """,
+                    uuid.UUID(str(job_id)),
+                    json.dumps([effect]),
+                )
+                if not row:
+                    raise RuntimePoolClaimError("runtime_pool_job_lost")
+                return dict(row)
+
+    async def get_cloud_side_effects(self, job_id: str) -> list[dict[str, Any]]:
+        value = await self.pool.fetchval(
+            "SELECT external_side_effects FROM ella_provisioning_jobs WHERE id = $1",
+            uuid.UUID(str(job_id)),
+        )
+        return [dict(item) for item in (value or []) if isinstance(item, dict)]
+
+    async def record_cloud_rollback(
+        self,
+        *,
+        job_id: str,
+        state: str,
+        rollback_receipt: dict[str, Any],
+        error_code: str,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        if state not in {"retryable", "blocked", "manual_intervention"}:
+            raise ValueError("invalid_cloud_rollback_state")
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_provisioning_jobs
+            SET state = $2,
+                stage = 'runtime_ready',
+                retryable = $3,
+                error_code = $4,
+                rollback_receipt = $5::jsonb,
+                manual_intervention_at = CASE
+                    WHEN $2 = 'manual_intervention' THEN CURRENT_TIMESTAMP
+                    ELSE manual_intervention_at
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING *
+            """,
+            uuid.UUID(str(job_id)),
+            state,
+            retryable,
+            error_code[:120],
+            json.dumps(rollback_receipt),
+        )
+        if not row:
+            raise RuntimePoolClaimError("runtime_pool_job_lost")
+        return dict(row)
 
     async def quarantine_cloud_pool_claim(
         self,
@@ -860,6 +987,44 @@ class EllaProvisioningRepository:
         )
         return _row_dict(row)
 
+    async def promote_cloud_binding(
+        self,
+        *,
+        uid: str,
+        binding_id: str,
+        expected_revision: int,
+        target_status: str,
+    ) -> dict[str, Any]:
+        """Promote a shadow binding through an explicit revision-checked CAS."""
+        if target_status not in {"internal_canary", "active"}:
+            raise ValueError("invalid_cloud_promotion_status")
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_runtime_bindings b
+            SET status = $4,
+                active = true,
+                revision = revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            FROM users u
+            WHERE b.id = $1
+              AND b.user_id = u.id
+              AND u.omi_uid = $2
+              AND b.provider = 'hermes_cloud'
+              AND b.status = 'shadow'
+              AND b.active = false
+              AND b.revision = $3
+              AND b.health_state = 'healthy'
+            RETURNING b.*
+            """,
+            uuid.UUID(str(binding_id)),
+            uid,
+            int(expected_revision),
+            target_status,
+        )
+        if not row:
+            raise RuntimePoolClaimError("runtime_cloud_promotion_conflict")
+        return dict(row)
+
     async def get_or_create_runtime_scope(
         self,
         *,
@@ -867,6 +1032,7 @@ class EllaProvisioningRepository:
         binding_id: str,
         role: str,
         channel: str,
+        allow_shadow: bool = False,
     ) -> dict[str, Any]:
         opaque_key = f"ella:scope:{uuid.uuid4()}"
         row = await self.pool.fetchrow(
@@ -880,7 +1046,7 @@ class EllaProvisioningRepository:
             WHERE b.id = $2
               AND u.omi_uid = $3
               AND b.provider = 'hermes_cloud'
-              AND b.active = true
+              AND (b.active = true OR ($7 AND b.status = 'shadow'))
               AND b.status IN ('shadow', 'internal_canary', 'active')
             ON CONFLICT (binding_id, role, channel)
             DO UPDATE SET updated_at = CURRENT_TIMESTAMP
@@ -892,6 +1058,7 @@ class EllaProvisioningRepository:
             role,
             channel,
             opaque_key,
+            allow_shadow,
         )
         if not row:
             raise LookupError("runtime_scope_binding_not_ready")
@@ -948,26 +1115,97 @@ class EllaProvisioningRepository:
         return result
 
     async def claim_runtime_interaction(self, interaction_id: str) -> Optional[dict[str, Any]]:
+        interaction_uuid = uuid.UUID(str(interaction_id))
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                selected = await connection.fetchrow(
+                    """
+                    SELECT i.*
+                    FROM ella_runtime_interactions i
+                    JOIN ella_runtime_session_scopes s ON s.id = i.scope_id
+                    WHERE i.id = $1
+                    FOR UPDATE OF s, i
+                    """,
+                    interaction_uuid,
+                )
+                if not selected:
+                    return None
+                running_other = await connection.fetchval(
+                    """
+                    SELECT 1
+                    FROM ella_runtime_interactions
+                    WHERE scope_id = $1
+                      AND id <> $2
+                      AND status = 'running'
+                      AND updated_at >= CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                    LIMIT 1
+                    """,
+                    selected["scope_id"],
+                    interaction_uuid,
+                )
+                if running_other:
+                    return None
+                previous_response_id = await connection.fetchval(
+                    """
+                    SELECT provider_response_id
+                    FROM ella_runtime_interactions
+                    WHERE scope_id = $1
+                      AND id <> $2
+                      AND status = 'completed'
+                      AND provider_response_id IS NOT NULL
+                    ORDER BY completed_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    selected["scope_id"],
+                    interaction_uuid,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_runtime_interactions
+                    SET status = 'running',
+                        error_code = NULL,
+                        previous_response_id = $2,
+                        started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND (
+                          status IN ('pending', 'failed')
+                          OR (
+                              status = 'running'
+                              AND updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                          )
+                      )
+                    RETURNING *
+                    """,
+                    interaction_uuid,
+                    previous_response_id,
+                )
+                return _row_dict(row)
+
+    async def record_runtime_provider_receipt(
+        self,
+        *,
+        interaction_id: str,
+        provider_response_id: str,
+        usage: dict[str, Any],
+    ) -> dict[str, Any]:
         row = await self.pool.fetchrow(
             """
             UPDATE ella_runtime_interactions
-            SET status = 'running',
-                error_code = NULL,
-                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            SET provider_response_id = $2,
+                usage = $3::jsonb,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
-              AND (
-                  status IN ('pending', 'failed')
-                  OR (
-                      status = 'running'
-                      AND updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
-                  )
-              )
+              AND status = 'running'
             RETURNING *
             """,
             uuid.UUID(str(interaction_id)),
+            provider_response_id,
+            json.dumps(usage),
         )
-        return _row_dict(row)
+        if not row:
+            raise LookupError("runtime_interaction_not_running")
+        return dict(row)
 
     async def complete_runtime_interaction(
         self,
@@ -1291,6 +1529,7 @@ class EllaProvisioningRepository:
             WHERE u.omi_uid = $1
               AND b.role = $2
               AND b.active = true
+              AND (b.provider <> 'hermes_cloud' OR b.status IN ('internal_canary', 'active'))
               AND ($3::text IS NULL OR b.template_version = $3)
             """,
             uid,

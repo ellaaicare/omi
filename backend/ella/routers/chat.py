@@ -187,9 +187,16 @@ def _parse_client_sent_at(value: str = "") -> datetime:
 def _canonical_turn_id(uid: str, request: EllaChatRequest, started_at: datetime) -> str:
     if request.client_message_id:
         return request.client_message_id
-    if request.conversation_id:
-        return request.conversation_id
-    digest = hashlib.sha256(f"{uid}|{request.message}|{started_at.isoformat()}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(
+        "|".join(
+            (
+                uid,
+                request.conversation_id or "no-conversation",
+                request.message,
+                request.client_sent_at or started_at.isoformat(),
+            )
+        ).encode("utf-8")
+    ).hexdigest()[:24]
     return f"server-{digest}"
 
 

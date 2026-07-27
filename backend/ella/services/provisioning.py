@@ -16,11 +16,19 @@ from urllib.parse import urlparse
 
 import httpx
 
+from database import voice_canary as voice_canary_db
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
     RuntimePoolClaimError,
 )
+from ella.services.hermes_cloud import (
+    HermesCloudClient,
+    HonchoCloudProvisionClient,
+    RuntimePoolAlertPublisher,
+)
+from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.runtime_errors import ProvisioningError
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
 CLOUD_TARGET_SCHEMA_VERSION = "hermes-cloud-user-v1"
@@ -38,14 +46,6 @@ MAX_PROVISION_TIMEOUT_SECONDS = 300.0
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
 DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
 DEFAULT_CLOUD_POOL_LOW_WATER = 2
-
-
-class ProvisioningError(RuntimeError):
-    def __init__(self, code: str, *, retryable: bool, detail: Optional[dict[str, Any]] = None):
-        super().__init__(code)
-        self.code = code
-        self.retryable = retryable
-        self.detail = detail or {}
 
 
 @dataclass(frozen=True)
@@ -148,9 +148,12 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "pending": "queued",
         "provisioning": "provisioning",
         "ready": "ready",
-        "degraded": "degraded",
+        "retryable": "retryable",
+        "rolling_back": "rolling_back",
+        "manual_intervention": "manual_intervention",
+        "degraded": "retryable",
         "blocked": "blocked",
-    }.get(state, "degraded")
+    }.get(state, "manual_intervention")
     public_stage = {
         "identity_ready": "preparing_account",
         "profile_ready": "preparing_memory",
@@ -164,7 +167,7 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "state": public_state,
         "stage": public_stage,
         "retryable": bool(job.get("retryable", True)),
-        "retry_after_ms": 2000 if public_state in {"queued", "provisioning", "degraded"} else None,
+        "retry_after_ms": 2000 if public_state in {"queued", "provisioning", "retryable"} else None,
         "support_code": f"ELLA-{job_id.split('-')[0].upper()}",
         "target_schema_version": job["target_schema_version"],
         "binding_state": "active" if binding and binding.get("active") else "inactive",
@@ -541,13 +544,6 @@ class ProvisioningCoordinator:
         job: dict[str, Any],
         identity: VerifiedIdentity,
     ) -> None:
-        from database import voice_canary as voice_canary_db
-        from ella.services.hermes_cloud import (
-            HermesCloudClient,
-            HonchoCloudProvisionClient,
-            RuntimePoolAlertPublisher,
-        )
-
         cloud_client = self.cloud_client or HermesCloudClient()
         honcho_client = self.honcho_client or HonchoCloudProvisionClient()
         alert_publisher = self.alert_publisher or RuntimePoolAlertPublisher()
@@ -555,6 +551,36 @@ class ProvisioningCoordinator:
         binding: Optional[dict[str, Any]] = None
         claim_token = ""
         try:
+            assert_cloud_identity_gate(identity.uid)
+            pool_policy = await self.repository.get_cloud_pool_admission_policy()
+            if not pool_policy:
+                pool_state = await self.repository.reconcile_cloud_pool_alert(
+                    threshold=cloud_pool_low_water_threshold()
+                )
+                await self._publish_pool_alert(alert_publisher, pool_state)
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="retryable",
+                    stage="profile_ready",
+                    retryable=True,
+                    error_code="runtime_pool_empty",
+                    error_detail={
+                        "available": int(pool_state["available"]),
+                        "threshold": cloud_pool_low_water_threshold(),
+                    },
+                )
+                return
+            admission = await runtime_admission(
+                uid=identity.uid,
+                provider=str(pool_policy["provider"]),
+                model=str(pool_policy["model"]),
+            )
+            if not admission.allowed:
+                raise ProvisioningError(
+                    f"runtime_admission_{admission.code}",
+                    retryable=False,
+                )
+
             binding = await self.repository.claim_cloud_pool_binding(
                 uid=identity.uid,
                 job_id=str(job["id"]),
@@ -563,21 +589,11 @@ class ProvisioningCoordinator:
             pool_state = await self.repository.reconcile_cloud_pool_alert(
                 threshold=cloud_pool_low_water_threshold()
             )
-            try:
-                alert = pool_state.get("alert")
-                delivered = bool(
-                    alert
-                    and not alert.get("delivered_at")
-                    and await alert_publisher.publish(pool_state)
-                )
-                if delivered:
-                    await self.repository.mark_cloud_pool_alert_delivered(str(alert["id"]))
-            except Exception:
-                logger.exception("Runtime pool alert mirror failed; durable outbox remains pending")
+            await self._publish_pool_alert(alert_publisher, pool_state)
             if not binding:
                 await self.repository.update_job(
                     job_id=str(job["id"]),
-                    state="degraded",
+                    state="retryable",
                     stage="profile_ready",
                     retryable=True,
                     error_code="runtime_pool_empty",
@@ -591,19 +607,25 @@ class ProvisioningCoordinator:
             claim_token = str(binding.get("claim_token") or "")
             if not claim_token:
                 raise ProvisioningError("runtime_pool_claim_incomplete", retryable=False)
+            if str(binding.get("expected_model") or "") != str(pool_policy["model"]):
+                raise ProvisioningError("runtime_pool_policy_changed", retryable=False)
 
-            admission = await runtime_admission(
-                uid=identity.uid,
-                provider="hermes_cloud",
-                model=str(binding.get("expected_model") or ""),
-            )
-            if not admission.allowed:
-                raise ProvisioningError(
-                    f"runtime_admission_{admission.code}",
-                    retryable=admission.code in {"no_entitlement", "invited"},
+            async def record_side_effect(effect: dict[str, str]) -> None:
+                await self.repository.record_cloud_side_effect(
+                    uid=identity.uid,
+                    job_id=str(job["id"]),
+                    claim_token=claim_token,
+                    effect={
+                        **effect,
+                        "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
+                        "content_free": True,
+                    },
                 )
 
-            honcho = await honcho_client.ensure_profile(binding)
+            honcho = await honcho_client.ensure_profile(
+                binding,
+                on_side_effect=record_side_effect,
+            )
             preflight = await cloud_client.preflight(binding)
             health_receipt = {
                 **preflight.receipt,
@@ -644,47 +666,141 @@ class ProvisioningCoordinator:
             code = exc.code
             retryable = exc.retryable if isinstance(exc, ProvisioningError) else False
             if binding and claim_token:
-                try:
-                    await self.repository.quarantine_cloud_pool_claim(
-                        uid=identity.uid,
-                        job_id=str(job["id"]),
-                        claim_token=claim_token,
-                        reason=code,
-                        health_receipt={"status": "failed", "code": code, "content_free": True},
-                    )
-                except Exception:
-                    logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
-                    code = "runtime_pool_quarantine_failed"
-                    retryable = False
-            await self.repository.update_job(
-                job_id=str(job["id"]),
-                state="degraded" if retryable else "blocked",
-                stage="runtime_ready",
-                retryable=retryable,
-                error_code=code,
-                error_detail=getattr(exc, "detail", {}),
-            )
+                await self._rollback_cloud_claim(
+                    job=job,
+                    identity=identity,
+                    binding=binding,
+                    claim_token=claim_token,
+                    honcho_client=honcho_client,
+                    error_code=code,
+                    retryable=retryable,
+                )
+            else:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="retryable" if retryable else "blocked",
+                    stage="profile_ready",
+                    retryable=retryable,
+                    error_code=code,
+                    error_detail=getattr(exc, "detail", {}),
+                )
         except Exception:
             logger.exception("Unexpected Hermes Cloud provisioning failure for uid=%s", identity.uid)
             if binding and claim_token:
-                try:
-                    await self.repository.quarantine_cloud_pool_claim(
-                        uid=identity.uid,
-                        job_id=str(job["id"]),
-                        claim_token=claim_token,
-                        reason="cloud_provisioning_internal_error",
-                        health_receipt={
-                            "status": "failed",
-                            "code": "cloud_provisioning_internal_error",
-                            "content_free": True,
-                        },
-                    )
-                except Exception:
-                    logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
-            await self.repository.update_job(
-                job_id=str(job["id"]),
-                state="blocked",
-                stage="runtime_ready",
-                retryable=False,
-                error_code="cloud_provisioning_internal_error",
+                await self._rollback_cloud_claim(
+                    job=job,
+                    identity=identity,
+                    binding=binding,
+                    claim_token=claim_token,
+                    honcho_client=honcho_client,
+                    error_code="cloud_provisioning_internal_error",
+                    retryable=False,
+                )
+            else:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="blocked",
+                    stage="profile_ready",
+                    retryable=False,
+                    error_code="cloud_provisioning_internal_error",
+                )
+
+    async def _publish_pool_alert(self, publisher: Any, pool_state: dict[str, Any]) -> None:
+        try:
+            alert = pool_state.get("alert")
+            delivered = bool(
+                alert
+                and not alert.get("delivered_at")
+                and await publisher.publish(pool_state)
             )
+            if delivered:
+                await self.repository.mark_cloud_pool_alert_delivered(str(alert["id"]))
+        except Exception:
+            logger.exception("Runtime pool alert mirror failed; durable outbox remains pending")
+
+    async def _rollback_cloud_claim(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+        binding: dict[str, Any],
+        claim_token: str,
+        honcho_client: Any,
+        error_code: str,
+        retryable: bool,
+    ) -> None:
+        await self.repository.update_job(
+            job_id=str(job["id"]),
+            state="rolling_back",
+            stage="runtime_ready",
+            retryable=False,
+            error_code=error_code,
+            receipt={
+                "type": "cloud_claim_rollback_started",
+                "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
+                "content_free": True,
+            },
+        )
+        side_effects = await self.repository.get_cloud_side_effects(str(job["id"]))
+        cleanup_receipt: dict[str, Any] = {
+            "status": "not_required",
+            "runtime_credentials": "no_claim_credentials_issued",
+            "content_free": True,
+        }
+        cleanup_error = ""
+        try:
+            if side_effects:
+                cleanup_receipt = await honcho_client.cleanup_profile(binding, side_effects)
+        except Exception as exc:
+            logger.exception("Cloud claim cleanup failed for uid=%s", identity.uid)
+            cleanup_error = getattr(exc, "code", "cloud_claim_cleanup_failed")
+
+        quarantine_error = ""
+        try:
+            quarantined = await self.repository.quarantine_cloud_pool_claim(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                claim_token=claim_token,
+                reason=error_code,
+                health_receipt={
+                    "status": "failed",
+                    "code": error_code,
+                    "cleanup_status": cleanup_receipt.get("status"),
+                    "content_free": True,
+                },
+            )
+            if not quarantined:
+                quarantine_error = "runtime_pool_quarantine_lost"
+        except Exception:
+            logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
+            quarantine_error = "runtime_pool_quarantine_failed"
+
+        if cleanup_error or quarantine_error:
+            await self.repository.record_cloud_rollback(
+                job_id=str(job["id"]),
+                state="manual_intervention",
+                retryable=False,
+                error_code=cleanup_error or quarantine_error,
+                rollback_receipt={
+                    "status": "manual_intervention",
+                    "original_error": error_code,
+                    "cleanup_error": cleanup_error or None,
+                    "quarantine_error": quarantine_error or None,
+                    "side_effect_count": len(side_effects),
+                    "content_free": True,
+                },
+            )
+            return
+        await self.repository.record_cloud_rollback(
+            job_id=str(job["id"]),
+            state="retryable" if retryable else "blocked",
+            retryable=retryable,
+            error_code=error_code,
+            rollback_receipt={
+                **cleanup_receipt,
+                "original_error": error_code,
+                "side_effect_count": len(side_effects),
+                "quarantined": True,
+                "content_free": True,
+            },
+        )

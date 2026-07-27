@@ -14,12 +14,17 @@ from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
 
+@pytest.fixture(autouse=True)
+def cloud_synthetic_identity(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+
+
 def _runtime() -> IsolatedRuntime:
     return IsolatedRuntime(
         uid="synthetic-user",
         binding_id="00000000-0000-0000-0000-000000000001",
         provider="hermes_cloud",
-        status="shadow",
+        status="internal_canary",
         profile_name="synthetic-profile",
         agent_id="hermes-cloud",
         runtime_instance_id="instance-a",
@@ -59,6 +64,7 @@ class FakeRepository:
         self.failures = []
 
     async def get_or_create_runtime_scope(self, **kwargs):
+        assert kwargs["allow_shadow"] is False
         return {"id": "00000000-0000-0000-0000-000000000002", "session_key": "scope-a"}
 
     async def get_or_create_runtime_interaction(self, **kwargs):
@@ -98,6 +104,12 @@ class FakeRepository:
         self.interaction["status"] = "failed"
         self.failures.append(kwargs["error_code"])
 
+    async def record_runtime_provider_receipt(self, **kwargs):
+        self.interaction.update(
+            provider_response_id=kwargs["provider_response_id"],
+            usage=kwargs["usage"],
+        )
+
     async def claim_runtime_ingestion(self, **kwargs):
         key = (
             kwargs["binding_id"],
@@ -124,9 +136,13 @@ class FakeRepository:
 
 
 class FakePolicy:
-    def __init__(self, *, admission=True):
+    def __init__(self, *, admission=True, reservation=True):
         self.admission = admission
+        self.reservation = reservation
         self.accepted = []
+        self.reserved = []
+        self.settled = []
+        self.released = []
         self.updated = []
         self.completed = []
 
@@ -145,6 +161,21 @@ class FakePolicy:
         self.completed.append(kwargs)
         return "usage-event"
 
+    async def reserve_session_cost(self, **kwargs):
+        self.reserved.append(kwargs)
+        return SimpleNamespace(
+            allowed=self.reservation,
+            code="ok" if self.reservation else "quota_daily_cost",
+        )
+
+    async def settle_session_cost(self, **kwargs):
+        self.settled.append(kwargs)
+        return SimpleNamespace(allowed=True, code="ok")
+
+    async def release_session_cost(self, **kwargs):
+        self.released.append(kwargs)
+        return SimpleNamespace(allowed=True, code="ok")
+
 
 class FakeCloudClient:
     def __init__(self):
@@ -157,6 +188,7 @@ class FakeCloudClient:
             text="Synthetic acknowledgement.",
             usage={"input_tokens": 10, "output_tokens": 5},
             model="model-a",
+            tool_calls=0,
         )
 
 
@@ -171,6 +203,7 @@ def test_cloud_turn_writes_once_and_same_interaction_replays():
         cloud_client=cloud,
         voice_policy=policy,
         cost_estimator=lambda usage: 7,
+        max_cost_estimator=lambda **kwargs: 20,
     )
 
     first = asyncio.run(service.run_turn(_runtime(), _request()))
@@ -185,6 +218,8 @@ def test_cloud_turn_writes_once_and_same_interaction_replays():
     assert policy.accepted[0]["provider"] == "hermes_cloud"
     assert policy.accepted[0]["model"] == "model-a"
     assert policy.updated[0]["estimated_cost_microusd"] == 7
+    assert policy.reserved[0]["reservation_microusd"] == 20
+    assert policy.settled[0]["actual_cost_microusd"] == 7
     assert policy.completed[0]["termination_reason"] == "completed"
 
 
@@ -196,6 +231,7 @@ def test_same_interaction_id_with_changed_payload_fails_closed():
         cloud_client=FakeCloudClient(),
         voice_policy=FakePolicy(),
         cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
     )
     asyncio.run(service.run_turn(_runtime(), _request()))
 
@@ -215,6 +251,7 @@ def test_retry_recovers_canonical_assistant_without_second_provider_call():
         cloud_client=cloud,
         voice_policy=FakePolicy(),
         cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
     )
     first = asyncio.run(service.run_turn(_runtime(), _request()))
     repository.interaction["status"] = "failed"
@@ -237,6 +274,7 @@ def test_kill_switch_denial_never_calls_cloud_and_records_terminal_failure():
         cloud_client=cloud,
         voice_policy=policy,
         cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
     )
 
     with pytest.raises(ProvisioningError) as error:
@@ -246,6 +284,29 @@ def test_kill_switch_denial_never_calls_cloud_and_records_terminal_failure():
     assert cloud.calls == []
     assert repository.failures == ["global_kill_switch"]
     assert policy.completed == []
+
+
+def test_cost_reservation_denial_never_calls_provider_and_releases_no_reservation():
+    repository = FakeRepository()
+    cloud = FakeCloudClient()
+    policy = FakePolicy(reservation=False)
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 25,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert error.value.code == "quota_daily_cost"
+    assert cloud.calls == []
+    assert policy.reserved[0]["reservation_microusd"] == 25
+    assert policy.settled == []
+    assert policy.released[0]["session_id"] == "interaction-a"
 
 
 def test_cancellation_closes_policy_lease():
@@ -263,6 +324,7 @@ def test_cancellation_closes_policy_lease():
             cloud_client=BlockingCloud(),
             voice_policy=policy,
             cost_estimator=lambda usage: 0,
+            max_cost_estimator=lambda **kwargs: 1,
         )
         task = asyncio.create_task(service.run_turn(_runtime(), _request()))
         await asyncio.sleep(0)
@@ -273,5 +335,24 @@ def test_cancellation_closes_policy_lease():
         assert repository.failures == ["client_cancelled"]
         assert policy.completed[0]["termination_reason"] == "client_disconnect"
         assert policy.completed[0]["normalized_error_code"] == "client_cancelled"
+        assert policy.settled[0]["actual_cost_microusd"] == 1
 
     asyncio.run(scenario())
+
+
+def test_shadow_binding_is_rejected_by_ordinary_runtime():
+    runtime = _runtime()
+    runtime = IsolatedRuntime(**{**runtime.__dict__, "status": "shadow"})
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=FakeCloudClient(),
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(runtime, _request()))
+
+    assert error.value.code == "hermes_cloud_shadow_not_routable"

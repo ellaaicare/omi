@@ -17,7 +17,7 @@ from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
 )
-from ella.services.runtime_resolver import resolve_isolated_runtime
+from ella.services.runtime_resolver import runtime_from_binding
 
 
 def _synthetic_guard(uid: str) -> None:
@@ -30,8 +30,8 @@ def _synthetic_guard(uid: str) -> None:
 async def run(uid: str, client_interaction_id: str) -> dict:
     _synthetic_guard(uid)
     repository = await EllaProvisioningRepository.create()
-    raw_binding = await repository.resolve_active_runtime(uid)
-    runtime = await resolve_isolated_runtime(uid, repository)
+    raw_binding = await repository.resolve_cloud_binding_state(uid)
+    runtime = runtime_from_binding(raw_binding, uid, allow_shadow=True) if raw_binding else None
     if not raw_binding or not runtime or runtime.provider != "hermes_cloud":
         raise SystemExit("synthetic UID has no active Hermes Cloud binding")
 
@@ -52,6 +52,7 @@ async def run(uid: str, client_interaction_id: str) -> dict:
     service = HermesCloudRuntimeService(
         repository=repository,
         event_store=PostgresCanonicalEventStore(),
+        allow_shadow=True,
     )
     first = await service.run_turn(runtime, request)
     replay = await service.run_turn(runtime, request)

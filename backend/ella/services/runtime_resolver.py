@@ -9,6 +9,11 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from database.ella_provisioning import EllaProvisioningRepository
+from ella.services.hermes_cloud import (
+    HermesCloudClient,
+    validate_prompt_artifact_receipt,
+)
+from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
 from ella.services.provisioning import (
     PROFILE_NAME_RE,
     ProvisioningError,
@@ -56,16 +61,20 @@ class IsolatedRuntime:
     revision: int
 
 
-def runtime_from_binding(binding: dict, uid: str) -> IsolatedRuntime:
+def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
     if binding.get("omi_uid") != uid:
         raise ProvisioningError("runtime_ownership_mismatch", retryable=False)
     provider = str(binding.get("provider") or "").lower()
     if provider not in {"hermes", "hermes_cloud"}:
         raise ProvisioningError("invalid_runtime_provider", retryable=False)
-    if binding.get("active") is not True or binding.get("health_state") != "healthy":
-        raise ProvisioningError("runtime_not_ready", retryable=True)
     status = str(binding.get("status") or ("active" if binding.get("active") else "disabled")).lower()
-    if provider == "hermes_cloud" and status not in {"shadow", "internal_canary", "active"}:
+    shadow_allowed = provider == "hermes_cloud" and status == "shadow" and allow_shadow
+    if (binding.get("active") is not True and not shadow_allowed) or binding.get("health_state") != "healthy":
+        raise ProvisioningError("runtime_not_ready", retryable=True)
+    if provider == "hermes_cloud" and (
+        status not in {"shadow", "internal_canary", "active"}
+        or (status == "shadow" and not allow_shadow)
+    ):
         raise ProvisioningError(f"hermes_cloud_{status or 'not_ready'}", retryable=status == "claiming")
 
     profile_name = str(binding.get("profile_name") or "")
@@ -79,11 +88,7 @@ def runtime_from_binding(binding: dict, uid: str) -> IsolatedRuntime:
         raise ProvisioningError("plato_binding_forbidden", retryable=False)
 
     if provider == "hermes_cloud":
-        from ella.services.hermes_cloud import (
-            HermesCloudClient,
-            validate_prompt_artifact_receipt,
-        )
-
+        assert_cloud_identity_gate(uid)
         if any(
             binding.get(field)
             for field in ("workspace_root", "internal_gateway_url", "gateway_port", "service_label", "credential_ref")

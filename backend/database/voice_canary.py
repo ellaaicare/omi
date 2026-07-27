@@ -841,6 +841,124 @@ async def update_session(
             )
 
 
+async def reserve_session_cost(
+    *,
+    uid: str,
+    session_id: str,
+    reservation_microusd: int,
+) -> VoicePolicyDecision:
+    """Atomically reserve worst-case provider cost before the provider call."""
+    reservation = max(1, int(reservation_microusd))
+    now = _utcnow()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            active_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM voice_active_sessions
+                WHERE session_id = $1 AND uid = $2
+                FOR UPDATE
+                """,
+                session_id,
+                uid,
+            )
+            if not active_row:
+                return VoicePolicyDecision(False, "voice_session_not_active", None, {})
+            active = _record_dict(active_row)
+            entitlement_row = await conn.fetchrow(
+                "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
+                uid,
+            )
+            entitlement = _record_dict(entitlement_row)
+            if not entitlement:
+                return VoicePolicyDecision(False, "no_entitlement", None, {})
+            rollup = await _usage_rollup(conn, uid, now)
+            current = _as_int(active.get("estimated_cost_microusd"))
+            daily_with_reservation = max(0, rollup["daily_cost_microusd"] - current) + reservation
+            monthly_with_reservation = max(0, rollup["monthly_cost_microusd"] - current) + reservation
+            code = await _kill_switch_code(conn, uid, active["provider"])
+            quota_code, soft_warning = quota_state(
+                entitlement,
+                daily_used_s=rollup["daily_used_s"],
+                monthly_used_s=rollup["monthly_used_s"],
+                daily_cost_used_microusd=daily_with_reservation,
+                monthly_cost_used_microusd=monthly_with_reservation,
+            )
+            if not code and quota_code not in {"ok", "soft_warning"}:
+                code = quota_code
+            quota = _quota_payload(
+                entitlement,
+                {
+                    **rollup,
+                    "daily_cost_microusd": daily_with_reservation,
+                    "monthly_cost_microusd": monthly_with_reservation,
+                },
+            )
+            quota["reserved_cost_microusd"] = reservation
+            if code:
+                return VoicePolicyDecision(False, code, entitlement, quota, quota.get("resets_at"))
+            await conn.execute(
+                """
+                UPDATE voice_active_sessions
+                SET estimated_cost_microusd = $3,
+                    last_seen_at = $4
+                WHERE session_id = $1 AND uid = $2
+                """,
+                session_id,
+                uid,
+                reservation,
+                now,
+            )
+            return VoicePolicyDecision(
+                True,
+                "soft_warning" if soft_warning else "ok",
+                entitlement,
+                quota,
+                quota.get("resets_at"),
+                soft_warning,
+            )
+
+
+async def settle_session_cost(
+    *,
+    uid: str,
+    session_id: str,
+    actual_cost_microusd: int,
+    tool_calls: int,
+) -> None:
+    result = await (await get_pool()).execute(
+        """
+        UPDATE voice_active_sessions
+        SET estimated_cost_microusd = $3,
+            tool_calls = GREATEST(tool_calls, $4),
+            last_seen_at = $5
+        WHERE session_id = $1 AND uid = $2
+        """,
+        session_id,
+        uid,
+        max(0, int(actual_cost_microusd)),
+        max(0, int(tool_calls)),
+        _utcnow(),
+    )
+    if result == "UPDATE 0":
+        raise LookupError("voice_session_not_active")
+
+
+async def release_session_cost(*, uid: str, session_id: str) -> None:
+    await (await get_pool()).execute(
+        """
+        UPDATE voice_active_sessions
+        SET estimated_cost_microusd = 0,
+            last_seen_at = $3
+        WHERE session_id = $1 AND uid = $2
+        """,
+        session_id,
+        uid,
+        _utcnow(),
+    )
+
+
 async def complete_session(
     *,
     uid: str,

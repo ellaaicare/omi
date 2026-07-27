@@ -323,3 +323,71 @@ def test_trial_expiry_is_rechecked_at_accept_and_heartbeat(monkeypatch):
         assert fallback_policy == {"enabled": False, "order": []}
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_cost_reservation_is_atomic_at_hard_boundary_and_settles(monkeypatch):
+    started_at = datetime(2026, 7, 26, 21, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(voice_canary, "_utcnow", lambda: started_at)
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        revision = await _grant(pool, "uid-cost-reservation")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET daily_cost_limit_microusd = 1000,
+                    monthly_cost_limit_microusd = 1000
+                WHERE uid = 'uid-cost-reservation'
+                """
+            )
+        assert (await _accept("uid-cost-reservation", "session-cost", revision)).allowed
+
+        denied = await voice_canary.reserve_session_cost(
+            uid="uid-cost-reservation",
+            session_id="session-cost",
+            reservation_microusd=1000,
+        )
+        assert denied.allowed is False
+        assert denied.code == "cost_daily"
+
+        allowed = await voice_canary.reserve_session_cost(
+            uid="uid-cost-reservation",
+            session_id="session-cost",
+            reservation_microusd=999,
+        )
+        assert allowed.allowed is True
+        await voice_canary.settle_session_cost(
+            uid="uid-cost-reservation",
+            session_id="session-cost",
+            actual_cost_microusd=300,
+            tool_calls=1,
+        )
+        async with pool.acquire() as conn:
+            settled = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT estimated_cost_microusd, tool_calls
+                    FROM voice_active_sessions
+                    WHERE session_id = 'session-cost'
+                    """
+                )
+            )
+        assert settled == {"estimated_cost_microusd": 300, "tool_calls": 1}
+
+        await voice_canary.release_session_cost(
+            uid="uid-cost-reservation",
+            session_id="session-cost",
+        )
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT estimated_cost_microusd
+                    FROM voice_active_sessions
+                    WHERE session_id = 'session-cost'
+                    """
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))

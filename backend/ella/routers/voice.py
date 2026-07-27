@@ -1679,10 +1679,16 @@ async def get_voice_context(request: Request):
             "Authorization": f"Bearer {PROVISION_API_TOKEN}",
             "Content-Type": "application/json",
         }
+    workspace_enabled = bool(
+        workspace_api_url
+        and agent_id
+        and workspace_headers.get("Authorization")
+        and workspace_headers.get("Authorization") != "Bearer "
+    )
 
     # 2. Read workspace files from provision API
     files = {}
-    if agent_id and workspace_headers.get("Authorization") != "Bearer ":
+    if workspace_enabled:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
@@ -1786,7 +1792,7 @@ async def get_voice_context(request: Request):
     user_profile = files.get("USER.md", "")[:2000]
     # Read last 2 days of daily voice logs (today + yesterday, UTC)
     voice_summaries = ""
-    if agent_id and workspace_headers.get("Authorization") != "Bearer ":
+    if workspace_enabled:
         try:
             _today = datetime.utcnow()
             _yesterday = _today - timedelta(days=1)
@@ -1840,6 +1846,11 @@ async def get_voice_context(request: Request):
             "provider": getattr(runtime, "provider", "hermes") if runtime else "legacy",
             "agent_id": agent_id,
             "binding_revision": runtime.revision if runtime else None,
+            "workspace_residency": (
+                "canonical_postgres+honcho_cloud+hermes_cloud_policy"
+                if runtime and getattr(runtime, "provider", "") == "hermes_cloud"
+                else "retained_workspace_api"
+            ),
         },
         "soul": soul,
         "user_profile": user_profile,
@@ -3663,7 +3674,8 @@ async def unified_search(request: Request):
         )
         task_source_names.append("timeline")
 
-    if allowed.get("workspace"):
+    cloud_runtime = bool(runtime and getattr(runtime, "provider", "") == "hermes_cloud")
+    if allowed.get("workspace") and not cloud_runtime:
         if runtime:
             tasks.append(
                 _search_workspace(
@@ -3689,7 +3701,7 @@ async def unified_search(request: Request):
         tasks.append(_search_memories(uid, query, limit))
         task_source_names.append("memories")
 
-    if allowed.get("voice"):
+    if allowed.get("voice") and not cloud_runtime:
         if runtime:
             tasks.append(
                 _search_voice_logs(

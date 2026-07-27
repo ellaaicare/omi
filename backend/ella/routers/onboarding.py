@@ -145,9 +145,9 @@ async def ensure_onboarding(
     if claimed:
         background_tasks.add_task(coordinator.process_claimed_job, job=job, identity=identity)
         response.status_code = 202
-    elif receipt["state"] in {"queued", "provisioning", "degraded"}:
+    elif receipt["state"] in {"queued", "provisioning", "retryable", "rolling_back"}:
         response.status_code = 202
-    elif receipt["state"] == "blocked":
+    elif receipt["state"] in {"blocked", "manual_intervention"}:
         response.status_code = 503 if receipt.get("error_code") == "provisioning_disabled" else 409
     return receipt
 

@@ -9,12 +9,17 @@ import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
 
-from ella.services.provisioning import ProvisioningError
+from ella.services.hermes_cloud_policy import (
+    ApprovedRuntimeManifestStore,
+    assert_cloud_operator_gate,
+    observed_artifacts,
+)
+from ella.services.runtime_errors import ProvisioningError
 
 CLOUD_SECRET_REF_RE = re.compile(
     r"^env:(?:"
@@ -89,7 +94,7 @@ def validate_honcho_base_url(value: str) -> str:
 
 
 def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
-    """Require reviewed prompt artifacts to match the observed vendor export."""
+    """Validate the persisted server-issued approval receipt."""
     receipt = binding.get("prompt_artifact_receipt")
     if not isinstance(receipt, dict):
         raise ProvisioningError("prompt_artifact_receipt_missing", retryable=False)
@@ -102,14 +107,24 @@ def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
         or str(receipt.get("model_policy_version") or "") != model_policy_version
     ):
         raise ProvisioningError("prompt_artifact_version_mismatch", retryable=False)
-    review_receipt = str(receipt.get("review_receipt") or "").strip()
-    if not review_receipt.startswith("https://github.com/ellaaicare/ella-ai/"):
+    policy_commit_sha = str(receipt.get("policy_commit_sha") or "").lower()
+    manifest_sha256 = str(receipt.get("approval_manifest_sha256") or "").lower()
+    review_receipt = str(receipt.get("lane_s_review_url") or "").strip()
+    if (
+        receipt.get("schema_version") != "ella-hermes-cloud-approval-v1"
+        or not re.fullmatch(r"[a-f0-9]{40}", policy_commit_sha)
+        or not SHA256_RE.fullmatch(manifest_sha256)
+        or not review_receipt.startswith("https://github.com/ellaaicare/ella-ai/")
+    ):
         raise ProvisioningError("prompt_artifact_review_missing", retryable=False)
 
     normalized = {
+        "schema_version": "ella-hermes-cloud-approval-v1",
         "prompt_pack_version": prompt_pack_version,
         "model_policy_version": model_policy_version,
-        "review_receipt": review_receipt,
+        "policy_commit_sha": policy_commit_sha,
+        "lane_s_review_url": review_receipt,
+        "approval_manifest_sha256": manifest_sha256,
         "content_free": True,
     }
     for artifact in ("soul", "agents", "model_policy"):
@@ -178,6 +193,8 @@ def _health_ready(body: Any) -> bool:
 
 def estimate_turn_cost_microusd(usage: dict[str, Any]) -> int:
     """Estimate provider cost from normalized token rates, failing closed."""
+    if not isinstance(usage, dict) or not {"input_tokens", "output_tokens"}.issubset(usage):
+        raise ProvisioningError("invalid_hermes_cloud_usage", retryable=False)
     try:
         input_tokens = max(0, int(usage.get("input_tokens") or 0))
         output_tokens = max(0, int(usage.get("output_tokens") or 0))
@@ -205,6 +222,15 @@ def estimate_turn_cost_microusd(usage: dict[str, Any]) -> int:
     return max(0, int(total.to_integral_value()))
 
 
+def estimate_max_turn_cost_microusd(*, max_input_tokens: int, max_output_tokens: int) -> int:
+    return estimate_turn_cost_microusd(
+        {
+            "input_tokens": max(1, int(max_input_tokens)),
+            "output_tokens": max(1, int(max_output_tokens)),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class HermesCloudPreflight:
     model: str
@@ -219,6 +245,7 @@ class HermesCloudTurn:
     text: str
     usage: dict[str, Any]
     model: str
+    tool_calls: int
 
 
 class HermesCloudClient:
@@ -382,6 +409,8 @@ class HermesCloudClient:
         previous_response_id: Optional[str] = None,
         base_url: Optional[str] = None,
         token: Optional[str] = None,
+        max_output_tokens: int,
+        max_tool_calls: int,
     ) -> HermesCloudTurn:
         if base_url is None or token is None:
             base_url, token = self.credentials(binding)
@@ -390,6 +419,10 @@ class HermesCloudClient:
             if not token:
                 raise ProvisioningError("cloud_secret_unavailable", retryable=True)
         expected_model = str(binding.get("expected_model") or "").strip()
+        if not expected_model:
+            raise ProvisioningError("cloud_model_policy_missing", retryable=False)
+        if not 1 <= int(max_output_tokens) <= 32768 or not 0 <= int(max_tool_calls) <= 32:
+            raise ProvisioningError("hermes_cloud_turn_budget_invalid", retryable=False)
         headers = {
             **_headers(token),
             "X-Hermes-Session-Key": session_key,
@@ -401,6 +434,8 @@ class HermesCloudClient:
             "input": user_input,
             "instructions": instructions,
             "store": True,
+            "max_output_tokens": int(max_output_tokens),
+            "max_tool_calls": int(max_tool_calls),
         }
         if previous_response_id:
             payload["previous_response_id"] = previous_response_id
@@ -434,6 +469,19 @@ class HermesCloudClient:
         text = _response_output_text(body)
         if not response_id or not text:
             raise ProvisioningError("invalid_hermes_cloud_response", retryable=True)
+        observed_model = str(body.get("model") or "").strip()
+        if observed_model != expected_model:
+            raise ProvisioningError("hermes_cloud_returned_model_mismatch", retryable=False)
+        usage = body.get("usage")
+        if not isinstance(usage, dict) or not {"input_tokens", "output_tokens"}.issubset(usage):
+            raise ProvisioningError("invalid_hermes_cloud_usage", retryable=False)
+        try:
+            normalized_usage = {
+                "input_tokens": max(0, int(usage["input_tokens"])),
+                "output_tokens": max(0, int(usage["output_tokens"])),
+            }
+        except (TypeError, ValueError) as exc:
+            raise ProvisioningError("invalid_hermes_cloud_usage", retryable=False) from exc
         unexpected_calls = [
             str(item.get("name") or "")
             for item in body.get("output") or []
@@ -442,11 +490,14 @@ class HermesCloudClient:
         allowed_tools = set(binding.get("allowed_tools") or [])
         if any(name not in allowed_tools for name in unexpected_calls):
             raise ProvisioningError("hermes_cloud_unapproved_tool_call", retryable=False)
+        if len(unexpected_calls) > int(max_tool_calls):
+            raise ProvisioningError("hermes_cloud_tool_budget_exceeded", retryable=False)
         return HermesCloudTurn(
             response_id=response_id,
             text=text,
-            usage=body.get("usage") if isinstance(body.get("usage"), dict) else {},
-            model=str(body.get("model") or expected_model),
+            usage=normalized_usage,
+            model=observed_model,
+            tool_calls=len(unexpected_calls),
         )
 
 
@@ -469,7 +520,12 @@ class HonchoCloudProvisionClient:
             f"companion-{opaque}",
         )
 
-    async def ensure_profile(self, binding: dict[str, Any]) -> dict[str, str]:
+    async def ensure_profile(
+        self,
+        binding: dict[str, Any],
+        *,
+        on_side_effect: Optional[Callable[[dict[str, str]], Awaitable[None]]] = None,
+    ) -> dict[str, str]:
         token = resolve_cloud_secret(binding.get("honcho_api_key_ref"))
         workspace, observed_peer, observer_peer = self._resource_ids(str(binding["id"]))
         calls = (
@@ -492,6 +548,13 @@ class HonchoCloudProvisionClient:
         try:
             async with self.http_client_factory(timeout=HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS) as client:
                 for url, payload, expected_id in calls:
+                    effect = {
+                        "kind": "honcho_workspace" if expected_id == workspace else "honcho_peer",
+                        "resource_id": expected_id,
+                        "workspace_id": workspace,
+                    }
+                    if on_side_effect:
+                        await on_side_effect({**effect, "state": "planned"})
                     response = await client.post(url, headers=_headers(token), json=payload)
                     if response.status_code in {401, 403}:
                         raise ProvisioningError("honcho_cloud_auth_failed", retryable=False)
@@ -506,6 +569,8 @@ class HonchoCloudProvisionClient:
                         raise ProvisioningError("invalid_honcho_cloud_receipt", retryable=True) from exc
                     if not isinstance(body, dict) or str(body.get("id") or "") != expected_id:
                         raise ProvisioningError("honcho_cloud_identity_mismatch", retryable=False)
+                    if on_side_effect:
+                        await on_side_effect({**effect, "state": "confirmed"})
         except httpx.TimeoutException as exc:
             raise ProvisioningError("honcho_cloud_timeout", retryable=True) from exc
         except httpx.HTTPError as exc:
@@ -514,6 +579,54 @@ class HonchoCloudProvisionClient:
             "workspace": workspace,
             "observed_peer": observed_peer,
             "observer_peer": observer_peer,
+        }
+
+    async def cleanup_profile(
+        self,
+        binding: dict[str, Any],
+        side_effects: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        token = resolve_cloud_secret(binding.get("honcho_api_key_ref"))
+        workspace_ids = {
+            str(item.get("workspace_id") or "")
+            for item in side_effects
+            if item.get("kind") in {"honcho_workspace", "honcho_peer"}
+        }
+        peer_ids = list(
+            dict.fromkeys(
+                str(item.get("resource_id") or "")
+                for item in reversed(side_effects)
+                if item.get("kind") == "honcho_peer"
+            )
+        )
+        if len(workspace_ids) != 1 or not all(peer_ids):
+            raise ProvisioningError("honcho_cloud_cleanup_receipt_invalid", retryable=False)
+        workspace = next(iter(workspace_ids))
+        urls = [
+            f"{self.base_url}/v3/workspaces/{quote(workspace, safe='')}/peers/{quote(peer, safe='')}"
+            for peer in peer_ids
+        ]
+        urls.append(f"{self.base_url}/v3/workspaces/{quote(workspace, safe='')}")
+        try:
+            async with self.http_client_factory(timeout=HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS) as client:
+                for url in urls:
+                    response = await client.delete(url, headers=_headers(token))
+                    if response.status_code in {401, 403}:
+                        raise ProvisioningError("honcho_cloud_cleanup_auth_failed", retryable=False)
+                    if response.status_code not in {200, 204, 404}:
+                        raise ProvisioningError(
+                            f"honcho_cloud_cleanup_http_{response.status_code}",
+                            retryable=response.status_code >= 500 or response.status_code == 429,
+                        )
+        except httpx.TimeoutException as exc:
+            raise ProvisioningError("honcho_cloud_cleanup_timeout", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise ProvisioningError("honcho_cloud_cleanup_unavailable", retryable=True) from exc
+        return {
+            "status": "cleaned",
+            "workspace_sha256": hashlib.sha256(workspace.encode("utf-8")).hexdigest(),
+            "peer_count": len(peer_ids),
+            "content_free": True,
         }
 
 
@@ -558,12 +671,43 @@ class RuntimePoolAlertPublisher:
 class HermesCloudPoolManager:
     """Register only vendor instances that pass the exact runtime policy."""
 
-    def __init__(self, *, repository: Any, cloud_client: Optional[HermesCloudClient] = None):
+    def __init__(
+        self,
+        *,
+        repository: Any,
+        cloud_client: Optional[HermesCloudClient] = None,
+        manifest_store: Optional[ApprovedRuntimeManifestStore] = None,
+    ):
         self.repository = repository
         self.cloud_client = cloud_client or HermesCloudClient()
+        self.manifest_store = manifest_store or ApprovedRuntimeManifestStore()
 
     async def register(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        preflight = await self.cloud_client.preflight(candidate)
+        assert_cloud_operator_gate()
+        protected_fields = {
+            "prompt_pack_version",
+            "prompt_artifact_receipt",
+            "model_policy_version",
+            "expected_model",
+            "allowed_tools",
+            "required_capabilities",
+            "lane_s_review_url",
+            "review_receipt",
+        }
+        if protected_fields.intersection(candidate):
+            raise ProvisioningError("hermes_cloud_candidate_policy_forbidden", retryable=False)
+        manifest = self.manifest_store.load()
+        observed = observed_artifacts(candidate, manifest)
+        effective_candidate = {
+            **candidate,
+            "prompt_pack_version": manifest.prompt_pack_version,
+            "model_policy_version": manifest.model_policy_version,
+            "expected_model": manifest.expected_model,
+            "allowed_tools": list(manifest.allowed_tools),
+            "required_capabilities": list(manifest.required_capabilities),
+            "prompt_artifact_receipt": manifest.binding_receipt(observed),
+        }
+        preflight = await self.cloud_client.preflight(effective_candidate)
         binding = await self.repository.register_cloud_pool_binding(
             runtime_instance_id=str(candidate["runtime_instance_id"]),
             profile_name=str(candidate["profile_name"]),
@@ -572,9 +716,9 @@ class HermesCloudPoolManager:
             api_key_ref=str(candidate["api_key_ref"]),
             honcho_api_key_ref=str(candidate["honcho_api_key_ref"]),
             template_version=str(candidate["template_version"]),
-            prompt_pack_version=str(candidate["prompt_pack_version"]),
+            prompt_pack_version=manifest.prompt_pack_version,
             prompt_artifact_receipt=dict(preflight.receipt["prompt_artifacts"]),
-            model_policy_version=str(candidate["model_policy_version"]),
+            model_policy_version=manifest.model_policy_version,
             voice_policy_version=str(candidate["voice_policy_version"]),
             expected_model=preflight.model,
             allowed_tools=list(preflight.tools),

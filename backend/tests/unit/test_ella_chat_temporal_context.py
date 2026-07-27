@@ -88,6 +88,32 @@ def test_ios_chat_assistant_event_disables_scan_policy():
     assert event.event_id == "ios_chat:uid-1:client-123:assistant"
 
 
+def test_missing_client_message_id_uses_per_message_fallback_identity():
+    started_at = datetime(2026, 5, 27, 18, 31, tzinfo=timezone.utc)
+    first = chat.EllaChatRequest(
+        uid="uid-1",
+        message="First message",
+        conversation_id="conversation-a",
+        client_sent_at="2026-05-27T18:31:00Z",
+    )
+    retry = chat.EllaChatRequest(
+        uid="uid-1",
+        message="First message",
+        conversation_id="conversation-a",
+        client_sent_at="2026-05-27T18:31:00Z",
+    )
+    second = chat.EllaChatRequest(
+        uid="uid-1",
+        message="Second message",
+        conversation_id="conversation-a",
+        client_sent_at="2026-05-27T18:31:01Z",
+    )
+
+    first_id = chat._canonical_turn_id("uid-1", first, started_at)
+    assert chat._canonical_turn_id("uid-1", retry, started_at) == first_id
+    assert chat._canonical_turn_id("uid-1", second, started_at) != first_id
+
+
 def test_hermes_session_defaults_to_canonical(monkeypatch):
     monkeypatch.setattr(chat, "HERMES_CHAT_SESSION_SCOPE", "canonical")
 
