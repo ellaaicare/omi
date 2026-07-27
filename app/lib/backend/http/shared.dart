@@ -93,11 +93,12 @@ Future<http.Response?> makeApiCall({
   required String method,
   Duration? timeout,
   int? retries,
+  bool? requireAuthCheck,
 }) async {
   try {
-    final bool requireAuthCheck = _isRequiredAuthCheck(url);
+    final shouldCheckAuth = requireAuthCheck ?? _isRequiredAuthCheck(url);
     Map<String, String> builtHeaders = await buildHeaders(
-      requireAuthCheck: requireAuthCheck,
+      requireAuthCheck: shouldCheckAuth,
       fromHeaders: headers,
     );
 
@@ -111,12 +112,12 @@ Future<http.Response?> makeApiCall({
       retries: effectiveRetries,
     );
 
-    if (requireAuthCheck && response.statusCode == 401) {
+    if (shouldCheckAuth && response.statusCode == 401) {
       Logger.log('Token expired on 1st attempt');
       SharedPreferencesUtil().authToken = await AuthService.instance.getIdToken() ?? '';
       if (SharedPreferencesUtil().authToken.isNotEmpty) {
         builtHeaders = await buildHeaders(
-          requireAuthCheck: requireAuthCheck,
+          requireAuthCheck: shouldCheckAuth,
           fromHeaders: headers,
         );
         response = await HttpPoolManager.instance.send(

@@ -14,6 +14,7 @@ import 'package:omi/models/user_usage.dart';
 import 'package:omi/utils/logger.dart';
 
 Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/geolocation',
     headers: {},

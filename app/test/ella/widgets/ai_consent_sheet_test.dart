@@ -26,6 +26,12 @@ void main() {
                 receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
                 uid: 'uid-a',
               );
+              preferences.markAiConsentServerVerified(
+                uid: 'uid-a',
+                receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+                policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+                processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+              );
               return true;
             },
           ),
@@ -65,6 +71,8 @@ void main() {
     expect(disclosure, contains('secure backend'));
     expect(disclosure, contains('live or stored microphone audio'));
     expect(disclosure, contains('Deepgram'));
+    expect(disclosure, contains('Soniox'));
+    expect(disclosure, contains('Speechmatics'));
     expect(disclosure, contains('Google Firebase'));
     expect(disclosure, contains('self-hosted Hermes'));
     expect(disclosure, contains('Honcho memory'));
@@ -75,6 +83,9 @@ void main() {
     expect(disclosure, contains('Groq'));
     expect(disclosure, contains('xAI Grok'));
     expect(disclosure, contains('ElevenLabs'));
+    expect(disclosure, contains('Inworld AI'));
+    expect(disclosure, contains('Kokoro'));
+    expect(disclosure, contains('Fish'));
     expect(disclosure, contains('response text'));
     expect(disclosure, contains('selected memory context'));
     expect(disclosure, contains('will not send audio, transcripts, messages, or memory context'));
@@ -105,6 +116,12 @@ void main() {
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
     );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
 
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
@@ -124,6 +141,12 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
     );
     var revokeCalled = false;
 

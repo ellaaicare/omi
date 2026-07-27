@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
@@ -163,6 +164,12 @@ void main() {
     });
     await SharedPreferencesUtil.init();
     final preferences = SharedPreferencesUtil();
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
 
     await preferences.prepareEllaProvisioningAccount('uid-a');
 
@@ -349,21 +356,34 @@ void main() {
     provider.dispose();
   });
 
-  test('AI consent becomes account-bound only after private cloud sync acknowledgement', () async {
+  test('AI consent becomes authority only after an exact server v5 grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
-    final transport = _FakeConsentTransport(updateResult: true, confirmedEnabled: true);
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      submitResponse: _consentStatus(),
+    );
     final service = EllaAiConsentService(
       transport: transport,
-      receiptIdFactory: () => 'receipt-1',
+      requestIdFactory: () => 'request-0001',
       clientVersionFactory: () => '1.0.528+804',
       localeFactory: () => 'en-US',
     );
 
-    final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
+    final receiptId = await service.grantCurrentConsent(uid: 'uid-a');
 
-    expect(receiptId, '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-1');
-    expect(transport.values, [true]);
-    expect(transport.getCalls, 1);
+    expect(receiptId, 'aicr_server-receipt');
+    expect(transport.policyCalls, 1);
+    expect(transport.statusCalls, 0);
+    expect(transport.submissions, hasLength(1));
+    expect(transport.submissions.single.toJson(), {
+      'decision': 'granted',
+      'policy_version': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      'request_id': 'request-0001',
+      'app_version': '1.0.528',
+      'build_number': '804',
+      'locale': 'en-US',
+    });
     expect(SharedPreferencesUtil().hasAccountBoundAiConsent('uid-a'), isTrue);
     expect(SharedPreferencesUtil().aiConsentReceiptId, receiptId);
     expect(SharedPreferencesUtil().aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
@@ -375,43 +395,82 @@ void main() {
     );
   });
 
-  test('AI consent stays disabled when private cloud sync cannot be confirmed', () async {
-    final transport = _FakeConsentTransport(updateResult: true, confirmedEnabled: false);
+  test('AI consent stays disabled when the public policy is unavailable', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
+    final transport = _FakeConsentTransport(policy: null);
     final service = EllaAiConsentService(
       transport: transport,
-      receiptIdFactory: () => 'receipt-1',
+      requestIdFactory: () => 'request-0001',
       clientVersionFactory: () => '1.0.528+804',
       localeFactory: () => 'en-US',
     );
 
-    final receiptId = await service.acknowledgePrivateCloudSync(uid: 'uid-a');
+    final receiptId = await service.grantCurrentConsent(uid: 'uid-a');
 
     expect(receiptId, isNull);
+    expect(transport.submissions, isEmpty);
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
   });
 
-  test('revocation stops local authority before requesting the server update', () async {
+  test('authenticated status refresh restores only an exact current server grant', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-      uid: 'uid-a',
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: _consentStatus(),
     );
-    final transport = _FakeConsentTransport(updateResult: false, confirmedEnabled: true);
+    final service = EllaAiConsentService(transport: transport);
+
+    final authorized = await service.refreshServerAuthority(uid: 'uid-a');
+
+    expect(authorized, isTrue);
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.aiConsentReceiptId, 'aicr_server-receipt');
+    expect(transport.policyCalls, 1);
+    expect(transport.statusCalls, 1);
+  });
+
+  test('stale server status fails closed even if it claims authorization', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: _consentStatus(processorSetHash: 'sha256:stale'),
+    );
+    final service = EllaAiConsentService(transport: transport);
+
+    final authorized = await service.refreshServerAuthority(uid: 'uid-a');
+
+    expect(authorized, isFalse);
+    expect(preferences.aiConsentAccepted, isFalse);
+  });
+
+  test('revocation stops local authority before an unreachable server update', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(receiptId: 'aicr_receipt-a', uid: 'uid-a');
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
+    expect(preferences.aiConsentAccepted, isTrue);
+    final transport = _FakeConsentTransport(policy: null);
     final service = EllaAiConsentService(
       transport: transport,
-      receiptIdFactory: () => 'unused',
+      requestIdFactory: () => 'request-revoke',
       clientVersionFactory: () => '1.0.528+804',
       localeFactory: () => 'en-US',
     );
 
-    final synced = await service.revokePrivateCloudSync();
+    final synced = await service.revokeCurrentConsent(uid: 'uid-a');
 
     expect(synced, isFalse);
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentReceiptId, isEmpty);
-    expect(transport.values, [false]);
+    expect(transport.submissions, isEmpty);
   });
 }
 
@@ -475,22 +534,53 @@ class _DeferredEnsureTransport implements EllaProvisioningTransport {
 }
 
 class _FakeConsentTransport implements EllaAiConsentTransport {
-  _FakeConsentTransport({required this.updateResult, required this.confirmedEnabled});
+  _FakeConsentTransport({
+    required this.policy,
+    this.statusResponse,
+    this.submitResponse,
+  });
 
-  final bool updateResult;
-  final bool confirmedEnabled;
-  final List<bool> values = [];
-  int getCalls = 0;
+  final AiConsentPolicy? policy;
+  final AiConsentStatus? statusResponse;
+  final AiConsentStatus? submitResponse;
+  final List<AiConsentSubmission> submissions = [];
+  int policyCalls = 0;
+  int statusCalls = 0;
 
   @override
-  Future<bool> setPrivateCloudSync(bool value) async {
-    values.add(value);
-    return updateResult;
+  Future<AiConsentPolicy?> fetchPolicy() async {
+    policyCalls++;
+    return policy;
   }
 
   @override
-  Future<bool> getPrivateCloudSyncEnabled() async {
-    getCalls++;
-    return confirmedEnabled;
+  Future<AiConsentStatus?> fetchStatus() async {
+    statusCalls++;
+    return statusResponse;
   }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
+    submissions.add(submission);
+    return submitResponse;
+  }
+}
+
+AiConsentStatus _consentStatus({
+  bool authorized = true,
+  String decision = 'granted',
+  String processorSetHash = SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+}) {
+  return AiConsentStatus(
+    subjectUid: 'uid-a',
+    authorized: authorized,
+    policy: AiConsentPolicy.bundled,
+    decision: decision,
+    receiptId: 'aicr_server-receipt',
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: processorSetHash,
+    appVersion: '1.0.528',
+    buildNumber: '804',
+    locale: 'en-US',
+  );
 }

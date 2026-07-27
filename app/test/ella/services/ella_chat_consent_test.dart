@@ -19,6 +19,13 @@ void main() {
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
     );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
+    expect(preferences.aiConsentAccepted, isTrue);
     preferences.uid = 'uid-b';
 
     final chunks = await sendEllaChatStream('private message').toList();

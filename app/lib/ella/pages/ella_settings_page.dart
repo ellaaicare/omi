@@ -20,7 +20,6 @@ import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
-import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
@@ -174,20 +173,22 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _openListeningConsent() async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final consentService = EllaAiConsentService();
+    await consentService.refreshServerAuthority(uid: uid);
+    if (!mounted) return;
     var revokeSynced = true;
     final accepted = await AiConsentSheet.show(
       context,
       reviewMode: true,
-      onAccept: isHermesProvisioningGateEnabled
-          ? () async {
-              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
-              if (receiptId == null) return false;
-              if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-              return true;
-            }
-          : null,
+      onAccept: () async {
+        final receiptId = await consentService.grantCurrentConsent(uid: uid);
+        if (receiptId == null) return false;
+        if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+        return true;
+      },
       onDecline: () async {
-        revokeSynced = await EllaAiConsentService().revokePrivateCloudSync();
+        revokeSynced = await consentService.revokeCurrentConsent(uid: uid);
+        return revokeSynced;
       },
       onRequestDeletion: () async {
         await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DeleteAccount()));

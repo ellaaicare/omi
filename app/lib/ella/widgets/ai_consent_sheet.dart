@@ -18,14 +18,14 @@ class AiConsentSheet extends StatefulWidget {
   });
 
   final Future<bool> Function()? onAccept;
-  final Future<void> Function()? onDecline;
+  final Future<bool> Function()? onDecline;
   final Future<void> Function()? onRequestDeletion;
   final bool reviewMode;
 
   static Future<bool?> show(
     BuildContext context, {
     Future<bool> Function()? onAccept,
-    Future<void> Function()? onDecline,
+    Future<bool> Function()? onDecline,
     Future<void> Function()? onRequestDeletion,
     bool reviewMode = false,
   }) {
@@ -65,10 +65,9 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     });
 
     try {
-      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(true));
+      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(false));
       if (!mounted) return;
       if (accepted) {
-        if (widget.onAccept == null) SharedPreferencesUtil().acceptAiConsent();
         Navigator.of(context).pop(true);
         return;
       }

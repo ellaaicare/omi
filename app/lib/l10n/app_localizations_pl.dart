@@ -8881,7 +8881,7 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Ella sends only the data needed for a feature through its secure backend. Speech transcription sends live or stored microphone audio to Deepgram. Answers, summaries, and memory assistance send messages, transcripts, and selected memory context through Ella\'s self-hosted Hermes agent runtime and Honcho memory service, and may send that text to OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok; OpenRouter may route it to the selected model provider. Live voice may send microphone audio and selected context to Google Gemini, OpenAI, or xAI Grok. Spoken replies use Ella\'s own voice service and may send response text to ElevenLabs as a fallback. Google Firebase processes account and service metadata for authentication and infrastructure. Summaries are shared only with family members you choose.';
+      'Ella sends only the data needed for a feature through its secure backend. Speech transcription may send live or stored microphone audio to Deepgram, Soniox, or Speechmatics. Answers, summaries, and memory assistance send messages, transcripts, and selected memory context through Ella\'s self-hosted Hermes agent runtime and Honcho memory service, and may send that text to OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok; OpenRouter may route it to the selected model provider. Live voice may send microphone audio and selected context to Google Gemini, OpenAI, or xAI Grok. Spoken replies use Ella\'s self-hosted Kokoro or Fish voice synthesis, or may send response text to Inworld AI or ElevenLabs. Google Firebase processes account and service metadata for authentication and infrastructure. Summaries are shared only with family members you choose.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
@@ -8905,4 +8905,14 @@ class AppLocalizationsPl extends AppLocalizations {
   @override
   String get aiConsentRevokeSyncFailed =>
       'Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.';
+
+  @override
+  String get aiConsentOffGateTitle => 'AI sharing is off';
+
+  @override
+  String get aiConsentOffGateBody =>
+      'Ella will not provision AI features or send audio, transcripts, messages, or memory context while permission is off. You can review the disclosure whenever you are ready.';
+
+  @override
+  String get aiConsentReviewAction => 'Review AI permission';
 }

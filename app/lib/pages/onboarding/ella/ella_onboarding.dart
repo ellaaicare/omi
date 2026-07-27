@@ -109,23 +109,26 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       await preferences.prepareEllaProvisioningAccount(uid);
     }
     if (!mounted) return;
+    final consentService = EllaAiConsentService();
+    if (uid.isNotEmpty && !preferences.aiConsentAccepted) {
+      await consentService.refreshServerAuthority(uid: uid);
+    }
+    if (!mounted) return;
     final shouldPresentVoiceConsent = EllaOnboarding.shouldPresentVoiceConsent(
-      hasCurrentConsent:
-          isHermesProvisioningGateEnabled ? preferences.hasAccountBoundAiConsent(uid) : preferences.aiConsentAccepted,
+      hasCurrentConsent: preferences.hasAccountBoundAiConsent(uid),
       hasPriorAccountConsent: uid.isNotEmpty && preferences.hasPriorAccountBoundAiConsent(uid),
       deferredCurrentConsent: preferences.isCurrentAiConsentDeferred,
     );
     if (shouldPresentVoiceConsent && mounted) {
       await AiConsentSheet.show(
         context,
-        onAccept: isHermesProvisioningGateEnabled
-            ? () async {
-                final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
-                if (receiptId == null) return false;
-                if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-                return true;
-              }
-            : null,
+        onAccept: () async {
+          final receiptId = await consentService.grantCurrentConsent(uid: uid);
+          if (receiptId == null) return false;
+          if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+          return true;
+        },
+        onDecline: () => consentService.declineCurrentConsent(uid: uid),
       );
     }
     if (!mounted) return;
@@ -133,8 +136,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      final hasCurrentConsent =
-          isHermesProvisioningGateEnabled ? preferences.hasAccountBoundAiConsent(uid) : preferences.aiConsentAccepted;
+      final hasCurrentConsent = preferences.hasAccountBoundAiConsent(uid);
       if (isHermesProvisioningGateEnabled &&
           EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: hasCurrentConsent)) {
         unawaited(_startHermesProvisioning());

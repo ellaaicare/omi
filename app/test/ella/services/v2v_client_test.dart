@@ -238,12 +238,18 @@ void main() {
       await client.disconnect();
     });
 
-    test('accepted account-bound v4 consent passes the mic gate before identity validation', () async {
+    test('accepted server-verified v5 consent passes the mic gate before identity validation', () async {
       final preferences = SharedPreferencesUtil();
       preferences.uid = 'uid-a';
       preferences.acceptAiConsent(
         receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
         uid: 'uid-a',
+      );
+      preferences.markAiConsentServerVerified(
+        uid: 'uid-a',
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
       );
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 

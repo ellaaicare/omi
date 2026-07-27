@@ -23,7 +23,7 @@ void main() {
     expect(preferences.publicMode, isFalse);
   });
 
-  test('accepting AI consent persists acceptance and a timestamp', () {
+  test('persisted AI consent is not authority until the server grant is verified', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
 
@@ -33,6 +33,9 @@ void main() {
       clientVersion: '1.0.528+804',
       locale: 'en-US',
     );
+
+    expect(preferences.aiConsentAccepted, isFalse);
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
 
     expect(preferences.aiConsentAccepted, isTrue);
     expect(DateTime.tryParse(preferences.aiConsentAcceptedAt), isNotNull);
@@ -69,16 +72,17 @@ void main() {
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}current-receipt',
       uid: 'uid-a',
     );
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_current-receipt');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
 
-  test('existing v3 account requires v4 before any AI action', () async {
+  test('existing v4 account requires v5 before any AI action', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentContractVersion': 'voice-ai-processors-v3',
-      'aiConsentReceiptId': 'ios-private-cloud-sync:voice-ai-processors-v3:receipt-a',
+      'aiConsentContractVersion': 'ai-data-processors-v4',
+      'aiConsentReceiptId': 'ios-ai-consent:ai-data-processors-v4:receipt-a',
       'aiConsentReceiptUid': 'uid-a',
     });
     await SharedPreferencesUtil.init();
@@ -89,7 +93,7 @@ void main() {
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
   });
 
-  test('deferred v4 remains inactive until account-bound acceptance', () {
+  test('deferred v5 remains inactive until a server-verified account grant', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
 
@@ -101,9 +105,11 @@ void main() {
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
     );
+    expect(preferences.aiConsentAccepted, isFalse);
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v4');
+    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v5');
   });
 
   test('receipt-less acceptance clears stale authority and remains fail closed', () async {
@@ -132,6 +138,7 @@ void main() {
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
     );
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
 
     preferences.uid = 'uid-b';
@@ -153,4 +160,34 @@ void main() {
 
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
+
+  test('expired server verification fails closed without deleting the cached receipt', () {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(receiptId: 'aicr_receipt-a', uid: 'uid-a');
+    _markServerVerified(
+      preferences,
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      verifiedAt: DateTime.now().subtract(SharedPreferencesUtil.aiConsentServerVerificationTtl),
+    );
+
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+  });
+}
+
+void _markServerVerified(
+  SharedPreferencesUtil preferences, {
+  required String uid,
+  required String receiptId,
+  DateTime? verifiedAt,
+}) {
+  preferences.markAiConsentServerVerified(
+    uid: uid,
+    receiptId: receiptId,
+    policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+    processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    verifiedAt: verifiedAt,
+  );
 }

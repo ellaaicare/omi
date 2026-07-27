@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -19,20 +18,18 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
-import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/voice_session_startup_guard.dart';
-import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/ella/widgets/ella_voice_orb.dart';
 import 'package:omi/ella/widgets/memory_correction_receipt.dart';
 import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
 import 'package:omi/ella/widgets/voice_modal_scaffold.dart';
 import 'package:omi/providers/capture_provider.dart';
-import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
@@ -264,31 +261,14 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<bool> _ensureVoiceConsent() async {
-    if (SharedPreferencesUtil().aiConsentAccepted) return true;
     if (_consentPromptActive || !mounted) return false;
 
     _consentPromptActive = true;
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final accepted = await AiConsentSheet.show(
-      context,
-      onAccept: isHermesProvisioningGateEnabled
-          ? () async {
-              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
-              if (receiptId == null) return false;
-              if (mounted) {
-                try {
-                  context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-                } catch (_) {
-                  // The authenticated receipt remains persisted even if this
-                  // route is rendered outside the provisioning provider tree.
-                }
-              }
-              return true;
-            }
-          : null,
-    );
-    _consentPromptActive = false;
-    return accepted == true && SharedPreferencesUtil().aiConsentAccepted;
+    try {
+      return await AiConsentCoordinator.ensure(context);
+    } finally {
+      _consentPromptActive = false;
+    }
   }
 
   Future<void> _activateSelectedVoice() async {
