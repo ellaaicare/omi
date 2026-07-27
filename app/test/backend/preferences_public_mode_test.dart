@@ -32,6 +32,8 @@ void main() {
       uid: 'uid-a',
       clientVersion: '1.0.528+804',
       locale: 'en-US',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
 
     expect(preferences.aiConsentAccepted, isFalse);
@@ -43,6 +45,10 @@ void main() {
     expect(preferences.aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
     expect(preferences.aiConsentClientVersion, '1.0.528+804');
     expect(preferences.aiConsentLocale, 'en-US');
+    expect(preferences.aiConsentProfileBindingId, 'profile-binding-a');
+    expect(preferences.aiConsentScopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
+    expect(preferences.aiConsentScopeHash, SharedPreferencesUtil.currentAiConsentScopeHash);
+    expect(preferences.aiConsentServerDecidedAt, '2026-07-27T00:00:00Z');
 
     preferences.declineAiConsent();
     expect(preferences.aiConsentAccepted, isFalse);
@@ -71,18 +77,20 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}current-receipt',
       uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
     _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_current-receipt');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
 
-  test('existing v4 account requires v5 before any AI action', () async {
+  test('existing v5 account requires v6 before any managed-cloud AI action', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentContractVersion': 'ai-data-processors-v4',
-      'aiConsentReceiptId': 'ios-ai-consent:ai-data-processors-v4:receipt-a',
+      'aiConsentContractVersion': 'ai-data-processors-v5',
+      'aiConsentReceiptId': 'aicr_v5-receipt-a',
       'aiConsentReceiptUid': 'uid-a',
     });
     await SharedPreferencesUtil.init();
@@ -93,7 +101,7 @@ void main() {
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
   });
 
-  test('deferred v5 remains inactive until a server-verified account grant', () {
+  test('deferred v6 remains inactive until a server-verified account and profile grant', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
 
@@ -104,12 +112,14 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
     expect(preferences.aiConsentAccepted, isFalse);
     _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v5');
+    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v6');
   });
 
   test('receipt-less acceptance clears stale authority and remains fail closed', () async {
@@ -137,6 +147,8 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
     _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
@@ -155,6 +167,10 @@ void main() {
       'aiConsentProcessorSetHash': 'sha256:stale',
       'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       'aiConsentReceiptUid': 'uid-a',
+      'aiConsentProfileBindingId': 'profile-binding-a',
+      'aiConsentScopeVersion': SharedPreferencesUtil.currentAiConsentScopeVersion,
+      'aiConsentScopeHash': SharedPreferencesUtil.currentAiConsentScopeHash,
+      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
     });
     await SharedPreferencesUtil.init();
 
@@ -164,13 +180,56 @@ void main() {
   test('expired server verification fails closed without deleting the cached receipt', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(receiptId: 'aicr_receipt-a', uid: 'uid-a');
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
     _markServerVerified(
       preferences,
       uid: 'uid-a',
       receiptId: 'aicr_receipt-a',
       verifiedAt: DateTime.now().subtract(SharedPreferencesUtil.aiConsentServerVerificationTtl),
     );
+
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
+  });
+
+  test('provider, profile, or Photon scope drift fails closed without deleting the cached receipt', () async {
+    SharedPreferences.setMockInitialValues({
+      'uid': 'uid-a',
+      'aiConsentAccepted': true,
+      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'aiConsentProcessorSetHash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      'aiConsentReceiptId': 'aicr_receipt-a',
+      'aiConsentReceiptUid': 'uid-a',
+      'aiConsentProfileBindingId': 'profile-binding-a',
+      'aiConsentScopeVersion': SharedPreferencesUtil.currentAiConsentScopeVersion,
+      'aiConsentScopeHash': 'sha256:stale-scope',
+      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
+    });
+    await SharedPreferencesUtil.init();
+
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+    expect(SharedPreferencesUtil().aiConsentReceiptId, 'aicr_receipt-a');
+  });
+
+  test('profile selection change invalidates ephemeral authority until the server re-verifies it', () {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
+    expect(preferences.aiConsentAccepted, isTrue);
+
+    preferences.verifiedPersonaId = 'persona-b';
 
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentReceiptId, 'aicr_receipt-a');
@@ -188,6 +247,9 @@ void _markServerVerified(
     receiptId: receiptId,
     policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
     processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    profileBindingId: 'profile-binding-a',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     verifiedAt: verifiedAt,
   );
 }

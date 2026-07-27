@@ -148,37 +148,46 @@ void main() {
     expect(preferences.getStringList('cachedMessages'), isEmpty);
   });
 
-  test('same retained account preserves current consent and legacy preferences without making them authority',
-      () async {
-    SharedPreferences.setMockInitialValues({
-      'ellaProvisioningAccountUid': 'uid-a',
-      'ellaGatewayUrl': 'https://gateway.invalid',
-      'ellaGatewayToken': 'secret',
-      'ellaKey': 'legacy-key',
-      'aiConsentAccepted': true,
-      'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
-      'aiConsentReceiptUid': 'uid-a',
-      'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
-      'aiConsentProcessorSetHash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-      'uid': 'uid-a',
-    });
-    await SharedPreferencesUtil.init();
-    final preferences = SharedPreferencesUtil();
-    preferences.markAiConsentServerVerified(
-      uid: 'uid-a',
-      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
-      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-    );
+  test(
+    'same retained account preserves current consent and legacy preferences without making them authority',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'ellaProvisioningAccountUid': 'uid-a',
+        'ellaGatewayUrl': 'https://gateway.invalid',
+        'ellaGatewayToken': 'secret',
+        'ellaKey': 'legacy-key',
+        'aiConsentAccepted': true,
+        'aiConsentReceiptId': '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
+        'aiConsentReceiptUid': 'uid-a',
+        'aiConsentContractVersion': SharedPreferencesUtil.currentAiConsentContractVersion,
+        'aiConsentProcessorSetHash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        'aiConsentProfileBindingId': 'profile-binding-a',
+        'aiConsentScopeVersion': SharedPreferencesUtil.currentAiConsentScopeVersion,
+        'aiConsentScopeHash': SharedPreferencesUtil.currentAiConsentScopeHash,
+        'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
+        'uid': 'uid-a',
+      });
+      await SharedPreferencesUtil.init();
+      final preferences = SharedPreferencesUtil();
+      preferences.markAiConsentServerVerified(
+        uid: 'uid-a',
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}consent-a',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: 'profile-binding-a',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+      );
 
-    await preferences.prepareEllaProvisioningAccount('uid-a');
+      await preferences.prepareEllaProvisioningAccount('uid-a');
 
-    expect(preferences.ellaGatewayUrl, 'https://gateway.invalid');
-    expect(preferences.ellaGatewayToken, 'secret');
-    expect(preferences.ellaKey, 'legacy-key');
-    expect(preferences.aiConsentAccepted, isTrue);
-    expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
-  });
+      expect(preferences.ellaGatewayUrl, 'https://gateway.invalid');
+      expect(preferences.ellaGatewayToken, 'secret');
+      expect(preferences.ellaKey, 'legacy-key');
+      expect(preferences.aiConsentAccepted, isTrue);
+      expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
+    },
+  );
 
   test('provider opens Home authority only for a complete ready receipt', () async {
     final transport = _FakeTransport(
@@ -356,12 +365,9 @@ void main() {
     provider.dispose();
   });
 
-  test('AI consent becomes authority only after an exact server v5 grant', () async {
+  test('AI consent becomes authority only after an exact server v6 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
-    final transport = _FakeConsentTransport(
-      policy: AiConsentPolicy.bundled,
-      submitResponse: _consentStatus(),
-    );
+    final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, submitResponse: _consentStatus());
     final service = EllaAiConsentService(
       transport: transport,
       requestIdFactory: () => 'request-0001',
@@ -383,16 +389,19 @@ void main() {
       'app_version': '1.0.528',
       'build_number': '804',
       'locale': 'en-US',
+      'scope_version': SharedPreferencesUtil.currentAiConsentScopeVersion,
+      'scope_hash': SharedPreferencesUtil.currentAiConsentScopeHash,
     });
     expect(SharedPreferencesUtil().hasAccountBoundAiConsent('uid-a'), isTrue);
     expect(SharedPreferencesUtil().aiConsentReceiptId, receiptId);
     expect(SharedPreferencesUtil().aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
     expect(SharedPreferencesUtil().aiConsentClientVersion, '1.0.528+804');
     expect(SharedPreferencesUtil().aiConsentLocale, 'en-US');
-    expect(
-      SharedPreferencesUtil().aiConsentContractVersion,
-      SharedPreferencesUtil.currentAiConsentContractVersion,
-    );
+    expect(SharedPreferencesUtil().aiConsentProfileBindingId, 'profile-binding-a');
+    expect(SharedPreferencesUtil().aiConsentScopeVersion, SharedPreferencesUtil.currentAiConsentScopeVersion);
+    expect(SharedPreferencesUtil().aiConsentScopeHash, SharedPreferencesUtil.currentAiConsentScopeHash);
+    expect(DateTime.tryParse(SharedPreferencesUtil().aiConsentServerDecidedAt), isNotNull);
+    expect(SharedPreferencesUtil().aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
   });
 
   test('AI consent stays disabled when the public policy is unavailable', () async {
@@ -413,13 +422,44 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
   });
 
+  test('decline submits only v6 consent metadata and grants no data authority', () async {
+    SharedPreferencesUtil().uid = 'uid-a';
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      submitResponse: _consentStatus(authorized: false, decision: 'declined'),
+    );
+    final service = EllaAiConsentService(
+      transport: transport,
+      requestIdFactory: () => 'request-decline',
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final declined = await service.declineCurrentConsent(uid: 'uid-a');
+
+    expect(declined, isTrue);
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+    expect(transport.submissions, hasLength(1));
+    expect(transport.submissions.single.toJson(), {
+      'decision': 'declined',
+      'policy_version': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      'request_id': 'request-decline',
+      'app_version': '1.0.528',
+      'build_number': '804',
+      'locale': 'en-US',
+      'scope_version': SharedPreferencesUtil.currentAiConsentScopeVersion,
+      'scope_hash': SharedPreferencesUtil.currentAiConsentScopeHash,
+    });
+    expect(transport.submissions.single.toJson().toString(), isNot(contains('message')));
+    expect(transport.submissions.single.toJson().toString(), isNot(contains('audio')));
+    expect(transport.submissions.single.toJson().toString(), isNot(contains('memory')));
+  });
+
   test('authenticated status refresh restores only an exact current server grant', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    final transport = _FakeConsentTransport(
-      policy: AiConsentPolicy.bundled,
-      statusResponse: _consentStatus(),
-    );
+    final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, statusResponse: _consentStatus());
     final service = EllaAiConsentService(transport: transport);
 
     final authorized = await service.refreshServerAuthority(uid: 'uid-a');
@@ -434,12 +474,20 @@ void main() {
   test('active authority remains valid while an early refresh is in flight', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(receiptId: 'aicr_server-receipt', uid: 'uid-a');
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_server-receipt',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
       receiptId: 'aicr_server-receipt',
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
     final transport = _DeferredConsentStatusTransport();
     final service = EllaAiConsentService(transport: transport);
@@ -451,6 +499,85 @@ void main() {
     transport.complete(_consentStatus());
     expect(await refresh, isTrue);
     expect(preferences.aiConsentAccepted, isTrue);
+  });
+
+  test('profile switch during delayed policy refresh cannot persist the stale grant', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentPolicyTransport(statusResponse: _consentStatus());
+    final service = EllaAiConsentService(transport: transport);
+
+    final refresh = service.refreshServerAuthority(uid: 'uid-a');
+    await transport.policyStarted.future;
+    preferences.verifiedPersonaId = 'persona-b';
+    transport.completePolicy(AiConsentPolicy.bundled);
+
+    expect(await refresh, isFalse);
+    expect(transport.statusCalls, 0);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('account switch during delayed policy grant prevents submission and persistence', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentPolicyTransport(submitResponse: _consentStatus());
+    final service = EllaAiConsentService(
+      transport: transport,
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final grant = service.grantCurrentConsent(uid: 'uid-a');
+    await transport.policyStarted.future;
+    preferences.uid = 'uid-b';
+    transport.completePolicy(AiConsentPolicy.bundled);
+
+    expect(await grant, isNull);
+    expect(transport.submissions, isEmpty);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('account switch during delayed status refresh cannot persist the stale grant', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentStatusTransport();
+    final service = EllaAiConsentService(transport: transport);
+
+    final refresh = service.refreshServerAuthority(uid: 'uid-a');
+    await transport.statusStarted.future;
+    preferences.uid = 'uid-b';
+    transport.complete(_consentStatus());
+
+    expect(await refresh, isFalse);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('profile switch during delayed grant submission cannot persist the stale receipt', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentSubmitTransport();
+    final service = EllaAiConsentService(
+      transport: transport,
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final grant = service.grantCurrentConsent(uid: 'uid-a');
+    await transport.submitStarted.future;
+    preferences.verifiedPersonaId = 'persona-b';
+    transport.complete(_consentStatus());
+
+    expect(await grant, isNull);
+    expect(transport.submissions, hasLength(1));
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
   });
 
   test('stale server status fails closed even if it claims authorization', () async {
@@ -468,15 +595,92 @@ void main() {
     expect(preferences.aiConsentAccepted, isFalse);
   });
 
-  test('revocation stops local authority before an unreachable server update', () async {
+  test('profile binding change fails closed and requires reconsent', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(receiptId: 'aicr_receipt-a', uid: 'uid-a');
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
       receiptId: 'aicr_receipt-a',
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    );
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      statusResponse: _consentStatus(profileBindingId: 'profile-binding-b'),
+    );
+
+    final authorized = await EllaAiConsentService(transport: transport).refreshServerAuthority(uid: 'uid-a');
+
+    expect(authorized, isFalse);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('missing server decision timestamp never becomes v6 authority', () async {
+    final transport = _FakeConsentTransport(
+      policy: AiConsentPolicy.bundled,
+      submitResponse: _consentStatus(includeServerDecidedAt: false),
+    );
+    SharedPreferencesUtil().uid = 'uid-a';
+
+    final receiptId = await EllaAiConsentService(
+      transport: transport,
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    ).grantCurrentConsent(uid: 'uid-a');
+
+    expect(receiptId, isNull);
+    expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
+  });
+
+  test('malformed v6 server status parses safely and cannot become authority', () {
+    final status = AiConsentStatus.fromJson({
+      'subject_uid': 42,
+      'authorized': 'true',
+      'decision': <String, Object?>{},
+      'receipt_id': <String>['unexpected'],
+      'policy_version': SharedPreferencesUtil.currentAiConsentContractVersion,
+      'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      'profile_binding_id': true,
+      'scope_version': SharedPreferencesUtil.currentAiConsentScopeVersion,
+      'scope_hash': SharedPreferencesUtil.currentAiConsentScopeHash,
+      'server_decided_at': 'not-a-timestamp',
+      'policy': {'processors': 'unexpected'},
+    });
+
+    expect(status.authorized, isFalse);
+    expect(status.subjectUid, isEmpty);
+    expect(status.profileBindingId, isEmpty);
+    expect(status.serverDecidedAt, isNull);
+    expect(status.isCurrentGrantFor('uid-a'), isFalse);
+  });
+
+  test('revocation stops local authority before an unreachable server update', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
     expect(preferences.aiConsentAccepted, isTrue);
     final transport = _FakeConsentTransport(policy: null);
@@ -556,11 +760,7 @@ class _DeferredEnsureTransport implements EllaProvisioningTransport {
 }
 
 class _FakeConsentTransport implements EllaAiConsentTransport {
-  _FakeConsentTransport({
-    required this.policy,
-    this.statusResponse,
-    this.submitResponse,
-  });
+  _FakeConsentTransport({required this.policy, this.statusResponse, this.submitResponse});
 
   final AiConsentPolicy? policy;
   final AiConsentStatus? statusResponse;
@@ -588,8 +788,40 @@ class _FakeConsentTransport implements EllaAiConsentTransport {
   }
 }
 
+class _DeferredConsentPolicyTransport implements EllaAiConsentTransport {
+  _DeferredConsentPolicyTransport({this.statusResponse, this.submitResponse});
+
+  final AiConsentStatus? statusResponse;
+  final AiConsentStatus? submitResponse;
+  final Completer<void> policyStarted = Completer<void>();
+  final Completer<AiConsentPolicy?> _policy = Completer<AiConsentPolicy?>();
+  final List<AiConsentSubmission> submissions = [];
+  int statusCalls = 0;
+
+  void completePolicy(AiConsentPolicy? policy) => _policy.complete(policy);
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() {
+    policyStarted.complete();
+    return _policy.future;
+  }
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() async {
+    statusCalls++;
+    return statusResponse;
+  }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
+    submissions.add(submission);
+    return submitResponse;
+  }
+}
+
 class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
+  final Completer<void> statusStarted = Completer<void>();
 
   void complete(AiConsentStatus? status) => _status.complete(status);
 
@@ -597,7 +829,10 @@ class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
 
   @override
-  Future<AiConsentStatus?> fetchStatus() => _status.future;
+  Future<AiConsentStatus?> fetchStatus() {
+    statusStarted.complete();
+    return _status.future;
+  }
 
   @override
   Future<AiConsentStatus?> submit(AiConsentSubmission submission) {
@@ -605,10 +840,37 @@ class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   }
 }
 
+class _DeferredConsentSubmitTransport implements EllaAiConsentTransport {
+  final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
+  final Completer<void> submitStarted = Completer<void>();
+  final List<AiConsentSubmission> submissions = [];
+
+  void complete(AiConsentStatus? status) => _status.complete(status);
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() {
+    throw StateError('status should not be called');
+  }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) {
+    submissions.add(submission);
+    submitStarted.complete();
+    return _status.future;
+  }
+}
+
 AiConsentStatus _consentStatus({
   bool authorized = true,
   String decision = 'granted',
   String processorSetHash = SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+  String profileBindingId = 'profile-binding-a',
+  String scopeVersion = SharedPreferencesUtil.currentAiConsentScopeVersion,
+  String scopeHash = SharedPreferencesUtil.currentAiConsentScopeHash,
+  bool includeServerDecidedAt = true,
 }) {
   return AiConsentStatus(
     subjectUid: 'uid-a',
@@ -621,5 +883,9 @@ AiConsentStatus _consentStatus({
     appVersion: '1.0.528',
     buildNumber: '804',
     locale: 'en-US',
+    profileBindingId: profileBindingId,
+    scopeVersion: scopeVersion,
+    scopeHash: scopeHash,
+    serverDecidedAt: includeServerDecidedAt ? DateTime.parse('2026-07-27T00:00:00Z') : null,
   );
 }

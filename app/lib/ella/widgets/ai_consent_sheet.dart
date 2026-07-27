@@ -9,13 +9,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 class AiConsentSheet extends StatefulWidget {
   static final Uri privacyPolicyUri = Uri.parse('https://ella-ai-care.com/privacy');
 
-  const AiConsentSheet({
-    super.key,
-    this.onAccept,
-    this.onDecline,
-    this.onRequestDeletion,
-    this.reviewMode = false,
-  });
+  const AiConsentSheet({super.key, this.onAccept, this.onDecline, this.onRequestDeletion, this.reviewMode = false});
 
   final Future<bool> Function()? onAccept;
   final Future<bool> Function()? onDecline;
@@ -38,7 +32,7 @@ class AiConsentSheet extends StatefulWidget {
       backgroundColor: EllaColors.paper,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
       builder: (_) => FractionallySizedBox(
-        heightFactor: reviewMode ? 0.78 : 0.68,
+        heightFactor: 0.92,
         child: AiConsentSheet(
           onAccept: onAccept,
           onDecline: onDecline,
@@ -107,6 +101,44 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     await widget.onRequestDeletion!.call();
   }
 
+  Widget _processorDisclosure({required IconData icon, required String title, required String body}) {
+    return Semantics(
+      container: true,
+      label: '$title. $body',
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: EllaColors.bgSecondary,
+          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+          border: Border.all(color: EllaColors.cardEdge),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: EllaColors.primary, size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 4),
+                  Text(
+                    body,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyMedium?.copyWith(color: EllaColors.textSecondary, height: 1.4),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final bodyStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(color: EllaColors.textSecondary, height: 1.5);
@@ -123,6 +155,42 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
+                    const SizedBox(height: 16),
+                    Text(context.l10n.aiConsentManagedCloudIntro, style: bodyStyle),
+                    const SizedBox(height: 12),
+                    _processorDisclosure(
+                      icon: Icons.cloud_outlined,
+                      title: context.l10n.aiConsentHermesCloudTitle,
+                      body: context.l10n.aiConsentHermesCloudBody,
+                    ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.auto_awesome_outlined,
+                      title: context.l10n.aiConsentOpenAiManagedTitle,
+                      body: context.l10n.aiConsentOpenAiManagedBody,
+                    ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.psychology_alt_outlined,
+                      title: context.l10n.aiConsentHonchoCloudTitle,
+                      body: context.l10n.aiConsentHonchoCloudBody,
+                    ),
+                    const SizedBox(height: 10),
+                    _processorDisclosure(
+                      icon: Icons.message_outlined,
+                      title: context.l10n.aiConsentPhotonTitle,
+                      body: context.l10n.aiConsentPhotonBody,
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: EllaColors.primarySubtle,
+                        borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+                      ),
+                      child: Text(context.l10n.aiConsentManagedCloudScope, style: bodyStyle),
+                    ),
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
                     const SizedBox(height: 12),
@@ -141,8 +209,10 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     ),
                     if (_hasError) ...[
                       const SizedBox(height: 12),
-                      Text(context.l10n.somethingWentWrongTryAgain,
-                          style: bodyStyle?.copyWith(color: EllaColors.error)),
+                      Text(
+                        context.l10n.somethingWentWrongTryAgain,
+                        style: bodyStyle?.copyWith(color: EllaColors.error),
+                      ),
                     ],
                   ],
                 ),

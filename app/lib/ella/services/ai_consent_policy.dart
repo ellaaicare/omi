@@ -10,12 +10,17 @@ class AiConsentProcessor {
   });
 
   factory AiConsentProcessor.fromJson(Map<String, dynamic> json) {
+    String readString(String key) {
+      final value = json[key];
+      return value is String ? value : '';
+    }
+
     return AiConsentProcessor(
-      id: json['id'] as String? ?? '',
-      name: json['legal_recipient'] as String? ?? '',
-      function: json['function'] as String? ?? '',
-      data: json['data'] as String? ?? '',
-      isThirdParty: json['third_party'] as bool? ?? true,
+      id: readString('id'),
+      name: readString('legal_recipient'),
+      function: readString('function'),
+      data: readString('data'),
+      isThirdParty: json['third_party'] is bool ? json['third_party'] as bool : true,
     );
   }
 
@@ -33,18 +38,30 @@ class AiConsentPolicy {
     required this.version,
     required this.processorSetHash,
     required this.canonicalProcessorSet,
+    required this.scopeVersion,
+    required this.scopeHash,
+    required this.canonicalScope,
     required this.processors,
   });
 
   factory AiConsentPolicy.fromJson(Map<String, dynamic> json) {
-    final processors = (json['processors'] as List<dynamic>? ?? const [])
+    String readString(String key) {
+      final value = json[key];
+      return value is String ? value : '';
+    }
+
+    final rawProcessors = json['processors'];
+    final processors = (rawProcessors is List<dynamic> ? rawProcessors : const <dynamic>[])
         .whereType<Map<String, dynamic>>()
         .map(AiConsentProcessor.fromJson)
         .toList(growable: false);
     return AiConsentPolicy(
-      version: json['version'] as String? ?? '',
-      processorSetHash: json['processor_set_hash'] as String? ?? '',
-      canonicalProcessorSet: json['canonical_processor_set'] as String? ?? '',
+      version: readString('version'),
+      processorSetHash: readString('processor_set_hash'),
+      canonicalProcessorSet: readString('canonical_processor_set'),
+      scopeVersion: readString('scope_version'),
+      scopeHash: readString('scope_hash'),
+      canonicalScope: readString('canonical_scope'),
       processors: processors,
     );
   }
@@ -52,12 +69,18 @@ class AiConsentPolicy {
   final String version;
   final String processorSetHash;
   final String canonicalProcessorSet;
+  final String scopeVersion;
+  final String scopeHash;
+  final String canonicalScope;
   final List<AiConsentProcessor> processors;
 
   bool get isBundledCurrent {
     if (version != bundled.version ||
         processorSetHash != bundled.processorSetHash ||
         canonicalProcessorSet != bundled.canonicalProcessorSet ||
+        scopeVersion != bundled.scopeVersion ||
+        scopeHash != bundled.scopeHash ||
+        canonicalScope != bundled.canonicalScope ||
         processors.length != bundled.processors.length) {
       return false;
     }
@@ -81,8 +104,15 @@ class AiConsentPolicy {
     processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
     canonicalProcessorSet: 'deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|'
         'hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|'
+        'nous-hermes-cloud:managed-agent-runtime|honcho-cloud:derived-memory-context|'
+        'openai-codex:managed-agent-model|photon:messaging-delivery|'
         'openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|'
         'groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback',
+    scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+    scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+    canonicalScope: 'profile_binding=server-profile-v1|runtime_provider=hermes_cloud|'
+        'model_route=openai-codex/gpt-5.6-terra|memory_provider=honcho_cloud_profile_isolated|'
+        'photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false',
     processors: [
       AiConsentProcessor(
         id: 'deepgram',
@@ -130,6 +160,31 @@ class AiConsentPolicy {
         isThirdParty: false,
       ),
       AiConsentProcessor(
+        id: 'nous-hermes-cloud',
+        name: 'Nous Research / Hermes Cloud',
+        function: 'Managed agent runtime',
+        data:
+            'Prompt policy, messages, transcripts, selected first-party context, session metadata, and model or tool usage',
+      ),
+      AiConsentProcessor(
+        id: 'honcho-cloud',
+        name: 'Honcho Cloud',
+        function: 'Profile-bound derived memory and context',
+        data: 'Consented derived memory, selected context, and memory relationships for the bound profile',
+      ),
+      AiConsentProcessor(
+        id: 'openai-codex',
+        name: 'OpenAI',
+        function: 'Managed agent model processing',
+        data: 'Model input and output through the approved OpenAI Codex OAuth route',
+      ),
+      AiConsentProcessor(
+        id: 'photon',
+        name: 'Photon',
+        function: 'Test/shared-line message delivery',
+        data: 'Message content and messaging identifiers for one explicitly allowed test contact',
+      ),
+      AiConsentProcessor(
         id: 'openrouter',
         name: 'OpenRouter',
         function: 'Model routing',
@@ -147,24 +202,14 @@ class AiConsentPolicy {
         function: 'Language processing and live voice',
         data: 'Text, selected context, or live microphone audio',
       ),
-      AiConsentProcessor(
-        id: 'groq',
-        name: 'Groq',
-        function: 'Language processing',
-        data: 'Text and selected context',
-      ),
+      AiConsentProcessor(id: 'groq', name: 'Groq', function: 'Language processing', data: 'Text and selected context'),
       AiConsentProcessor(
         id: 'xai-grok',
         name: 'xAI Grok',
         function: 'Language processing and live voice',
         data: 'Text, selected context, or live microphone audio',
       ),
-      AiConsentProcessor(
-        id: 'inworld',
-        name: 'Inworld AI',
-        function: 'Voice synthesis',
-        data: 'Response text',
-      ),
+      AiConsentProcessor(id: 'inworld', name: 'Inworld AI', function: 'Voice synthesis', data: 'Response text'),
       AiConsentProcessor(
         id: 'elevenlabs',
         name: 'ElevenLabs',

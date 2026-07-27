@@ -21,13 +21,20 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentReceiptId = '';
   static String _verifiedAiConsentPolicyVersion = '';
   static String _verifiedAiConsentProcessorSetHash = '';
+  static String _verifiedAiConsentProfileBindingId = '';
+  static String _verifiedAiConsentScopeVersion = '';
+  static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
+  static int _aiConsentAuthorityGeneration = 0;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
-  static const String currentAiConsentContractVersion = 'ai-data-processors-v5';
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v6';
   static const String currentAiConsentProcessorSetHash =
-      'sha256:9c2529babbd6241f20242cf0836baf7e1899d05bb3d945a0d38a357113d4cbc4';
+      'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296';
+  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v1';
+  static const String currentAiConsentScopeHash =
+      'sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
 
   factory SharedPreferencesUtil() {
@@ -45,11 +52,13 @@ class SharedPreferencesUtil {
   }
 
   set uid(String value) {
-    if (value != uid) clearAiConsentServerVerification();
+    if (value != uid) _invalidateAiConsentAuthority();
     saveString('uid', value);
   }
 
   String get uid => getString('uid');
+
+  int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
 
   //-------------------------------- Device ----------------------------------//
 
@@ -70,6 +79,7 @@ class SharedPreferencesUtil {
   String? get verifiedPersonaId => getString('verifiedPersonaId');
 
   set verifiedPersonaId(String? value) {
+    if (value != verifiedPersonaId) _invalidateAiConsentAuthority();
     if (value != null) {
       _preferences?.setString('verifiedPersonaId', value);
     } else {
@@ -217,7 +227,11 @@ class SharedPreferencesUtil {
     if (!accepted ||
         uid.isEmpty ||
         !aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) ||
-        aiConsentReceiptUid != uid) {
+        aiConsentReceiptUid != uid ||
+        aiConsentProfileBindingId.isEmpty ||
+        aiConsentScopeVersion != currentAiConsentScopeVersion ||
+        aiConsentScopeHash != currentAiConsentScopeHash ||
+        DateTime.tryParse(aiConsentServerDecidedAt) == null) {
       return false;
     }
     final verifiedAt = _verifiedAiConsentAt;
@@ -226,7 +240,10 @@ class SharedPreferencesUtil {
         _verifiedAiConsentUid == uid &&
         _verifiedAiConsentReceiptId == aiConsentReceiptId &&
         _verifiedAiConsentPolicyVersion == currentAiConsentContractVersion &&
-        _verifiedAiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
+        _verifiedAiConsentProcessorSetHash == currentAiConsentProcessorSetHash &&
+        _verifiedAiConsentProfileBindingId == aiConsentProfileBindingId &&
+        _verifiedAiConsentScopeVersion == currentAiConsentScopeVersion &&
+        _verifiedAiConsentScopeHash == currentAiConsentScopeHash;
   }
 
   Duration? get aiConsentServerVerificationRemaining {
@@ -235,7 +252,10 @@ class SharedPreferencesUtil {
         _verifiedAiConsentUid != uid ||
         _verifiedAiConsentReceiptId != aiConsentReceiptId ||
         _verifiedAiConsentPolicyVersion != currentAiConsentContractVersion ||
-        _verifiedAiConsentProcessorSetHash != currentAiConsentProcessorSetHash) {
+        _verifiedAiConsentProcessorSetHash != currentAiConsentProcessorSetHash ||
+        _verifiedAiConsentProfileBindingId != aiConsentProfileBindingId ||
+        _verifiedAiConsentScopeVersion != currentAiConsentScopeVersion ||
+        _verifiedAiConsentScopeHash != currentAiConsentScopeHash) {
       return null;
     }
     final remaining = aiConsentServerVerificationTtl - DateTime.now().difference(verifiedAt);
@@ -258,6 +278,14 @@ class SharedPreferencesUtil {
 
   String get aiConsentLocale => getString('aiConsentLocale');
 
+  String get aiConsentProfileBindingId => getString('aiConsentProfileBindingId');
+
+  String get aiConsentScopeVersion => getString('aiConsentScopeVersion');
+
+  String get aiConsentScopeHash => getString('aiConsentScopeHash');
+
+  String get aiConsentServerDecidedAt => getString('aiConsentServerDecidedAt');
+
   String get aiConsentDeferredVersion => getString('aiConsentDeferredVersion');
 
   bool get isCurrentAiConsentDeferred => aiConsentDeferredVersion == currentAiConsentContractVersion;
@@ -266,7 +294,8 @@ class SharedPreferencesUtil {
       uid.isNotEmpty &&
       aiConsentAccepted &&
       aiConsentReceiptId.startsWith(currentAiConsentReceiptPrefix) &&
-      aiConsentReceiptUid == uid;
+      aiConsentReceiptUid == uid &&
+      aiConsentProfileBindingId.isNotEmpty;
 
   bool hasPriorAccountBoundAiConsent(String uid) =>
       uid.isNotEmpty &&
@@ -281,12 +310,18 @@ class SharedPreferencesUtil {
     required String receiptId,
     required String policyVersion,
     required String processorSetHash,
+    required String profileBindingId,
+    required String scopeVersion,
+    required String scopeHash,
     DateTime? verifiedAt,
   }) {
     if (uid.isEmpty ||
         !receiptId.startsWith(currentAiConsentReceiptPrefix) ||
         policyVersion != currentAiConsentContractVersion ||
-        processorSetHash != currentAiConsentProcessorSetHash) {
+        processorSetHash != currentAiConsentProcessorSetHash ||
+        profileBindingId.isEmpty ||
+        scopeVersion != currentAiConsentScopeVersion ||
+        scopeHash != currentAiConsentScopeHash) {
       clearAiConsentServerVerification();
       return;
     }
@@ -294,6 +329,9 @@ class SharedPreferencesUtil {
     _verifiedAiConsentReceiptId = receiptId;
     _verifiedAiConsentPolicyVersion = policyVersion;
     _verifiedAiConsentProcessorSetHash = processorSetHash;
+    _verifiedAiConsentProfileBindingId = profileBindingId;
+    _verifiedAiConsentScopeVersion = scopeVersion;
+    _verifiedAiConsentScopeHash = scopeHash;
     _verifiedAiConsentAt = verifiedAt ?? DateTime.now();
   }
 
@@ -302,7 +340,15 @@ class SharedPreferencesUtil {
     _verifiedAiConsentReceiptId = '';
     _verifiedAiConsentPolicyVersion = '';
     _verifiedAiConsentProcessorSetHash = '';
+    _verifiedAiConsentProfileBindingId = '';
+    _verifiedAiConsentScopeVersion = '';
+    _verifiedAiConsentScopeHash = '';
     _verifiedAiConsentAt = null;
+  }
+
+  static void _invalidateAiConsentAuthority() {
+    _aiConsentAuthorityGeneration++;
+    clearAiConsentServerVerification();
   }
 
   void acceptAiConsent({
@@ -310,13 +356,22 @@ class SharedPreferencesUtil {
     String uid = '',
     String clientVersion = '',
     String locale = '',
+    String profileBindingId = '',
+    String serverDecidedAt = '',
   }) {
+    if (uid != aiConsentReceiptUid || profileBindingId != aiConsentProfileBindingId) {
+      _invalidateAiConsentAuthority();
+    }
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);
     saveString('aiConsentProcessorSetHash', currentAiConsentProcessorSetHash);
     saveString('aiConsentClientVersion', clientVersion);
     saveString('aiConsentLocale', locale);
+    saveString('aiConsentProfileBindingId', profileBindingId);
+    saveString('aiConsentScopeVersion', currentAiConsentScopeVersion);
+    saveString('aiConsentScopeHash', currentAiConsentScopeHash);
+    saveString('aiConsentServerDecidedAt', serverDecidedAt);
     remove('aiConsentDeferredVersion');
     if (receiptId.startsWith(currentAiConsentReceiptPrefix) && uid.isNotEmpty) {
       saveString('aiConsentReceiptId', receiptId);
@@ -333,7 +388,7 @@ class SharedPreferencesUtil {
   }
 
   void declineAiConsent() {
-    clearAiConsentServerVerification();
+    _invalidateAiConsentAuthority();
     aiConsentAccepted = false;
     remove('aiConsentAcceptedAt');
     remove('aiConsentReceiptId');
@@ -342,6 +397,10 @@ class SharedPreferencesUtil {
     remove('aiConsentProcessorSetHash');
     remove('aiConsentClientVersion');
     remove('aiConsentLocale');
+    remove('aiConsentProfileBindingId');
+    remove('aiConsentScopeVersion');
+    remove('aiConsentScopeHash');
+    remove('aiConsentServerDecidedAt');
     remove('aiConsentDeferredVersion');
   }
 
@@ -683,7 +742,7 @@ class SharedPreferencesUtil {
 
     if (previousUid == newUid) return;
 
-    clearAiConsentServerVerification();
+    _invalidateAiConsentAuthority();
 
     if (previousUid.isNotEmpty) {
       // Retained users keep compatibility preferences when returning to the
@@ -718,6 +777,10 @@ class SharedPreferencesUtil {
       'aiConsentProcessorSetHash',
       'aiConsentClientVersion',
       'aiConsentLocale',
+      'aiConsentProfileBindingId',
+      'aiConsentScopeVersion',
+      'aiConsentScopeHash',
+      'aiConsentServerDecidedAt',
       'aiConsentDeferredVersion',
     ]) {
       await remove(key);

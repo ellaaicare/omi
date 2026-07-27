@@ -238,18 +238,23 @@ void main() {
       await client.disconnect();
     });
 
-    test('accepted server-verified v5 consent passes the mic gate before identity validation', () async {
+    test('accepted server-verified v6 consent passes the mic gate before identity validation', () async {
       final preferences = SharedPreferencesUtil();
       preferences.uid = 'uid-a';
       preferences.acceptAiConsent(
         receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
         uid: 'uid-a',
+        profileBindingId: 'profile-binding-a',
+        serverDecidedAt: '2026-07-27T00:00:00Z',
       );
       preferences.markAiConsentServerVerified(
         uid: 'uid-a',
         receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
         policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
         processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: 'profile-binding-a',
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
       );
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 
@@ -264,10 +269,7 @@ void main() {
     test('cancelled startup stops before provider or session work begins', () async {
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 
-      final receipt = await client.connect(
-        provider: 'grok-voice',
-        shouldContinue: () => false,
-      );
+      final receipt = await client.connect(provider: 'grok-voice', shouldContinue: () => false);
 
       expect(receipt.connected, isFalse);
       expect(receipt.stage, V2VConnectionStage.providerRegistry);

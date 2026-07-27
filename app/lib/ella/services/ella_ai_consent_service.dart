@@ -29,6 +29,10 @@ class AiConsentStatus {
     required this.appVersion,
     required this.buildNumber,
     required this.locale,
+    required this.profileBindingId,
+    required this.scopeVersion,
+    required this.scopeHash,
+    required this.serverDecidedAt,
   });
 
   factory AiConsentStatus.fromJson(Map<String, dynamic> json) {
@@ -36,20 +40,29 @@ class AiConsentStatus {
         json['consent'] is Map<String, dynamic> ? json['consent'] as Map<String, dynamic> : const <String, dynamic>{};
     final receipt =
         json['receipt'] is Map<String, dynamic> ? json['receipt'] as Map<String, dynamic> : const <String, dynamic>{};
+    String readString(String key) {
+      final value = receipt[key] ?? consent[key];
+      return value is String ? value : '';
+    }
+
     final policy = json['policy'] is Map<String, dynamic>
         ? AiConsentPolicy.fromJson(json['policy'] as Map<String, dynamic>)
         : null;
     return AiConsentStatus(
-      subjectUid: json['subject_uid'] as String? ?? '',
-      authorized: json['authorized'] as bool? ?? false,
+      subjectUid: json['subject_uid'] is String ? json['subject_uid'] as String : '',
+      authorized: json['authorized'] is bool ? json['authorized'] as bool : false,
       policy: policy,
-      decision: receipt['decision'] as String? ?? consent['decision'] as String? ?? '',
-      receiptId: receipt['receipt_id'] as String? ?? consent['receipt_id'] as String? ?? '',
-      policyVersion: receipt['policy_version'] as String? ?? consent['policy_version'] as String? ?? '',
-      processorSetHash: receipt['processor_set_hash'] as String? ?? consent['processor_set_hash'] as String? ?? '',
-      appVersion: receipt['app_version'] as String? ?? consent['app_version'] as String? ?? '',
-      buildNumber: receipt['build_number'] as String? ?? consent['build_number'] as String? ?? '',
-      locale: receipt['locale'] as String? ?? consent['locale'] as String? ?? '',
+      decision: readString('decision'),
+      receiptId: readString('receipt_id'),
+      policyVersion: readString('policy_version'),
+      processorSetHash: readString('processor_set_hash'),
+      appVersion: readString('app_version'),
+      buildNumber: readString('build_number'),
+      locale: readString('locale'),
+      profileBindingId: readString('profile_binding_id'),
+      scopeVersion: readString('scope_version'),
+      scopeHash: readString('scope_hash'),
+      serverDecidedAt: DateTime.tryParse(readString('server_decided_at')),
     );
   }
 
@@ -63,8 +76,12 @@ class AiConsentStatus {
   final String appVersion;
   final String buildNumber;
   final String locale;
+  final String profileBindingId;
+  final String scopeVersion;
+  final String scopeHash;
+  final DateTime? serverDecidedAt;
 
-  bool isCurrentGrantFor(String uid) {
+  bool isCurrentGrantFor(String uid, {String? expectedProfileBindingId}) {
     return uid.isNotEmpty &&
         subjectUid == uid &&
         authorized &&
@@ -72,6 +89,11 @@ class AiConsentStatus {
         receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
         policyVersion == SharedPreferencesUtil.currentAiConsentContractVersion &&
         processorSetHash == SharedPreferencesUtil.currentAiConsentProcessorSetHash &&
+        profileBindingId.isNotEmpty &&
+        (expectedProfileBindingId == null || profileBindingId == expectedProfileBindingId) &&
+        scopeVersion == SharedPreferencesUtil.currentAiConsentScopeVersion &&
+        scopeHash == SharedPreferencesUtil.currentAiConsentScopeHash &&
+        serverDecidedAt != null &&
         (policy?.isBundledCurrent ?? false);
   }
 }
@@ -85,6 +107,8 @@ class AiConsentSubmission {
     required this.appVersion,
     required this.buildNumber,
     required this.locale,
+    required this.scopeVersion,
+    required this.scopeHash,
   });
 
   final AiConsentDecision decision;
@@ -94,6 +118,8 @@ class AiConsentSubmission {
   final String appVersion;
   final String buildNumber;
   final String locale;
+  final String scopeVersion;
+  final String scopeHash;
 
   Map<String, dynamic> toJson() => {
         'decision': decision.wireValue,
@@ -103,6 +129,8 @@ class AiConsentSubmission {
         'app_version': appVersion,
         'build_number': buildNumber,
         'locale': locale,
+        'scope_version': scopeVersion,
+        'scope_hash': scopeHash,
       };
 }
 
@@ -144,12 +172,7 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
 
   @override
   Future<AiConsentStatus?> fetchStatus() async {
-    final response = await makeApiCall(
-      url: _endpoint,
-      headers: const {},
-      method: 'GET',
-      body: '',
-    );
+    final response = await makeApiCall(url: _endpoint, headers: const {}, method: 'GET', body: '');
     if (response?.statusCode != 200) return null;
     final body = _decodeMap(response!.body);
     return body == null ? null : AiConsentStatus.fromJson(body);
@@ -189,24 +212,31 @@ class EllaAiConsentService {
   final String Function() _localeFactory;
 
   Future<bool> refreshServerAuthority({required String uid}) async {
-    if (uid.isEmpty || _preferences.uid != uid) {
+    final authority = _captureAuthority(uid);
+    if (authority == null) {
       SharedPreferencesUtil.clearAiConsentServerVerification();
       return false;
     }
 
     try {
       final policy = await _fetchAcceptedPolicy();
-      if (policy == null) {
+      if (!_requireCurrentAuthority(authority) || policy == null) {
         SharedPreferencesUtil.clearAiConsentServerVerification();
         return false;
       }
 
       final status = await _transport.fetchStatus();
-      if (status == null || status.policy?.processorSetHash != policy.processorSetHash) {
+      if (!_requireCurrentAuthority(authority) ||
+          status == null ||
+          status.policy?.processorSetHash != policy.processorSetHash) {
         SharedPreferencesUtil.clearAiConsentServerVerification();
         return false;
       }
-      if (!status.isCurrentGrantFor(uid)) {
+      final expectedProfileBindingId = authority.profileBindingId;
+      if (!status.isCurrentGrantFor(
+        uid,
+        expectedProfileBindingId: expectedProfileBindingId.isEmpty ? null : expectedProfileBindingId,
+      )) {
         if (status.subjectUid == uid && status.decision == AiConsentDecision.declined.wireValue) {
           _preferences.deferAiConsent();
         } else if (status.subjectUid == uid) {
@@ -217,8 +247,7 @@ class EllaAiConsentService {
         return false;
       }
 
-      _persistVerifiedGrant(uid, status);
-      return _preferences.aiConsentAccepted;
+      return _persistVerifiedGrant(authority, status) && _preferences.aiConsentAccepted;
     } catch (_) {
       SharedPreferencesUtil.clearAiConsentServerVerification();
       return false;
@@ -226,15 +255,22 @@ class EllaAiConsentService {
   }
 
   Future<String?> grantCurrentConsent({required String uid}) async {
-    final status = await _submit(uid: uid, decision: AiConsentDecision.granted);
-    if (status == null || !status.isCurrentGrantFor(uid)) return null;
-    _persistVerifiedGrant(uid, status);
+    final authority = _captureAuthority(uid);
+    if (authority == null) {
+      SharedPreferencesUtil.clearAiConsentServerVerification();
+      return null;
+    }
+    final status = await _submit(authority: authority, decision: AiConsentDecision.granted);
+    if (!_requireCurrentAuthority(authority) || status == null || !status.isCurrentGrantFor(uid)) return null;
+    if (!_persistVerifiedGrant(authority, status)) return null;
     return _preferences.aiConsentAccepted ? status.receiptId : null;
   }
 
   Future<bool> declineCurrentConsent({required String uid}) async {
     _preferences.deferAiConsent();
-    final status = await _submit(uid: uid, decision: AiConsentDecision.declined);
+    final authority = _captureAuthority(uid);
+    if (authority == null) return false;
+    final status = await _submit(authority: authority, decision: AiConsentDecision.declined);
     return status != null &&
         status.subjectUid == uid &&
         !status.authorized &&
@@ -243,7 +279,9 @@ class EllaAiConsentService {
 
   Future<bool> revokeCurrentConsent({required String uid}) async {
     _preferences.declineAiConsent();
-    final status = await _submit(uid: uid, decision: AiConsentDecision.revoked);
+    final authority = _captureAuthority(uid);
+    if (authority == null) return false;
+    final status = await _submit(authority: authority, decision: AiConsentDecision.revoked);
     return status != null &&
         status.subjectUid == uid &&
         !status.authorized &&
@@ -251,20 +289,20 @@ class EllaAiConsentService {
   }
 
   Future<AiConsentStatus?> _submit({
-    required String uid,
+    required _AiConsentAuthority authority,
     required AiConsentDecision decision,
   }) async {
     SharedPreferencesUtil.clearAiConsentServerVerification();
-    if (uid.isEmpty || _preferences.uid != uid) return null;
+    if (!_requireCurrentAuthority(authority)) return null;
     final policy = await _fetchAcceptedPolicy();
-    if (policy == null) return null;
+    if (!_requireCurrentAuthority(authority) || policy == null) return null;
 
     final fullVersion = _clientVersionFactory();
     final separator = fullVersion.lastIndexOf('+');
     final appVersion = separator > 0 ? fullVersion.substring(0, separator) : fullVersion;
     final buildNumber =
         separator > 0 && separator < fullVersion.length - 1 ? fullVersion.substring(separator + 1) : 'unknown';
-    return _transport.submit(
+    final status = await _transport.submit(
       AiConsentSubmission(
         decision: decision,
         policyVersion: policy.version,
@@ -273,8 +311,11 @@ class EllaAiConsentService {
         appVersion: appVersion,
         buildNumber: buildNumber,
         locale: _localeFactory(),
+        scopeVersion: policy.scopeVersion,
+        scopeHash: policy.scopeHash,
       ),
     );
+    return _requireCurrentAuthority(authority) ? status : null;
   }
 
   Future<AiConsentPolicy?> _fetchAcceptedPolicy() async {
@@ -282,19 +323,71 @@ class EllaAiConsentService {
     return policy?.isBundledCurrent == true ? policy : null;
   }
 
-  void _persistVerifiedGrant(String uid, AiConsentStatus status) {
+  _AiConsentAuthority? _captureAuthority(String uid) {
+    if (uid.isEmpty || _preferences.uid != uid) return null;
+    return _AiConsentAuthority(
+      generation: _preferences.aiConsentAuthorityGeneration,
+      uid: uid,
+      verifiedPersonaId: _preferences.verifiedPersonaId,
+      profileBindingId: _preferences.aiConsentProfileBindingId,
+    );
+  }
+
+  bool _isCurrentAuthority(_AiConsentAuthority authority) {
+    return _preferences.aiConsentAuthorityGeneration == authority.generation &&
+        _preferences.uid == authority.uid &&
+        _preferences.verifiedPersonaId == authority.verifiedPersonaId &&
+        _preferences.aiConsentProfileBindingId == authority.profileBindingId;
+  }
+
+  bool _requireCurrentAuthority(_AiConsentAuthority authority) {
+    if (_isCurrentAuthority(authority)) return true;
+    SharedPreferencesUtil.clearAiConsentServerVerification();
+    return false;
+  }
+
+  bool _persistVerifiedGrant(_AiConsentAuthority authority, AiConsentStatus status) {
+    if (!_requireCurrentAuthority(authority)) return false;
     final clientVersion = status.buildNumber.isEmpty ? status.appVersion : '${status.appVersion}+${status.buildNumber}';
     _preferences.acceptAiConsent(
       receiptId: status.receiptId,
-      uid: uid,
+      uid: authority.uid,
       clientVersion: clientVersion,
       locale: status.locale,
+      profileBindingId: status.profileBindingId,
+      serverDecidedAt: status.serverDecidedAt!.toUtc().toIso8601String(),
     );
+    final persistedAuthority = _captureAuthority(authority.uid);
+    if (persistedAuthority == null ||
+        persistedAuthority.verifiedPersonaId != authority.verifiedPersonaId ||
+        persistedAuthority.profileBindingId != status.profileBindingId ||
+        !_requireCurrentAuthority(persistedAuthority)) {
+      SharedPreferencesUtil.clearAiConsentServerVerification();
+      return false;
+    }
     _preferences.markAiConsentServerVerified(
-      uid: uid,
+      uid: authority.uid,
       receiptId: status.receiptId,
       policyVersion: status.policyVersion,
       processorSetHash: status.processorSetHash,
+      profileBindingId: status.profileBindingId,
+      scopeVersion: status.scopeVersion,
+      scopeHash: status.scopeHash,
     );
+    return _requireCurrentAuthority(persistedAuthority);
   }
+}
+
+class _AiConsentAuthority {
+  const _AiConsentAuthority({
+    required this.generation,
+    required this.uid,
+    required this.verifiedPersonaId,
+    required this.profileBindingId,
+  });
+
+  final int generation;
+  final String uid;
+  final String? verifiedPersonaId;
+  final String profileBindingId;
 }
