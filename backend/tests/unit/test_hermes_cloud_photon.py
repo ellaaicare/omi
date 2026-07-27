@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from database.ella_provisioning import RuntimePoolClaimError
 from ella.routers.photon import create_photon_router
 from ella.routers.canonical_events import CanonicalEventIn, InMemoryCanonicalEventStore
+from ella.services import ai_consent, hermes_cloud_photon
 from ella.services.hermes_cloud import HermesCloudPreflight
 from ella.services.hermes_cloud_photon import (
     PHOTON_ALLOWED_REGULAR_COMMANDS,
@@ -38,6 +39,12 @@ class SimulatedProcessCrash(BaseException):
     pass
 
 
+@pytest.fixture(autouse=True)
+def synthetic_owner_gate(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-owner")
+
+
 def _opaque_key(namespace: str, raw_value: str) -> str:
     return hmac.new(
         IDENTITY_HMAC_KEY.encode("utf-8"),
@@ -59,6 +66,56 @@ def _config(*, authorize_synthetic_fixture: bool = True) -> PhotonAdapterConfig:
             else frozenset()
         ),
     )
+
+
+def _consent_submission(
+    *,
+    request_id: str,
+    decision: str = "granted",
+) -> ai_consent.ConsentSubmission:
+    return ai_consent.ConsentSubmission(
+        decision=decision,
+        policy_version=ai_consent.CURRENT_POLICY_VERSION,
+        processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+        request_id=request_id,
+        app_version="1.0.0",
+        build_number="804",
+        locale="en-US",
+        scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+        scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+    )
+
+
+def _enable_real_managed_consent(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "false")
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_CONSENT_POLICY_VERSION",
+        ai_consent.CURRENT_POLICY_VERSION,
+    )
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_CONSENT_PROCESSOR_SET_HASH",
+        ai_consent.CURRENT_PROCESSOR_SET_HASH,
+    )
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_CONSENT_SCOPE_VERSION",
+        ai_consent.CURRENT_SCOPE_VERSION,
+    )
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_CONSENT_SCOPE_HASH",
+        ai_consent.CURRENT_SCOPE_HASH,
+    )
+    monkeypatch.setenv(
+        "ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS",
+        "synthetic-owner",
+    )
+    repository = ai_consent.InMemoryConsentRepository()
+    service = ai_consent.AiConsentService(repository)
+    first = service.submit(
+        "synthetic-owner",
+        _consent_submission(request_id="photon-grant-a"),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", repository)
+    return service, first["consent"]["receipt_id"]
 
 
 def _runtime(**updates) -> IsolatedRuntime:
@@ -125,6 +182,7 @@ class FakeRepository:
         self.claim_calls = []
         self.quota_calls = []
         self.failures = []
+        self.consent_quarantines = []
         self.ack_calls = []
         self.completed_runtime_receipts = set()
         self.crash_before_quota = False
@@ -148,6 +206,12 @@ class FakeRepository:
         )
         return dict(self.binding)
 
+    async def get_photon_message_by_inbound(self, **kwargs):
+        row = self.messages.get(kwargs["inbound_provider_message_key"])
+        if row and row["inbound_payload_sha256"] != kwargs["inbound_payload_sha256"]:
+            raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
+        return dict(row) if row else None
+
     async def claim_photon_message(self, **kwargs):
         self.claim_calls.append(dict(kwargs))
         key = kwargs["inbound_provider_message_key"]
@@ -155,6 +219,21 @@ class FakeRepository:
         if existing:
             if existing["inbound_payload_sha256"] != kwargs["inbound_payload_sha256"]:
                 raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
+            if existing["consent_grant_epoch"] != kwargs["consent_grant_epoch"]:
+                if existing["status"] in {"claimed", "running", "awaiting_delivery"}:
+                    existing.update(
+                        status="uncertain",
+                        reconciliation_status="manual_required",
+                        error_code="managed_cloud_consent_grant_changed",
+                        lease_token=None,
+                        lease_expires_at=None,
+                    )
+                return {
+                    **existing,
+                    "inserted": False,
+                    "reclaimed": False,
+                    "acquired": False,
+                }
             stale = existing["status"] in {"claimed", "running"} and (
                 not isinstance(existing.get("lease_expires_at"), datetime)
                 or existing["lease_expires_at"] <= datetime.now(timezone.utc)
@@ -201,6 +280,7 @@ class FakeRepository:
             "inbound_payload_sha256": kwargs["inbound_payload_sha256"],
             "delivery_idempotency_key": "00000000-0000-0000-0000-000000000004",
             "status": "claimed",
+            "consent_grant_epoch": kwargs["consent_grant_epoch"],
             "quota_reserved": False,
             "writeback_receipt": {},
             "provider_started": False,
@@ -281,6 +361,18 @@ class FakeRepository:
     def expire_active_lease(self):
         row = next(iter(self.messages.values()))
         row["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    async def quarantine_photon_delivery_for_consent(self, **kwargs):
+        self.consent_quarantines.append(dict(kwargs))
+        row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
+        if row["status"] != "awaiting_delivery":
+            raise RuntimePoolClaimError("photon_consent_quarantine_conflict")
+        row.update(
+            status="uncertain",
+            error_code=kwargs["error_code"],
+            reconciliation_status="manual_required",
+        )
+        return dict(row)
 
     async def get_photon_message_receipt(self, **kwargs):
         for item in self.messages.values():
@@ -480,6 +572,170 @@ def test_sidecar_preflight_turn_replay_and_delivery_ack_are_idempotent_and_opaqu
     assert len(runtime_service.calls) == 1
 
 
+def test_consent_revoked_after_model_turn_blocks_photon_outbound_handoff(monkeypatch):
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    grant_epoch = hermes_cloud_photon.assert_runtime_managed_consent(_runtime())
+    checks = 0
+
+    def revoked_after_provider(_runtime):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            return grant_epoch
+        raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(
+        hermes_cloud_photon,
+        "assert_runtime_managed_consent",
+        revoked_after_provider,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert error.value.code == "managed_cloud_consent_required"
+    assert len(runtime_service.calls) == 1
+    assert next(iter(repository.messages.values()))["status"] == "uncertain"
+
+
+def test_consent_revoked_after_receipt_completion_quarantines_delivery(monkeypatch):
+    consent_service, _ = _enable_real_managed_consent(monkeypatch)
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    original_complete = repository.complete_photon_message
+
+    async def complete_then_revoke(**kwargs):
+        result = await original_complete(**kwargs)
+        consent_service.submit(
+            "synthetic-owner",
+            _consent_submission(
+                request_id="photon-revoke-after-completion",
+                decision="revoked",
+            ),
+        )
+        return result
+
+    repository.complete_photon_message = complete_then_revoke
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "managed_cloud_consent_required"
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert repository.consent_quarantines[-1]["receipt_id"] == receipt["id"]
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_replay_rechecks_consent_and_quarantines_before_returning_text(monkeypatch):
+    consent_service, _ = _enable_real_managed_consent(monkeypatch)
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    first = asyncio.run(adapter.handle_inbound(_message()))
+    assert first.outbound_text == "Synthetic answer."
+
+    async def production_resolver_gate_would_block(_uid, _repository):
+        raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    adapter.runtime_resolver = production_resolver_gate_would_block
+    consent_service.submit(
+        "synthetic-owner",
+        _consent_submission(
+            request_id="photon-revoke-before-replay",
+            decision="revoked",
+        ),
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "managed_cloud_consent_required"
+    assert receipt["status"] == "uncertain"
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_replay_rechecks_epoch_after_canonical_reconstruction(monkeypatch):
+    consent_service, _ = _enable_real_managed_consent(monkeypatch)
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    first = asyncio.run(adapter.handle_inbound(_message()))
+    original_get_event = adapter.event_store.get_event
+
+    async def read_then_revoke(**kwargs):
+        event = await original_get_event(**kwargs)
+        consent_service.submit(
+            "synthetic-owner",
+            _consent_submission(
+                request_id="photon-revoke-during-replay-read",
+                decision="revoked",
+            ),
+        )
+        return event
+
+    adapter.event_store.get_event = read_then_revoke
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "managed_cloud_consent_required"
+    assert first.outbound_text == "Synthetic answer."
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_revoke_then_regrant_never_releases_output_from_prior_grant(monkeypatch):
+    consent_service, grant_a = _enable_real_managed_consent(monkeypatch)
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    original_run_turn = runtime_service.run_turn
+
+    async def disconnect_after_writeback(runtime, request):
+        result = await original_run_turn(runtime, request)
+        repository.binding["sidecar_connected_at"] = NOW - timedelta(minutes=2)
+        return result
+
+    runtime_service.run_turn = disconnect_after_writeback
+    with pytest.raises(ProvisioningError) as disconnected:
+        asyncio.run(adapter.handle_inbound(_message()))
+    assert disconnected.value.code == "photon_sidecar_not_ready"
+
+    receipt = next(iter(repository.messages.values()))
+    assert receipt["status"] == "awaiting_delivery"
+    assert receipt["consent_grant_epoch"] == grant_a
+    consent_service.submit(
+        "synthetic-owner",
+        _consent_submission(
+            request_id="photon-revoke-between-grants",
+            decision="revoked",
+        ),
+    )
+    regranted = consent_service.submit(
+        "synthetic-owner",
+        _consent_submission(request_id="photon-grant-c"),
+    )
+    grant_c = regranted["consent"]["receipt_id"]
+    assert grant_a != grant_c
+
+    async def production_resolver_would_accept_new_grant(_uid, _repository):
+        raise AssertionError("duplicate replay must be checked before runtime resolution")
+
+    adapter.runtime_resolver = production_resolver_would_accept_new_grant
+    repository.binding["sidecar_connected_at"] = datetime.now(timezone.utc)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert error.value.code == "managed_cloud_consent_grant_changed"
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert len(runtime_service.provider_calls) == 1
+
+
 def _stable_persisted(repository):
     return json.dumps(
         {
@@ -618,7 +874,8 @@ def test_runtime_or_writeback_failure_is_uncertain_and_never_returns_delivery():
     assert next(iter(repository.messages.values()))["status"] == "uncertain"
 
 
-def test_sidecar_disconnect_after_writeback_returns_no_delivery():
+def test_sidecar_disconnect_after_writeback_returns_no_delivery(monkeypatch):
+    _enable_real_managed_consent(monkeypatch)
     adapter, repository, runtime_service = _adapter()
     asyncio.run(adapter.preflight(_preflight()))
     original_run_turn = runtime_service.run_turn
@@ -637,6 +894,17 @@ def test_sidecar_disconnect_after_writeback_returns_no_delivery():
     receipt = next(iter(repository.messages.values()))
     assert receipt["status"] == "awaiting_delivery"
     assert receipt["canonical_outbound_event_id"] == "canonical-outbound"
+
+    repository.binding["sidecar_connected_at"] = datetime.now(timezone.utc)
+
+    async def production_resolver_must_not_run_for_replay(_uid, _repository):
+        raise AssertionError("same-grant replay must not re-enter runtime resolution")
+
+    adapter.runtime_resolver = production_resolver_must_not_run_for_replay
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+    assert recovered.status == "awaiting_delivery"
+    assert recovered.duplicate is True
+    assert len(runtime_service.provider_calls) == 1
 
 
 def test_stale_claimed_receipt_is_reclaimed_before_quota_or_provider_work():

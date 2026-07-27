@@ -9,6 +9,10 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from database.ella_provisioning import EllaProvisioningRepository
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+)
 from ella.services.hermes_cloud import (
     HermesCloudClient,
     validate_prompt_artifact_receipt,
@@ -90,13 +94,11 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         raise ProvisioningError("plato_binding_forbidden", retryable=False)
 
     if provider == "hermes_cloud":
-        assert_cloud_identity_gate(uid)
         if any(
             binding.get(field)
             for field in ("workspace_root", "internal_gateway_url", "gateway_port", "service_label", "credential_ref")
         ):
             raise ProvisioningError("cloud_binding_contains_local_runtime", retryable=False)
-        gateway_url, gateway_token = HermesCloudClient.credentials(binding)
         prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
         workspace_root = ""
         runtime_instance_id = str(binding.get("runtime_instance_id") or "")
@@ -104,6 +106,15 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         model_context_window_tokens = int(prompt_artifact_receipt["model_context_window_tokens"])
         if not runtime_instance_id or not expected_model:
             raise ProvisioningError("cloud_runtime_receipt_incomplete", retryable=False)
+        assert_cloud_identity_gate(
+            uid,
+            profile_uid=uid,
+            runtime_provider=provider,
+            model_route=f"openai-codex/{expected_model}",
+            memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+            photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+        )
+        gateway_url, gateway_token = HermesCloudClient.credentials(binding)
     else:
         workspace_root = str(binding.get("workspace_root") or "")
         profiles_root = os.getenv("ELLA_HERMES_PROFILES_ROOT", "/Users/ellaai/.hermes/profiles")

@@ -22,6 +22,10 @@ from database.ella_provisioning import (
     ProvisioningSchemaNotReadyError,
     RuntimePoolClaimError,
 )
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+)
 from ella.services.hermes_cloud import (
     HermesCloudClient,
     HonchoCloudProvisionClient,
@@ -551,7 +555,6 @@ class ProvisioningCoordinator:
         binding: Optional[dict[str, Any]] = None
         claim_token = ""
         try:
-            assert_cloud_identity_gate(identity.uid)
             pool_policy = await self.repository.get_cloud_pool_admission_policy()
             if not pool_policy:
                 pool_state = await self.repository.reconcile_cloud_pool_alert(
@@ -570,10 +573,23 @@ class ProvisioningCoordinator:
                     },
                 )
                 return
+            expected_model = str(pool_policy["model"])
+
+            def assert_current_cloud_consent() -> None:
+                assert_cloud_identity_gate(
+                    identity.uid,
+                    profile_uid=identity.uid,
+                    runtime_provider=str(pool_policy["provider"]),
+                    model_route=f"openai-codex/{expected_model}",
+                    memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+                    photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+                )
+
+            assert_current_cloud_consent()
             admission = await runtime_admission(
                 uid=identity.uid,
                 provider=str(pool_policy["provider"]),
-                model=str(pool_policy["model"]),
+                model=expected_model,
             )
             if not admission.allowed:
                 raise ProvisioningError(
@@ -586,9 +602,7 @@ class ProvisioningCoordinator:
                 job_id=str(job["id"]),
                 lease_seconds=cloud_pool_claim_lease_seconds(),
             )
-            pool_state = await self.repository.reconcile_cloud_pool_alert(
-                threshold=cloud_pool_low_water_threshold()
-            )
+            pool_state = await self.repository.reconcile_cloud_pool_alert(threshold=cloud_pool_low_water_threshold())
             await self._publish_pool_alert(alert_publisher, pool_state)
             if not binding:
                 await self.repository.update_job(
@@ -607,7 +621,7 @@ class ProvisioningCoordinator:
             claim_token = str(binding.get("claim_token") or "")
             if not claim_token:
                 raise ProvisioningError("runtime_pool_claim_incomplete", retryable=False)
-            if str(binding.get("expected_model") or "") != str(pool_policy["model"]):
+            if str(binding.get("expected_model") or "") != expected_model:
                 raise ProvisioningError("runtime_pool_policy_changed", retryable=False)
 
             async def record_side_effect(effect: dict[str, str]) -> None:
@@ -622,10 +636,12 @@ class ProvisioningCoordinator:
                     },
                 )
 
+            assert_current_cloud_consent()
             honcho = await honcho_client.ensure_profile(
                 binding,
                 on_side_effect=record_side_effect,
             )
+            assert_current_cloud_consent()
             preflight = await cloud_client.preflight(binding)
             health_receipt = {
                 **preflight.receipt,
@@ -634,9 +650,7 @@ class ProvisioningCoordinator:
                     "observed_peer_sha256": hashlib.sha256(honcho["observed_peer"].encode("utf-8")).hexdigest(),
                     "observer_peer_sha256": hashlib.sha256(honcho["observer_peer"].encode("utf-8")).hexdigest(),
                 },
-                "admission_revision": (
-                    int(admission.entitlement.get("revision") or 0) if admission.entitlement else 0
-                ),
+                "admission_revision": (int(admission.entitlement.get("revision") or 0) if admission.entitlement else 0),
             }
             activated = await self.repository.finalize_cloud_pool_claim(
                 uid=identity.uid,
@@ -708,11 +722,7 @@ class ProvisioningCoordinator:
     async def _publish_pool_alert(self, publisher: Any, pool_state: dict[str, Any]) -> None:
         try:
             alert = pool_state.get("alert")
-            delivered = bool(
-                alert
-                and not alert.get("delivered_at")
-                and await publisher.publish(pool_state)
-            )
+            delivered = bool(alert and not alert.get("delivered_at") and await publisher.publish(pool_state))
             if delivered:
                 await self.repository.mark_cloud_pool_alert_delivered(str(alert["id"]))
         except Exception:

@@ -439,6 +439,44 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     assert error.value.code == "cloud_binding_contains_local_runtime"
 
 
+def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_env, monkeypatch):
+    binding = {
+        **_binding(),
+        "id": "binding-a",
+        "omi_uid": "user-a",
+        "provider": "hermes_cloud",
+        "status": "active",
+        "active": True,
+        "health_state": "healthy",
+        "profile_name": "cloud-user-a",
+        "agent_id": "hermes-cloud",
+        "runtime_instance_id": "instance-a",
+        "honcho_workspace": "workspace-a",
+        "observed_peer": "user-a",
+        "observer_peer": "companion-a",
+        "revision": 2,
+        "workspace_root": None,
+        "internal_gateway_url": None,
+        "gateway_port": None,
+        "service_label": None,
+        "credential_ref": None,
+    }
+
+    def denied(*_args, **_kwargs):
+        raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    def credentials_forbidden(_binding):
+        raise AssertionError("credentials must not load before consent")
+
+    monkeypatch.setattr(runtime_resolver, "assert_cloud_identity_gate", denied)
+    monkeypatch.setattr(runtime_resolver.HermesCloudClient, "credentials", credentials_forbidden)
+
+    with pytest.raises(ProvisioningError) as error:
+        runtime_from_binding(binding, "user-a")
+
+    assert error.value.code == "managed_cloud_consent_required"
+
+
 @pytest.mark.parametrize(
     ("body_update", "expected_code"),
     [

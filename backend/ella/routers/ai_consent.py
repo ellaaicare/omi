@@ -27,6 +27,8 @@ class AiConsentSubmissionRequest(BaseModel):
     app_version: str = Field(min_length=1, max_length=80)
     build_number: str = Field(min_length=1, max_length=40)
     locale: str = Field(min_length=2, max_length=40)
+    scope_version: str = Field(default="", max_length=100)
+    scope_hash: str = Field(default="", max_length=100)
 
 
 @router.get("/v1/users/ai-consent/policy")
@@ -64,6 +66,8 @@ def submit_ai_consent(
                 app_version=request.app_version,
                 build_number=request.build_number,
                 locale=request.locale,
+                scope_version=request.scope_version,
+                scope_hash=request.scope_hash,
             ),
         )
     except ConsentPolicyMismatch as exc:

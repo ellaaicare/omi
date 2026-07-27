@@ -14,10 +14,18 @@ from typing import Any, Awaitable, Callable, Optional
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
 from ella.routers.canonical_events import CanonicalEventStore
 from ella.services.hermes_cloud import HermesCloudClient
-from ella.services.hermes_cloud_policy import cloud_synthetic_only
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+)
+from ella.services.hermes_cloud_policy import (
+    assert_cloud_identity_gate,
+    cloud_synthetic_only,
+)
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    assert_runtime_managed_consent,
 )
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime
@@ -29,6 +37,14 @@ PHOTON_ALLOWED_TOOLS = ("honcho_context", "honcho_reasoning", "honcho_search")
 GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
+MANAGED_CLOUD_CONSENT_ERROR_CODES = {
+    "managed_cloud_real_data_disabled",
+    "managed_cloud_consent_required",
+    "managed_cloud_consent_stale",
+    "managed_cloud_consent_scope_drift",
+    "managed_cloud_consent_grant_changed",
+    "hermes_cloud_consent_policy_not_deployed",
+}
 
 
 def _utcnow() -> datetime:
@@ -388,6 +404,69 @@ class HermesCloudPhotonAdapter:
             canonical_outbound_event_id=canonical_outbound_event_id,
         )
 
+    async def _replay_with_consent(
+        self,
+        *,
+        binding: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> PhotonAdapterResult:
+        if str(receipt.get("status") or "") != "awaiting_delivery":
+            return await self._replay(receipt)
+        try:
+            self._assert_receipt_grant_epoch(
+                binding=binding,
+                receipt=receipt,
+            )
+            replay = await self._replay(receipt)
+            # Canonical reconstruction is asynchronous. Recheck after it so a
+            # revoke/regrant during the read cannot release the old payload.
+            self._assert_receipt_grant_epoch(
+                binding=binding,
+                receipt=receipt,
+            )
+            return replay
+        except ProvisioningError as exc:
+            if exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+                try:
+                    await self.repository.quarantine_photon_delivery_for_consent(
+                        receipt_id=str(receipt["id"]),
+                        error_code=exc.code,
+                    )
+                except RuntimePoolClaimError as conflict:
+                    raise ProvisioningError(
+                        conflict.code,
+                        retryable=False,
+                    ) from conflict
+            raise
+
+    def _assert_receipt_grant_epoch(
+        self,
+        *,
+        binding: dict[str, Any],
+        receipt: dict[str, Any],
+    ) -> str:
+        expected_model = str(receipt.get("expected_model") or binding.get("expected_model") or "")
+        expected_epoch = str(receipt.get("consent_grant_epoch") or "")
+        if not expected_model or not expected_epoch:
+            raise ProvisioningError(
+                "managed_cloud_consent_grant_changed",
+                retryable=False,
+            )
+        current_epoch = assert_cloud_identity_gate(
+            self.config.internal_owner_uid,
+            profile_uid=self.config.internal_owner_uid,
+            runtime_provider=str(binding.get("provider") or ""),
+            model_route=f"openai-codex/{expected_model}",
+            memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+            photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+        )
+        if not hmac.compare_digest(expected_epoch, current_epoch):
+            raise ProvisioningError(
+                "managed_cloud_consent_grant_changed",
+                retryable=False,
+            )
+        return current_epoch
+
     async def handle_inbound(
         self,
         request: PhotonInboundEnvelope,
@@ -408,7 +487,6 @@ class HermesCloudPhotonAdapter:
             line_identity=request.line_identity,
             contact_identity=request.contact_identity,
         )
-        runtime = await self._runtime(binding)
         preflight_receipt = self._assert_live_preflight(
             binding=binding,
             connection_id=request.connection_id,
@@ -427,23 +505,44 @@ class HermesCloudPhotonAdapter:
             ).encode("utf-8")
         ).hexdigest()
         try:
+            existing = await self.repository.get_photon_message_by_inbound(
+                photon_binding_id=str(binding["photon_binding_id"]),
+                inbound_provider_message_key=inbound_provider_key,
+                inbound_payload_sha256=payload_sha256,
+            )
+        except RuntimePoolClaimError as exc:
+            raise ProvisioningError(exc.code, retryable=False) from exc
+        if existing and str(existing.get("status") or "") not in {"claimed", "running"}:
+            return await self._replay_with_consent(
+                binding=binding,
+                receipt=existing,
+            )
+
+        runtime = await self._runtime(binding)
+        consent_grant_epoch = assert_runtime_managed_consent(runtime)
+        try:
             receipt = await self.repository.claim_photon_message(
                 photon_binding_id=str(binding["photon_binding_id"]),
                 inbound_provider_message_key=inbound_provider_key,
                 inbound_payload_sha256=payload_sha256,
                 command_tier_version=self.config.command_tier_version,
+                consent_grant_epoch=consent_grant_epoch,
                 lease_seconds=self.config.receipt_lease_seconds,
             )
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(exc.code, retryable=False) from exc
         if not receipt.get("acquired"):
-            return await self._replay(receipt)
+            return await self._replay_with_consent(
+                binding=binding,
+                receipt=receipt,
+            )
 
         receipt_id = str(receipt["id"])
         lease_token = str(receipt.get("lease_token") or "")
         if not lease_token:
             raise ProvisioningError("photon_message_claim_conflict", retryable=True)
         provider_started = bool(receipt.get("provider_started"))
+        completed_for_delivery = False
         try:
             await self.repository.reserve_photon_quota(
                 receipt_id=receipt_id,
@@ -471,6 +570,7 @@ class HermesCloudPhotonAdapter:
                     "photon_receipt_id": receipt_id,
                     "content_free_identifiers": True,
                 },
+                consent_grant_epoch=consent_grant_epoch,
             )
             if not provider_started:
                 await self.repository.mark_photon_provider_started(
@@ -491,6 +591,12 @@ class HermesCloudPhotonAdapter:
                 "runtime_interaction_id": result.runtime_interaction_id,
                 "content_free": True,
             }
+            current_grant_epoch = assert_runtime_managed_consent(runtime)
+            if not hmac.compare_digest(consent_grant_epoch, current_grant_epoch):
+                raise ProvisioningError(
+                    "managed_cloud_consent_grant_changed",
+                    retryable=False,
+                )
             completed = await self.repository.complete_photon_message(
                 receipt_id=receipt_id,
                 lease_token=lease_token,
@@ -504,6 +610,7 @@ class HermesCloudPhotonAdapter:
                 preflight_receipt=preflight_receipt,
                 writeback_receipt=writeback_receipt,
             )
+            completed_for_delivery = True
             refreshed_binding = await self._binding(
                 line_identity=request.line_identity,
                 contact_identity=request.contact_identity,
@@ -511,6 +618,12 @@ class HermesCloudPhotonAdapter:
             self._assert_live_preflight(
                 binding=refreshed_binding,
                 connection_id=request.connection_id,
+            )
+            # The sidecar response is the Photon egress boundary. A revocation
+            # after model completion must prevent delivery of the stored text.
+            self._assert_receipt_grant_epoch(
+                binding=refreshed_binding,
+                receipt=completed,
             )
             return PhotonAdapterResult(
                 receipt_id=receipt_id,
@@ -531,13 +644,19 @@ class HermesCloudPhotonAdapter:
             )
             raise ProvisioningError(exc.code, retryable=not provider_started) from exc
         except ProvisioningError as exc:
-            await self.repository.fail_photon_message(
-                receipt_id=receipt_id,
-                lease_token=lease_token,
-                error_code=exc.code,
-                uncertain=provider_started,
-                provider_started=provider_started,
-            )
+            if completed_for_delivery and exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+                await self.repository.quarantine_photon_delivery_for_consent(
+                    receipt_id=receipt_id,
+                    error_code=exc.code,
+                )
+            else:
+                await self.repository.fail_photon_message(
+                    receipt_id=receipt_id,
+                    lease_token=lease_token,
+                    error_code=exc.code,
+                    uncertain=provider_started,
+                    provider_started=provider_started,
+                )
             raise
         except Exception as exc:
             await self.repository.fail_photon_message(

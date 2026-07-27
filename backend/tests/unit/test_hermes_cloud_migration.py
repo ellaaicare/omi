@@ -37,6 +37,7 @@ def test_hermes_cloud_migration_contains_fail_closed_pool_invariants():
         "ella_photon_message_receipts_inbound_key",
         "ella_photon_message_receipts_outbound_key",
         "ella_photon_message_receipts_delivery_key",
+        "consent_grant_epoch varchar(96) not null",
         "attempt_count integer not null default 1",
         "lease_token uuid",
         "lease_expires_at timestamptz",

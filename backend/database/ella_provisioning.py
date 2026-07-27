@@ -1423,6 +1423,28 @@ class EllaProvisioningRepository:
             raise RuntimePoolClaimError("photon_binding_not_ready")
         return dict(row)
 
+    async def get_photon_message_by_inbound(
+        self,
+        *,
+        photon_binding_id: str,
+        inbound_provider_message_key: str,
+        inbound_payload_sha256: str,
+    ) -> Optional[dict[str, Any]]:
+        row = await self.pool.fetchrow(
+            """
+            SELECT *
+            FROM ella_photon_message_receipts
+            WHERE photon_binding_id = $1
+              AND inbound_provider_message_key = $2
+            """,
+            uuid.UUID(str(photon_binding_id)),
+            inbound_provider_message_key,
+        )
+        result = _row_dict(row)
+        if result and str(result.get("inbound_payload_sha256") or "") != inbound_payload_sha256:
+            raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
+        return result
+
     async def claim_photon_message(
         self,
         *,
@@ -1430,10 +1452,13 @@ class EllaProvisioningRepository:
         inbound_provider_message_key: str,
         inbound_payload_sha256: str,
         command_tier_version: str,
+        consent_grant_epoch: str,
         lease_seconds: int,
     ) -> dict[str, Any]:
         if not 30 <= lease_seconds <= 900:
             raise RuntimePoolClaimError("photon_receipt_lease_invalid")
+        if not 16 <= len(consent_grant_epoch) <= 96:
+            raise RuntimePoolClaimError("photon_consent_grant_epoch_invalid")
         binding_uuid = uuid.UUID(str(photon_binding_id))
         new_lease_token = uuid.uuid4()
         async with self.pool.acquire() as connection:
@@ -1443,11 +1468,11 @@ class EllaProvisioningRepository:
                     INSERT INTO ella_photon_message_receipts (
                         id, photon_binding_id, inbound_provider_message_key,
                         inbound_payload_sha256, status, command_tier_version,
-                        lease_token, lease_expires_at
+                        consent_grant_epoch, lease_token, lease_expires_at
                     )
                     VALUES (
-                        $1, $2, $3, $4, 'claimed', $5, $6,
-                        CURRENT_TIMESTAMP + ($7 * INTERVAL '1 second')
+                        $1, $2, $3, $4, 'claimed', $5, $6, $7,
+                        CURRENT_TIMESTAMP + ($8 * INTERVAL '1 second')
                     )
                     ON CONFLICT (
                         photon_binding_id, inbound_provider_message_key
@@ -1459,6 +1484,7 @@ class EllaProvisioningRepository:
                     inbound_provider_message_key,
                     inbound_payload_sha256,
                     command_tier_version,
+                    consent_grant_epoch,
                     new_lease_token,
                     lease_seconds,
                 )
@@ -1485,6 +1511,27 @@ class EllaProvisioningRepository:
                     raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
 
                 status = str(result.get("status") or "")
+                if str(result.get("consent_grant_epoch") or "") != consent_grant_epoch:
+                    if status in {"claimed", "running", "awaiting_delivery"}:
+                        quarantined = await connection.fetchrow(
+                            """
+                            UPDATE ella_photon_message_receipts
+                            SET status = 'uncertain',
+                                reconciliation_status = 'manual_required',
+                                error_code = 'managed_cloud_consent_grant_changed',
+                                lease_token = NULL,
+                                lease_expires_at = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $1
+                              AND status IN ('claimed', 'running', 'awaiting_delivery')
+                            RETURNING *
+                            """,
+                            result["id"],
+                        )
+                        result = dict(quarantined)
+                    result.update(inserted=False, reclaimed=False, acquired=False)
+                    return result
+
                 lease_expires_at = result.get("lease_expires_at")
                 stale = status in {"claimed", "running"} and (
                     not isinstance(lease_expires_at, datetime) or lease_expires_at <= datetime.now(timezone.utc)
@@ -1748,6 +1795,30 @@ class EllaProvisioningRepository:
             provider_started,
             uuid.UUID(str(lease_token)),
         )
+
+    async def quarantine_photon_delivery_for_consent(
+        self,
+        *,
+        receipt_id: str,
+        error_code: str,
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_photon_message_receipts
+            SET status = 'uncertain',
+                error_code = $2,
+                reconciliation_status = 'manual_required',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'awaiting_delivery'
+            RETURNING *
+            """,
+            uuid.UUID(str(receipt_id)),
+            error_code[:120],
+        )
+        if not row:
+            raise RuntimePoolClaimError("photon_consent_quarantine_conflict")
+        return dict(row)
 
     async def acknowledge_photon_delivery(
         self,

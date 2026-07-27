@@ -19,7 +19,12 @@ APPROVAL_SCHEMA_VERSION = "ella-hermes-cloud-approval-v1"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
-MANAGED_CLOUD_PROCESSORS = {"hermes-cloud", "honcho-cloud"}
+MANAGED_CLOUD_PROCESSORS = {
+    "nous-hermes-cloud",
+    "honcho-cloud",
+    "openai-codex",
+    "photon",
+}
 
 
 def _stable_json(value: Any) -> str:
@@ -41,39 +46,56 @@ def assert_cloud_operator_gate() -> None:
     _assert_deployed_cloud_consent_policy()
 
 
-def assert_cloud_identity_gate(uid: str) -> None:
-    """Reject real identities until an exact managed-cloud consent grant exists."""
+def assert_cloud_identity_gate(
+    uid: str,
+    *,
+    profile_uid: Optional[str] = None,
+    runtime_provider: Optional[str] = None,
+    model_route: Optional[str] = None,
+    memory_provider: Optional[str] = None,
+    photon_scope: Optional[str] = None,
+) -> str:
+    """Return the server-owned grant epoch for an allowed cloud identity."""
     if cloud_synthetic_only():
         if uid not in _synthetic_uids():
             raise ProvisioningError("hermes_cloud_synthetic_identity_required", retryable=False)
-        return
-    required_version, required_hash = _assert_deployed_cloud_consent_policy()
-    status = ai_consent.get_ai_consent_service().status(uid)
-    consent = dict(status.get("consent") or {})
-    if (
-        status.get("authorized") is not True
-        or consent.get("decision") != "granted"
-        or consent.get("policy_version") != required_version
-        or consent.get("processor_set_hash") != required_hash
-        or not consent.get("receipt_id")
-    ):
-        raise ProvisioningError("hermes_cloud_consent_required", retryable=False)
+        return (
+            "synthetic:" + hashlib.sha256(f"{ai_consent.CURRENT_POLICY_VERSION}\x1f{uid}".encode("utf-8")).hexdigest()
+        )
+    _assert_deployed_cloud_consent_policy()
+    try:
+        return ai_consent.assert_managed_cloud_consent(
+            uid,
+            profile_uid=str(profile_uid or ""),
+            runtime_provider=str(runtime_provider or ""),
+            model_route=str(model_route or ""),
+            memory_provider=str(memory_provider or ""),
+            photon_scope=str(photon_scope or ""),
+        )
+    except ai_consent.ManagedCloudConsentError as exc:
+        raise ProvisioningError(exc.code, retryable=False) from exc
 
 
-def _assert_deployed_cloud_consent_policy() -> tuple[str, str]:
+def _assert_deployed_cloud_consent_policy() -> tuple[str, str, str, str]:
     required_version = os.getenv("ELLA_HERMES_CLOUD_CONSENT_POLICY_VERSION", "").strip()
     required_hash = os.getenv("ELLA_HERMES_CLOUD_CONSENT_PROCESSOR_SET_HASH", "").strip()
+    required_scope_version = os.getenv("ELLA_HERMES_CLOUD_CONSENT_SCOPE_VERSION", "").strip()
+    required_scope_hash = os.getenv("ELLA_HERMES_CLOUD_CONSENT_SCOPE_HASH", "").strip()
     if (
         not required_version
         or not required_hash
+        or not required_scope_version
+        or not required_scope_hash
         or required_version != ai_consent.CURRENT_POLICY_VERSION
         or required_hash != ai_consent.CURRENT_PROCESSOR_SET_HASH
+        or required_scope_version != ai_consent.CURRENT_SCOPE_VERSION
+        or required_scope_hash != ai_consent.CURRENT_SCOPE_HASH
         or not MANAGED_CLOUD_PROCESSORS.issubset(
             {str(processor.get("id") or "") for processor in ai_consent.PROCESSORS if isinstance(processor, dict)}
         )
     ):
         raise ProvisioningError("hermes_cloud_consent_policy_not_deployed", retryable=False)
-    return required_version, required_hash
+    return required_version, required_hash, required_scope_version, required_scope_hash
 
 
 @dataclass(frozen=True)
