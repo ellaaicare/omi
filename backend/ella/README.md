@@ -298,9 +298,14 @@ immutable receipt subcollection; callers cannot submit or select another UID.
 
 Exact-policy grants are required at the Ella chat stream, Hermes onboarding
 ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,
-and legacy message/audio/file upload routes. Read-only status/history and
-first-party canonical storage remain available so decline/revoke does not
-silently retransmit data.
+legacy message/audio/file upload routes, shared conversation processing,
+stored-audio transcription, Guardian consolidation, and legacy callback TTS.
+Signed voice-proxy requests recheck current consent on every request so a token
+issued before revocation cannot continue sending audio. The consent authority
+router remains registered when `ELLA_ENABLED=false`; a rollback cannot leave
+generic OMI route gates active without grant/revoke endpoints. Read-only
+status/history and first-party canonical storage remain available so
+decline/revoke does not silently retransmit data.
 
 Rollout is fail-safe and non-breaking:
 
@@ -313,6 +318,9 @@ Rollout is fail-safe and non-breaking:
    so the service token is not a consent bypass.
 4. Add synthetic Firebase UIDs to `ELLA_AI_CONSENT_ENFORCEMENT_UIDS` and prove
    grant, stale-policy, decline, revoke, chat, voice, STT, and Guardian TTS.
+   Canary clients must authenticate direct TTS calls. Legacy anonymous TTS has
+   no trustworthy UID and remains a migration bridge during UID-only canaries;
+   global enforcement rejects those unattributed calls.
 5. Enable `ELLA_AI_CONSENT_ENFORCEMENT_ENABLED=true` only after the live
    privacy policy and App Store metadata match the server manifest.
 

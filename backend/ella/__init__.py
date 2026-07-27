@@ -405,15 +405,6 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
 
-    # Authenticated, versioned third-party AI processing consent
-    try:
-        from ella.routers.ai_consent import router as ai_consent_router
-
-        app.include_router(ai_consent_router, tags=["AI Consent"])
-        print("  🌐 /v1/users/ai-consent* - Versioned AI processing consent", flush=True)
-    except ImportError as e:
-        print(f"  ⚠️ AI consent endpoints not available: {e}", flush=True)
-
     # Authenticated, idempotent per-user Hermes onboarding
     try:
         app.include_router(onboarding_router, tags=["Ella Onboarding"])

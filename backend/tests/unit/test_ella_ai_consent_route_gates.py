@@ -29,6 +29,17 @@ def _gated_route_paths(source_path: Path, dependency_name: str) -> set[str]:
     return gated_paths
 
 
+def _function_source(source_path: Path, function_name: str) -> str:
+    source = source_path.read_text()
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name
+    )
+    return ast.get_source_segment(source, function)
+
+
 def test_authenticated_ai_egress_routes_share_the_consent_gate():
     assert "/chat/stream" in _gated_route_paths(
         BACKEND / "ella" / "routers" / "chat.py",
@@ -115,6 +126,49 @@ def test_stored_transcript_processing_routes_require_current_consent():
     )
 
     assert protected_paths <= gated_paths
+
+
+def test_shared_conversation_processor_gates_target_uid_before_model_work():
+    source_path = BACKEND / "utils" / "conversations" / "process_conversation.py"
+    source = _function_source(source_path, "process_conversation")
+
+    assert source.index("assert_current_ai_consent(uid)") < source.index("_get_structured(")
+    for caller in ("integration.py", "workflow.py", "developer.py"):
+        assert "process_conversation(" in (BACKEND / "routers" / caller).read_text()
+
+
+def test_stored_sync_gates_target_uid_before_deepgram_and_processing():
+    source_path = BACKEND / "routers" / "sync.py"
+    process_segment_source = _function_source(source_path, "process_segment")
+
+    assert process_segment_source.index("assert_current_ai_consent(uid)") < process_segment_source.index(
+        "deepgram_prerecorded("
+    )
+    assert "/v1/sync-local-files" in _gated_route_paths(source_path, "require_current_ai_consent")
+
+
+def test_legacy_initial_message_helper_gates_every_model_call_path():
+    source = _function_source(BACKEND / "routers" / "chat.py", "initial_message_util")
+
+    assert source.index("assert_current_ai_consent(uid)") < source.index("initial_chat_message(")
+
+
+def test_guardian_model_and_legacy_callback_tts_gate_target_uid():
+    consolidate_source = _function_source(BACKEND / "ella" / "routers" / "guardian.py", "_consolidate_queue")
+    notification_source = _function_source(BACKEND / "ella" / "routers" / "callbacks.py", "ella_notification")
+
+    assert consolidate_source.index("assert_current_ai_consent(uid)") < consolidate_source.index("httpx.AsyncClient(")
+    assert notification_source.index("assert_current_ai_consent(request.uid)") < notification_source.index(
+        "_generate_tts_audio("
+    )
+
+
+def test_consent_authority_router_is_registered_outside_ella_feature_switch():
+    main_source = (BACKEND / "main.py").read_text()
+    ella_init_source = (BACKEND / "ella" / "__init__.py").read_text()
+
+    assert "app.include_router(ai_consent.router)" in main_source
+    assert "ai_consent_router" not in ella_init_source
 
 
 def test_correction_submit_is_gated_but_receipt_and_undo_remain_available():

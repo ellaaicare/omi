@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
 from ella.services.ai_consent import (
+    assert_current_ai_consent,
     require_current_ai_consent,
     require_current_ai_consent_or_internal_tts,
     resolve_processor,
@@ -206,6 +207,7 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         subject = str(claims.get("uid") or "").strip()
         if not subject or str(requested_uid or "").strip() != subject:
             raise HTTPException(status_code=403, detail={"code": "voice_session_ownership_mismatch"})
+        assert_current_ai_consent(subject)
         return VoiceProxyPrincipal(
             uid=subject,
             session_id=str(claims.get("jti") or ""),
@@ -255,6 +257,7 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
+    assert_current_ai_consent(subject)
     return VoiceProxyPrincipal(
         uid=subject,
         session_id=str(claims.get("jti") or ""),

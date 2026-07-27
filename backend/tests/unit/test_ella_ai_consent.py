@@ -238,6 +238,26 @@ def test_revoke_supersedes_prior_grant():
     assert revoked["account_deletion"]["path"] == "/v1/users/delete-account"
 
 
+@pytest.mark.parametrize("decision", ["declined", "revoked"])
+def test_decline_and_revoke_block_central_target_uid_egress(monkeypatch, decision):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    service.submit("user-a", _submission())
+    service.submit(
+        "user-a",
+        _submission(decision=decision, request_id=f"request-{decision}"),
+    )
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_current_ai_consent("user-a")
+
+    assert error.value.status_code == 403
+    assert error.value.detail["code"] == "ai_consent_required"
+    assert error.value.detail["decision"] == decision
+
+
 def test_account_deletion_receipt_is_opaque_and_completed():
     receipt = consent.build_account_deletion_receipt(
         now=lambda: datetime(2026, 7, 26, 20, 15, tzinfo=timezone.utc)
@@ -312,8 +332,23 @@ def test_tts_internal_service_token_cannot_bypass_subject_consent(monkeypatch):
     assert missing_consent.value.detail["code"] == "ai_consent_required"
 
 
-def test_tts_gate_rejects_unauthenticated_public_request_when_enforcement_is_active(monkeypatch):
+def test_tts_uid_canary_does_not_break_unattributed_legacy_callers(monkeypatch):
     monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+    monkeypatch.delenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", raising=False)
+    monkeypatch.delenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", raising=False)
+
+    result = consent.require_current_ai_consent_or_internal_tts(
+        authorization=None,
+        x_internal_token=None,
+        x_subject_uid=None,
+    )
+
+    assert result == "migration-bypass"
+
+
+def test_tts_global_enforcement_rejects_unattributed_legacy_callers(monkeypatch):
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "true")
+    monkeypatch.delenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", raising=False)
     monkeypatch.delenv("ELLA_INTERNAL_VOICE_TTS_TOKEN", raising=False)
 
     with pytest.raises(HTTPException) as error:
@@ -325,6 +360,23 @@ def test_tts_gate_rejects_unauthenticated_public_request_when_enforcement_is_act
 
     assert error.value.status_code == 401
     assert error.value.detail == {"code": "authorization_required"}
+
+
+def test_tts_authenticated_canary_subject_must_have_current_consent(monkeypatch):
+    repository = consent.InMemoryConsentRepository()
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setattr(consent.auth, "get_current_user_uid", lambda _authorization: "user-a")
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+
+    with pytest.raises(HTTPException) as error:
+        consent.require_current_ai_consent_or_internal_tts(
+            authorization="Bearer firebase-token",
+            x_internal_token=None,
+            x_subject_uid=None,
+        )
+
+    assert error.value.status_code == 403
+    assert error.value.detail["code"] == "ai_consent_required"
 
 
 def test_provider_aliases_resolve_to_disclosed_legal_recipient():

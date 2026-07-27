@@ -36,7 +36,7 @@ from utils.llm.persona import initial_persona_chat_message
 from utils.llm.chat import initial_chat_message
 from utils.llm.goals import extract_and_update_goal_progress
 from utils.other import endpoints as auth, storage
-from ella.services.ai_consent import require_current_ai_consent
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from utils.other.chat_file import FileChatTool
 from utils.retrieval.graph import execute_graph_chat, execute_graph_chat_stream, execute_persona_chat_stream
 from utils.retrieval.agentic import execute_agentic_chat, execute_agentic_chat_stream
@@ -243,6 +243,7 @@ def clear_chat_messages(
 
 
 def initial_message_util(uid: str, app_id: Optional[str] = None):
+    assert_current_ai_consent(uid)
     print('initial_message_util', app_id)
 
     # init chat session

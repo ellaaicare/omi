@@ -61,6 +61,7 @@ from utils.notifications import send_notification
 from utils.other.hume import get_hume, HumeJobCallbackModel, HumeJobModelPredictionResponseModel
 from utils.retrieval.rag import retrieve_rag_conversation_context
 from utils.webhooks import conversation_created_webhook
+from ella.services.ai_consent import assert_current_ai_consent
 
 # ====== ELLA POST-PROCESS HOOK IMPORT ======
 try:
@@ -561,6 +562,8 @@ def process_conversation(
     is_reprocess: bool = False,
     app_id: Optional[str] = None,
 ) -> Conversation:
+    assert_current_ai_consent(uid)
+
     # Fetch meeting context from Firestore if meeting_id is associated with this conversation
     if hasattr(conversation, 'id') and conversation.id:
         meeting_id = redis_db.get_conversation_meeting_id(conversation.id)

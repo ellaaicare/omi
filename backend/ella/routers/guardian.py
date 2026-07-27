@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from ella.routers.resolve import resolve_user_routing
 from database import app_settings as app_settings_db
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
+from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.runtime_resolver import runtime_bindings_enabled
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
@@ -1113,6 +1114,8 @@ async def _consolidate_queue(
         str  — consolidated spoken message to enqueue (plain text, no SSML)
         None — all items are resolved/irrelevant, nothing to say
     """
+    assert_current_ai_consent(uid)
+
     pending_text = "\n".join(
         f"- [{i+1}] ({item.get('trigger_type', '?')} at {item.get('created_at', '?')}): {item.get('message', '')}"
         for i, item in enumerate(pending)

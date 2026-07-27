@@ -170,6 +170,14 @@ class ConsentIdempotencyConflict(ValueError):
     pass
 
 
+_firestore_db: Any = None
+
+
+def configure_firestore_db(firestore_db: Any) -> None:
+    global _firestore_db
+    _firestore_db = firestore_db
+
+
 class ConsentRepository(Protocol):
     def get_state(self, uid: str) -> Optional[dict[str, Any]]: ...
 
@@ -248,20 +256,20 @@ def _record_firestore_receipt(
 
 class FirestoreConsentRepository:
     @staticmethod
-    def _db():
-        from database._client import db
-
-        return db
+    def _configured_db():
+        if _firestore_db is None:
+            raise RuntimeError("AI consent Firestore client is not configured")
+        return _firestore_db
 
     def get_state(self, uid: str) -> Optional[dict[str, Any]]:
-        db = self._db()
+        db = self._configured_db()
         snapshot = db.collection("users").document(uid).get()
         if not snapshot.exists:
             return None
         return dict((snapshot.to_dict() or {}).get("ai_consent") or {}) or None
 
     def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
-        db = self._db()
+        db = self._configured_db()
         snapshot = db.collection("users").document(uid).collection("ai_consent_receipts").document(receipt_id).get()
         return snapshot.to_dict() if snapshot.exists else None
 
@@ -272,7 +280,7 @@ class FirestoreConsentRepository:
         receipt: dict[str, Any],
         request_fingerprint: str,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-        db = self._db()
+        db = self._configured_db()
         user_ref = db.collection("users").document(uid)
         receipt_ref = user_ref.collection("ai_consent_receipts").document(receipt_id)
         return _record_firestore_receipt(
@@ -453,8 +461,8 @@ def ai_consent_enforcement_required(uid: str) -> bool:
     return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true" or uid in _uid_allowlist()
 
 
-def ai_consent_enforcement_active() -> bool:
-    return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true" or bool(_uid_allowlist())
+def ai_consent_global_enforcement_enabled() -> bool:
+    return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true"
 
 
 def assert_current_ai_consent(uid: str) -> str:
@@ -498,8 +506,11 @@ def require_current_ai_consent_or_internal_tts(
         return assert_current_ai_consent(subject_uid)
     if authorization:
         return assert_current_ai_consent(auth.get_current_user_uid(authorization))
-    if ai_consent_enforcement_active():
+    if ai_consent_global_enforcement_enabled():
         raise HTTPException(status_code=401, detail={"code": "authorization_required"})
+    # A legacy anonymous request has no trustworthy subject to compare with the
+    # UID canary. Canary clients must send Firebase auth; global enforcement
+    # removes this migration bridge for every caller.
     return "migration-bypass"
 
 

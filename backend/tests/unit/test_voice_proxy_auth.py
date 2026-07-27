@@ -309,6 +309,30 @@ def test_voice_proxy_accepts_complete_memory_scope_claims():
     assert principal.can_reinterpret is False
 
 
+def test_voice_proxy_rechecks_current_consent_after_token_issuance(monkeypatch):
+    def reject_revoked(uid):
+        assert uid == "uid-a"
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ai_consent_required", "decision": "revoked"},
+        )
+
+    monkeypatch.setattr(voice, "assert_current_ai_consent", reject_revoked)
+
+    with pytest.raises(HTTPException) as error:
+        voice.authenticate_voice_proxy_request(
+            _request(
+                {"uid": "uid-a"},
+                token=_token("uid-a"),
+                service_token="test-proxy-secret",
+            ),
+            "uid-a",
+        )
+
+    assert error.value.status_code == 403
+    assert error.value.detail == {"code": "ai_consent_required", "decision": "revoked"}
+
+
 @pytest.mark.parametrize("endpoint", ["context", "search", "tool"])
 def test_two_uid_request_is_denied_before_any_data_lookup(endpoint):
     bodies = {
