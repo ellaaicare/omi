@@ -189,25 +189,40 @@ class EllaAiConsentService {
   final String Function() _localeFactory;
 
   Future<bool> refreshServerAuthority({required String uid}) async {
-    SharedPreferencesUtil.clearAiConsentServerVerification();
-    if (uid.isEmpty || _preferences.uid != uid) return false;
-
-    final policy = await _fetchAcceptedPolicy();
-    if (policy == null) return false;
-
-    final status = await _transport.fetchStatus();
-    if (status == null || status.policy?.processorSetHash != policy.processorSetHash) return false;
-    if (!status.isCurrentGrantFor(uid)) {
-      if (status.subjectUid == uid && status.decision == AiConsentDecision.declined.wireValue) {
-        _preferences.deferAiConsent();
-      } else if (status.subjectUid == uid) {
-        _preferences.declineAiConsent();
-      }
+    if (uid.isEmpty || _preferences.uid != uid) {
+      SharedPreferencesUtil.clearAiConsentServerVerification();
       return false;
     }
 
-    _persistVerifiedGrant(uid, status);
-    return _preferences.aiConsentAccepted;
+    try {
+      final policy = await _fetchAcceptedPolicy();
+      if (policy == null) {
+        SharedPreferencesUtil.clearAiConsentServerVerification();
+        return false;
+      }
+
+      final status = await _transport.fetchStatus();
+      if (status == null || status.policy?.processorSetHash != policy.processorSetHash) {
+        SharedPreferencesUtil.clearAiConsentServerVerification();
+        return false;
+      }
+      if (!status.isCurrentGrantFor(uid)) {
+        if (status.subjectUid == uid && status.decision == AiConsentDecision.declined.wireValue) {
+          _preferences.deferAiConsent();
+        } else if (status.subjectUid == uid) {
+          _preferences.declineAiConsent();
+        } else {
+          SharedPreferencesUtil.clearAiConsentServerVerification();
+        }
+        return false;
+      }
+
+      _persistVerifiedGrant(uid, status);
+      return _preferences.aiConsentAccepted;
+    } catch (_) {
+      SharedPreferencesUtil.clearAiConsentServerVerification();
+      return false;
+    }
   }
 
   Future<String?> grantCurrentConsent({required String uid}) async {

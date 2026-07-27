@@ -16586,6 +16586,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Review AI permission'**
   String get aiConsentReviewAction;
+
+  /// No description provided for @aiConsentActiveAudioStopped.
+  ///
+  /// In en, this message translates to:
+  /// **'AI permission could not be verified. Recording and voice chat stopped.'**
+  String get aiConsentActiveAudioStopped;
+
+  /// No description provided for @deleteAccountServerConfirmationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.'**
+  String get deleteAccountServerConfirmationFailed;
+
+  /// No description provided for @deleteAccountLocalCleanupFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.'**
+  String get deleteAccountLocalCleanupFailed;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

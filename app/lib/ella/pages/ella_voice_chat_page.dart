@@ -18,6 +18,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -96,6 +97,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   /// V2V client for WebSocket-based voice-to-voice mode
   V2VClient? _v2vClient;
+  AiConsentActiveSessionLease? _standardVoiceConsentLease;
   final VoiceSessionStartupGuard _voiceStartupGuard = VoiceSessionStartupGuard();
   bool _isV2VMode = false;
   String _activeV2VProvider = '';
@@ -243,6 +245,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final client = _v2vClient;
     _v2vClient = null;
     if (client != null) unawaited(client.disconnect());
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = null;
     super.dispose();
   }
 
@@ -289,6 +293,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       final startupGeneration = _beginV2VStartup(provider);
       await _startV2V(provider, startupGeneration: startupGeneration);
     } else {
+      _startStandardVoiceConsentLease();
       setState(() {
         _voiceModeActive = true;
         _isV2VMode = false;
@@ -298,6 +303,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   int _beginV2VStartup(String provider) {
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = null;
     final startupGeneration = _voiceStartupGuard.begin();
     final providerName = localizedV2VProviderName(context, V2VClient.normalizeProvider(provider));
     setState(() {
@@ -355,6 +362,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (cancelStartup) _voiceStartupGuard.cancel();
     _voiceModeActive = false;
     _isV2VMode = false;
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = null;
     _typewriterTimer?.cancel();
     if (_speech.isListening) {
       _speech.stop();
@@ -363,6 +372,33 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     setState(() {
       _orbState = VoiceOrbState.idle;
       _statusText = 'Paused — Tap to Resume';
+      _audioLevel = 0.0;
+    });
+  }
+
+  void _startStandardVoiceConsentLease() {
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = AiConsentActiveSessionLease(
+      uid: SharedPreferencesUtil().uid,
+      onAuthorityLost: _handleStandardVoiceConsentAuthorityLost,
+    )..start();
+  }
+
+  Future<void> _handleStandardVoiceConsentAuthorityLost() async {
+    _standardVoiceConsentLease = null;
+    _voiceModeActive = false;
+    _isV2VMode = false;
+    if (_speech.isListening) {
+      await _speech.stop();
+    }
+    try {
+      await _audioPlayer.stop();
+      await ElevenLabsTts.stopOnDevice();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _orbState = VoiceOrbState.idle;
+      _statusText = context.l10n.aiConsentActiveAudioStopped;
       _audioLevel = 0.0;
     });
   }
@@ -651,6 +687,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         case V2VFailureChoice.useElevenLabs:
           if (_sessionScope != null) break;
           _usingElevenLabsFallback = true;
+          _startStandardVoiceConsentLease();
           setState(() {
             _voiceModeActive = true;
             _isV2VMode = false;
@@ -824,6 +861,21 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         debugPrint('[VoiceChat] V2V error: ${event.text}');
         setState(() {
           _statusText = 'Error: ${event.text ?? "unknown"}';
+        });
+        break;
+      case 'consent_authority_lost':
+        final endedSessionId = _activeSessionId;
+        _voiceStartupGuard.cancel();
+        _v2vClient = null;
+        _voiceModeActive = false;
+        _isV2VMode = false;
+        _activeSessionId = '';
+        _activeV2VProvider = '';
+        _notifyMemorySessionEnded(endedSessionId);
+        setState(() {
+          _orbState = VoiceOrbState.idle;
+          _statusText = context.l10n.aiConsentActiveAudioStopped;
+          _audioLevel = 0.0;
         });
         break;
       case 'session_end':

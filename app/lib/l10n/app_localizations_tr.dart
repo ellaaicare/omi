@@ -8910,4 +8910,15 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get aiConsentReviewAction => 'Review AI permission';
+
+  @override
+  String get aiConsentActiveAudioStopped => 'AI permission could not be verified. Recording and voice chat stopped.';
+
+  @override
+  String get deleteAccountServerConfirmationFailed =>
+      'Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.';
+
+  @override
+  String get deleteAccountLocalCleanupFailed =>
+      'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.';
 }

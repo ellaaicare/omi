@@ -12,8 +12,27 @@ import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/wal_file_manager.dart';
 import 'package:omi/widgets/dialog.dart';
 
+typedef DeleteAccountRequest = Future<AccountDeletionReceipt?> Function();
+
 class DeleteAccount extends StatefulWidget {
-  const DeleteAccount({super.key});
+  const DeleteAccount({
+    super.key,
+    this.deleteAccountRequest,
+    this.signOut,
+    this.clearWal,
+    this.clearPreferences,
+    this.onDeletionComplete,
+    this.onDeleteConfirmed,
+    this.onDeleteSucceeded,
+  });
+
+  final DeleteAccountRequest? deleteAccountRequest;
+  final Future<void> Function()? signOut;
+  final Future<void> Function()? clearWal;
+  final VoidCallback? clearPreferences;
+  final VoidCallback? onDeletionComplete;
+  final VoidCallback? onDeleteConfirmed;
+  final VoidCallback? onDeleteSucceeded;
 
   @override
   State<DeleteAccount> createState() => _DeleteAccountState();
@@ -33,16 +52,57 @@ class _DeleteAccountState extends State<DeleteAccount> {
     setState(() {
       isDeleteing = true;
     });
-    MixpanelManager().deleteAccountConfirmed();
-    MixpanelManager().deleteUser();
-    await deleteAccount();
-    await FirebaseAuth.instance.signOut();
-    await WalFileManager.clearAll();
-    SharedPreferencesUtil().clear();
+    (widget.onDeleteConfirmed ?? MixpanelManager().deleteAccountConfirmed).call();
+
+    AccountDeletionReceipt? receipt;
+    try {
+      receipt = await (widget.deleteAccountRequest ?? deleteAccount).call();
+    } catch (_) {
+      _showDeletionError();
+      return;
+    }
+    if (receipt == null) {
+      _showDeletionError();
+      return;
+    }
+
+    try {
+      (widget.onDeleteSucceeded ?? MixpanelManager().deleteUser).call();
+      await (widget.signOut ?? FirebaseAuth.instance.signOut).call();
+      await (widget.clearWal ?? WalFileManager.clearAll).call();
+      if (widget.clearPreferences != null) {
+        widget.clearPreferences!.call();
+      } else {
+        await SharedPreferencesUtil().clear();
+      }
+      if (!mounted) return;
+      setState(() {
+        isDeleteing = false;
+      });
+      if (widget.onDeletionComplete != null) {
+        widget.onDeletionComplete!.call();
+      } else {
+        routeToPage(context, const AppShell(), replace: true);
+      }
+    } catch (_) {
+      _showDeletionError(localCleanupFailed: true);
+    }
+  }
+
+  void _showDeletionError({bool localCleanupFailed = false}) {
+    if (!mounted) return;
     setState(() {
       isDeleteing = false;
     });
-    routeToPage(context, const AppShell(), replace: true);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          localCleanupFailed
+              ? context.l10n.deleteAccountLocalCleanupFailed
+              : context.l10n.deleteAccountServerConfirmationFailed,
+        ),
+      ),
+    );
   }
 
   @override
@@ -55,7 +115,7 @@ class _DeleteAccountState extends State<DeleteAccount> {
           backgroundColor: Theme.of(context).colorScheme.primary,
           title: Text(context.l10n.deleteAccountTitle),
         ),
-        body: Padding(
+        body: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           child: Column(
             children: [
@@ -94,7 +154,7 @@ class _DeleteAccountState extends State<DeleteAccount> {
                 leading: const Icon(Icons.upload_file_outlined),
                 title: Text(context.l10n.exportBeforeDelete),
               ),
-              const Spacer(),
+              const SizedBox(height: 30),
               Row(
                 children: [
                   Checkbox(
@@ -105,8 +165,7 @@ class _DeleteAccountState extends State<DeleteAccount> {
                       }
                     },
                   ),
-                  SizedBox(
-                    width: MediaQuery.of(context).size.width * 0.80,
+                  Expanded(
                     child: Text(context.l10n.deleteAccountCheckbox),
                   ),
                 ],

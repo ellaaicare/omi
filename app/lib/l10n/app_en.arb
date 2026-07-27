@@ -10479,5 +10479,8 @@
   "aiConsentRevokeSyncFailed": "Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.",
   "aiConsentOffGateTitle": "AI sharing is off",
   "aiConsentOffGateBody": "Ella will not provision AI features or send audio, transcripts, messages, or memory context while permission is off. You can review the disclosure whenever you are ready.",
-  "aiConsentReviewAction": "Review AI permission"
+  "aiConsentReviewAction": "Review AI permission",
+  "aiConsentActiveAudioStopped": "AI permission could not be verified. Recording and voice chat stopped.",
+  "deleteAccountServerConfirmationFailed": "Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.",
+  "deleteAccountLocalCleanupFailed": "Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again."
 }

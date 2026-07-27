@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import 'package:omi/backend/http/api/messages.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/main.dart';
 import 'package:omi/services/services.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -28,6 +29,7 @@ class VoiceRecorderProvider extends ChangeNotifier {
   List<List<int>> _audioChunks = [];
   String _transcript = '';
   bool _isProcessing = false;
+  AiConsentActiveSessionLease? _aiConsentLease;
 
   // Audio visualization
   final List<double> _audioLevels = List.generate(20, (_) => 0.1);
@@ -80,76 +82,100 @@ class VoiceRecorderProvider extends ChangeNotifier {
       }
     });
 
-    await ServiceManager.instance().mic.start(
-      onByteReceived: (bytes) {
-        if (_state == VoiceRecorderState.recording) {
-          _audioChunks.add(bytes.toList());
+    _aiConsentLease?.stop();
+    _aiConsentLease = AiConsentActiveSessionLease(
+      uid: SharedPreferencesUtil().uid,
+      onAuthorityLost: _handleConsentAuthorityLost,
+    )..start();
 
-          // Update audio visualization based on actual audio levels
-          if (bytes.isNotEmpty) {
-            // Calculate RMS (Root Mean Square) for PCM16 audio data
-            double rms = 0;
+    try {
+      await ServiceManager.instance().mic.start(
+        onByteReceived: (bytes) {
+          if (_state == VoiceRecorderState.recording) {
+            _audioChunks.add(bytes.toList());
 
-            // Process bytes as 16-bit samples (2 bytes per sample)
-            for (int i = 0; i < bytes.length - 1; i += 2) {
-              // Convert two bytes to a 16-bit signed integer
-              // PCM16 is little-endian: LSB first, then MSB
-              int sample = bytes[i] | (bytes[i + 1] << 8);
+            // Update audio visualization based on actual audio levels
+            if (bytes.isNotEmpty) {
+              // Calculate RMS (Root Mean Square) for PCM16 audio data
+              double rms = 0;
 
-              // Convert to signed value (if high bit is set)
-              if (sample > 32767) {
-                sample = sample - 65536;
+              // Process bytes as 16-bit samples (2 bytes per sample)
+              for (int i = 0; i < bytes.length - 1; i += 2) {
+                // Convert two bytes to a 16-bit signed integer
+                // PCM16 is little-endian: LSB first, then MSB
+                int sample = bytes[i] | (bytes[i + 1] << 8);
+
+                // Convert to signed value (if high bit is set)
+                if (sample > 32767) {
+                  sample = sample - 65536;
+                }
+
+                // Square the sample and add to sum
+                rms += sample * sample;
               }
 
-              // Square the sample and add to sum
-              rms += sample * sample;
+              // Calculate RMS and normalize to 0.0-1.0 range
+              // 32768 is max absolute value for 16-bit audio
+              int sampleCount = bytes.length ~/ 2;
+              if (sampleCount > 0) {
+                rms = math.sqrt(rms / sampleCount) / 32768.0;
+              } else {
+                rms = 0;
+              }
+
+              // Apply non-linear scaling to make quiet sounds more visible
+              // and loud sounds more dramatic
+              final level = math.pow(rms, 0.4).toDouble().clamp(0.1, 1.0);
+
+              // Shift all values left
+              for (int i = 0; i < _audioLevels.length - 1; i++) {
+                _audioLevels[i] = _audioLevels[i + 1];
+              }
+
+              // Add new level at the end
+              _audioLevels[_audioLevels.length - 1] = level;
             }
-
-            // Calculate RMS and normalize to 0.0-1.0 range
-            // 32768 is max absolute value for 16-bit audio
-            int sampleCount = bytes.length ~/ 2;
-            if (sampleCount > 0) {
-              rms = math.sqrt(rms / sampleCount) / 32768.0;
-            } else {
-              rms = 0;
-            }
-
-            // Apply non-linear scaling to make quiet sounds more visible
-            // and loud sounds more dramatic
-            final level = math.pow(rms, 0.4).toDouble().clamp(0.1, 1.0);
-
-            // Shift all values left
-            for (int i = 0; i < _audioLevels.length - 1; i++) {
-              _audioLevels[i] = _audioLevels[i + 1];
-            }
-
-            // Add new level at the end
-            _audioLevels[_audioLevels.length - 1] = level;
           }
-        }
-      },
-      onRecording: () {
-        Logger.debug('VoiceRecorderProvider: Recording started');
-        _state = VoiceRecorderState.recording;
-        _audioChunks = [];
-        // Reset audio levels
-        for (int i = 0; i < _audioLevels.length; i++) {
-          _audioLevels[i] = 0.1;
-        }
-        notifyListeners();
-      },
-      onStop: () {
-        Logger.debug('VoiceRecorderProvider: Recording stopped');
-      },
-      onInitializing: () {
-        Logger.debug('VoiceRecorderProvider: Initializing');
-      },
-    );
+        },
+        onRecording: () {
+          Logger.debug('VoiceRecorderProvider: Recording started');
+          _state = VoiceRecorderState.recording;
+          _audioChunks = [];
+          // Reset audio levels
+          for (int i = 0; i < _audioLevels.length; i++) {
+            _audioLevels[i] = 0.1;
+          }
+          notifyListeners();
+        },
+        onStop: () {
+          Logger.debug('VoiceRecorderProvider: Recording stopped');
+        },
+        onInitializing: () {
+          Logger.debug('VoiceRecorderProvider: Initializing');
+        },
+      );
+    } catch (_) {
+      _aiConsentLease?.stop();
+      _aiConsentLease = null;
+      rethrow;
+    }
   }
 
   void stopRecording() {
+    _aiConsentLease?.stop();
+    _aiConsentLease = null;
     _waveformTimer?.cancel();
     ServiceManager.instance().mic.stop();
+  }
+
+  Future<void> _handleConsentAuthorityLost() async {
+    stopRecording();
+    _state = VoiceRecorderState.transcribeFailed;
+    _audioChunks = [];
+    _isProcessing = false;
+    notifyListeners();
+    AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.aiConsentActiveAudioStopped ??
+        'AI permission could not be verified. Recording stopped.');
   }
 
   Future<void> processRecording() async {
@@ -251,6 +277,8 @@ class VoiceRecorderProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _aiConsentLease?.stop();
+    _aiConsentLease = null;
     _waveformTimer?.cancel();
     if (_state == VoiceRecorderState.recording) {
       ServiceManager.instance().mic.stop();

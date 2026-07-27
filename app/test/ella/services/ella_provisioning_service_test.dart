@@ -431,6 +431,28 @@ void main() {
     expect(transport.statusCalls, 1);
   });
 
+  test('active authority remains valid while an early refresh is in flight', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(receiptId: 'aicr_server-receipt', uid: 'uid-a');
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: 'aicr_server-receipt',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
+    final transport = _DeferredConsentStatusTransport();
+    final service = EllaAiConsentService(transport: transport);
+
+    final refresh = service.refreshServerAuthority(uid: 'uid-a');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(preferences.aiConsentAccepted, isTrue);
+    transport.complete(_consentStatus());
+    expect(await refresh, isTrue);
+    expect(preferences.aiConsentAccepted, isTrue);
+  });
+
   test('stale server status fails closed even if it claims authorization', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
@@ -563,6 +585,23 @@ class _FakeConsentTransport implements EllaAiConsentTransport {
   Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
     submissions.add(submission);
     return submitResponse;
+  }
+}
+
+class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
+  final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
+
+  void complete(AiConsentStatus? status) => _status.complete(status);
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() => _status.future;
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) {
+    throw StateError('submit should not be called');
   }
 }
 

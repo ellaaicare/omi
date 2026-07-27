@@ -229,6 +229,19 @@ class SharedPreferencesUtil {
         _verifiedAiConsentProcessorSetHash == currentAiConsentProcessorSetHash;
   }
 
+  Duration? get aiConsentServerVerificationRemaining {
+    final verifiedAt = _verifiedAiConsentAt;
+    if (verifiedAt == null ||
+        _verifiedAiConsentUid != uid ||
+        _verifiedAiConsentReceiptId != aiConsentReceiptId ||
+        _verifiedAiConsentPolicyVersion != currentAiConsentContractVersion ||
+        _verifiedAiConsentProcessorSetHash != currentAiConsentProcessorSetHash) {
+      return null;
+    }
+    final remaining = aiConsentServerVerificationTtl - DateTime.now().difference(verifiedAt);
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
   set aiConsentAcceptedAt(String value) => saveString('aiConsentAcceptedAt', value);
 
   String get aiConsentAcceptedAt => getString('aiConsentAcceptedAt');
