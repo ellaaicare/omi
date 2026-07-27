@@ -596,11 +596,20 @@ class ProvisioningCoordinator:
                     f"runtime_admission_{admission.code}",
                     retryable=False,
                 )
+            admitted_entitlement_revision = int((admission.entitlement or {}).get("revision") or 0)
+            if admitted_entitlement_revision <= 0:
+                raise ProvisioningError(
+                    "runtime_admission_contract_invalid",
+                    retryable=False,
+                )
 
             binding = await self.repository.claim_cloud_pool_binding(
                 uid=identity.uid,
                 job_id=str(job["id"]),
                 lease_seconds=cloud_pool_claim_lease_seconds(),
+                admitted_entitlement_revision=admitted_entitlement_revision,
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
             )
             pool_state = await self.repository.reconcile_cloud_pool_alert(threshold=cloud_pool_low_water_threshold())
             await self._publish_pool_alert(alert_publisher, pool_state)
@@ -650,7 +659,7 @@ class ProvisioningCoordinator:
                     "observed_peer_sha256": hashlib.sha256(honcho["observed_peer"].encode("utf-8")).hexdigest(),
                     "observer_peer_sha256": hashlib.sha256(honcho["observer_peer"].encode("utf-8")).hexdigest(),
                 },
-                "admission_revision": (int(admission.entitlement.get("revision") or 0) if admission.entitlement else 0),
+                "admission_revision": admitted_entitlement_revision,
             }
             activated = await self.repository.finalize_cloud_pool_claim(
                 uid=identity.uid,

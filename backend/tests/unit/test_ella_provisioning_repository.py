@@ -108,8 +108,16 @@ def test_retained_runtime_rejects_unknown_or_inactive_account():
 
 
 class _CloudClaimConnection:
-    def __init__(self, *, reconnect=False):
+    def __init__(
+        self,
+        *,
+        reconnect=False,
+        entitlement_revision=3,
+        entitlement_status="invited",
+    ):
         self.reconnect = reconnect
+        self.entitlement_revision = entitlement_revision
+        self.entitlement_status = entitlement_status
         self.queries = []
         self.binding_id = uuid.uuid4()
         self.user_id = uuid.uuid4()
@@ -117,8 +125,45 @@ class _CloudClaimConnection:
     def transaction(self):
         return _AsyncContext(self)
 
+    async def fetch(self, query, *args):
+        self.queries.append(query)
+        if "FROM voice_kill_switches" in query:
+            return []
+        raise AssertionError(query)
+
     async def fetchrow(self, query, *args):
         self.queries.append(query)
+        if "FROM voice_entitlements" in query:
+            return {
+                "uid": args[0],
+                "revision": self.entitlement_revision,
+                "status": self.entitlement_status,
+                "trial_expires_at": None,
+                "provider_allowlist": ["hermes_cloud"],
+                "model_allowlist": ["model-a"],
+                "daily_limit_s": 2700,
+                "monthly_limit_s": 43200,
+                "daily_cost_limit_microusd": None,
+                "monthly_cost_limit_microusd": None,
+                "max_session_s": 1200,
+                "max_concurrent": 1,
+                "max_audio_bytes_per_session": 120000000,
+                "hard_limit_ratio": 1,
+                "soft_limit_ratio": 0.8,
+            }
+        if "FROM voice_usage_events" in query:
+            return {
+                "daily_used_s": 0,
+                "monthly_used_s": 0,
+                "daily_cost_microusd": 0,
+                "monthly_cost_microusd": 0,
+            }
+        if "FROM voice_active_sessions" in query:
+            return {
+                "active_s": 0,
+                "active_cost_microusd": 0,
+                "active_count": 0,
+            }
         if "b.claim_job_id = $2" in query:
             if self.reconnect:
                 return {
@@ -155,6 +200,9 @@ def test_cloud_pool_claim_uses_reconnect_receipt_skip_locked_and_cas():
             uid="synthetic-user",
             job_id=job_id,
             lease_seconds=120,
+            admitted_entitlement_revision=3,
+            provider="hermes_cloud",
+            model="model-a",
         )
     )
 
@@ -172,10 +220,42 @@ def test_cloud_pool_claim_uses_reconnect_receipt_skip_locked_and_cas():
             uid="synthetic-user",
             job_id=job_id,
             lease_seconds=120,
+            admitted_entitlement_revision=3,
+            provider="hermes_cloud",
+            model="model-a",
         )
     )
     assert reconnect_result["status"] == "claiming"
     assert not any("FOR UPDATE SKIP LOCKED" in query for query in reconnect.queries)
+
+
+@pytest.mark.parametrize(
+    ("connection", "expected_code"),
+    [
+        (_CloudClaimConnection(entitlement_revision=4), "runtime_admission_entitlement_stale"),
+        (_CloudClaimConnection(entitlement_status="revoked"), "runtime_admission_revoked"),
+    ],
+)
+def test_cloud_pool_claim_revalidates_entitlement_before_selecting_candidate(
+    connection,
+    expected_code,
+):
+    repository = EllaProvisioningRepository(_Pool(connection))
+
+    with pytest.raises(RuntimePoolClaimError) as error:
+        asyncio.run(
+            repository.claim_cloud_pool_binding(
+                uid="synthetic-user",
+                job_id=str(uuid.uuid4()),
+                lease_seconds=120,
+                admitted_entitlement_revision=3,
+                provider="hermes_cloud",
+                model="model-a",
+            )
+        )
+
+    assert error.value.code == expected_code
+    assert not any("FOR UPDATE SKIP LOCKED" in query for query in connection.queries)
 
 
 def test_cloud_pool_registration_persists_prompt_artifact_receipt():
@@ -348,9 +428,7 @@ class _InteractionClaimConnection:
 def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_claim():
     interaction_id = str(uuid.uuid4())
     connection = _InteractionClaimConnection()
-    result = asyncio.run(
-        EllaProvisioningRepository(_Pool(connection)).claim_runtime_interaction(interaction_id)
-    )
+    result = asyncio.run(EllaProvisioningRepository(_Pool(connection)).claim_runtime_interaction(interaction_id))
 
     assert result["status"] == "running"
     assert result["previous_response_id"] == "response-previous"
@@ -364,15 +442,10 @@ def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_c
 
     blocked_connection = _InteractionClaimConnection(running_other=True)
     blocked = asyncio.run(
-        EllaProvisioningRepository(_Pool(blocked_connection)).claim_runtime_interaction(
-            str(uuid.uuid4())
-        )
+        EllaProvisioningRepository(_Pool(blocked_connection)).claim_runtime_interaction(str(uuid.uuid4()))
     )
     assert blocked is None
-    assert not any(
-        "UPDATE ella_runtime_interactions" in query
-        for query, _args in blocked_connection.queries
-    )
+    assert not any("UPDATE ella_runtime_interactions" in query for query, _args in blocked_connection.queries)
 
 
 def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():

@@ -252,6 +252,51 @@ def test_photon_turn_uses_photon_entitlement_mode():
     assert policy.accepted[0]["mode"] == "hermes-cloud-photon"
 
 
+def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
+    monkeypatch,
+):
+    events = []
+    policy = FakePolicy()
+
+    def consent_gate(_runtime):
+        events.append("consent")
+        return "aicr_" + ("a" * 32)
+
+    class OrderedCloud(FakeCloudClient):
+        async def create_response(self, binding, **kwargs):
+            events.append("provider")
+            return await super().create_response(binding, **kwargs)
+
+    async def mark_provider_started():
+        assert policy.reserved
+        assert events == ["consent", "consent"]
+        events.append("provider_started")
+
+    monkeypatch.setattr(
+        hermes_cloud_runtime,
+        "assert_runtime_managed_consent",
+        consent_gate,
+    )
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=OrderedCloud(),
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    asyncio.run(
+        service.run_turn(
+            _runtime(),
+            _request(),
+            before_provider_call=mark_provider_started,
+        )
+    )
+
+    assert events == ["consent", "consent", "provider_started", "provider"]
+
+
 def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
     repository = FakeRepository()
     policy = FakePolicy()
@@ -274,12 +319,25 @@ def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
         max_cost_estimator=lambda **kwargs: 1,
     )
 
+    provider_marked = False
+
+    async def mark_provider_started():
+        nonlocal provider_marked
+        provider_marked = True
+
     with pytest.raises(ProvisioningError) as error:
-        asyncio.run(service.run_turn(_runtime(), _request()))
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                before_provider_call=mark_provider_started,
+            )
+        )
 
     assert error.value.code == "managed_cloud_consent_required"
     assert checks == 2
     assert cloud.calls == []
+    assert provider_marked is False
     assert policy.reserved
     assert policy.released
 

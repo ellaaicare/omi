@@ -376,6 +376,77 @@ async def get_entitlement(uid: str) -> Optional[dict[str, Any]]:
         return _record_dict(row) or None
 
 
+async def _runtime_activation_decision(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    provider: str,
+    model: str,
+    admitted_entitlement_revision: Optional[int] = None,
+) -> VoicePolicyDecision:
+    now = _utcnow()
+    row = await conn.fetchrow(
+        "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
+        uid,
+    )
+    entitlement = _record_dict(row)
+    if not entitlement:
+        return VoicePolicyDecision(False, "no_entitlement", None, {})
+    rollup = await _usage_rollup(conn, uid, now)
+    quota = _quota_payload(entitlement, rollup)
+
+    code: Optional[str] = None
+    if admitted_entitlement_revision is not None and entitlement["revision"] != admitted_entitlement_revision:
+        code = "entitlement_stale"
+    elif entitlement["status"] not in {"invited", "active"}:
+        code = str(entitlement["status"])
+    elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
+        code = "expired"
+    else:
+        code = await _kill_switch_code(conn, uid, provider)
+    if not code and provider not in set(entitlement.get("provider_allowlist") or []):
+        code = "provider_not_allowed"
+    if not code and entitlement.get("model_allowlist") and model not in set(entitlement["model_allowlist"]):
+        code = "model_not_allowed"
+    quota_code, soft_warning = quota_state(
+        entitlement,
+        daily_used_s=rollup["daily_used_s"],
+        monthly_used_s=rollup["monthly_used_s"],
+        daily_cost_used_microusd=rollup["daily_cost_microusd"],
+        monthly_cost_used_microusd=rollup["monthly_cost_microusd"],
+    )
+    if not code and quota_code not in {"ok", "soft_warning"}:
+        code = quota_code
+    if code:
+        return VoicePolicyDecision(False, code, entitlement, quota, quota.get("resets_at"))
+    return VoicePolicyDecision(
+        True,
+        "soft_warning" if soft_warning else "ok",
+        entitlement,
+        quota,
+        quota.get("resets_at"),
+        soft_warning,
+    )
+
+
+async def revalidate_runtime_activation_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    admitted_entitlement_revision: int,
+    provider: str,
+    model: str,
+) -> VoicePolicyDecision:
+    """Recheck admitted authority inside the caller's pool-claim transaction."""
+    return await _runtime_activation_decision(
+        conn,
+        uid=uid,
+        provider=provider,
+        model=model,
+        admitted_entitlement_revision=admitted_entitlement_revision,
+    )
+
+
 async def evaluate_runtime_activation(
     *,
     uid: str,
@@ -387,61 +458,28 @@ async def evaluate_runtime_activation(
     An invited entitlement may provision in the background, but only an active
     entitlement may later open a voice/provider session.
     """
-    now = _utcnow()
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
-                uid,
+            decision = await _runtime_activation_decision(
+                conn,
+                uid=uid,
+                provider=provider,
+                model=model,
             )
-            entitlement = _record_dict(row)
-            if not entitlement:
-                return VoicePolicyDecision(False, "no_entitlement", None, {})
-            rollup = await _usage_rollup(conn, uid, now)
-            quota = _quota_payload(entitlement, rollup)
-
-            code: Optional[str] = None
-            if entitlement["status"] not in {"invited", "active"}:
-                code = str(entitlement["status"])
-            elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
-                code = "expired"
-            else:
-                code = await _kill_switch_code(conn, uid, provider)
-            if not code and provider not in set(entitlement.get("provider_allowlist") or []):
-                code = "provider_not_allowed"
-            if not code and entitlement.get("model_allowlist") and model not in set(entitlement["model_allowlist"]):
-                code = "model_not_allowed"
-            quota_code, soft_warning = quota_state(
-                entitlement,
-                daily_used_s=rollup["daily_used_s"],
-                monthly_used_s=rollup["monthly_used_s"],
-                daily_cost_used_microusd=rollup["daily_cost_microusd"],
-                monthly_cost_used_microusd=rollup["monthly_cost_microusd"],
-            )
-            if not code and quota_code not in {"ok", "soft_warning"}:
-                code = quota_code
-            if code:
+            if not decision.allowed:
                 await _append_event(
                     conn,
                     event_type="policy_denied",
                     uid=uid,
                     correlation_id=f"runtime-activation:{uuid.uuid4()}",
-                    entitlement_revision=entitlement["revision"],
+                    entitlement_revision=(decision.entitlement["revision"] if decision.entitlement else None),
                     provider=provider,
                     model=model,
                     mode="runtime_activation",
-                    normalized_error_code=code,
+                    normalized_error_code=decision.code,
                 )
-                return VoicePolicyDecision(False, code, entitlement, quota, quota.get("resets_at"))
-            return VoicePolicyDecision(
-                True,
-                "soft_warning" if soft_warning else "ok",
-                entitlement,
-                quota,
-                quota.get("resets_at"),
-                soft_warning,
-            )
+            return decision
 
 
 async def get_entitlement_contract(uid: str) -> dict[str, Any]:

@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import voice_canary as voice_canary_db
+
 _pool: Optional[asyncpg.Pool] = None
 REQUIRED_PROVISIONING_INDEXES = (
     "ella_provisioning_jobs_user_schema_key",
@@ -610,6 +612,9 @@ class EllaProvisioningRepository:
         uid: str,
         job_id: str,
         lease_seconds: int,
+        admitted_entitlement_revision: int,
+        provider: str,
+        model: str,
     ) -> Optional[dict[str, Any]]:
         """Atomically reserve one healthy unbound Hermes Cloud instance.
 
@@ -621,6 +626,15 @@ class EllaProvisioningRepository:
         job_uuid = uuid.UUID(str(job_id))
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
+                    connection,
+                    uid=uid,
+                    admitted_entitlement_revision=admitted_entitlement_revision,
+                    provider=provider,
+                    model=model,
+                )
+                if not admission.allowed:
+                    raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
                 existing = await connection.fetchrow(
                     """
                     SELECT b.*, u.omi_uid

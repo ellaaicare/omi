@@ -572,13 +572,22 @@ class HermesCloudPhotonAdapter:
                 },
                 consent_grant_epoch=consent_grant_epoch,
             )
-            if not provider_started:
+
+            async def mark_provider_started() -> None:
+                nonlocal provider_started
+                if provider_started:
+                    return
                 await self.repository.mark_photon_provider_started(
                     receipt_id=receipt_id,
                     lease_token=lease_token,
                 )
                 provider_started = True
-            result = await self.runtime_service_factory().run_turn(runtime, runtime_request)
+
+            result = await self.runtime_service_factory().run_turn(
+                runtime,
+                runtime_request,
+                before_provider_call=mark_provider_started,
+            )
             source_identity = self._source_identity(
                 self.config.internal_owner_uid,
                 runtime_request.client_interaction_id,

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -256,6 +257,8 @@ class HermesCloudRuntimeService:
         self,
         runtime: IsolatedRuntime,
         request: HermesCloudTurnRequest,
+        *,
+        before_provider_call: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
@@ -438,6 +441,8 @@ class HermesCloudRuntimeService:
                     "managed_cloud_consent_grant_changed",
                     retryable=False,
                 )
+            if before_provider_call is not None:
+                await before_provider_call()
             provider_started = True
             turn = await self.cloud_client.create_response(
                 {

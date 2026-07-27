@@ -417,26 +417,42 @@ class FakeCloudClient:
 
 
 class FakeRuntimeService:
-    def __init__(self, event_store, repository, *, failure=None):
+    def __init__(
+        self,
+        event_store,
+        repository,
+        *,
+        failure=None,
+        failure_after_provider_start=None,
+    ):
         self.event_store = event_store
         self.repository = repository
         self.failure = failure
+        self.failure_after_provider_start = failure_after_provider_start
         self.calls = []
         self.provider_calls = []
         self.completed = {}
+        self.crash_before_provider_boundary = False
         self.crash_after_provider_start = False
 
-    async def run_turn(self, runtime, request):
+    async def run_turn(self, runtime, request, *, before_provider_call=None):
         self.calls.append((runtime, request))
         existing = self.completed.get(request.client_interaction_id)
         if existing:
             return HermesCloudTurnResult(**{**existing.__dict__, "duplicate": True})
         if self.failure:
             raise self.failure
+        if self.crash_before_provider_boundary:
+            self.crash_before_provider_boundary = False
+            raise SimulatedProcessCrash()
+        if before_provider_call is not None:
+            await before_provider_call()
         self.provider_calls.append(request.client_interaction_id)
         if self.crash_after_provider_start:
             self.crash_after_provider_start = False
             raise SimulatedProcessCrash()
+        if self.failure_after_provider_start:
+            raise self.failure_after_provider_start
         source_identity = HermesCloudPhotonAdapter._source_identity(request.uid, request.client_interaction_id)
         inbound_event_id = "canonical-inbound"
         outbound_event_id = "canonical-outbound"
@@ -506,6 +522,7 @@ def _adapter(
     *,
     cloud=None,
     runtime_failure=None,
+    runtime_failure_after_provider_start=None,
     authorize_synthetic_fixture=True,
 ):
     config = _config(
@@ -517,6 +534,7 @@ def _adapter(
         event_store,
         repository,
         failure=runtime_failure,
+        failure_after_provider_start=runtime_failure_after_provider_start,
     )
 
     async def resolve(uid, repository_arg):
@@ -694,8 +712,8 @@ def test_revoke_then_regrant_never_releases_output_from_prior_grant(monkeypatch)
     asyncio.run(adapter.preflight(_preflight()))
     original_run_turn = runtime_service.run_turn
 
-    async def disconnect_after_writeback(runtime, request):
-        result = await original_run_turn(runtime, request)
+    async def disconnect_after_writeback(runtime, request, **kwargs):
+        result = await original_run_turn(runtime, request, **kwargs)
         repository.binding["sidecar_connected_at"] = NOW - timedelta(minutes=2)
         return result
 
@@ -859,7 +877,7 @@ def test_tool_drift_and_allow_all_fail_preflight():
     assert runtime_service.calls == []
 
 
-def test_runtime_or_writeback_failure_is_uncertain_and_never_returns_delivery():
+def test_pre_provider_runtime_failure_is_retryable_and_not_uncertain():
     adapter, repository, runtime_service = _adapter(
         runtime_failure=ProvisioningError("canonical_writeback_failed", retryable=True)
     )
@@ -870,6 +888,24 @@ def test_runtime_or_writeback_failure_is_uncertain_and_never_returns_delivery():
 
     assert error.value.code == "canonical_writeback_failed"
     assert len(runtime_service.calls) == 1
+    assert repository.failures[-1]["uncertain"] is False
+    assert next(iter(repository.messages.values()))["status"] == "failed"
+
+
+def test_post_provider_writeback_failure_is_uncertain_and_never_delivered():
+    adapter, repository, runtime_service = _adapter(
+        runtime_failure_after_provider_start=ProvisioningError(
+            "canonical_writeback_failed",
+            retryable=True,
+        )
+    )
+    asyncio.run(adapter.preflight(_preflight()))
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert error.value.code == "canonical_writeback_failed"
+    assert len(runtime_service.provider_calls) == 1
     assert repository.failures[-1]["uncertain"] is True
     assert next(iter(repository.messages.values()))["status"] == "uncertain"
 
@@ -880,8 +916,8 @@ def test_sidecar_disconnect_after_writeback_returns_no_delivery(monkeypatch):
     asyncio.run(adapter.preflight(_preflight()))
     original_run_turn = runtime_service.run_turn
 
-    async def disconnect_after_writeback(runtime, request):
-        result = await original_run_turn(runtime, request)
+    async def disconnect_after_writeback(runtime, request, **kwargs):
+        result = await original_run_turn(runtime, request, **kwargs)
         repository.binding["sidecar_connected_at"] = NOW - timedelta(minutes=2)
         return result
 
@@ -948,6 +984,30 @@ def test_stale_running_receipt_is_reclaimed_before_provider_start():
     assert recovered.status == "awaiting_delivery"
     assert len(repository.quota_calls) == 2
     assert len(runtime_service.provider_calls) == 1
+
+
+def test_runtime_pre_provider_crash_after_adapter_handoff_is_reclaimable():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    runtime_service.crash_before_provider_boundary = True
+
+    with pytest.raises(SimulatedProcessCrash):
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert len(runtime_service.calls) == 1
+    assert receipt["status"] == "running"
+    assert receipt["quota_reserved"] is True
+    assert receipt["provider_started"] is False
+    assert runtime_service.provider_calls == []
+
+    repository.expire_active_lease()
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+
+    assert recovered.status == "awaiting_delivery"
+    assert len(runtime_service.calls) == 2
+    assert len(runtime_service.provider_calls) == 1
+    assert receipt["reconciliation_status"] == "recovered"
 
 
 def test_completed_runtime_interaction_recovers_without_second_provider_call():
