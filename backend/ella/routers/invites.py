@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import secrets
@@ -10,7 +11,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from database import invitations
 from utils.other import endpoints as auth
@@ -51,13 +52,44 @@ def _diagnostic_receipt() -> tuple[str, str]:
     return f"INV-{secrets.token_hex(4).upper()}", str(uuid.uuid4())
 
 
-@router.post("/redeem")
+def _invalid_request() -> HTTPException:
+    support_code, correlation_id = _diagnostic_receipt()
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": "invalid",
+            "support_code": support_code,
+            "correlation_id": correlation_id,
+        },
+    )
+
+
+async def _validated_payload(request: Request) -> InviteRedeemRequest:
+    try:
+        return InviteRedeemRequest.model_validate(await request.json())
+    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+        raise _invalid_request() from exc
+
+
+@router.post(
+    "/redeem",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": InviteRedeemRequest.model_json_schema(),
+                }
+            },
+        }
+    },
+)
 async def redeem_invite(
-    payload: InviteRedeemRequest,
     request: Request,
     authenticated_uid: str = Depends(auth.get_current_user_uid),
     app_build: str = Header(default="", alias="X-Ella-App-Build"),
 ) -> dict:
+    payload = await _validated_payload(request)
     try:
         return await invitations.redeem_invitation(
             uid=authenticated_uid,

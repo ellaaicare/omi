@@ -2,6 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import ModuleType
+from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
@@ -149,6 +150,70 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
     assert response.json()["status"] == "invited"
     assert captured["uid"] == "firebase-subject"
     assert captured["app_build"] == "804"
+
+
+@pytest.mark.parametrize(
+    ("payload", "secret_marker"),
+    [
+        pytest.param({}, None, id="missing-code"),
+        pytest.param(
+            {"code": {"secret": "wrong-type-secret"}},
+            "wrong-type-secret",
+            id="wrong-type",
+        ),
+        pytest.param(
+            {"code": "overlength-secret-" + ("X" * 32)},
+            "overlength-secret",
+            id="overlength",
+        ),
+        pytest.param(
+            {"code": "ABCD-2345", "uid": "extra-field-secret"},
+            "extra-field-secret",
+            id="extra-field",
+        ),
+    ],
+)
+def test_authenticated_malformed_body_returns_safe_invalid_envelope(
+    monkeypatch,
+    payload,
+    secret_marker,
+):
+    app = FastAPI()
+    app.include_router(invites.router)
+    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    redemption_called = False
+
+    async def fake_redeem(**_kwargs):
+        nonlocal redemption_called
+        redemption_called = True
+        return {}
+
+    monkeypatch.setattr(invites.invitations, "redeem_invitation", fake_redeem)
+    response = TestClient(app).post("/v1/invite/redeem", json=payload)
+
+    assert response.status_code == 400
+    assert not redemption_called
+    assert set(response.json()) == {"detail"}
+    detail = response.json()["detail"]
+    assert set(detail) == {"code", "support_code", "correlation_id"}
+    assert detail["code"] == "invalid"
+    assert detail["support_code"].startswith("INV-")
+    assert len(detail["support_code"]) == 12
+    assert str(UUID(detail["correlation_id"])) == detail["correlation_id"]
+    if secret_marker:
+        assert secret_marker not in response.text
+
+
+def test_unauthenticated_malformed_body_remains_unauthorized():
+    app = FastAPI()
+    app.include_router(invites.router)
+
+    response = TestClient(app).post(
+        "/v1/invite/redeem",
+        json={"code": "overlength-secret-" + ("X" * 32)},
+    )
+
+    assert response.status_code == 401
 
 
 def test_entitlement_read_requires_auth_and_is_uid_scoped(monkeypatch):
