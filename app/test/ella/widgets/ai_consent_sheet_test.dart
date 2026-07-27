@@ -25,12 +25,17 @@ void main() {
               preferences.acceptAiConsent(
                 receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
                 uid: 'uid-a',
+                profileBindingId: 'profile-binding-a',
+                serverDecidedAt: '2026-07-27T00:00:00Z',
               );
               preferences.markAiConsentServerVerified(
                 uid: 'uid-a',
                 receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
                 policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
                 processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+                profileBindingId: 'profile-binding-a',
+                scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+                scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
               );
               return true;
             },
@@ -45,10 +50,7 @@ void main() {
         supportedLocales: AppLocalizations.supportedLocales,
         home: Builder(
           builder: (context) => Scaffold(
-            body: TextButton(
-              onPressed: () => AiConsentSheet.show(context),
-              child: const Text('Show consent'),
-            ),
+            body: TextButton(onPressed: () => AiConsentSheet.show(context), child: const Text('Show consent')),
           ),
         ),
       ),
@@ -58,26 +60,37 @@ void main() {
     await tester.pumpAndSettle();
 
     final screenHeight = tester.view.physicalSize.height / tester.view.devicePixelRatio;
-    expect(tester.getSize(find.byType(AiConsentSheet)).height, lessThanOrEqualTo(screenHeight * 0.7));
+    expect(tester.getSize(find.byType(AiConsentSheet)).height, lessThanOrEqualTo(screenHeight * 0.95));
     expect(find.text('Not now').hitTestable(), findsOneWidget);
   });
 
-  testWidgets('names every voice processor and explains routed data before acceptance', (tester) async {
+  testWidgets('names managed-cloud recipients, data, purpose, and narrow scope before acceptance', (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
 
     final disclosure =
         tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
     expect(disclosure, contains('secure backend'));
-    expect(disclosure, contains('live or stored microphone audio'));
+    expect(disclosure, contains('Nous Research / Hermes Cloud'));
+    expect(disclosure, contains('messages, voice or transcript text'));
+    expect(disclosure, contains('OpenAI'));
+    expect(disclosure, contains('OpenAI Codex OAuth route'));
+    expect(disclosure, contains('Honcho Cloud'));
+    expect(disclosure, contains('derived memory'));
+    expect(disclosure, contains('Photon'));
+    expect(disclosure, contains('messaging identifiers'));
+    expect(disclosure, contains('one explicitly allowed test contact'));
+    expect(disclosure, contains('no allow-all recipients'));
+    expect(disclosure, contains('caregiver delivery'));
+    expect(disclosure, contains('inbound attachments'));
+    expect(disclosure, contains('requires permission again'));
     expect(disclosure, contains('Deepgram'));
     expect(disclosure, contains('Soniox'));
     expect(disclosure, contains('Speechmatics'));
     expect(disclosure, contains('Google Firebase'));
     expect(disclosure, contains('self-hosted Hermes'));
-    expect(disclosure, contains('Honcho memory'));
+    expect(disclosure, contains('Ella self-hosted Hermes, Honcho'));
     expect(disclosure, contains('OpenRouter'));
-    expect(disclosure, contains('selected model provider'));
     expect(disclosure, contains('Google Gemini'));
     expect(disclosure, contains('OpenAI'));
     expect(disclosure, contains('Groq'));
@@ -86,9 +99,8 @@ void main() {
     expect(disclosure, contains('Inworld AI'));
     expect(disclosure, contains('Kokoro'));
     expect(disclosure, contains('Fish'));
-    expect(disclosure, contains('response text'));
     expect(disclosure, contains('selected memory context'));
-    expect(disclosure, contains('will not send audio, transcripts, messages, or memory context'));
+    expect(disclosure, contains('will not send audio, transcripts, messages, selected memory context'));
     expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
   });
@@ -115,12 +127,17 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
 
     await tester.pumpWidget(buildApp());
@@ -141,12 +158,17 @@ void main() {
     preferences.acceptAiConsent(
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
     );
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
       receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
     var revokeCalled = false;
 

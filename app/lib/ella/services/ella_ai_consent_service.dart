@@ -29,6 +29,10 @@ class AiConsentStatus {
     required this.appVersion,
     required this.buildNumber,
     required this.locale,
+    required this.profileBindingId,
+    required this.scopeVersion,
+    required this.scopeHash,
+    required this.serverDecidedAt,
   });
 
   factory AiConsentStatus.fromJson(Map<String, dynamic> json) {
@@ -36,20 +40,29 @@ class AiConsentStatus {
         json['consent'] is Map<String, dynamic> ? json['consent'] as Map<String, dynamic> : const <String, dynamic>{};
     final receipt =
         json['receipt'] is Map<String, dynamic> ? json['receipt'] as Map<String, dynamic> : const <String, dynamic>{};
+    String readString(String key) {
+      final value = receipt[key] ?? consent[key];
+      return value is String ? value : '';
+    }
+
     final policy = json['policy'] is Map<String, dynamic>
         ? AiConsentPolicy.fromJson(json['policy'] as Map<String, dynamic>)
         : null;
     return AiConsentStatus(
-      subjectUid: json['subject_uid'] as String? ?? '',
-      authorized: json['authorized'] as bool? ?? false,
+      subjectUid: json['subject_uid'] is String ? json['subject_uid'] as String : '',
+      authorized: json['authorized'] is bool ? json['authorized'] as bool : false,
       policy: policy,
-      decision: receipt['decision'] as String? ?? consent['decision'] as String? ?? '',
-      receiptId: receipt['receipt_id'] as String? ?? consent['receipt_id'] as String? ?? '',
-      policyVersion: receipt['policy_version'] as String? ?? consent['policy_version'] as String? ?? '',
-      processorSetHash: receipt['processor_set_hash'] as String? ?? consent['processor_set_hash'] as String? ?? '',
-      appVersion: receipt['app_version'] as String? ?? consent['app_version'] as String? ?? '',
-      buildNumber: receipt['build_number'] as String? ?? consent['build_number'] as String? ?? '',
-      locale: receipt['locale'] as String? ?? consent['locale'] as String? ?? '',
+      decision: readString('decision'),
+      receiptId: readString('receipt_id'),
+      policyVersion: readString('policy_version'),
+      processorSetHash: readString('processor_set_hash'),
+      appVersion: readString('app_version'),
+      buildNumber: readString('build_number'),
+      locale: readString('locale'),
+      profileBindingId: readString('profile_binding_id'),
+      scopeVersion: readString('scope_version'),
+      scopeHash: readString('scope_hash'),
+      serverDecidedAt: DateTime.tryParse(readString('server_decided_at')),
     );
   }
 
@@ -63,8 +76,12 @@ class AiConsentStatus {
   final String appVersion;
   final String buildNumber;
   final String locale;
+  final String profileBindingId;
+  final String scopeVersion;
+  final String scopeHash;
+  final DateTime? serverDecidedAt;
 
-  bool isCurrentGrantFor(String uid) {
+  bool isCurrentGrantFor(String uid, {String? expectedProfileBindingId}) {
     return uid.isNotEmpty &&
         subjectUid == uid &&
         authorized &&
@@ -72,6 +89,11 @@ class AiConsentStatus {
         receiptId.startsWith(SharedPreferencesUtil.currentAiConsentReceiptPrefix) &&
         policyVersion == SharedPreferencesUtil.currentAiConsentContractVersion &&
         processorSetHash == SharedPreferencesUtil.currentAiConsentProcessorSetHash &&
+        profileBindingId.isNotEmpty &&
+        (expectedProfileBindingId == null || profileBindingId == expectedProfileBindingId) &&
+        scopeVersion == SharedPreferencesUtil.currentAiConsentScopeVersion &&
+        scopeHash == SharedPreferencesUtil.currentAiConsentScopeHash &&
+        serverDecidedAt != null &&
         (policy?.isBundledCurrent ?? false);
   }
 }
@@ -85,6 +107,8 @@ class AiConsentSubmission {
     required this.appVersion,
     required this.buildNumber,
     required this.locale,
+    required this.scopeVersion,
+    required this.scopeHash,
   });
 
   final AiConsentDecision decision;
@@ -94,6 +118,8 @@ class AiConsentSubmission {
   final String appVersion;
   final String buildNumber;
   final String locale;
+  final String scopeVersion;
+  final String scopeHash;
 
   Map<String, dynamic> toJson() => {
         'decision': decision.wireValue,
@@ -103,6 +129,8 @@ class AiConsentSubmission {
         'app_version': appVersion,
         'build_number': buildNumber,
         'locale': locale,
+        'scope_version': scopeVersion,
+        'scope_hash': scopeHash,
       };
 }
 
@@ -144,12 +172,7 @@ class EllaAiConsentHttpTransport implements EllaAiConsentTransport {
 
   @override
   Future<AiConsentStatus?> fetchStatus() async {
-    final response = await makeApiCall(
-      url: _endpoint,
-      headers: const {},
-      method: 'GET',
-      body: '',
-    );
+    final response = await makeApiCall(url: _endpoint, headers: const {}, method: 'GET', body: '');
     if (response?.statusCode != 200) return null;
     final body = _decodeMap(response!.body);
     return body == null ? null : AiConsentStatus.fromJson(body);
@@ -206,7 +229,11 @@ class EllaAiConsentService {
         SharedPreferencesUtil.clearAiConsentServerVerification();
         return false;
       }
-      if (!status.isCurrentGrantFor(uid)) {
+      final expectedProfileBindingId = _preferences.aiConsentProfileBindingId;
+      if (!status.isCurrentGrantFor(
+        uid,
+        expectedProfileBindingId: expectedProfileBindingId.isEmpty ? null : expectedProfileBindingId,
+      )) {
         if (status.subjectUid == uid && status.decision == AiConsentDecision.declined.wireValue) {
           _preferences.deferAiConsent();
         } else if (status.subjectUid == uid) {
@@ -250,10 +277,7 @@ class EllaAiConsentService {
         status.decision == AiConsentDecision.revoked.wireValue;
   }
 
-  Future<AiConsentStatus?> _submit({
-    required String uid,
-    required AiConsentDecision decision,
-  }) async {
+  Future<AiConsentStatus?> _submit({required String uid, required AiConsentDecision decision}) async {
     SharedPreferencesUtil.clearAiConsentServerVerification();
     if (uid.isEmpty || _preferences.uid != uid) return null;
     final policy = await _fetchAcceptedPolicy();
@@ -273,6 +297,8 @@ class EllaAiConsentService {
         appVersion: appVersion,
         buildNumber: buildNumber,
         locale: _localeFactory(),
+        scopeVersion: policy.scopeVersion,
+        scopeHash: policy.scopeHash,
       ),
     );
   }
@@ -289,12 +315,17 @@ class EllaAiConsentService {
       uid: uid,
       clientVersion: clientVersion,
       locale: status.locale,
+      profileBindingId: status.profileBindingId,
+      serverDecidedAt: status.serverDecidedAt!.toUtc().toIso8601String(),
     );
     _preferences.markAiConsentServerVerified(
       uid: uid,
       receiptId: status.receiptId,
       policyVersion: status.policyVersion,
       processorSetHash: status.processorSetHash,
+      profileBindingId: status.profileBindingId,
+      scopeVersion: status.scopeVersion,
+      scopeHash: status.scopeHash,
     );
   }
 }

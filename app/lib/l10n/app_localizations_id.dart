@@ -8703,7 +8703,7 @@ class AppLocalizationsId extends AppLocalizations {
   String get necklaceResting => 'Ella\'s necklace is resting — tap to reconnect';
 
   @override
-  String get aiConsentTitle => 'Ella listens to help remember.';
+  String get aiConsentTitle => 'Choose how Ella uses cloud AI';
 
   @override
   String get aiConsentBodyIntro =>
@@ -8875,14 +8875,14 @@ class AppLocalizationsId extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Ella sends only the data needed for a feature through its secure backend. Speech transcription may send live or stored microphone audio to Deepgram, Soniox, or Speechmatics. Answers, summaries, and memory assistance send messages, transcripts, and selected memory context through Ella\'s self-hosted Hermes agent runtime and Honcho memory service, and may send that text to OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok; OpenRouter may route it to the selected model provider. Live voice may send microphone audio and selected context to Google Gemini, OpenAI, or xAI Grok. Spoken replies use Ella\'s self-hosted Kokoro or Fish voice synthesis, or may send response text to Inworld AI or ElevenLabs. Google Firebase processes account and service metadata for authentication and infrastructure. Summaries are shared only with family members you choose.';
+      'Other enabled Ella features may use these already disclosed processors: Deepgram, Soniox, or Speechmatics for microphone transcription; Ella self-hosted Hermes, Honcho, Kokoro, or Fish; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok for text or live voice; Inworld AI or ElevenLabs for spoken replies; and Google Firebase for account and service infrastructure. Only the data needed for the chosen feature is sent through Ella’s secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
 
   @override
   String get aiConsentNoSharingBeforeAllow =>
-      'Ella will not send audio, transcripts, messages, or memory context to these AI processors until you choose Allow. Not now keeps listening and AI features off. You can review or revoke this permission in Settings.';
+      'Ella will not send audio, transcripts, messages, selected memory context, or Photon message content to these processors until you choose Allow. Not now keeps cloud listening, AI, memory, voice, and messaging features off. You can review or revoke this permission in Settings.';
 
   @override
   String get aiConsentRevokeAction => 'Revoke AI permission';
@@ -8891,10 +8891,10 @@ class AppLocalizationsId extends AppLocalizations {
   String get aiConsentDeleteDataAction => 'Delete my account and data';
 
   @override
-  String get aiConsentAllowedStatus => 'Allowed for this account';
+  String get aiConsentAllowedStatus => 'Managed cloud AI allowed for this account and profile';
 
   @override
-  String get aiConsentNotAllowedStatus => 'Not allowed — AI sharing is off';
+  String get aiConsentNotAllowedStatus => 'Managed cloud AI sharing is off — v6 permission required';
 
   @override
   String get aiConsentRevokeSyncFailed =>
@@ -8920,4 +8920,30 @@ class AppLocalizationsId extends AppLocalizations {
   @override
   String get deleteAccountLocalCleanupFailed =>
       'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.';
+  @override
+  String get aiConsentManagedCloudIntro =>
+      'For the managed cloud experience, Ella may send only the data needed for the feature you choose to these named partners:';
+  @override
+  String get aiConsentHermesCloudTitle => 'Nous Research / Hermes Cloud';
+  @override
+  String get aiConsentHermesCloudBody =>
+      'Runs Ella’s managed agent. It may receive messages, voice or transcript text, selected first-party context, session metadata, prompt policy, and model or tool usage so Ella can answer and continue a session.';
+  @override
+  String get aiConsentOpenAiManagedTitle => 'OpenAI';
+  @override
+  String get aiConsentOpenAiManagedBody =>
+      'Processes model input and output through Ella’s approved OpenAI Codex OAuth route so the managed agent can generate a response. Ella does not expose an OpenAI key to the app.';
+  @override
+  String get aiConsentHonchoCloudTitle => 'Honcho Cloud';
+  @override
+  String get aiConsentHonchoCloudBody =>
+      'Stores and retrieves consented derived memory and selected context for this server-bound profile so Ella can remember relevant details. It is not Ella’s canonical record.';
+  @override
+  String get aiConsentPhotonTitle => 'Photon';
+  @override
+  String get aiConsentPhotonBody =>
+      'Delivers iMessage content and the messaging identifiers needed for one explicitly allowed test contact on a shared test line.';
+  @override
+  String get aiConsentManagedCloudScope =>
+      'This permission is bound to the signed-in account and its server-selected profile. Photon remains test-contact-only: no allow-all recipients, caregiver delivery, or inbound attachments. A provider, model route, profile, or messaging-scope change requires permission again.';
 }

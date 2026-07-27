@@ -14,12 +14,20 @@ void main() {
     await SharedPreferencesUtil.init();
     preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
-    preferences.acceptAiConsent(receiptId: 'aicr_receipt-a', uid: 'uid-a');
+    preferences.acceptAiConsent(
+      receiptId: 'aicr_receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
     preferences.markAiConsentServerVerified(
       uid: 'uid-a',
       receiptId: 'aicr_receipt-a',
       policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
       processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+      profileBindingId: 'profile-binding-a',
+      scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+      scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     );
   });
 
@@ -36,6 +44,9 @@ void main() {
           receiptId: 'aicr_receipt-a',
           policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
           processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+          profileBindingId: 'profile-binding-a',
+          scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+          scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
         );
         return true;
       },
@@ -45,10 +56,7 @@ void main() {
     );
 
     lease.start();
-    expect(
-      AiConsentActiveSessionLease.refreshInterval,
-      lessThan(SharedPreferencesUtil.aiConsentServerVerificationTtl),
-    );
+    expect(AiConsentActiveSessionLease.refreshInterval, lessThan(SharedPreferencesUtil.aiConsentServerVerificationTtl));
     await lease.refreshNow();
 
     expect(refreshCalls, 1);
@@ -59,10 +67,7 @@ void main() {
   });
 
   test('session opened near expiry refreshes immediately rather than waiting a fresh interval', () {
-    expect(
-      AiConsentActiveSessionLease.refreshDelayFor(const Duration(seconds: 30)),
-      Duration.zero,
-    );
+    expect(AiConsentActiveSessionLease.refreshDelayFor(const Duration(seconds: 30)), Duration.zero);
     expect(
       AiConsentActiveSessionLease.refreshDelayFor(SharedPreferencesUtil.aiConsentServerVerificationTtl),
       AiConsentActiveSessionLease.refreshInterval,

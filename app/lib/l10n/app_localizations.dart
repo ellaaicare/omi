@@ -16604,6 +16604,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.'**
   String get deleteAccountLocalCleanupFailed;
+
+  /// Introduces the named managed-cloud processors before first use
+  ///
+  /// In en, this message translates to:
+  /// **'For the managed cloud experience, Ella may send only the data needed for the feature you choose to these named partners:'**
+  String get aiConsentManagedCloudIntro;
+
+  /// Legal recipient and product name for the managed agent runtime
+  ///
+  /// In en, this message translates to:
+  /// **'Nous Research / Hermes Cloud'**
+  String get aiConsentHermesCloudTitle;
+
+  /// Data categories and purpose for Hermes Cloud
+  ///
+  /// In en, this message translates to:
+  /// **'Runs Ella’s managed agent. It may receive messages, voice or transcript text, selected first-party context, session metadata, prompt policy, and model or tool usage so Ella can answer and continue a session.'**
+  String get aiConsentHermesCloudBody;
+
+  /// Legal recipient for the approved managed model route
+  ///
+  /// In en, this message translates to:
+  /// **'OpenAI'**
+  String get aiConsentOpenAiManagedTitle;
+
+  /// Data categories and purpose for the managed OpenAI route
+  ///
+  /// In en, this message translates to:
+  /// **'Processes model input and output through Ella’s approved OpenAI Codex OAuth route so the managed agent can generate a response. Ella does not expose an OpenAI key to the app.'**
+  String get aiConsentOpenAiManagedBody;
+
+  /// Legal recipient and product name for managed derived memory
+  ///
+  /// In en, this message translates to:
+  /// **'Honcho Cloud'**
+  String get aiConsentHonchoCloudTitle;
+
+  /// Data categories and purpose for Honcho Cloud
+  ///
+  /// In en, this message translates to:
+  /// **'Stores and retrieves consented derived memory and selected context for this server-bound profile so Ella can remember relevant details. It is not Ella’s canonical record.'**
+  String get aiConsentHonchoCloudBody;
+
+  /// Legal recipient for the narrow messaging channel
+  ///
+  /// In en, this message translates to:
+  /// **'Photon'**
+  String get aiConsentPhotonTitle;
+
+  /// Data categories and purpose for Photon
+  ///
+  /// In en, this message translates to:
+  /// **'Delivers iMessage content and the messaging identifiers needed for one explicitly allowed test contact on a shared test line.'**
+  String get aiConsentPhotonBody;
+
+  /// Explains the exact managed-cloud profile and messaging scope
+  ///
+  /// In en, this message translates to:
+  /// **'This permission is bound to the signed-in account and its server-selected profile. Photon remains test-contact-only: no allow-all recipients, caregiver delivery, or inbound attachments. A provider, model route, profile, or messaging-scope change requires permission again.'**
+  String get aiConsentManagedCloudScope;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {
