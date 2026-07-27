@@ -200,3 +200,124 @@ CREATE UNIQUE INDEX ella_runtime_pool_alerts_one_pending_key
     WHERE state = 'pending';
 CREATE INDEX ella_runtime_pool_alerts_provider_state_idx
     ON ella_runtime_pool_alerts(provider, state, created_at);
+
+ALTER TABLE voice_kill_switches
+    DROP CONSTRAINT voice_kill_switches_scope_type_check,
+    ADD CONSTRAINT voice_kill_switches_scope_type_check
+    CHECK (scope_type IN ('global', 'user', 'provider', 'channel'));
+
+CREATE TABLE ella_photon_channel_bindings (
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    runtime_binding_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    role TEXT NOT NULL DEFAULT 'internal-owner'
+        CHECK (role = 'internal-owner'),
+    status TEXT NOT NULL DEFAULT 'disabled'
+        CHECK (status IN ('disabled', 'enabled', 'quarantined')),
+    line_identity_key VARCHAR(64) NOT NULL CHECK (length(line_identity_key) = 64),
+    contact_identity_key VARCHAR(64) NOT NULL CHECK (length(contact_identity_key) = 64),
+    policy_commit_sha VARCHAR(40) NOT NULL CHECK (length(policy_commit_sha) = 40),
+    command_tier_version TEXT NOT NULL,
+    allow_all BOOLEAN NOT NULL DEFAULT false CHECK (allow_all = false),
+    attachments_enabled BOOLEAN NOT NULL DEFAULT false CHECK (attachments_enabled = false),
+    caregiver_delivery_enabled BOOLEAN NOT NULL DEFAULT false
+        CHECK (caregiver_delivery_enabled = false),
+    rollout_phase INTEGER NOT NULL DEFAULT 3 CHECK (rollout_phase = 3),
+    daily_message_limit INTEGER NOT NULL CHECK (
+        daily_message_limit >= 2 AND daily_message_limit < 5000
+    ),
+    daily_initiation_limit INTEGER NOT NULL CHECK (
+        daily_initiation_limit > 0 AND daily_initiation_limit < 50
+    ),
+    sidecar_connection_key VARCHAR(64),
+    sidecar_connected_at TIMESTAMPTZ,
+    oauth_expires_at TIMESTAMPTZ,
+    preflight_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+    quarantined_at TIMESTAMPTZ,
+    quarantine_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ella_photon_channel_bindings_pkey PRIMARY KEY (id),
+    CONSTRAINT ella_photon_channel_bindings_runtime_binding_id_fkey
+        FOREIGN KEY (runtime_binding_id)
+        REFERENCES ella_runtime_bindings(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT ella_photon_channel_bindings_user_id_fkey
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX ella_photon_channel_bindings_runtime_key
+    ON ella_photon_channel_bindings(runtime_binding_id);
+CREATE UNIQUE INDEX ella_photon_channel_bindings_identity_key
+    ON ella_photon_channel_bindings(line_identity_key, contact_identity_key);
+CREATE UNIQUE INDEX ella_photon_channel_bindings_one_owner_key
+    ON ella_photon_channel_bindings(role)
+    WHERE status = 'enabled';
+CREATE INDEX ella_photon_channel_bindings_status_idx
+    ON ella_photon_channel_bindings(status, updated_at);
+
+CREATE TABLE ella_photon_message_receipts (
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    photon_binding_id UUID NOT NULL,
+    inbound_provider_message_key VARCHAR(64) NOT NULL
+        CHECK (length(inbound_provider_message_key) = 64),
+    inbound_payload_sha256 VARCHAR(64) NOT NULL
+        CHECK (length(inbound_payload_sha256) = 64),
+    outbound_provider_message_key VARCHAR(64),
+    delivery_idempotency_key UUID NOT NULL DEFAULT gen_random_uuid(),
+    status TEXT NOT NULL DEFAULT 'claimed'
+        CHECK (status IN (
+            'claimed', 'running', 'awaiting_delivery', 'delivered',
+            'failed', 'uncertain'
+        )),
+    runtime_interaction_id UUID,
+    canonical_inbound_event_id TEXT,
+    canonical_outbound_event_id TEXT,
+    runtime_revision INTEGER,
+    expected_model TEXT,
+    policy_commit_sha VARCHAR(40),
+    command_tier_version TEXT,
+    usage JSONB NOT NULL DEFAULT '{}'::jsonb,
+    preflight_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+    writeback_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+    delivery_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+    quota_reserved BOOLEAN NOT NULL DEFAULT false,
+    error_code TEXT,
+    provider_started BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ,
+    CONSTRAINT ella_photon_message_receipts_pkey PRIMARY KEY (id),
+    CONSTRAINT ella_photon_message_receipts_binding_id_fkey
+        FOREIGN KEY (photon_binding_id)
+        REFERENCES ella_photon_channel_bindings(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT ella_photon_message_receipts_runtime_interaction_id_fkey
+        FOREIGN KEY (runtime_interaction_id)
+        REFERENCES ella_runtime_interactions(id) ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX ella_photon_message_receipts_inbound_key
+    ON ella_photon_message_receipts(
+        photon_binding_id, inbound_provider_message_key
+    );
+CREATE UNIQUE INDEX ella_photon_message_receipts_outbound_key
+    ON ella_photon_message_receipts(
+        photon_binding_id, outbound_provider_message_key
+    )
+    WHERE outbound_provider_message_key IS NOT NULL;
+CREATE UNIQUE INDEX ella_photon_message_receipts_delivery_key
+    ON ella_photon_message_receipts(delivery_idempotency_key);
+CREATE INDEX ella_photon_message_receipts_status_idx
+    ON ella_photon_message_receipts(photon_binding_id, status, updated_at);
+
+CREATE TABLE ella_photon_quota_buckets (
+    photon_binding_id UUID NOT NULL,
+    bucket_date DATE NOT NULL,
+    messages_reserved INTEGER NOT NULL DEFAULT 0 CHECK (messages_reserved >= 0),
+    initiations_reserved INTEGER NOT NULL DEFAULT 0 CHECK (initiations_reserved >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ella_photon_quota_buckets_pkey
+        PRIMARY KEY (photon_binding_id, bucket_date),
+    CONSTRAINT ella_photon_quota_buckets_binding_id_fkey
+        FOREIGN KEY (photon_binding_id)
+        REFERENCES ella_photon_channel_bindings(id) ON DELETE CASCADE ON UPDATE CASCADE
+);

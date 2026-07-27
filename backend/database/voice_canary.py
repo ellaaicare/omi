@@ -14,7 +14,6 @@ from typing import Any, Optional
 
 import asyncpg
 
-
 DEFAULT_DAILY_LIMIT_S = 45 * 60
 DEFAULT_MONTHLY_LIMIT_S = 12 * 60 * 60
 DEFAULT_MAX_SESSION_S = 20 * 60
@@ -313,10 +312,8 @@ async def _usage_rollup(
     return {
         "daily_used_s": _as_float(row["daily_used_s"] if row else 0) + active_s,
         "monthly_used_s": _as_float(row["monthly_used_s"] if row else 0) + active_s,
-        "daily_cost_microusd": _as_int(row["daily_cost_microusd"] if row else 0)
-        + active_cost_microusd,
-        "monthly_cost_microusd": _as_int(row["monthly_cost_microusd"] if row else 0)
-        + active_cost_microusd,
+        "daily_cost_microusd": _as_int(row["daily_cost_microusd"] if row else 0) + active_cost_microusd,
+        "monthly_cost_microusd": _as_int(row["monthly_cost_microusd"] if row else 0) + active_cost_microusd,
         "active_count": _as_int(active["active_count"] if active else 0),
         "daily_resets_at": (day_start + timedelta(days=1)).isoformat(),
         "monthly_resets_at": _next_month(now).isoformat(),
@@ -327,7 +324,9 @@ async def _kill_switch_code(
     conn: asyncpg.Connection,
     uid: str,
     provider: str,
+    mode: Optional[str] = None,
 ) -> Optional[str]:
+    channel = "photon" if mode == "hermes-cloud-photon" else ""
     rows = await conn.fetch(
         """
         SELECT scope_type
@@ -337,10 +336,12 @@ async def _kill_switch_code(
               (scope_type = 'global' AND scope_value = '*')
               OR (scope_type = 'user' AND scope_value = $1)
               OR (scope_type = 'provider' AND scope_value = $2)
+              OR (scope_type = 'channel' AND scope_value = $3)
           )
         """,
         uid,
         provider,
+        channel,
     )
     scopes = {row["scope_type"] for row in rows}
     if "global" in scopes:
@@ -349,6 +350,8 @@ async def _kill_switch_code(
         return "user_disabled"
     if "provider" in scopes:
         return "provider_disabled"
+    if "channel" in scopes:
+        return "channel_disabled"
     return None
 
 
@@ -514,7 +517,7 @@ async def evaluate_issuance(
             elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
                 code = "expired"
             else:
-                code = await _kill_switch_code(conn, uid, provider)
+                code = await _kill_switch_code(conn, uid, provider, mode)
 
             if not code and provider not in set(entitlement.get("provider_allowlist") or []):
                 code = "provider_not_allowed"
@@ -631,7 +634,7 @@ async def accept_session(
             elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
                 code = "expired"
             else:
-                code = await _kill_switch_code(conn, uid, provider)
+                code = await _kill_switch_code(conn, uid, provider, mode)
             if not code and provider not in set(entitlement.get("provider_allowlist") or []):
                 code = "provider_not_allowed"
             if not code and entitlement.get("model_allowlist") and model not in set(entitlement["model_allowlist"]):
@@ -777,7 +780,12 @@ async def update_session(
             elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
                 code = "expired"
             else:
-                code = await _kill_switch_code(conn, uid, active["provider"])
+                code = await _kill_switch_code(
+                    conn,
+                    uid,
+                    active["provider"],
+                    active["mode"],
+                )
 
             provider_ids = _merge_provider_request_ids(
                 active.get("provider_request_ids"),
@@ -885,10 +893,13 @@ async def reserve_session_cost(
             elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
                 code = "expired"
             else:
-                code = await _kill_switch_code(conn, uid, active["provider"])
-            if not code and active["provider"] not in set(
-                entitlement.get("provider_allowlist") or []
-            ):
+                code = await _kill_switch_code(
+                    conn,
+                    uid,
+                    active["provider"],
+                    active["mode"],
+                )
+            if not code and active["provider"] not in set(entitlement.get("provider_allowlist") or []):
                 code = "provider_not_allowed"
             if (
                 not code
@@ -896,9 +907,7 @@ async def reserve_session_cost(
                 and active["model"] not in set(entitlement["model_allowlist"])
             ):
                 code = "model_not_allowed"
-            if not code and active["mode"] not in set(
-                entitlement.get("mode_allowlist") or []
-            ):
+            if not code and active["mode"] not in set(entitlement.get("mode_allowlist") or []):
                 code = "mode_not_allowed"
             quota_code, soft_warning = quota_state(
                 entitlement,

@@ -405,6 +405,18 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella settings not available: {e}", flush=True)
 
+    # Token-authenticated first-party adapter for the persistent Photon sidecar.
+    try:
+        from ella.routers.photon import router as photon_router
+
+        app.include_router(photon_router, tags=["Hermes Cloud Photon"])
+        print(
+            "  🌐 /v1/ella/internal/hermes-cloud/photon/* - Photon sidecar adapter",
+            flush=True,
+        )
+    except ImportError as e:
+        print(f"  ⚠️ Hermes Cloud Photon adapter not available: {e}", flush=True)
+
     # Authenticated, idempotent per-user Hermes onboarding
     try:
         app.include_router(onboarding_router, tags=["Ella Onboarding"])

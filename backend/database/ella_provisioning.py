@@ -42,12 +42,23 @@ REQUIRED_CLOUD_RUNTIME_INDEXES = (
     "ella_runtime_ingestion_status_idx",
     "ella_runtime_pool_alerts_one_pending_key",
     "ella_runtime_pool_alerts_provider_state_idx",
+    "ella_photon_channel_bindings_runtime_key",
+    "ella_photon_channel_bindings_identity_key",
+    "ella_photon_channel_bindings_one_owner_key",
+    "ella_photon_channel_bindings_status_idx",
+    "ella_photon_message_receipts_inbound_key",
+    "ella_photon_message_receipts_outbound_key",
+    "ella_photon_message_receipts_delivery_key",
+    "ella_photon_message_receipts_status_idx",
 )
 CLOUD_RUNTIME_TABLES = (
     "ella_runtime_session_scopes",
     "ella_runtime_interactions",
     "ella_runtime_ingestion_receipts",
     "ella_runtime_pool_alerts",
+    "ella_photon_channel_bindings",
+    "ella_photon_message_receipts",
+    "ella_photon_quota_buckets",
 )
 REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS = (
     "status",
@@ -248,9 +259,7 @@ class EllaProvisioningRepository:
             missing.extend(f"table:{name}" for name in (row["missing_tables"] or []))
             missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
             missing.extend(f"column:ella_runtime_bindings.{name}" for name in (row["missing_columns"] or []))
-            missing.extend(
-                f"column:ella_provisioning_jobs.{name}" for name in (row["missing_job_columns"] or [])
-            )
+            missing.extend(f"column:ella_provisioning_jobs.{name}" for name in (row["missing_job_columns"] or []))
             missing.extend(f"constraint:{name}" for name in (row["missing_constraints"] or []))
             if row["binding_user_nullable"] != "YES":
                 missing.append("column:ella_runtime_bindings.user_id_nullable")
@@ -492,8 +501,7 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -501,8 +509,7 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """
-        )
+            """)
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -587,16 +594,14 @@ class EllaProvisioningRepository:
         return dict(existing)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """
-        )
+            """)
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
@@ -640,8 +645,7 @@ class EllaProvisioningRepository:
                 if not user_row:
                     raise LookupError("user_not_found")
 
-                candidate = await connection.fetchrow(
-                    """
+                candidate = await connection.fetchrow("""
                     SELECT *
                     FROM ella_runtime_bindings
                     WHERE provider = 'hermes_cloud'
@@ -660,8 +664,7 @@ class EllaProvisioningRepository:
                     ORDER BY updated_at ASC, id ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
-                    """
-                )
+                    """)
                 if not candidate:
                     return None
 
@@ -1171,12 +1174,8 @@ class EllaProvisioningRepository:
                     selected["scope_id"],
                     interaction_uuid,
                 )
-                previous_response_id = (
-                    previous_response["provider_response_id"] if previous_response else None
-                )
-                previous_response_usage = (
-                    _json_object(previous_response["usage"] or {}) if previous_response else {}
-                )
+                previous_response_id = previous_response["provider_response_id"] if previous_response else None
+                previous_response_usage = _json_object(previous_response["usage"] or {}) if previous_response else {}
                 row = await connection.fetchrow(
                     """
                     UPDATE ella_runtime_interactions
@@ -1347,6 +1346,335 @@ class EllaProvisioningRepository:
         if not row:
             raise LookupError("runtime_ingestion_receipt_not_found")
         return dict(row)
+
+    async def resolve_photon_channel_binding(
+        self,
+        *,
+        line_identity_key: str,
+        contact_identity_key: str,
+    ) -> Optional[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT
+                b.*,
+                p.id AS photon_binding_id,
+                p.role AS photon_role,
+                p.status AS photon_status,
+                p.line_identity_key,
+                p.contact_identity_key,
+                p.policy_commit_sha AS photon_policy_commit_sha,
+                p.command_tier_version,
+                p.allow_all,
+                p.attachments_enabled,
+                p.caregiver_delivery_enabled,
+                p.rollout_phase,
+                p.daily_message_limit,
+                p.daily_initiation_limit,
+                p.sidecar_connection_key,
+                p.sidecar_connected_at,
+                p.oauth_expires_at,
+                p.preflight_receipt AS photon_preflight_receipt,
+                u.omi_uid
+            FROM ella_photon_channel_bindings p
+            JOIN ella_runtime_bindings b ON b.id = p.runtime_binding_id
+            JOIN users u ON u.id = p.user_id AND u.id = b.user_id
+            WHERE p.line_identity_key = $1
+              AND p.contact_identity_key = $2
+              AND p.status = 'enabled'
+            ORDER BY p.id
+            LIMIT 2
+            """,
+            line_identity_key,
+            contact_identity_key,
+        )
+        if len(rows) > 1:
+            raise RuntimePoolClaimError("photon_identity_mapping_ambiguous")
+        return _row_dict(rows[0]) if rows else None
+
+    async def record_photon_sidecar_preflight(
+        self,
+        *,
+        photon_binding_id: str,
+        connection_key: str,
+        oauth_expires_at: datetime,
+        receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_photon_channel_bindings
+            SET sidecar_connection_key = $2,
+                sidecar_connected_at = CURRENT_TIMESTAMP,
+                oauth_expires_at = $3,
+                preflight_receipt = $4::jsonb,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'enabled'
+              AND allow_all = false
+              AND attachments_enabled = false
+              AND caregiver_delivery_enabled = false
+            RETURNING *
+            """,
+            uuid.UUID(str(photon_binding_id)),
+            connection_key,
+            oauth_expires_at,
+            json.dumps(receipt),
+        )
+        if not row:
+            raise RuntimePoolClaimError("photon_binding_not_ready")
+        return dict(row)
+
+    async def claim_photon_message(
+        self,
+        *,
+        photon_binding_id: str,
+        inbound_provider_message_key: str,
+        inbound_payload_sha256: str,
+        command_tier_version: str,
+    ) -> dict[str, Any]:
+        inserted = await self.pool.fetchrow(
+            """
+            INSERT INTO ella_photon_message_receipts (
+                id, photon_binding_id, inbound_provider_message_key,
+                inbound_payload_sha256, status, command_tier_version
+            )
+            VALUES ($1, $2, $3, $4, 'claimed', $5)
+            ON CONFLICT (
+                photon_binding_id, inbound_provider_message_key
+            ) DO NOTHING
+            RETURNING *
+            """,
+            uuid.uuid4(),
+            uuid.UUID(str(photon_binding_id)),
+            inbound_provider_message_key,
+            inbound_payload_sha256,
+            command_tier_version,
+        )
+        if inserted:
+            result = dict(inserted)
+            result["inserted"] = True
+            return result
+        existing = await self.pool.fetchrow(
+            """
+            SELECT *
+            FROM ella_photon_message_receipts
+            WHERE photon_binding_id = $1
+              AND inbound_provider_message_key = $2
+            """,
+            uuid.UUID(str(photon_binding_id)),
+            inbound_provider_message_key,
+        )
+        if not existing:
+            raise RuntimePoolClaimError("photon_message_claim_lost")
+        result = dict(existing)
+        if str(result["inbound_payload_sha256"]) != inbound_payload_sha256:
+            raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
+        result["inserted"] = False
+        return result
+
+    async def reserve_photon_quota(
+        self,
+        *,
+        receipt_id: str,
+        photon_binding_id: str,
+        message_limit: int,
+        initiation_limit: int,
+        conversation_initiation: bool,
+    ) -> dict[str, Any]:
+        if not 2 <= message_limit < 5000 or not 0 < initiation_limit < 50:
+            raise RuntimePoolClaimError("photon_quota_policy_invalid")
+        receipt_uuid = uuid.UUID(str(receipt_id))
+        binding_uuid = uuid.UUID(str(photon_binding_id))
+        initiation_units = 1 if conversation_initiation else 0
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                receipt = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_photon_message_receipts
+                    WHERE id = $1 AND photon_binding_id = $2
+                    FOR UPDATE
+                    """,
+                    receipt_uuid,
+                    binding_uuid,
+                )
+                if not receipt:
+                    raise RuntimePoolClaimError("photon_message_receipt_missing")
+                if receipt["quota_reserved"]:
+                    return dict(receipt)
+                bucket = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_photon_quota_buckets (
+                        photon_binding_id, bucket_date,
+                        messages_reserved, initiations_reserved
+                    )
+                    VALUES ($1, CURRENT_DATE, 2, $2)
+                    ON CONFLICT (photon_binding_id, bucket_date)
+                    DO UPDATE SET
+                        messages_reserved =
+                            ella_photon_quota_buckets.messages_reserved + 2,
+                        initiations_reserved =
+                            ella_photon_quota_buckets.initiations_reserved + EXCLUDED.initiations_reserved,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE ella_photon_quota_buckets.messages_reserved + 2 <= $3
+                      AND ella_photon_quota_buckets.initiations_reserved
+                          + EXCLUDED.initiations_reserved <= $4
+                    RETURNING *
+                    """,
+                    binding_uuid,
+                    initiation_units,
+                    message_limit,
+                    initiation_limit,
+                )
+                if not bucket:
+                    raise RuntimePoolClaimError("photon_quota_exhausted")
+                updated = await connection.fetchrow(
+                    """
+                    UPDATE ella_photon_message_receipts
+                    SET quota_reserved = true,
+                        status = 'running',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND status = 'claimed'
+                    RETURNING *
+                    """,
+                    receipt_uuid,
+                )
+                if not updated:
+                    raise RuntimePoolClaimError("photon_message_claim_conflict")
+                return dict(updated)
+
+    async def complete_photon_message(
+        self,
+        *,
+        receipt_id: str,
+        runtime_interaction_id: Optional[str],
+        canonical_inbound_event_id: str,
+        canonical_outbound_event_id: str,
+        runtime_revision: int,
+        expected_model: str,
+        policy_commit_sha: str,
+        usage: dict[str, Any],
+        preflight_receipt: dict[str, Any],
+        writeback_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_photon_message_receipts
+            SET status = 'awaiting_delivery',
+                runtime_interaction_id = $2,
+                canonical_inbound_event_id = $3,
+                canonical_outbound_event_id = $4,
+                runtime_revision = $5,
+                expected_model = $6,
+                policy_commit_sha = $7,
+                usage = $8::jsonb,
+                preflight_receipt = $9::jsonb,
+                writeback_receipt = $10::jsonb,
+                provider_started = true,
+                error_code = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'running'
+            RETURNING *
+            """,
+            uuid.UUID(str(receipt_id)),
+            uuid.UUID(str(runtime_interaction_id)) if runtime_interaction_id else None,
+            canonical_inbound_event_id,
+            canonical_outbound_event_id,
+            int(runtime_revision),
+            expected_model,
+            policy_commit_sha,
+            json.dumps(usage),
+            json.dumps(preflight_receipt),
+            json.dumps(writeback_receipt),
+        )
+        if not row:
+            raise RuntimePoolClaimError("photon_message_completion_conflict")
+        return dict(row)
+
+    async def fail_photon_message(
+        self,
+        *,
+        receipt_id: str,
+        error_code: str,
+        uncertain: bool,
+        provider_started: bool,
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE ella_photon_message_receipts
+            SET status = $2,
+                error_code = $3,
+                provider_started = provider_started OR $4,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status IN ('claimed', 'running')
+            """,
+            uuid.UUID(str(receipt_id)),
+            "uncertain" if uncertain else "failed",
+            error_code[:120],
+            provider_started,
+        )
+
+    async def acknowledge_photon_delivery(
+        self,
+        *,
+        receipt_id: str,
+        delivery_idempotency_key: str,
+        outbound_provider_message_key: str,
+        delivery_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            row = await self.pool.fetchrow(
+                """
+                UPDATE ella_photon_message_receipts
+                SET status = 'delivered',
+                    outbound_provider_message_key = $3,
+                    delivery_receipt = $4::jsonb,
+                    completed_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                  AND delivery_idempotency_key = $2
+                  AND status IN ('awaiting_delivery', 'delivered')
+                  AND (
+                      outbound_provider_message_key IS NULL
+                      OR outbound_provider_message_key = $3
+                  )
+                RETURNING *
+                """,
+                uuid.UUID(str(receipt_id)),
+                uuid.UUID(str(delivery_idempotency_key)),
+                outbound_provider_message_key,
+                json.dumps(delivery_receipt),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise RuntimePoolClaimError("photon_outbound_message_conflict") from exc
+        if not row:
+            raise RuntimePoolClaimError("photon_delivery_ack_conflict")
+        return dict(row)
+
+    async def get_photon_message_receipt(
+        self,
+        *,
+        receipt_id: str,
+    ) -> Optional[dict[str, Any]]:
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                m.*,
+                p.status AS photon_status,
+                p.sidecar_connection_key,
+                p.sidecar_connected_at,
+                p.oauth_expires_at,
+                p.line_identity_key,
+                p.contact_identity_key
+            FROM ella_photon_message_receipts m
+            JOIN ella_photon_channel_bindings p ON p.id = m.photon_binding_id
+            WHERE m.id = $1
+            """,
+            uuid.UUID(str(receipt_id)),
+        )
+        return _row_dict(row)
 
     async def update_job(
         self,

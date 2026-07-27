@@ -232,6 +232,25 @@ def test_cloud_turn_writes_once_and_same_interaction_replays():
     assert policy.completed[0]["termination_reason"] == "completed"
 
 
+def test_photon_turn_uses_photon_entitlement_mode():
+    repository = FakeRepository()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=FakeCloudClient(),
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    request = _request()
+    request = HermesCloudTurnRequest(**{**request.__dict__, "channel": "photon"})
+
+    asyncio.run(service.run_turn(_runtime(), request))
+
+    assert policy.accepted[0]["mode"] == "hermes-cloud-photon"
+
+
 def test_same_interaction_id_with_changed_payload_fails_closed():
     repository = FakeRepository()
     service = HermesCloudRuntimeService(

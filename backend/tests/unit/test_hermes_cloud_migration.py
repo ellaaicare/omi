@@ -3,10 +3,10 @@ from pathlib import Path
 
 def test_hermes_cloud_migration_contains_fail_closed_pool_invariants():
     migration = (
-        Path(__file__).resolve().parents[2]
-        / "migrations"
-        / "009_create_hermes_cloud_runtime_pool.sql"
-    ).read_text(encoding="utf-8").lower()
+        (Path(__file__).resolve().parents[2] / "migrations" / "009_create_hermes_cloud_runtime_pool.sql")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
 
     required = (
         "alter column user_id drop not null",
@@ -29,15 +29,24 @@ def test_hermes_cloud_migration_contains_fail_closed_pool_invariants():
         "ella_runtime_interactions_scope_client_key",
         "ella_runtime_ingestion_event_revision_key",
         "ella_runtime_pool_alerts_one_pending_key",
+        "scope_type in ('global', 'user', 'provider', 'channel')",
+        "ella_photon_channel_bindings_one_owner_key",
+        "allow_all = false",
+        "daily_message_limit >= 2 and daily_message_limit < 5000",
+        "daily_initiation_limit > 0 and daily_initiation_limit < 50",
+        "ella_photon_message_receipts_inbound_key",
+        "ella_photon_message_receipts_outbound_key",
+        "ella_photon_message_receipts_delivery_key",
+        "ella_photon_quota_buckets",
     )
     # SKIP LOCKED is repository behavior rather than DDL; verify it separately.
     for fragment in required:
         if fragment == "for update skip locked":
             repository = (
-                Path(__file__).resolve().parents[2]
-                / "database"
-                / "ella_provisioning.py"
-            ).read_text(encoding="utf-8").lower()
+                (Path(__file__).resolve().parents[2] / "database" / "ella_provisioning.py")
+                .read_text(encoding="utf-8")
+                .lower()
+            )
             assert fragment in repository
         else:
             assert fragment in migration

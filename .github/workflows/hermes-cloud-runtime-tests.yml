@@ -9,10 +9,12 @@ on:
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
@@ -33,10 +35,12 @@ on:
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
@@ -88,8 +92,10 @@ jobs:
           database/ella_provisioning.py
           database/voice_canary.py
           ella/services/hermes_cloud.py
+          ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
           ella/services/hermes_cloud_runtime.py
+          ella/routers/photon.py
           ella/services/provisioning.py
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
@@ -101,6 +107,7 @@ jobs:
           pytest
           tests/unit/test_hermes_cloud_migration.py
           tests/unit/test_hermes_cloud_policy.py
+          tests/unit/test_hermes_cloud_photon.py
           tests/unit/test_hermes_cloud_provider.py
           tests/unit/test_hermes_cloud_provisioning.py
           tests/unit/test_hermes_cloud_runtime.py

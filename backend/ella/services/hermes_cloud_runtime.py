@@ -23,6 +23,7 @@ from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
 HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
+HERMES_CLOUD_PHOTON_MODE = "hermes-cloud-photon"
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
@@ -147,6 +148,7 @@ class HermesCloudTurnResult:
     canonical_assistant_event_id: str
     duplicate: bool
     usage: dict[str, Any]
+    runtime_interaction_id: str
 
 
 def _request_hash(request: HermesCloudTurnRequest) -> str:
@@ -280,6 +282,7 @@ class HermesCloudRuntimeService:
                 canonical_assistant_event_id=assistant_event_id,
                 duplicate=True,
                 usage=dict(interaction.get("usage") or {}),
+                runtime_interaction_id=str(interaction["id"]),
             )
 
         claimed = await self.repository.claim_runtime_interaction(str(interaction["id"]))
@@ -309,6 +312,7 @@ class HermesCloudRuntimeService:
                 canonical_assistant_event_id=assistant_event_id,
                 duplicate=True,
                 usage=dict(claimed.get("usage") or {}),
+                runtime_interaction_id=str(claimed["id"]),
             )
 
         user_receipt: Optional[dict[str, Any]] = None
@@ -362,7 +366,7 @@ class HermesCloudRuntimeService:
                 entitlement_revision=int(entitlement["revision"]),
                 provider="hermes_cloud",
                 model=runtime.expected_model,
-                mode=HERMES_CLOUD_CHAT_MODE,
+                mode=(HERMES_CLOUD_PHOTON_MODE if request.channel == "photon" else HERMES_CLOUD_CHAT_MODE),
             )
             if not admission.allowed:
                 raise ProvisioningError(admission.code, retryable=False)
@@ -501,6 +505,7 @@ class HermesCloudRuntimeService:
                 canonical_assistant_event_id=assistant_event_id,
                 duplicate=False,
                 usage=turn.usage,
+                runtime_interaction_id=str(claimed["id"]),
             )
         except asyncio.CancelledError:
             termination_reason = "client_disconnect"

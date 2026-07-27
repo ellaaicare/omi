@@ -60,6 +60,8 @@ class IsolatedRuntime:
     model_policy_version: str
     voice_policy_version: str
     revision: int
+    policy_commit_sha: str = ""
+    approval_manifest_sha256: str = ""
 
 
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
@@ -152,6 +154,12 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         model_policy_version=str(binding.get("model_policy_version") or ""),
         voice_policy_version=str(binding.get("voice_policy_version") or ""),
         revision=revision,
+        policy_commit_sha=(
+            str(prompt_artifact_receipt.get("policy_commit_sha") or "") if provider == "hermes_cloud" else ""
+        ),
+        approval_manifest_sha256=(
+            str(prompt_artifact_receipt.get("approval_manifest_sha256") or "") if provider == "hermes_cloud" else ""
+        ),
     )
 
 
