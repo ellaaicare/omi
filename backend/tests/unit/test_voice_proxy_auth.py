@@ -548,13 +548,90 @@ def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeyp
 
     assert all("agent_clusters" not in query for query in queries)
     assert result["user_agent_id"] == "ella-uid-a"
-    assert result["runtime"] == {"provider": "hermes", "agent_id": "ella-uid-a", "binding_revision": 7}
+    assert result["runtime"] == {
+        "provider": "hermes",
+        "agent_id": "ella-uid-a",
+        "binding_revision": 7,
+        "workspace_residency": "retained_workspace_api",
+    }
     assert "gateway_token" not in result
     assert "gateway_url" not in result
     assert result["honcho_context"] == "Honcho remembers the user's gardening plans."
     assert result["honcho_status"]["available"] is True
     assert requests[0][0] == "http://hermes-8210/workspace/ella-uid-a/files"
     assert requests[0][1]["X-Ella-Owner-Uid"] == "uid-a"
+
+
+def test_cloud_context_never_calls_mini_workspace_api(monkeypatch):
+    runtime = SimpleNamespace(
+        uid="synthetic-user",
+        provider="hermes_cloud",
+        agent_id="hermes-cloud",
+        revision=2,
+        honcho_workspace="cloud-workspace",
+        observer_peer="companion-a",
+        observed_peer="user-a",
+    )
+
+    async def resolve(uid):
+        assert uid == "synthetic-user"
+        return runtime
+
+    class Pool:
+        async def fetchrow(self, query, uid):
+            return {
+                "id": "db-user-a",
+                "name": "Synthetic User",
+                "conditions": [],
+                "medications": [],
+                "guardian_mode": "off",
+            }
+
+        async def fetch(self, *args):
+            return []
+
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("cloud context must not construct a Mini workspace client")
+
+    async def empty(*args, **kwargs):
+        return ""
+
+    async def honcho_context(target, *, query, top_k):
+        return {
+            "available": True,
+            "reason": "ok",
+            "context": "Cloud memory context.",
+            "source": "honcho",
+        }
+
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(voice, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
+    monkeypatch.setattr(voice, "_fetch_recent_conversations", empty)
+    monkeypatch.setattr(voice, "_fetch_recent_canonical_timeline", empty)
+    monkeypatch.setattr(voice, "fetch_voice_honcho_context", honcho_context)
+    monkeypatch.setattr(voice.httpx, "AsyncClient", ForbiddenClient)
+
+    result = asyncio.run(
+        voice.get_voice_context(
+            _request(
+                {"uid": "synthetic-user"},
+                token=_token("synthetic-user"),
+                service_token="test-proxy-secret",
+            )
+        )
+    )
+
+    assert result["runtime"]["provider"] == "hermes_cloud"
+    assert (
+        result["runtime"]["workspace_residency"]
+        == "canonical_postgres+honcho_cloud+hermes_cloud_policy"
+    )
+    assert result["soul"] == ""
+    assert result["user_profile"] == ""
+    assert result["honcho_context"] == "Cloud memory context."
 
 
 def test_retained_context_loads_uid_mapped_honcho_without_runtime_receipt(monkeypatch):
@@ -1109,3 +1186,39 @@ def test_isolated_tool_calls_exact_runtime_without_returning_credentials(monkeyp
     assert requests[0][0] == "http://hermes-8210/runtime/ella-uid-a/chat"
     assert requests[0][1]["X-Ella-Owner-Uid"] == "uid-a"
     assert "test-hermes-secret" not in str(result)
+
+
+def test_cloud_voice_tool_never_calls_mini_provisioning_shim(monkeypatch):
+    runtime = SimpleNamespace(
+        provider="hermes_cloud",
+        agent_id="hermes-cloud",
+        revision=2,
+    )
+
+    async def resolve_runtime(principal):
+        return runtime
+
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Hermes Cloud voice tool must not call the Mini")
+
+    monkeypatch.setattr(voice, "_resolve_voice_runtime", resolve_runtime)
+    monkeypatch.setattr(voice.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.execute_voice_tool(
+                _request(
+                    {
+                        "uid": "uid-a",
+                        "tool_name": "ask_ella",
+                        "arguments": {"query": "Synthetic question"},
+                    },
+                    token=_token("uid-a"),
+                    service_token="test-proxy-secret",
+                )
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "hermes_cloud_voice_tool_not_enabled"}

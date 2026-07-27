@@ -49,7 +49,33 @@ def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
     async def forbidden_legacy(uid):
         raise AssertionError("OpenClaw fallback must not run in isolated mode")
 
-    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
+
+    result = asyncio.run(chat.ella_chat_history("user-a", authenticated_uid="user-a"))
+
+    assert result == {
+        "messages": [],
+        "hasMore": False,
+        "source": "canonical_timeline_empty",
+        "fallback": False,
+    }
+
+
+def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
+    async def fake_runtime(uid):
+        assert uid == "user-a"
+        return SimpleNamespace(provider="hermes_cloud")
+
+    async def no_events(uid, *, limit, before=None):
+        return []
+
+    async def forbidden_legacy(uid):
+        raise AssertionError("OpenClaw fallback must not run for a cloud-bound user")
+
+    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
     monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
@@ -68,7 +94,7 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
     async def missing_runtime(uid):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
-    monkeypatch.setattr(chat, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", missing_runtime)
 
     with pytest.raises(HTTPException) as error:
@@ -529,3 +555,98 @@ def test_voice_session_rejects_voice_canary_without_runtime_binding(monkeypatch)
 
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "isolated_voice_runtime_required"}
+
+
+def test_cloud_resolver_returns_first_party_route_without_vendor_credentials(monkeypatch):
+    class Pool:
+        async def fetchrow(self, *args):
+            return {
+                "id": "db-user-a",
+                "name": "A",
+                "omi_uid": "user-a",
+                "status": "ACTIVE",
+                "guardian_mode": "off",
+                "timezone": "UTC",
+                "conditions": [],
+                "medications": [],
+                "agents": None,
+                "cluster_status": None,
+            }
+
+    runtime = SimpleNamespace(
+        provider="hermes_cloud",
+        agent_id="hermes-cloud",
+        profile_name="cloud-user-a",
+        revision=2,
+        model_policy_version="models-v1",
+        voice_policy_version="voice-v1",
+        gateway_url="https://vendor.example.test",
+        gateway_token="must-not-leak",
+    )
+
+    async def resolve_runtime(uid, repository):
+        assert uid == "user-a"
+        return runtime
+
+    monkeypatch.setattr(resolve, "_get_pool", lambda: asyncio.sleep(0, result=Pool()))
+    monkeypatch.setattr(resolve, "resolve_isolated_runtime", resolve_runtime)
+
+    result = asyncio.run(resolve.resolve_user_routing("user-a"))
+
+    assert result["routing"]["platform"] == "hermes_cloud"
+    assert result["routing"]["chatUrl"] == "/v1/ella/chat/stream"
+    assert result["routing"]["runtimeBound"] is True
+    assert "gatewayUrl" not in result["routing"]
+    assert "token" not in result["routing"]
+
+
+def test_cloud_chat_path_does_not_call_openclaw_or_mini(monkeypatch):
+    class Repository:
+        @classmethod
+        async def create(cls):
+            return object()
+
+    class Service:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_turn(self, runtime, request):
+            return SimpleNamespace(
+                text="Cloud response",
+                response_id="response-a",
+                duplicate=False,
+                canonical_assistant_event_id="assistant-event-a",
+            )
+
+    async def no_context(*args, **kwargs):
+        return []
+
+    async def no_temporal(*args, **kwargs):
+        return ("requested window", [])
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("legacy resolver must not run")
+
+    runtime = SimpleNamespace(provider="hermes_cloud", binding_id="binding-a")
+    monkeypatch.setattr(chat, "EllaProvisioningRepository", Repository)
+    monkeypatch.setattr(chat, "HermesCloudRuntimeService", Service)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_context)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+    monkeypatch.setattr(chat, "resolve_user_routing", forbidden)
+
+    async def collect():
+        return [
+            item
+            async for item in chat._stream_hermes_cloud_chat(
+                "Synthetic hello",
+                "user-a",
+                {"synthetic": True},
+                turn_id="turn-a",
+                client_sent_at=chat.datetime.now(chat.timezone.utc),
+                runtime=runtime,
+            )
+        ]
+
+    output = asyncio.run(collect())
+    assert output[0] == "data: Cloud response\n\n"
+    assert output[1].startswith("done: ")

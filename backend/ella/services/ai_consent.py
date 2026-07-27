@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Optional, Protocol
@@ -18,14 +19,27 @@ from utils.other import endpoints as auth
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
-CURRENT_POLICY_VERSION = "ai-data-processors-v5"
+CURRENT_POLICY_VERSION = "ai-data-processors-v6"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
+    "nous-hermes-cloud:managed-agent-runtime|honcho-cloud:derived-memory-context|"
+    "openai-codex:managed-agent-model|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
     "groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
+CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v1"
+CANONICAL_SCOPE = (
+    "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
+    "model_route=openai-codex/gpt-5.6-terra|memory_provider=honcho_cloud_profile_isolated|"
+    "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
+)
+CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
+MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
+MANAGED_CLOUD_MODEL_ROUTE = "openai-codex/gpt-5.6-terra"
+MANAGED_CLOUD_MEMORY_PROVIDER = "honcho_cloud_profile_isolated"
+MANAGED_CLOUD_PHOTON_SCOPE = "shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
 
 PROCESSORS: tuple[dict[str, Any], ...] = (
     {
@@ -83,6 +97,41 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "data": "Response text",
         "provider_aliases": ["fish-audio", "fish-audio-s1", "fish-audio-s2", "kokoro"],
         "third_party": False,
+    },
+    {
+        "id": "nous-hermes-cloud",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Managed agent runtime",
+        "data": (
+            "Prompt policy, messages, transcripts, selected first-party context, "
+            "session metadata, and model or tool usage"
+        ),
+        "provider_aliases": ["hermes-cloud", "hermes_cloud", "nous-hermes-cloud"],
+        "third_party": True,
+    },
+    {
+        "id": "honcho-cloud",
+        "legal_recipient": "Honcho Cloud",
+        "function": "Profile-bound derived memory and context",
+        "data": ("Consented derived memory, selected context, and memory relationships " "for the bound profile"),
+        "provider_aliases": ["honcho-cloud", "honcho_cloud", "honcho_cloud_profile_isolated"],
+        "third_party": True,
+    },
+    {
+        "id": "openai-codex",
+        "legal_recipient": "OpenAI",
+        "function": "Managed agent model processing",
+        "data": "Model input and output through the approved OpenAI Codex OAuth route",
+        "provider_aliases": ["openai-codex", "openai-codex/gpt-5.6-terra"],
+        "third_party": True,
+    },
+    {
+        "id": "photon",
+        "legal_recipient": "Photon",
+        "function": "Test/shared-line message delivery",
+        "data": "Message content and messaging identifiers for one explicitly allowed test contact",
+        "provider_aliases": ["photon", "hermes-cloud-photon"],
+        "third_party": True,
     },
     {
         "id": "openrouter",
@@ -170,6 +219,34 @@ class ConsentIdempotencyConflict(ValueError):
     pass
 
 
+class ManagedCloudConsentError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _valid_server_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        decided_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return decided_at.tzinfo is not None
+
+
+def derive_profile_binding_id(*, account_uid: str, profile_uid: str) -> str:
+    """Derive an opaque, stable binding from server-owned account/profile authority."""
+    account_uid = str(account_uid or "").strip()
+    profile_uid = str(profile_uid or "").strip()
+    if not account_uid or not profile_uid:
+        raise ManagedCloudConsentError("managed_cloud_profile_binding_missing")
+    digest = hashlib.sha256(
+        f"ella-managed-cloud-profile-v1\x1f{account_uid}\x1f{profile_uid}".encode("utf-8")
+    ).hexdigest()
+    return f"aipb_{digest[:32]}"
+
+
 _firestore_db: Any = None
 
 
@@ -182,6 +259,11 @@ class ConsentRepository(Protocol):
     def get_state(self, uid: str) -> Optional[dict[str, Any]]: ...
 
     def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]: ...
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]: ...
 
     def record(
         self,
@@ -199,6 +281,8 @@ def _receipt_fingerprint(receipt: dict[str, Any]) -> str:
             "decision",
             "policy_version",
             "processor_set_hash",
+            "scope_version",
+            "scope_hash",
             "request_id",
             "app_version",
             "build_number",
@@ -234,6 +318,10 @@ def _record_firestore_receipt(
             "decision",
             "policy_version",
             "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
             "server_decided_at",
             "app_version",
             "build_number",
@@ -254,6 +342,23 @@ def _record_firestore_receipt(
     return stored_receipt, state, True
 
 
+@transactional
+def _read_firestore_current_receipt(
+    transaction,
+    user_ref,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    if not user_snapshot.exists:
+        return None, None
+    state = dict((user_snapshot.to_dict() or {}).get("ai_consent") or {}) or None
+    receipt_id = str((state or {}).get("receipt_id") or "")
+    if not receipt_id:
+        return state, None
+    receipt_snapshot = user_ref.collection("ai_consent_receipts").document(receipt_id).get(transaction=transaction)
+    receipt = receipt_snapshot.to_dict() if receipt_snapshot.exists else None
+    return state, receipt
+
+
 class FirestoreConsentRepository:
     @staticmethod
     def _configured_db():
@@ -272,6 +377,14 @@ class FirestoreConsentRepository:
         db = self._configured_db()
         snapshot = db.collection("users").document(uid).collection("ai_consent_receipts").document(receipt_id).get()
         return snapshot.to_dict() if snapshot.exists else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        return _read_firestore_current_receipt(db.transaction(), user_ref)
 
     def record(
         self,
@@ -298,14 +411,28 @@ class InMemoryConsentRepository:
     def __init__(self) -> None:
         self.states: dict[str, dict[str, Any]] = {}
         self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.RLock()
 
     def get_state(self, uid: str) -> Optional[dict[str, Any]]:
-        state = self.states.get(uid)
-        return dict(state) if state else None
+        with self._lock:
+            state = self.states.get(uid)
+            return dict(state) if state else None
 
     def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
-        receipt = self.receipts.get((uid, receipt_id))
-        return dict(receipt) if receipt else None
+        with self._lock:
+            receipt = self.receipts.get((uid, receipt_id))
+            return dict(receipt) if receipt else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        with self._lock:
+            state = self.states.get(uid)
+            state_copy = dict(state) if state else None
+            receipt_id = str((state_copy or {}).get("receipt_id") or "")
+            receipt = self.receipts.get((uid, receipt_id)) if receipt_id else None
+            return state_copy, dict(receipt) if receipt else None
 
     def record(
         self,
@@ -314,30 +441,35 @@ class InMemoryConsentRepository:
         receipt: dict[str, Any],
         request_fingerprint: str,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-        key = (uid, receipt_id)
-        existing = self.receipts.get(key)
-        if existing:
-            if existing.get("request_fingerprint") != request_fingerprint:
-                raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
-            return dict(existing), dict(self.states.get(uid) or {}), False
+        with self._lock:
+            key = (uid, receipt_id)
+            existing = self.receipts.get(key)
+            if existing:
+                if existing.get("request_fingerprint") != request_fingerprint:
+                    raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                return dict(existing), dict(self.states.get(uid) or {}), False
 
-        stored = {**receipt, "request_fingerprint": request_fingerprint}
-        state = {
-            key: receipt.get(key)
-            for key in (
-                "receipt_id",
-                "decision",
-                "policy_version",
-                "processor_set_hash",
-                "server_decided_at",
-                "app_version",
-                "build_number",
-                "locale",
-            )
-        }
-        self.receipts[(uid, receipt_id)] = stored
-        self.states[uid] = state
-        return dict(stored), dict(state), True
+            stored = {**receipt, "request_fingerprint": request_fingerprint}
+            state = {
+                key: receipt.get(key)
+                for key in (
+                    "receipt_id",
+                    "decision",
+                    "policy_version",
+                    "processor_set_hash",
+                    "processor_ids",
+                    "profile_binding_id",
+                    "scope_version",
+                    "scope_hash",
+                    "server_decided_at",
+                    "app_version",
+                    "build_number",
+                    "locale",
+                )
+            }
+            self.receipts[(uid, receipt_id)] = stored
+            self.states[uid] = state
+            return dict(stored), dict(state), True
 
 
 @dataclass(frozen=True)
@@ -349,6 +481,8 @@ class ConsentSubmission:
     app_version: str
     build_number: str
     locale: str
+    scope_version: str = ""
+    scope_hash: str = ""
 
 
 class AiConsentService:
@@ -367,12 +501,15 @@ class AiConsentService:
             "version": CURRENT_POLICY_VERSION,
             "processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
             "canonical_processor_set": CANONICAL_PROCESSOR_SET,
+            "scope_version": CURRENT_SCOPE_VERSION,
+            "scope_hash": CURRENT_SCOPE_HASH,
+            "canonical_scope": CANONICAL_SCOPE,
             "processors": [dict(processor) for processor in PROCESSORS],
         }
 
     def status(self, uid: str) -> dict[str, Any]:
-        state = self.repository.get_state(uid)
-        return _status_payload(uid, state)
+        state, receipt = self.repository.get_current(uid)
+        return _status_payload(uid, state, receipt)
 
     def receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
         receipt = self.repository.get_receipt(uid, receipt_id)
@@ -384,16 +521,23 @@ class AiConsentService:
         if submission.decision == "granted" and (
             submission.policy_version != CURRENT_POLICY_VERSION
             or submission.processor_set_hash != CURRENT_PROCESSOR_SET_HASH
+            or submission.scope_version != CURRENT_SCOPE_VERSION
+            or submission.scope_hash != CURRENT_SCOPE_HASH
         ):
             raise ConsentPolicyMismatch("grant does not match the server-required processor policy")
 
         receipt_id = "aicr_" + hashlib.sha256(f"{uid}:{submission.request_id}".encode()).hexdigest()[:32]
+        profile_binding_id = derive_profile_binding_id(account_uid=uid, profile_uid=uid)
         receipt = {
             "receipt_id": receipt_id,
             "subject_uid": uid,
             "decision": submission.decision,
             "policy_version": submission.policy_version,
             "processor_set_hash": submission.processor_set_hash,
+            "processor_ids": [str(processor["id"]) for processor in PROCESSORS],
+            "profile_binding_id": profile_binding_id,
+            "scope_version": submission.scope_version,
+            "scope_hash": submission.scope_hash,
             "request_id": submission.request_id,
             "server_decided_at": self.now().astimezone(timezone.utc).isoformat(),
             "app_version": submission.app_version,
@@ -402,7 +546,7 @@ class AiConsentService:
         }
         fingerprint = _receipt_fingerprint(receipt)
         stored_receipt, state, created = self.repository.record(uid, receipt_id, receipt, fingerprint)
-        payload = _status_payload(uid, state)
+        payload = _status_payload(uid, state, stored_receipt)
         payload["receipt"] = _public_receipt(stored_receipt)
         payload["receipt_created"] = created
         return payload
@@ -417,6 +561,10 @@ def _public_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
             "decision",
             "policy_version",
             "processor_set_hash",
+            "processor_ids",
+            "profile_binding_id",
+            "scope_version",
+            "scope_hash",
             "server_decided_at",
             "app_version",
             "build_number",
@@ -425,20 +573,51 @@ def _public_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _is_current_grant(state: Optional[dict[str, Any]]) -> bool:
+def _is_current_grant(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+) -> bool:
+    expected_processor_ids = [str(processor["id"]) for processor in PROCESSORS]
+    exact_fields = (
+        "receipt_id",
+        "decision",
+        "policy_version",
+        "processor_set_hash",
+        "processor_ids",
+        "profile_binding_id",
+        "scope_version",
+        "scope_hash",
+        "server_decided_at",
+        "app_version",
+        "build_number",
+        "locale",
+    )
     return bool(
         state
+        and receipt
+        and receipt.get("subject_uid") == uid
+        and all(receipt.get(field) == state.get(field) for field in exact_fields)
         and state.get("decision") == "granted"
         and state.get("policy_version") == CURRENT_POLICY_VERSION
         and state.get("processor_set_hash") == CURRENT_PROCESSOR_SET_HASH
+        and state.get("processor_ids") == expected_processor_ids
+        and state.get("profile_binding_id")
+        and state.get("scope_version") == CURRENT_SCOPE_VERSION
+        and state.get("scope_hash") == CURRENT_SCOPE_HASH
+        and _valid_server_timestamp(state.get("server_decided_at"))
         and state.get("receipt_id")
     )
 
 
-def _status_payload(uid: str, state: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _status_payload(
+    uid: str,
+    state: Optional[dict[str, Any]],
+    receipt: Optional[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "subject_uid": uid,
-        "authorized": _is_current_grant(state),
+        "authorized": _is_current_grant(uid, state, receipt),
         "enforcement_required": ai_consent_enforcement_required(uid),
         "policy": AiConsentService.policy(),
         "consent": dict(state) if state else {"decision": "not_recorded", "receipt_id": None},
@@ -463,6 +642,59 @@ def ai_consent_enforcement_required(uid: str) -> bool:
 
 def ai_consent_global_enforcement_enabled() -> bool:
     return os.getenv("ELLA_AI_CONSENT_ENFORCEMENT_ENABLED", "false").lower() == "true"
+
+
+def managed_cloud_real_data_enabled(uid: str) -> bool:
+    enabled = os.getenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED", "false").strip().lower() == "true"
+    enabled_uids = {
+        value.strip()
+        for value in os.getenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", "").split(",")
+        if value.strip()
+    }
+    return enabled or uid in enabled_uids
+
+
+def assert_managed_cloud_consent(
+    account_uid: str,
+    *,
+    profile_uid: str,
+    runtime_provider: str,
+    model_route: str,
+    memory_provider: str,
+    photon_scope: str,
+) -> str:
+    """Return the immutable receipt id authorizing one exact egress contract."""
+    if not managed_cloud_real_data_enabled(account_uid):
+        raise ManagedCloudConsentError("managed_cloud_real_data_disabled")
+    if (
+        runtime_provider != MANAGED_CLOUD_RUNTIME_PROVIDER
+        or model_route != MANAGED_CLOUD_MODEL_ROUTE
+        or memory_provider != MANAGED_CLOUD_MEMORY_PROVIDER
+        or photon_scope != MANAGED_CLOUD_PHOTON_SCOPE
+    ):
+        raise ManagedCloudConsentError("managed_cloud_consent_scope_drift")
+
+    expected_profile_binding_id = derive_profile_binding_id(
+        account_uid=account_uid,
+        profile_uid=profile_uid,
+    )
+    status = get_ai_consent_service().status(account_uid)
+    state = dict(status.get("consent") or {})
+    if status.get("authorized") is not True or state.get("decision") != "granted":
+        raise ManagedCloudConsentError("managed_cloud_consent_required")
+    if (
+        state.get("policy_version") != CURRENT_POLICY_VERSION
+        or state.get("processor_set_hash") != CURRENT_PROCESSOR_SET_HASH
+        or state.get("scope_version") != CURRENT_SCOPE_VERSION
+        or state.get("scope_hash") != CURRENT_SCOPE_HASH
+        or state.get("profile_binding_id") != expected_profile_binding_id
+        or not _valid_server_timestamp(state.get("server_decided_at"))
+    ):
+        raise ManagedCloudConsentError("managed_cloud_consent_stale")
+    receipt_id = str(state.get("receipt_id") or "")
+    if not receipt_id:
+        raise ManagedCloudConsentError("managed_cloud_consent_stale")
+    return receipt_id
 
 
 def assert_current_ai_consent(uid: str) -> str:

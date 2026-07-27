@@ -16,12 +16,26 @@ from urllib.parse import urlparse
 
 import httpx
 
+from database import voice_canary as voice_canary_db
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    RuntimePoolClaimError,
 )
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+)
+from ella.services.hermes_cloud import (
+    HermesCloudClient,
+    HonchoCloudProvisionClient,
+    RuntimePoolAlertPublisher,
+)
+from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.runtime_errors import ProvisioningError
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
+CLOUD_TARGET_SCHEMA_VERSION = "hermes-cloud-user-v1"
 DEFAULT_TEMPLATE_VERSION = "hermes-user-v1"
 DEFAULT_MODEL_POLICY_VERSION = "frontier-v1"
 DEFAULT_VOICE_POLICY_VERSION = "ella-voice-v1"
@@ -34,14 +48,8 @@ DEFAULT_PROVISION_TIMEOUT_SECONDS = 180.0
 MIN_PROVISION_TIMEOUT_SECONDS = 30.0
 MAX_PROVISION_TIMEOUT_SECONDS = 300.0
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
-
-
-class ProvisioningError(RuntimeError):
-    def __init__(self, code: str, *, retryable: bool, detail: Optional[dict[str, Any]] = None):
-        super().__init__(code)
-        self.code = code
-        self.retryable = retryable
-        self.detail = detail or {}
+DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
+DEFAULT_CLOUD_POOL_LOW_WATER = 2
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,44 @@ def provisioning_enabled(uid: Optional[str] = None) -> bool:
         "ELLA_HERMES_PROVISIONING_ENABLED_UIDS",
         uid,
     )
+
+
+def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return rollout_enabled(
+        "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED",
+        "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
+        uid,
+    )
+
+
+def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid)
+
+
+def effective_target_schema_version(uid: str, requested: str) -> str:
+    if not cloud_provisioning_enabled(uid):
+        return requested
+    if requested not in {DEFAULT_TARGET_SCHEMA_VERSION, CLOUD_TARGET_SCHEMA_VERSION}:
+        raise ProvisioningError("cloud_target_schema_version_required", retryable=False)
+    return CLOUD_TARGET_SCHEMA_VERSION
+
+
+def cloud_pool_claim_lease_seconds() -> int:
+    raw = os.getenv("ELLA_HERMES_CLOUD_POOL_CLAIM_LEASE_SECONDS", "").strip()
+    try:
+        parsed = int(raw) if raw else DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS
+    except ValueError:
+        parsed = DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS
+    return min(600, max(30, parsed))
+
+
+def cloud_pool_low_water_threshold() -> int:
+    raw = os.getenv("ELLA_HERMES_CLOUD_POOL_LOW_WATER", "").strip()
+    try:
+        parsed = int(raw) if raw else DEFAULT_CLOUD_POOL_LOW_WATER
+    except ValueError:
+        parsed = DEFAULT_CLOUD_POOL_LOW_WATER
+    return min(20, max(1, parsed))
 
 
 def provision_timeout_seconds() -> float:
@@ -106,9 +152,12 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "pending": "queued",
         "provisioning": "provisioning",
         "ready": "ready",
-        "degraded": "degraded",
+        "retryable": "retryable",
+        "rolling_back": "rolling_back",
+        "manual_intervention": "manual_intervention",
+        "degraded": "retryable",
         "blocked": "blocked",
-    }.get(state, "degraded")
+    }.get(state, "manual_intervention")
     public_stage = {
         "identity_ready": "preparing_account",
         "profile_ready": "preparing_memory",
@@ -122,7 +171,7 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "state": public_state,
         "stage": public_stage,
         "retryable": bool(job.get("retryable", True)),
-        "retry_after_ms": 2000 if public_state in {"queued", "provisioning", "degraded"} else None,
+        "retry_after_ms": 2000 if public_state in {"queued", "provisioning", "retryable"} else None,
         "support_code": f"ELLA-{job_id.split('-')[0].upper()}",
         "target_schema_version": job["target_schema_version"],
         "binding_state": "active" if binding and binding.get("active") else "inactive",
@@ -130,6 +179,8 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "effective_policy_revision": (
             f"{binding['model_policy_version']}:{binding['voice_policy_version']}" if binding else None
         ),
+        "runtime_provider": str(binding.get("provider") or "") if binding else None,
+        "runtime_status": str(binding.get("status") or "") if binding else None,
     }
     if job.get("error_code"):
         result["error_code"] = job["error_code"]
@@ -349,9 +400,18 @@ class ProvisioningCoordinator:
         self,
         repository: EllaProvisioningRepository,
         client: Optional[HermesProvisionClient] = None,
+        *,
+        cloud_client: Any = None,
+        honcho_client: Any = None,
+        alert_publisher: Any = None,
+        runtime_admission: Any = None,
     ):
         self.repository = repository
         self.client = client or HermesProvisionClient()
+        self.cloud_client = cloud_client
+        self.honcho_client = honcho_client
+        self.alert_publisher = alert_publisher
+        self.runtime_admission = runtime_admission
 
     async def ensure_job(
         self,
@@ -361,8 +421,11 @@ class ProvisioningCoordinator:
         client_request_id: Optional[str],
         request_payload: dict[str, Any],
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
+        cloud_required = cloud_provisioning_enabled(identity.uid)
         try:
             await self.repository.assert_schema_ready()
+            if cloud_required:
+                await self.repository.assert_cloud_schema_ready()
         except ProvisioningSchemaNotReadyError as exc:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
@@ -401,6 +464,8 @@ class ProvisioningCoordinator:
             template_version=target_schema_version,
         )
         if binding:
+            if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
+                raise ProvisioningError("cloud_runtime_binding_conflict", retryable=False)
             if str(binding.get("user_status") or "") != "ACTIVE":
                 await self.repository.activate_user(identity.uid)
             if job.get("state") != "ready":
@@ -412,7 +477,7 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not provisioning_enabled(identity.uid):
+        if not cloud_required and not provisioning_enabled(identity.uid):
             job = await self.repository.update_job(
                 job_id=str(job["id"]),
                 state="degraded",
@@ -425,6 +490,9 @@ class ProvisioningCoordinator:
         return claimed or job, None, claimed is not None
 
     async def process_claimed_job(self, *, job: dict[str, Any], identity: VerifiedIdentity) -> None:
+        if cloud_provisioning_enabled(identity.uid):
+            await self._process_cloud_claimed_job(job=job, identity=identity)
+            return
         try:
             result = await self.client.provision(identity, str(job["target_schema_version"]))
             binding_data = extract_runtime_binding(
@@ -473,3 +541,302 @@ class ProvisioningCoordinator:
                 retryable=True,
                 error_code="provisioning_internal_error",
             )
+
+    async def _process_cloud_claimed_job(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+    ) -> None:
+        cloud_client = self.cloud_client or HermesCloudClient()
+        honcho_client = self.honcho_client or HonchoCloudProvisionClient()
+        alert_publisher = self.alert_publisher or RuntimePoolAlertPublisher()
+        runtime_admission = self.runtime_admission or voice_canary_db.evaluate_runtime_activation
+        binding: Optional[dict[str, Any]] = None
+        claim_token = ""
+        try:
+            pool_policy = await self.repository.get_cloud_pool_admission_policy()
+            if not pool_policy:
+                pool_state = await self.repository.reconcile_cloud_pool_alert(
+                    threshold=cloud_pool_low_water_threshold()
+                )
+                await self._publish_pool_alert(alert_publisher, pool_state)
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="retryable",
+                    stage="profile_ready",
+                    retryable=True,
+                    error_code="runtime_pool_empty",
+                    error_detail={
+                        "available": int(pool_state["available"]),
+                        "threshold": cloud_pool_low_water_threshold(),
+                    },
+                )
+                return
+            expected_model = str(pool_policy["model"])
+
+            def assert_current_cloud_consent() -> None:
+                assert_cloud_identity_gate(
+                    identity.uid,
+                    profile_uid=identity.uid,
+                    runtime_provider=str(pool_policy["provider"]),
+                    model_route=f"openai-codex/{expected_model}",
+                    memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+                    photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+                )
+
+            assert_current_cloud_consent()
+            admission = await runtime_admission(
+                uid=identity.uid,
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
+            )
+            if not admission.allowed:
+                raise ProvisioningError(
+                    f"runtime_admission_{admission.code}",
+                    retryable=False,
+                )
+            admitted_entitlement_revision = int((admission.entitlement or {}).get("revision") or 0)
+            if admitted_entitlement_revision <= 0:
+                raise ProvisioningError(
+                    "runtime_admission_contract_invalid",
+                    retryable=False,
+                )
+
+            binding = await self.repository.claim_cloud_pool_binding(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                lease_seconds=cloud_pool_claim_lease_seconds(),
+                admitted_entitlement_revision=admitted_entitlement_revision,
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
+            )
+            pool_state = await self.repository.reconcile_cloud_pool_alert(threshold=cloud_pool_low_water_threshold())
+            await self._publish_pool_alert(alert_publisher, pool_state)
+            if not binding:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="retryable",
+                    stage="profile_ready",
+                    retryable=True,
+                    error_code="runtime_pool_empty",
+                    error_detail={
+                        "available": int(pool_state["available"]),
+                        "threshold": cloud_pool_low_water_threshold(),
+                    },
+                )
+                return
+
+            claim_token = str(binding.get("claim_token") or "")
+            if not claim_token:
+                raise ProvisioningError("runtime_pool_claim_incomplete", retryable=False)
+            if str(binding.get("expected_model") or "") != expected_model:
+                raise ProvisioningError("runtime_pool_policy_changed", retryable=False)
+
+            side_effect_admission = await runtime_admission(
+                uid=identity.uid,
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
+            )
+            if not side_effect_admission.allowed:
+                raise ProvisioningError(
+                    f"runtime_admission_{side_effect_admission.code}",
+                    retryable=False,
+                )
+            side_effect_revision = int((side_effect_admission.entitlement or {}).get("revision") or 0)
+            if side_effect_revision != admitted_entitlement_revision:
+                raise ProvisioningError(
+                    "runtime_admission_entitlement_stale",
+                    retryable=False,
+                )
+
+            async def record_side_effect(effect: dict[str, str]) -> None:
+                await self.repository.record_cloud_side_effect(
+                    uid=identity.uid,
+                    job_id=str(job["id"]),
+                    claim_token=claim_token,
+                    effect={
+                        **effect,
+                        "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
+                        "content_free": True,
+                    },
+                )
+
+            assert_current_cloud_consent()
+            honcho = await honcho_client.ensure_profile(
+                binding,
+                on_side_effect=record_side_effect,
+            )
+            assert_current_cloud_consent()
+            preflight = await cloud_client.preflight(binding)
+            health_receipt = {
+                **preflight.receipt,
+                "honcho": {
+                    "workspace_sha256": hashlib.sha256(honcho["workspace"].encode("utf-8")).hexdigest(),
+                    "observed_peer_sha256": hashlib.sha256(honcho["observed_peer"].encode("utf-8")).hexdigest(),
+                    "observer_peer_sha256": hashlib.sha256(honcho["observer_peer"].encode("utf-8")).hexdigest(),
+                },
+                "admission_revision": admitted_entitlement_revision,
+            }
+            activated = await self.repository.finalize_cloud_pool_claim(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                claim_token=claim_token,
+                honcho_workspace=honcho["workspace"],
+                observed_peer=honcho["observed_peer"],
+                observer_peer=honcho["observer_peer"],
+                health_receipt=health_receipt,
+                status=os.getenv("ELLA_HERMES_CLOUD_INITIAL_STATUS", "shadow").strip().lower(),
+            )
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="ready",
+                stage="active",
+                retryable=False,
+                receipt={
+                    "type": "hermes_cloud_binding_activated",
+                    "binding_revision": int(activated["revision"]),
+                    "runtime_instance_sha256": hashlib.sha256(
+                        str(activated["runtime_instance_id"]).encode("utf-8")
+                    ).hexdigest(),
+                    "content_free": True,
+                },
+            )
+        except (ProvisioningError, RuntimePoolClaimError) as exc:
+            code = exc.code
+            retryable = exc.retryable if isinstance(exc, ProvisioningError) else False
+            if binding and claim_token:
+                await self._rollback_cloud_claim(
+                    job=job,
+                    identity=identity,
+                    binding=binding,
+                    claim_token=claim_token,
+                    honcho_client=honcho_client,
+                    error_code=code,
+                    retryable=retryable,
+                )
+            else:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="retryable" if retryable else "blocked",
+                    stage="profile_ready",
+                    retryable=retryable,
+                    error_code=code,
+                    error_detail=getattr(exc, "detail", {}),
+                )
+        except Exception:
+            logger.exception("Unexpected Hermes Cloud provisioning failure for uid=%s", identity.uid)
+            if binding and claim_token:
+                await self._rollback_cloud_claim(
+                    job=job,
+                    identity=identity,
+                    binding=binding,
+                    claim_token=claim_token,
+                    honcho_client=honcho_client,
+                    error_code="cloud_provisioning_internal_error",
+                    retryable=False,
+                )
+            else:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="blocked",
+                    stage="profile_ready",
+                    retryable=False,
+                    error_code="cloud_provisioning_internal_error",
+                )
+
+    async def _publish_pool_alert(self, publisher: Any, pool_state: dict[str, Any]) -> None:
+        try:
+            alert = pool_state.get("alert")
+            delivered = bool(alert and not alert.get("delivered_at") and await publisher.publish(pool_state))
+            if delivered:
+                await self.repository.mark_cloud_pool_alert_delivered(str(alert["id"]))
+        except Exception:
+            logger.exception("Runtime pool alert mirror failed; durable outbox remains pending")
+
+    async def _rollback_cloud_claim(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+        binding: dict[str, Any],
+        claim_token: str,
+        honcho_client: Any,
+        error_code: str,
+        retryable: bool,
+    ) -> None:
+        await self.repository.update_job(
+            job_id=str(job["id"]),
+            state="rolling_back",
+            stage="runtime_ready",
+            retryable=False,
+            error_code=error_code,
+            receipt={
+                "type": "cloud_claim_rollback_started",
+                "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
+                "content_free": True,
+            },
+        )
+        side_effects = await self.repository.get_cloud_side_effects(str(job["id"]))
+        cleanup_receipt: dict[str, Any] = {
+            "status": "not_required",
+            "runtime_credentials": "no_claim_credentials_issued",
+            "content_free": True,
+        }
+        cleanup_error = ""
+        try:
+            if side_effects:
+                cleanup_receipt = await honcho_client.cleanup_profile(binding, side_effects)
+        except Exception as exc:
+            logger.exception("Cloud claim cleanup failed for uid=%s", identity.uid)
+            cleanup_error = getattr(exc, "code", "cloud_claim_cleanup_failed")
+
+        quarantine_error = ""
+        try:
+            quarantined = await self.repository.quarantine_cloud_pool_claim(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                claim_token=claim_token,
+                reason=error_code,
+                health_receipt={
+                    "status": "failed",
+                    "code": error_code,
+                    "cleanup_status": cleanup_receipt.get("status"),
+                    "content_free": True,
+                },
+            )
+            if not quarantined:
+                quarantine_error = "runtime_pool_quarantine_lost"
+        except Exception:
+            logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
+            quarantine_error = "runtime_pool_quarantine_failed"
+
+        if cleanup_error or quarantine_error:
+            await self.repository.record_cloud_rollback(
+                job_id=str(job["id"]),
+                state="manual_intervention",
+                retryable=False,
+                error_code=cleanup_error or quarantine_error,
+                rollback_receipt={
+                    "status": "manual_intervention",
+                    "original_error": error_code,
+                    "cleanup_error": cleanup_error or None,
+                    "quarantine_error": quarantine_error or None,
+                    "side_effect_count": len(side_effects),
+                    "content_free": True,
+                },
+            )
+            return
+        await self.repository.record_cloud_rollback(
+            job_id=str(job["id"]),
+            state="retryable" if retryable else "blocked",
+            retryable=retryable,
+            error_code=error_code,
+            rollback_receipt={
+                **cleanup_receipt,
+                "original_error": error_code,
+                "side_effect_count": len(side_effects),
+                "quarantined": True,
+                "content_free": True,
+            },
+        )

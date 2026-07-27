@@ -1,0 +1,149 @@
+name: Hermes Cloud Runtime Tests
+
+on:
+  pull_request:
+    paths:
+      - "backend/database/ella_provisioning.py"
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/photon.py"
+      - "backend/ella/routers/resolve.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/hermes_cloud_photon.py"
+      - "backend/ella/services/hermes_cloud_runtime.py"
+      - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_errors.py"
+      - "backend/ella/services/runtime_resolver.py"
+      - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
+      - "backend/scripts/hermes_cloud_pool_admin.py"
+      - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
+      - "backend/tests/unit/test_ella_runtime_route_isolation.py"
+      - "backend/tests/unit/test_hermes_cloud_*.py"
+      - "backend/tests/unit/test_voice_proxy_auth.py"
+      - ".github/workflows/hermes-cloud-runtime-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/database/ella_provisioning.py"
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/photon.py"
+      - "backend/ella/routers/resolve.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/hermes_cloud_photon.py"
+      - "backend/ella/services/hermes_cloud_runtime.py"
+      - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_errors.py"
+      - "backend/ella/services/runtime_resolver.py"
+      - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
+      - "backend/scripts/hermes_cloud_pool_admin.py"
+      - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
+      - "backend/tests/unit/test_ella_runtime_route_isolation.py"
+      - "backend/tests/unit/test_hermes_cloud_*.py"
+      - "backend/tests/unit/test_voice_proxy_auth.py"
+      - ".github/workflows/hermes-cloud-runtime-tests.yml"
+
+jobs:
+  hermes-cloud-runtime:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hermes_cloud_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hermes_cloud_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED: "false"
+      ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/hermes_cloud_test
+      FIRESTORE_EMULATOR_HOST: localhost:9999
+      GCLOUD_PROJECT: omi-ci
+      GOOGLE_CLOUD_PROJECT: omi-ci
+      ENCRYPTION_SECRET: omi_ci_hermes_cloud_test_only
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install
+          "asyncpg==0.31.0"
+          "fastapi==0.112.0"
+          "firebase-admin==6.5.0"
+          "httpx==0.28.0"
+          "PyJWT==2.9.0"
+          "pytest==8.3.2"
+          "websockets==12.0"
+
+      - name: Compile Hermes Cloud runtime modules
+        run: >-
+          python -m py_compile
+          database/ella_provisioning.py
+          database/voice_canary.py
+          ella/routers/ai_consent.py
+          ella/services/ai_consent.py
+          ella/services/hermes_cloud.py
+          ella/services/hermes_cloud_photon.py
+          ella/services/hermes_cloud_policy.py
+          ella/services/hermes_cloud_runtime.py
+          ella/routers/photon.py
+          ella/services/provisioning.py
+          ella/services/runtime_errors.py
+          ella/services/runtime_resolver.py
+          scripts/hermes_cloud_pool_admin.py
+          scripts/hermes_cloud_shadow.py
+
+      - name: Run Hermes Cloud and isolation failure-path tests
+        run: >-
+          pytest
+          tests/unit/test_ella_ai_consent.py
+          tests/unit/test_ella_ai_consent_route_gates.py
+          tests/unit/test_hermes_cloud_migration.py
+          tests/unit/test_hermes_cloud_policy.py
+          tests/unit/test_hermes_cloud_photon.py
+          tests/unit/test_hermes_cloud_provider.py
+          tests/unit/test_hermes_cloud_provisioning.py
+          tests/unit/test_hermes_cloud_runtime.py
+          tests/unit/test_ella_chat_temporal_context.py
+          tests/unit/test_ella_provisioning_repository.py
+          tests/unit/test_ella_runtime_route_isolation.py
+          tests/unit/test_voice_proxy_auth.py
+          tests/postgres/test_hermes_cloud_pool_postgres.py
+          -v

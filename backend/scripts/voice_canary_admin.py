@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database import voice_canary
 
-
 DEFAULT_PROVIDERS = ["grok-voice"]
 DEFAULT_MODES = ["v4"]
 DEFAULT_FALLBACK_POLICY = {"enabled": False, "order": []}
@@ -99,27 +98,13 @@ async def _kill(args: argparse.Namespace) -> None:
     scope_value = "*" if args.scope == "global" else args.value
     if not scope_value:
         raise SystemExit("--value is required for user/provider kill switches")
-    pool = await voice_canary.get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO voice_kill_switches (
-                scope_type, scope_value, enabled, reason, updated_by
-            ) VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (scope_type, scope_value) DO UPDATE SET
-                enabled = EXCLUDED.enabled,
-                reason = EXCLUDED.reason,
-                revision = voice_kill_switches.revision + 1,
-                updated_by = EXCLUDED.updated_by,
-                updated_at = NOW()
-            RETURNING *
-            """,
-            args.scope,
-            scope_value,
-            args.enabled == "on",
-            args.reason,
-            args.operator,
-        )
+    row = await voice_canary.set_kill_switch(
+        scope_type=args.scope,
+        scope_value=scope_value,
+        enabled=args.enabled == "on",
+        reason=args.reason,
+        updated_by=args.operator,
+    )
     _print({"action": "kill_switch", "switch": dict(row)})
 
 

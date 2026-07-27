@@ -264,6 +264,15 @@ class CanonicalEventStore:
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         raise NotImplementedError
 
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        raise NotImplementedError
+
     async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -367,6 +376,31 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             "duplicates": len(statuses) - inserted_count - updated_count,
             "events": statuses,
         }
+
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        pool = await _get_pool()
+        row = await pool.fetchrow(
+            """
+            SELECT uid, canonical_identity, event_id, source_identity,
+                   session_id, channel, provider, role, text,
+                   started_at, ended_at, privacy_scope, scan_policy,
+                   source_ref, metadata, raw_event, inserted_at
+            FROM canonical_events
+            WHERE uid = $1
+              AND event_id = $2
+              AND source_identity = $3
+            """,
+            uid,
+            event_id,
+            source_identity,
+        )
+        return _row_to_event(row) if row else None
 
     async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
         item = completion.normalized(session_id)
@@ -512,6 +546,18 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
             "duplicates": len(statuses) - inserted_count,
             "events": statuses,
         }
+
+    async def get_event(
+        self,
+        *,
+        uid: str,
+        event_id: str,
+        source_identity: str,
+    ) -> Optional[dict[str, Any]]:
+        event = self._events.get((event_id, source_identity))
+        if not event or event.get("uid") != uid:
+            return None
+        return _row_to_event(event)
 
     async def complete_session(self, session_id: str, completion: SessionCompleteIn) -> dict[str, Any]:
         item = completion.normalized(session_id)

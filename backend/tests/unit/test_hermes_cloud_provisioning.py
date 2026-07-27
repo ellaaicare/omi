@@ -1,0 +1,433 @@
+import asyncio
+from types import SimpleNamespace
+
+from ella.services import provisioning
+from ella.services.hermes_cloud import HermesCloudPreflight
+from ella.services.provisioning import (
+    HermesProvisionClient,
+    ProvisioningCoordinator,
+    ProvisioningError,
+    VerifiedIdentity,
+)
+
+
+class ForbiddenLocalClient(HermesProvisionClient):
+    async def provision(self, identity, target_schema_version):
+        raise AssertionError("cloud provisioning must not call the Mini provision shim")
+
+
+class FakeRepository:
+    def __init__(self, *, pool_empty=False, claim_error=None):
+        self.pool_empty = pool_empty
+        self.claim_error = claim_error
+        self.quarantined = []
+        self.finalized = []
+        self.jobs = []
+        self.claims = 0
+        self.delivered_alerts = []
+        self.side_effects = []
+        self.rollbacks = []
+        self.call_order = []
+        self.claim_arguments = []
+
+    async def get_cloud_pool_admission_policy(self):
+        self.call_order.append("admission_policy")
+        if self.pool_empty:
+            return None
+        return {"provider": "hermes_cloud", "model": "model-a"}
+
+    async def claim_cloud_pool_binding(self, **kwargs):
+        self.call_order.append("pool_claim")
+        self.claim_arguments.append(dict(kwargs))
+        self.claims += 1
+        if self.claim_error:
+            raise self.claim_error
+        if self.pool_empty:
+            return None
+        return {
+            "id": "binding-a",
+            "claim_token": "00000000-0000-0000-0000-000000000004",
+            "expected_model": "model-a",
+            "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+            "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+            "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+        }
+
+    async def reconcile_cloud_pool_alert(self, **kwargs):
+        return {
+            "available": 1 if not self.pool_empty else 0,
+            "alert": {"id": "alert-a", "threshold": kwargs["threshold"]},
+        }
+
+    async def finalize_cloud_pool_claim(self, **kwargs):
+        self.finalized.append(kwargs)
+        return {
+            "revision": 2,
+            "runtime_instance_id": "instance-a",
+        }
+
+    async def mark_cloud_pool_alert_delivered(self, alert_id):
+        self.delivered_alerts.append(alert_id)
+
+    async def quarantine_cloud_pool_claim(self, **kwargs):
+        self.quarantined.append(kwargs)
+        return {"status": "quarantined"}
+
+    async def update_job(self, **kwargs):
+        self.jobs.append(kwargs)
+        return kwargs
+
+    async def record_cloud_side_effect(self, **kwargs):
+        self.side_effects.append(kwargs["effect"])
+
+    async def get_cloud_side_effects(self, job_id):
+        return list(self.side_effects)
+
+    async def record_cloud_rollback(self, **kwargs):
+        self.rollbacks.append(kwargs)
+        self.jobs.append(kwargs)
+        return kwargs
+
+
+class FakeCloud:
+    def __init__(self, *, error=None):
+        self.error = error
+        self.calls = []
+
+    async def preflight(self, binding):
+        self.calls.append(binding)
+        if self.error:
+            raise self.error
+        return HermesCloudPreflight(
+            model="model-a",
+            tools=(),
+            capabilities=("responses_api", "session_key_header"),
+            receipt={"status": "ok", "content_free": True},
+        )
+
+
+class FakeHoncho:
+    def __init__(self, *, cleanup_error=None):
+        self.calls = []
+        self.cleanup_calls = []
+        self.cleanup_error = cleanup_error
+
+    async def ensure_profile(self, binding, *, on_side_effect):
+        self.calls.append(binding)
+        await on_side_effect(
+            {
+                "kind": "honcho_workspace",
+                "workspace": "workspace-a",
+            }
+        )
+        await on_side_effect(
+            {
+                "kind": "honcho_peer",
+                "workspace": "workspace-a",
+                "peer": "user-a",
+            }
+        )
+        return {
+            "workspace": "workspace-a",
+            "observed_peer": "user-a",
+            "observer_peer": "companion-a",
+        }
+
+    async def cleanup_profile(self, binding, side_effects):
+        self.cleanup_calls.append((binding, side_effects))
+        if self.cleanup_error:
+            raise self.cleanup_error
+        return {"status": "cleaned", "content_free": True}
+
+
+class FakeAlert:
+    def __init__(self):
+        self.calls = []
+
+    async def publish(self, state):
+        self.calls.append(state)
+        return True
+
+
+async def allow_runtime(**kwargs):
+    return SimpleNamespace(
+        allowed=True,
+        code="ok",
+        entitlement={"revision": 3, "status": "invited"},
+    )
+
+
+def _identity():
+    return VerifiedIdentity(
+        uid="synthetic-user",
+        email="synthetic@example.test",
+        name="Synthetic User",
+        timezone="UTC",
+    )
+
+
+def _job():
+    return {"id": "00000000-0000-0000-0000-000000000005", "target_schema_version": "hermes-cloud-user-v1"}
+
+
+def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    alert = FakeAlert()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=alert,
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.claims == 1
+    assert repository.call_order == ["admission_policy", "pool_claim"]
+    assert repository.claim_arguments == [
+        {
+            "uid": "synthetic-user",
+            "job_id": "00000000-0000-0000-0000-000000000005",
+            "lease_seconds": 120,
+            "admitted_entitlement_revision": 3,
+            "provider": "hermes_cloud",
+            "model": "model-a",
+        }
+    ]
+    assert len(cloud.calls) == 1
+    assert len(honcho.calls) == 1
+    assert len(repository.finalized) == 1
+    assert repository.finalized[0]["status"] == "shadow"
+    assert repository.finalized[0]["health_receipt"]["admission_revision"] == 3
+    assert repository.quarantined == []
+    assert repository.jobs[-1]["state"] == "ready"
+    assert alert.calls[0]["available"] == 1
+    assert repository.delivered_alerts == ["alert-a"]
+
+
+def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=False)),
+        honcho_client=FakeHoncho(),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.finalized == []
+    assert repository.quarantined[0]["reason"] == "hermes_cloud_tool_drift"
+    assert repository.jobs[-1]["state"] == "blocked"
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "cleaned"
+
+
+def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    checks = 0
+
+    def consent_gate(*_args, **_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(provisioning, "assert_cloud_identity_gate", consent_gate)
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert checks == 2
+    assert repository.claims == 1
+    assert honcho.calls == []
+    assert cloud.calls == []
+    assert repository.finalized == []
+    assert repository.quarantined[0]["reason"] == "managed_cloud_consent_required"
+
+
+def test_empty_pool_emits_durable_low_water_and_stays_retryable(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository(pool_empty=True)
+    alert = FakeAlert()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(),
+        honcho_client=FakeHoncho(),
+        alert_publisher=alert,
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.finalized == []
+    assert repository.quarantined == []
+    assert repository.jobs[-1]["error_code"] == "runtime_pool_empty"
+    assert repository.jobs[-1]["retryable"] is True
+    assert alert.calls[0]["available"] == 0
+    assert repository.claims == 0
+
+
+def test_entitlement_denial_happens_before_pool_claim_or_vendor_side_effect(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+
+    async def deny_runtime(**kwargs):
+        repository.call_order.append("entitlement_denied")
+        return SimpleNamespace(allowed=False, code="no_entitlement", entitlement=None)
+
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=deny_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.call_order == ["admission_policy", "entitlement_denied"]
+    assert repository.claims == 0
+    assert cloud.calls == []
+    assert honcho.calls == []
+    assert repository.jobs[-1]["error_code"] == "runtime_admission_no_entitlement"
+
+
+def test_atomic_claim_revalidation_denial_has_zero_honcho_or_cloud_side_effects(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository(claim_error=provisioning.RuntimePoolClaimError("runtime_admission_revoked"))
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.claims == 1
+    assert repository.side_effects == []
+    assert repository.quarantined == []
+    assert honcho.calls == []
+    assert cloud.calls == []
+    assert repository.jobs[-1]["state"] == "blocked"
+    assert repository.jobs[-1]["error_code"] == "runtime_admission_revoked"
+
+
+def test_authority_change_after_claim_blocks_honcho_and_quarantines_claim(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    admissions = 0
+
+    async def change_authority_after_claim(**_kwargs):
+        nonlocal admissions
+        admissions += 1
+        if admissions == 1:
+            return SimpleNamespace(
+                allowed=True,
+                code="ok",
+                entitlement={"revision": 3, "status": "invited"},
+            )
+        return SimpleNamespace(
+            allowed=False,
+            code="provider_disabled",
+            entitlement={"revision": 3, "status": "invited"},
+        )
+
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=change_authority_after_claim,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert admissions == 2
+    assert repository.claims == 1
+    assert repository.side_effects == []
+    assert honcho.calls == []
+    assert cloud.calls == []
+    assert repository.finalized == []
+    assert repository.quarantined[0]["reason"] == "runtime_admission_provider_disabled"
+
+
+def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    honcho = FakeHoncho()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)),
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(repository.side_effects) == 2
+    assert len(honcho.cleanup_calls) == 1
+    assert len(repository.quarantined) == 1
+    assert repository.rollbacks[-1]["state"] == "retryable"
+
+
+def test_cleanup_failure_requires_manual_intervention(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)),
+        honcho_client=FakeHoncho(cleanup_error=RuntimeError("cleanup failed")),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.rollbacks[-1]["state"] == "manual_intervention"
+    assert repository.rollbacks[-1]["retryable"] is False
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "manual_intervention"

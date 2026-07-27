@@ -283,12 +283,14 @@ authenticated Firebase UID selects both the current state and the
 immutable receipt subcollection; callers cannot submit or select another UID.
 
 - `GET /v1/users/ai-consent/policy` returns the required legal-recipient
-  manifest, policy version, and processor-set hash.
+  manifest, policy version, processor-set hash, and managed-cloud scope
+  version/hash.
 - `GET /v1/users/ai-consent` returns the current decision and whether the exact
   current policy authorizes protected routes.
 - `POST /v1/users/ai-consent` records `granted`, `declined`, or `revoked` with a
-  caller request ID, app/build, locale, and server timestamp. The same request
-  ID is idempotent; reuse with different metadata fails with `409`.
+  caller request ID, app/build, locale, exact scope, server-derived opaque
+  account/profile binding, and server timestamp. The same request ID is
+  idempotent; reuse with different metadata fails with `409`.
 - `GET /v1/users/ai-consent/receipts/{receipt_id}` verifies a receipt only
   within the authenticated user's path.
 - Account/data deletion remains `DELETE /v1/users/delete-account`; deletion
@@ -327,6 +329,15 @@ Rollout is fail-safe and non-breaking:
 Changing the canonical processor set or its legal recipients requires a new
 policy version/hash. Do not reuse a prior hash or silently map an undisclosed
 fallback provider.
+
+Managed Hermes Cloud real-data egress has a second default-off gate:
+`ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED=false` plus an optional exact UID canary
+list. Real egress also requires exact deployed v6 policy and scope env values.
+The backend rechecks the current account/profile-bound receipt immediately
+before Honcho Cloud profile creation, Hermes Cloud/OpenAI model calls, and
+Photon outbound handoff. A v5, missing, declined, revoked, deleted, malformed,
+or route/profile-drifted receipt fails closed. Synthetic/content-free preflight
+continues under `ELLA_HERMES_CLOUD_SYNTHETIC_ONLY=true`.
 
 Upstream-managed patch points are tracked in `docs/POST_MERGE_PATCHES.md`. Review that file after every Basehardware upstream sync.
 

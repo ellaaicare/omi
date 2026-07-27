@@ -19,7 +19,9 @@ from ella.services.provisioning import (
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
-    provisioning_enabled,
+    any_provisioning_enabled,
+    cloud_provisioning_enabled,
+    effective_target_schema_version,
     public_receipt,
     retained_compatibility_receipt,
 )
@@ -110,7 +112,11 @@ async def ensure_onboarding(
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(payload.target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
-    if not provisioning_enabled(uid):
+    try:
+        target_schema_version = effective_target_schema_version(uid, payload.target_schema_version)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    if not any_provisioning_enabled(uid):
         receipt = await _retained_receipt(uid, payload.target_schema_version)
         if receipt:
             return receipt
@@ -120,9 +126,12 @@ async def ensure_onboarding(
     try:
         job, binding, claimed = await coordinator.ensure_job(
             identity=identity,
-            target_schema_version=payload.target_schema_version,
+            target_schema_version=target_schema_version,
             client_request_id=payload.client_request_id,
-            request_payload=_payload_dict(payload),
+            request_payload={
+                **_payload_dict(payload),
+                "effective_target_schema_version": target_schema_version,
+            },
         )
     except IdentityConflictError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from exc
@@ -136,9 +145,9 @@ async def ensure_onboarding(
     if claimed:
         background_tasks.add_task(coordinator.process_claimed_job, job=job, identity=identity)
         response.status_code = 202
-    elif receipt["state"] in {"queued", "provisioning", "degraded"}:
+    elif receipt["state"] in {"queued", "provisioning", "retryable", "rolling_back"}:
         response.status_code = 202
-    elif receipt["state"] == "blocked":
+    elif receipt["state"] in {"blocked", "manual_intervention"}:
         response.status_code = 503 if receipt.get("error_code") == "provisioning_disabled" else 409
     return receipt
 
@@ -150,7 +159,11 @@ async def onboarding_status(
 ) -> dict[str, Any]:
     if not SCHEMA_VERSION_RE.fullmatch(target_schema_version):
         raise HTTPException(status_code=400, detail={"code": "invalid_target_schema_version"})
-    if not provisioning_enabled(uid):
+    try:
+        target_schema_version = effective_target_schema_version(uid, target_schema_version)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    if not any_provisioning_enabled(uid):
         receipt = await _retained_receipt(uid, target_schema_version)
         if receipt:
             return receipt
@@ -158,6 +171,8 @@ async def onboarding_status(
     repository = await EllaProvisioningRepository.create()
     try:
         await repository.assert_schema_ready()
+        if cloud_provisioning_enabled(uid):
+            await repository.assert_cloud_schema_ready()
     except ProvisioningSchemaNotReadyError as exc:
         logger.error("Ella provisioning status schema is incomplete: %s", ", ".join(exc.missing))
         raise HTTPException(status_code=503, detail={"code": "provisioning_schema_not_ready"}) from exc
@@ -168,4 +183,6 @@ async def onboarding_status(
         uid,
         template_version=target_schema_version,
     )
+    if not binding and cloud_provisioning_enabled(uid):
+        binding = await repository.resolve_cloud_binding_state(uid)
     return public_receipt(job, binding)
