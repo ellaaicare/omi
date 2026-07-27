@@ -44,7 +44,7 @@ class PhotonInboundIn(BaseModel):
     conversation_initiation: bool = False
     attachment_count: int = Field(default=0, ge=0, le=100)
     group_message: bool = False
-    synthetic: bool = True
+    synthetic: bool = False
 
 
 class PhotonDeliveryAckIn(BaseModel):

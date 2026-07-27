@@ -283,6 +283,13 @@ CREATE TABLE ella_photon_message_receipts (
     quota_reserved BOOLEAN NOT NULL DEFAULT false,
     error_code TEXT,
     provider_started BOOLEAN NOT NULL DEFAULT false,
+    attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
+    lease_token UUID,
+    lease_expires_at TIMESTAMPTZ,
+    reconciliation_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (reconciliation_status IN (
+            'none', 'recovered', 'manual_required'
+        )),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMPTZ,

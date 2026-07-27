@@ -59,9 +59,19 @@ class PhotonAdapterConfig:
     approved_policy_commit_sha: str
     command_tier_version: str = PHOTON_COMMAND_TIER_VERSION
     preflight_max_age_seconds: int = 30
+    receipt_lease_seconds: int = 300
+    synthetic_message_keys: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "PhotonAdapterConfig":
+        synthetic_message_keys = frozenset(
+            item.strip().lower()
+            for item in os.getenv(
+                "ELLA_HERMES_CLOUD_PHOTON_SYNTHETIC_MESSAGE_KEYS",
+                "",
+            ).split(",")
+            if item.strip()
+        )
         return cls(
             enabled=os.getenv("ELLA_HERMES_CLOUD_PHOTON_ENABLED", "false").strip().lower() in TRUE_VALUES,
             internal_owner_uid=os.getenv("ELLA_HERMES_CLOUD_PHOTON_INTERNAL_OWNER_UID", "").strip(),
@@ -72,6 +82,13 @@ class PhotonAdapterConfig:
                 PHOTON_COMMAND_TIER_VERSION,
             ).strip(),
             preflight_max_age_seconds=int(os.getenv("ELLA_HERMES_CLOUD_PHOTON_PREFLIGHT_MAX_AGE_SECONDS", "30")),
+            receipt_lease_seconds=int(
+                os.getenv(
+                    "ELLA_HERMES_CLOUD_PHOTON_RECEIPT_LEASE_SECONDS",
+                    "300",
+                )
+            ),
+            synthetic_message_keys=synthetic_message_keys,
         )
 
     def assert_ready(self) -> None:
@@ -83,6 +100,8 @@ class PhotonAdapterConfig:
             or not GIT_SHA_RE.fullmatch(self.approved_policy_commit_sha)
             or self.command_tier_version != PHOTON_COMMAND_TIER_VERSION
             or not 5 <= self.preflight_max_age_seconds <= 300
+            or not 30 <= self.receipt_lease_seconds <= 900
+            or any(not SHA256_RE.fullmatch(item) for item in self.synthetic_message_keys)
         ):
             raise ProvisioningError("photon_control_policy_invalid", retryable=False)
 
@@ -122,7 +141,7 @@ class PhotonInboundEnvelope:
     conversation_initiation: bool = False
     attachment_count: int = 0
     group_message: bool = False
-    synthetic: bool = True
+    synthetic: bool = False
 
 
 @dataclass(frozen=True)
@@ -375,7 +394,12 @@ class HermesCloudPhotonAdapter:
     ) -> PhotonAdapterResult:
         self.config.assert_ready()
         self._assert_message_shape(request)
-        if cloud_synthetic_only() and not request.synthetic:
+        inbound_provider_key = self.config.opaque_key(
+            "photon-inbound-message",
+            request.provider_message_id,
+        )
+        synthetic_authorized = inbound_provider_key in self.config.synthetic_message_keys
+        if cloud_synthetic_only() and not synthetic_authorized:
             raise ProvisioningError(
                 "photon_real_data_not_authorized",
                 retryable=False,
@@ -389,7 +413,6 @@ class HermesCloudPhotonAdapter:
             binding=binding,
             connection_id=request.connection_id,
         )
-        inbound_provider_key = self.config.opaque_key("photon-inbound-message", request.provider_message_id)
         payload_sha256 = hashlib.sha256(
             _stable_json(
                 {
@@ -399,7 +422,7 @@ class HermesCloudPhotonAdapter:
                     "text": request.text,
                     "occurred_at": request.occurred_at.astimezone(timezone.utc).isoformat(),
                     "conversation_initiation": request.conversation_initiation,
-                    "synthetic": request.synthetic,
+                    "synthetic": synthetic_authorized,
                 }
             ).encode("utf-8")
         ).hexdigest()
@@ -409,17 +432,22 @@ class HermesCloudPhotonAdapter:
                 inbound_provider_message_key=inbound_provider_key,
                 inbound_payload_sha256=payload_sha256,
                 command_tier_version=self.config.command_tier_version,
+                lease_seconds=self.config.receipt_lease_seconds,
             )
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(exc.code, retryable=False) from exc
-        if not receipt.get("inserted"):
+        if not receipt.get("acquired"):
             return await self._replay(receipt)
 
         receipt_id = str(receipt["id"])
-        provider_started = False
+        lease_token = str(receipt.get("lease_token") or "")
+        if not lease_token:
+            raise ProvisioningError("photon_message_claim_conflict", retryable=True)
+        provider_started = bool(receipt.get("provider_started"))
         try:
             await self.repository.reserve_photon_quota(
                 receipt_id=receipt_id,
+                lease_token=lease_token,
                 photon_binding_id=str(binding["photon_binding_id"]),
                 message_limit=int(binding["daily_message_limit"]),
                 initiation_limit=int(binding["daily_initiation_limit"]),
@@ -438,13 +466,18 @@ class HermesCloudPhotonAdapter:
                 ),
                 started_at=request.occurred_at.astimezone(timezone.utc),
                 client_metadata={
-                    "synthetic": request.synthetic,
+                    "synthetic": synthetic_authorized,
                     "provider_message_key": inbound_provider_key,
                     "photon_receipt_id": receipt_id,
                     "content_free_identifiers": True,
                 },
             )
-            provider_started = True
+            if not provider_started:
+                await self.repository.mark_photon_provider_started(
+                    receipt_id=receipt_id,
+                    lease_token=lease_token,
+                )
+                provider_started = True
             result = await self.runtime_service_factory().run_turn(runtime, runtime_request)
             source_identity = self._source_identity(
                 self.config.internal_owner_uid,
@@ -460,6 +493,7 @@ class HermesCloudPhotonAdapter:
             }
             completed = await self.repository.complete_photon_message(
                 receipt_id=receipt_id,
+                lease_token=lease_token,
                 runtime_interaction_id=result.runtime_interaction_id,
                 canonical_inbound_event_id=result.canonical_user_event_id,
                 canonical_outbound_event_id=result.canonical_assistant_event_id,
@@ -487,9 +521,19 @@ class HermesCloudPhotonAdapter:
                 canonical_inbound_event_id=result.canonical_user_event_id,
                 canonical_outbound_event_id=result.canonical_assistant_event_id,
             )
+        except RuntimePoolClaimError as exc:
+            await self.repository.fail_photon_message(
+                receipt_id=receipt_id,
+                lease_token=lease_token,
+                error_code=exc.code,
+                uncertain=provider_started,
+                provider_started=provider_started,
+            )
+            raise ProvisioningError(exc.code, retryable=not provider_started) from exc
         except ProvisioningError as exc:
             await self.repository.fail_photon_message(
                 receipt_id=receipt_id,
+                lease_token=lease_token,
                 error_code=exc.code,
                 uncertain=provider_started,
                 provider_started=provider_started,
@@ -498,6 +542,7 @@ class HermesCloudPhotonAdapter:
         except Exception as exc:
             await self.repository.fail_photon_message(
                 receipt_id=receipt_id,
+                lease_token=lease_token,
                 error_code="photon_adapter_failed",
                 uncertain=provider_started,
                 provider_started=provider_started,

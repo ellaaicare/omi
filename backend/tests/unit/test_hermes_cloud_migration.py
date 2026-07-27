@@ -37,6 +37,10 @@ def test_hermes_cloud_migration_contains_fail_closed_pool_invariants():
         "ella_photon_message_receipts_inbound_key",
         "ella_photon_message_receipts_outbound_key",
         "ella_photon_message_receipts_delivery_key",
+        "attempt_count integer not null default 1",
+        "lease_token uuid",
+        "lease_expires_at timestamptz",
+        "'manual_required'",
         "ella_photon_quota_buckets",
     )
     # SKIP LOCKED is repository behavior rather than DDL; verify it separately.

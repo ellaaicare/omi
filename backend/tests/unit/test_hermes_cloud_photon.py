@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
+import hmac
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -27,15 +30,34 @@ from ella.services.runtime_resolver import IsolatedRuntime
 POLICY_SHA = "a" * 40
 MANIFEST_SHA = "b" * 64
 NOW = datetime.now(timezone.utc)
+IDENTITY_HMAC_KEY = "identity-key-" + ("x" * 32)
+PROVIDER_MESSAGE_ID = "provider-message-raw"
 
 
-def _config() -> PhotonAdapterConfig:
+class SimulatedProcessCrash(BaseException):
+    pass
+
+
+def _opaque_key(namespace: str, raw_value: str) -> str:
+    return hmac.new(
+        IDENTITY_HMAC_KEY.encode("utf-8"),
+        f"{namespace}\x1f{raw_value}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _config(*, authorize_synthetic_fixture: bool = True) -> PhotonAdapterConfig:
     return PhotonAdapterConfig(
         enabled=True,
         internal_owner_uid="synthetic-owner",
-        identity_hmac_key="identity-key-" + ("x" * 32),
+        identity_hmac_key=IDENTITY_HMAC_KEY,
         approved_policy_commit_sha=POLICY_SHA,
         preflight_max_age_seconds=30,
+        synthetic_message_keys=(
+            frozenset({_opaque_key("photon-inbound-message", PROVIDER_MESSAGE_ID)})
+            if authorize_synthetic_fixture
+            else frozenset()
+        ),
     )
 
 
@@ -104,6 +126,10 @@ class FakeRepository:
         self.quota_calls = []
         self.failures = []
         self.ack_calls = []
+        self.completed_runtime_receipts = set()
+        self.crash_before_quota = False
+        self.crash_before_provider_mark = False
+        self.crash_on_complete = False
 
     async def resolve_photon_channel_binding(self, **kwargs):
         if (
@@ -129,7 +155,45 @@ class FakeRepository:
         if existing:
             if existing["inbound_payload_sha256"] != kwargs["inbound_payload_sha256"]:
                 raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
-            return {**existing, "inserted": False}
+            stale = existing["status"] in {"claimed", "running"} and (
+                not isinstance(existing.get("lease_expires_at"), datetime)
+                or existing["lease_expires_at"] <= datetime.now(timezone.utc)
+            )
+            if stale and existing["status"] in {"claimed", "running"}:
+                if existing["provider_started"] and existing["id"] not in self.completed_runtime_receipts:
+                    existing.update(
+                        status="uncertain",
+                        reconciliation_status="manual_required",
+                        error_code="photon_provider_outcome_unconfirmed",
+                        lease_token=None,
+                        lease_expires_at=None,
+                    )
+                    return {
+                        **existing,
+                        "inserted": False,
+                        "reclaimed": False,
+                        "acquired": False,
+                    }
+                existing.update(
+                    lease_token=str(uuid.uuid4()),
+                    lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=kwargs["lease_seconds"]),
+                    attempt_count=existing["attempt_count"] + 1,
+                    reconciliation_status="recovered",
+                    error_code=None,
+                )
+                return {
+                    **existing,
+                    "inserted": False,
+                    "reclaimed": True,
+                    "acquired": True,
+                }
+            return {
+                **existing,
+                "inserted": False,
+                "reclaimed": False,
+                "acquired": False,
+            }
+        lease_token = str(uuid.uuid4())
         row = {
             "id": "00000000-0000-0000-0000-000000000003",
             "photon_binding_id": kwargs["photon_binding_id"],
@@ -139,18 +203,50 @@ class FakeRepository:
             "status": "claimed",
             "quota_reserved": False,
             "writeback_receipt": {},
+            "provider_started": False,
+            "attempt_count": 1,
+            "lease_token": lease_token,
+            "lease_expires_at": datetime.now(timezone.utc) + timedelta(seconds=kwargs["lease_seconds"]),
+            "reconciliation_status": "none",
         }
         self.messages[key] = row
-        return {**row, "inserted": True}
+        return {
+            **row,
+            "inserted": True,
+            "reclaimed": False,
+            "acquired": True,
+        }
 
     async def reserve_photon_quota(self, **kwargs):
+        if self.crash_before_quota:
+            self.crash_before_quota = False
+            raise SimulatedProcessCrash()
         self.quota_calls.append(dict(kwargs))
         row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
+        if row["lease_token"] != kwargs["lease_token"]:
+            raise RuntimePoolClaimError("photon_message_claim_conflict")
+        if row["quota_reserved"]:
+            return dict(row)
         row.update(status="running", quota_reserved=True)
         return dict(row)
 
-    async def complete_photon_message(self, **kwargs):
+    async def mark_photon_provider_started(self, **kwargs):
+        if self.crash_before_provider_mark:
+            self.crash_before_provider_mark = False
+            raise SimulatedProcessCrash()
         row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
+        if row["lease_token"] != kwargs["lease_token"]:
+            raise RuntimePoolClaimError("photon_message_claim_conflict")
+        row["provider_started"] = True
+        return dict(row)
+
+    async def complete_photon_message(self, **kwargs):
+        if self.crash_on_complete:
+            self.crash_on_complete = False
+            raise SimulatedProcessCrash()
+        row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
+        if row["lease_token"] != kwargs["lease_token"]:
+            raise RuntimePoolClaimError("photon_message_claim_conflict")
         row.update(
             status="awaiting_delivery",
             runtime_interaction_id=kwargs["runtime_interaction_id"],
@@ -163,19 +259,28 @@ class FakeRepository:
             preflight_receipt=dict(kwargs["preflight_receipt"]),
             writeback_receipt=dict(kwargs["writeback_receipt"]),
             provider_started=True,
+            lease_token=None,
+            lease_expires_at=None,
         )
         return dict(row)
 
     async def fail_photon_message(self, **kwargs):
         self.failures.append(dict(kwargs))
         row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
-        if row["status"] not in {"claimed", "running"}:
+        if row["status"] not in {"claimed", "running"} or row["lease_token"] != kwargs["lease_token"]:
             return
         row.update(
             status="uncertain" if kwargs["uncertain"] else "failed",
             error_code=kwargs["error_code"],
             provider_started=kwargs["provider_started"],
+            reconciliation_status=("manual_required" if kwargs["uncertain"] else row["reconciliation_status"]),
+            lease_token=None,
+            lease_expires_at=None,
         )
+
+    def expire_active_lease(self):
+        row = next(iter(self.messages.values()))
+        row["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async def get_photon_message_receipt(self, **kwargs):
         for item in self.messages.values():
@@ -220,15 +325,26 @@ class FakeCloudClient:
 
 
 class FakeRuntimeService:
-    def __init__(self, event_store, *, failure=None):
+    def __init__(self, event_store, repository, *, failure=None):
         self.event_store = event_store
+        self.repository = repository
         self.failure = failure
         self.calls = []
+        self.provider_calls = []
+        self.completed = {}
+        self.crash_after_provider_start = False
 
     async def run_turn(self, runtime, request):
         self.calls.append((runtime, request))
+        existing = self.completed.get(request.client_interaction_id)
+        if existing:
+            return HermesCloudTurnResult(**{**existing.__dict__, "duplicate": True})
         if self.failure:
             raise self.failure
+        self.provider_calls.append(request.client_interaction_id)
+        if self.crash_after_provider_start:
+            self.crash_after_provider_start = False
+            raise SimulatedProcessCrash()
         source_identity = HermesCloudPhotonAdapter._source_identity(request.uid, request.client_interaction_id)
         inbound_event_id = "canonical-inbound"
         outbound_event_id = "canonical-outbound"
@@ -249,7 +365,7 @@ class FakeRuntimeService:
                 )
             ]
         )
-        return HermesCloudTurnResult(
+        result = HermesCloudTurnResult(
             text="Synthetic answer.",
             response_id="provider-response",
             canonical_user_event_id=inbound_event_id,
@@ -258,6 +374,10 @@ class FakeRuntimeService:
             usage={"input_tokens": 10, "output_tokens": 4},
             runtime_interaction_id="00000000-0000-0000-0000-000000000005",
         )
+        self.completed[request.client_interaction_id] = result
+        receipt_id = request.client_interaction_id.removeprefix("photon:")
+        self.repository.completed_runtime_receipts.add(receipt_id)
+        return result
 
 
 def _preflight() -> PhotonSidecarPreflight:
@@ -280,7 +400,7 @@ def _message(**updates) -> PhotonInboundEnvelope:
         line_identity="line-raw",
         contact_identity="contact-raw",
         connection_id="connection-raw",
-        provider_message_id="provider-message-raw",
+        provider_message_id=PROVIDER_MESSAGE_ID,
         text="Synthetic hello.",
         occurred_at=NOW,
         conversation_initiation=True,
@@ -290,11 +410,22 @@ def _message(**updates) -> PhotonInboundEnvelope:
     return PhotonInboundEnvelope(**values)
 
 
-def _adapter(*, cloud=None, runtime_failure=None):
-    config = _config()
+def _adapter(
+    *,
+    cloud=None,
+    runtime_failure=None,
+    authorize_synthetic_fixture=True,
+):
+    config = _config(
+        authorize_synthetic_fixture=authorize_synthetic_fixture,
+    )
     repository = FakeRepository(config)
     event_store = InMemoryCanonicalEventStore()
-    runtime_service = FakeRuntimeService(event_store, failure=runtime_failure)
+    runtime_service = FakeRuntimeService(
+        event_store,
+        repository,
+        failure=runtime_failure,
+    )
 
     async def resolve(uid, repository_arg):
         assert uid == "synthetic-owner"
@@ -420,19 +551,42 @@ def test_stale_connection_and_expired_oauth_fail_closed():
     assert runtime_service.calls == []
 
 
-def test_synthetic_only_mode_rejects_non_synthetic_content_before_claim(
+@pytest.mark.parametrize("caller_synthetic", [False, True])
+def test_synthetic_only_mode_uses_server_fixture_allowlist_not_caller_flag(
+    monkeypatch,
+    caller_synthetic,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    adapter, repository, runtime_service = _adapter(
+        authorize_synthetic_fixture=False,
+    )
+    asyncio.run(adapter.preflight(_preflight()))
+
+    with pytest.raises(ProvisioningError) as blocked:
+        asyncio.run(
+            adapter.handle_inbound(
+                _message(synthetic=caller_synthetic),
+            )
+        )
+
+    assert blocked.value.code == "photon_real_data_not_authorized"
+    assert repository.claim_calls == []
+    assert repository.quota_calls == []
+    assert runtime_service.calls == []
+
+
+def test_synthetic_fixture_is_server_authorized_when_caller_omits_flag(
     monkeypatch,
 ):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     adapter, repository, runtime_service = _adapter()
     asyncio.run(adapter.preflight(_preflight()))
 
-    with pytest.raises(ProvisioningError) as blocked:
-        asyncio.run(adapter.handle_inbound(_message(synthetic=False)))
+    result = asyncio.run(adapter.handle_inbound(_message(synthetic=False)))
 
-    assert blocked.value.code == "photon_real_data_not_authorized"
-    assert repository.claim_calls == []
-    assert runtime_service.calls == []
+    assert result.status == "awaiting_delivery"
+    assert repository.claim_calls
+    assert runtime_service.calls[0][1].client_metadata["synthetic"] is True
 
 
 def test_tool_drift_and_allow_all_fail_preflight():
@@ -483,6 +637,94 @@ def test_sidecar_disconnect_after_writeback_returns_no_delivery():
     receipt = next(iter(repository.messages.values()))
     assert receipt["status"] == "awaiting_delivery"
     assert receipt["canonical_outbound_event_id"] == "canonical-outbound"
+
+
+def test_stale_claimed_receipt_is_reclaimed_before_quota_or_provider_work():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    repository.crash_before_quota = True
+
+    with pytest.raises(SimulatedProcessCrash):
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert receipt["status"] == "claimed"
+    assert receipt["quota_reserved"] is False
+    assert runtime_service.provider_calls == []
+
+    repository.expire_active_lease()
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+
+    assert recovered.status == "awaiting_delivery"
+    assert receipt["attempt_count"] == 2
+    assert receipt["reconciliation_status"] == "recovered"
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_stale_running_receipt_is_reclaimed_before_provider_start():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    repository.crash_before_provider_mark = True
+
+    with pytest.raises(SimulatedProcessCrash):
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert receipt["status"] == "running"
+    assert receipt["quota_reserved"] is True
+    assert receipt["provider_started"] is False
+
+    repository.expire_active_lease()
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+
+    assert recovered.status == "awaiting_delivery"
+    assert len(repository.quota_calls) == 2
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_completed_runtime_interaction_recovers_without_second_provider_call():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    repository.crash_on_complete = True
+
+    with pytest.raises(SimulatedProcessCrash):
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert receipt["status"] == "running"
+    assert receipt["provider_started"] is True
+    assert len(runtime_service.provider_calls) == 1
+
+    repository.expire_active_lease()
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+
+    assert recovered.status == "awaiting_delivery"
+    assert len(runtime_service.calls) == 2
+    assert len(runtime_service.provider_calls) == 1
+    assert receipt["reconciliation_status"] == "recovered"
+
+
+def test_unconfirmed_provider_started_receipt_requires_manual_reconciliation():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    runtime_service.crash_after_provider_start = True
+
+    with pytest.raises(SimulatedProcessCrash):
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert receipt["status"] == "running"
+    assert receipt["provider_started"] is True
+    repository.expire_active_lease()
+
+    with pytest.raises(ProvisioningError) as blocked:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert blocked.value.code == "photon_message_uncertain"
+    assert blocked.value.retryable is False
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert len(runtime_service.provider_calls) == 1
 
 
 def test_conflicting_outbound_provider_ack_fails_closed():

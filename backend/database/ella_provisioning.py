@@ -1430,51 +1430,134 @@ class EllaProvisioningRepository:
         inbound_provider_message_key: str,
         inbound_payload_sha256: str,
         command_tier_version: str,
+        lease_seconds: int,
     ) -> dict[str, Any]:
-        inserted = await self.pool.fetchrow(
-            """
-            INSERT INTO ella_photon_message_receipts (
-                id, photon_binding_id, inbound_provider_message_key,
-                inbound_payload_sha256, status, command_tier_version
-            )
-            VALUES ($1, $2, $3, $4, 'claimed', $5)
-            ON CONFLICT (
-                photon_binding_id, inbound_provider_message_key
-            ) DO NOTHING
-            RETURNING *
-            """,
-            uuid.uuid4(),
-            uuid.UUID(str(photon_binding_id)),
-            inbound_provider_message_key,
-            inbound_payload_sha256,
-            command_tier_version,
-        )
-        if inserted:
-            result = dict(inserted)
-            result["inserted"] = True
-            return result
-        existing = await self.pool.fetchrow(
-            """
-            SELECT *
-            FROM ella_photon_message_receipts
-            WHERE photon_binding_id = $1
-              AND inbound_provider_message_key = $2
-            """,
-            uuid.UUID(str(photon_binding_id)),
-            inbound_provider_message_key,
-        )
-        if not existing:
-            raise RuntimePoolClaimError("photon_message_claim_lost")
-        result = dict(existing)
-        if str(result["inbound_payload_sha256"]) != inbound_payload_sha256:
-            raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
-        result["inserted"] = False
-        return result
+        if not 30 <= lease_seconds <= 900:
+            raise RuntimePoolClaimError("photon_receipt_lease_invalid")
+        binding_uuid = uuid.UUID(str(photon_binding_id))
+        new_lease_token = uuid.uuid4()
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                inserted = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_photon_message_receipts (
+                        id, photon_binding_id, inbound_provider_message_key,
+                        inbound_payload_sha256, status, command_tier_version,
+                        lease_token, lease_expires_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, 'claimed', $5, $6,
+                        CURRENT_TIMESTAMP + ($7 * INTERVAL '1 second')
+                    )
+                    ON CONFLICT (
+                        photon_binding_id, inbound_provider_message_key
+                    ) DO NOTHING
+                    RETURNING *
+                    """,
+                    uuid.uuid4(),
+                    binding_uuid,
+                    inbound_provider_message_key,
+                    inbound_payload_sha256,
+                    command_tier_version,
+                    new_lease_token,
+                    lease_seconds,
+                )
+                if inserted:
+                    result = dict(inserted)
+                    result.update(inserted=True, reclaimed=False, acquired=True)
+                    return result
+
+                existing = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_photon_message_receipts
+                    WHERE photon_binding_id = $1
+                      AND inbound_provider_message_key = $2
+                    FOR UPDATE
+                    """,
+                    binding_uuid,
+                    inbound_provider_message_key,
+                )
+                if not existing:
+                    raise RuntimePoolClaimError("photon_message_claim_lost")
+                result = dict(existing)
+                if str(result["inbound_payload_sha256"]) != inbound_payload_sha256:
+                    raise RuntimePoolClaimError("photon_duplicate_payload_conflict")
+
+                status = str(result.get("status") or "")
+                lease_expires_at = result.get("lease_expires_at")
+                stale = status in {"claimed", "running"} and (
+                    not isinstance(lease_expires_at, datetime) or lease_expires_at <= datetime.now(timezone.utc)
+                )
+                if stale:
+                    safe_to_reclaim = not bool(result.get("provider_started"))
+                    if not safe_to_reclaim:
+                        safe_to_reclaim = bool(
+                            await connection.fetchval(
+                                """
+                                SELECT 1
+                                FROM ella_runtime_interactions i
+                                JOIN ella_runtime_session_scopes s ON s.id = i.scope_id
+                                JOIN ella_photon_channel_bindings p
+                                  ON p.runtime_binding_id = s.binding_id
+                                WHERE p.id = $1
+                                  AND s.channel = 'photon'
+                                  AND i.client_interaction_id = $2
+                                  AND i.status = 'completed'
+                                LIMIT 1
+                                """,
+                                binding_uuid,
+                                f"photon:{result['id']}",
+                            )
+                        )
+                    if safe_to_reclaim:
+                        reclaimed = await connection.fetchrow(
+                            """
+                            UPDATE ella_photon_message_receipts
+                            SET lease_token = $2,
+                                lease_expires_at =
+                                    CURRENT_TIMESTAMP + ($3 * INTERVAL '1 second'),
+                                attempt_count = attempt_count + 1,
+                                reconciliation_status = 'recovered',
+                                error_code = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = $1
+                              AND status IN ('claimed', 'running')
+                            RETURNING *
+                            """,
+                            result["id"],
+                            new_lease_token,
+                            lease_seconds,
+                        )
+                        recovered = dict(reclaimed)
+                        recovered.update(inserted=False, reclaimed=True, acquired=True)
+                        return recovered
+
+                    quarantined = await connection.fetchrow(
+                        """
+                        UPDATE ella_photon_message_receipts
+                        SET status = 'uncertain',
+                            reconciliation_status = 'manual_required',
+                            error_code = 'photon_provider_outcome_unconfirmed',
+                            lease_token = NULL,
+                            lease_expires_at = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1
+                          AND status IN ('claimed', 'running')
+                        RETURNING *
+                        """,
+                        result["id"],
+                    )
+                    result = dict(quarantined)
+
+                result.update(inserted=False, reclaimed=False, acquired=False)
+                return result
 
     async def reserve_photon_quota(
         self,
         *,
         receipt_id: str,
+        lease_token: str,
         photon_binding_id: str,
         message_limit: int,
         initiation_limit: int,
@@ -1499,7 +1582,15 @@ class EllaProvisioningRepository:
                 )
                 if not receipt:
                     raise RuntimePoolClaimError("photon_message_receipt_missing")
+                if (
+                    str(receipt.get("lease_token") or "") != lease_token
+                    or not isinstance(receipt.get("lease_expires_at"), datetime)
+                    or receipt["lease_expires_at"] <= datetime.now(timezone.utc)
+                ):
+                    raise RuntimePoolClaimError("photon_message_claim_conflict")
                 if receipt["quota_reserved"]:
+                    if receipt["status"] != "running":
+                        raise RuntimePoolClaimError("photon_message_claim_conflict")
                     return dict(receipt)
                 bucket = await connection.fetchrow(
                     """
@@ -1535,18 +1626,46 @@ class EllaProvisioningRepository:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = $1
                       AND status = 'claimed'
+                      AND lease_token = $2
+                      AND lease_expires_at > CURRENT_TIMESTAMP
                     RETURNING *
                     """,
                     receipt_uuid,
+                    uuid.UUID(str(lease_token)),
                 )
                 if not updated:
                     raise RuntimePoolClaimError("photon_message_claim_conflict")
                 return dict(updated)
 
+    async def mark_photon_provider_started(
+        self,
+        *,
+        receipt_id: str,
+        lease_token: str,
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_photon_message_receipts
+            SET provider_started = true,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND lease_token = $2
+              AND lease_expires_at > CURRENT_TIMESTAMP
+              AND status = 'running'
+            RETURNING *
+            """,
+            uuid.UUID(str(receipt_id)),
+            uuid.UUID(str(lease_token)),
+        )
+        if not row:
+            raise RuntimePoolClaimError("photon_message_claim_conflict")
+        return dict(row)
+
     async def complete_photon_message(
         self,
         *,
         receipt_id: str,
+        lease_token: str,
         runtime_interaction_id: Optional[str],
         canonical_inbound_event_id: str,
         canonical_outbound_event_id: str,
@@ -1572,9 +1691,13 @@ class EllaProvisioningRepository:
                 writeback_receipt = $10::jsonb,
                 provider_started = true,
                 error_code = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
               AND status = 'running'
+              AND lease_token = $11
+              AND lease_expires_at > CURRENT_TIMESTAMP
             RETURNING *
             """,
             uuid.UUID(str(receipt_id)),
@@ -1587,6 +1710,7 @@ class EllaProvisioningRepository:
             json.dumps(usage),
             json.dumps(preflight_receipt),
             json.dumps(writeback_receipt),
+            uuid.UUID(str(lease_token)),
         )
         if not row:
             raise RuntimePoolClaimError("photon_message_completion_conflict")
@@ -1596,6 +1720,7 @@ class EllaProvisioningRepository:
         self,
         *,
         receipt_id: str,
+        lease_token: str,
         error_code: str,
         uncertain: bool,
         provider_started: bool,
@@ -1606,14 +1731,22 @@ class EllaProvisioningRepository:
             SET status = $2,
                 error_code = $3,
                 provider_started = provider_started OR $4,
+                reconciliation_status = CASE
+                    WHEN $2 = 'uncertain' THEN 'manual_required'
+                    ELSE reconciliation_status
+                END,
+                lease_token = NULL,
+                lease_expires_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $1
               AND status IN ('claimed', 'running')
+              AND lease_token = $5
             """,
             uuid.UUID(str(receipt_id)),
             "uncertain" if uncertain else "failed",
             error_code[:120],
             provider_started,
+            uuid.UUID(str(lease_token)),
         )
 
     async def acknowledge_photon_delivery(
