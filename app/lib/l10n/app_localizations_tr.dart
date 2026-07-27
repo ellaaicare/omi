@@ -8876,14 +8876,14 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get aiConsentCompactSummary =>
-      'Other enabled Ella features may use these already disclosed processors: Deepgram, Soniox, or Speechmatics for microphone transcription; Ella self-hosted Hermes, Honcho, Kokoro, or Fish; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok for text or live voice; Inworld AI or ElevenLabs for spoken replies; and Google Firebase for account and service infrastructure. Only the data needed for the chosen feature is sent through Ella’s secure backend.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
 
   @override
   String get aiConsentNoSharingBeforeAllow =>
-      'Ella will not send audio, transcripts, messages, selected memory context, or Photon message content to these processors until you choose Allow. Not now keeps cloud listening, AI, memory, voice, and messaging features off. You can review or revoke this permission in Settings.';
+      'Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.';
 
   @override
   String get aiConsentRevokeAction => 'Revoke AI permission';
@@ -8895,7 +8895,7 @@ class AppLocalizationsTr extends AppLocalizations {
   String get aiConsentAllowedStatus => 'Managed cloud AI allowed for this account and profile';
 
   @override
-  String get aiConsentNotAllowedStatus => 'Managed cloud AI sharing is off — v6 permission required';
+  String get aiConsentNotAllowedStatus => 'Cloud AI permission is off — v7 permission required';
 
   @override
   String get aiConsentRevokeSyncFailed =>
@@ -8906,13 +8906,14 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get aiConsentOffGateBody =>
-      'Ella will not provision AI features or send audio, transcripts, messages, or memory context while permission is off. You can review the disclosure whenever you are ready.';
+      'Ella will not set up these cloud AI features or send what you say or type, messages, or details from your saved memories while permission is off. You can review this information whenever you are ready.';
 
   @override
   String get aiConsentReviewAction => 'Review AI permission';
 
   @override
-  String get aiConsentActiveAudioStopped => 'AI permission could not be verified. Recording and voice chat stopped.';
+  String get aiConsentActiveAudioStopped =>
+      'Ella could not verify AI permission. Cloud sharing and voice chat have stopped.';
 
   @override
   String get deleteAccountServerConfirmationFailed =>
@@ -8921,30 +8922,40 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get deleteAccountLocalCleanupFailed =>
       'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.';
+
   @override
   String get aiConsentManagedCloudIntro =>
-      'For the managed cloud experience, Ella may send only the data needed for the feature you choose to these named partners:';
+      'Before Ella sends anything to these companies, please choose whether you agree. Ella uses only the company needed for the feature you choose:';
+
   @override
   String get aiConsentHermesCloudTitle => 'Nous Research / Hermes Cloud';
+
   @override
   String get aiConsentHermesCloudBody =>
-      'Runs Ella’s managed agent. It may receive messages, voice or transcript text, selected first-party context, session metadata, prompt policy, and model or tool usage so Ella can answer and continue a session.';
+      'Runs Ella’s cloud companion. It may receive what you say or type, details you choose to share, and basic information needed to keep your conversation going.';
+
   @override
   String get aiConsentOpenAiManagedTitle => 'OpenAI';
+
   @override
   String get aiConsentOpenAiManagedBody =>
-      'Processes model input and output through Ella’s approved OpenAI Codex OAuth route so the managed agent can generate a response. Ella does not expose an OpenAI key to the app.';
+      'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.';
+
   @override
-  String get aiConsentHonchoCloudTitle => 'Honcho Cloud';
+  String get aiConsentHonchoCloudTitle => 'Honcho / Plastic Labs';
+
   @override
   String get aiConsentHonchoCloudBody =>
-      'Stores and retrieves consented derived memory and selected context for this server-bound profile so Ella can remember relevant details. It is not Ella’s canonical record.';
+      'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.';
+
   @override
   String get aiConsentPhotonTitle => 'Photon';
+
   @override
   String get aiConsentPhotonBody =>
-      'Delivers iMessage content and the messaging identifiers needed for one explicitly allowed test contact on a shared test line.';
+      'Sends iMessage content and basic delivery details only to one person you choose for testing.';
+
   @override
   String get aiConsentManagedCloudScope =>
-      'This permission is bound to the signed-in account and its server-selected profile. Photon remains test-contact-only: no allow-all recipients, caregiver delivery, or inbound attachments. A provider, model route, profile, or messaging-scope change requires permission again.';
+      'This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.';
 }

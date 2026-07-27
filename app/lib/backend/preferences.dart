@@ -29,7 +29,7 @@ class SharedPreferencesUtil {
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
-  static const String currentAiConsentContractVersion = 'ai-data-processors-v6';
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v7';
   static const String currentAiConsentProcessorSetHash =
       'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296';
   static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v1';

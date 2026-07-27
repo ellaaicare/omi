@@ -72,24 +72,19 @@ void main() {
         tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
     expect(disclosure, contains('secure backend'));
     expect(disclosure, contains('Nous Research / Hermes Cloud'));
-    expect(disclosure, contains('messages, voice or transcript text'));
+    expect(disclosure, contains('what you say or type'));
     expect(disclosure, contains('OpenAI'));
-    expect(disclosure, contains('OpenAI Codex OAuth route'));
-    expect(disclosure, contains('Honcho Cloud'));
-    expect(disclosure, contains('derived memory'));
+    expect(disclosure, contains('Honcho / Plastic Labs'));
+    expect(disclosure, contains('remember useful details'));
     expect(disclosure, contains('Photon'));
-    expect(disclosure, contains('messaging identifiers'));
-    expect(disclosure, contains('one explicitly allowed test contact'));
-    expect(disclosure, contains('no allow-all recipients'));
-    expect(disclosure, contains('caregiver delivery'));
-    expect(disclosure, contains('inbound attachments'));
-    expect(disclosure, contains('requires permission again'));
+    expect(disclosure, contains('one person you choose for testing'));
+    expect(disclosure, contains('cannot message everyone'));
+    expect(disclosure, contains('Ella will ask again'));
     expect(disclosure, contains('Deepgram'));
     expect(disclosure, contains('Soniox'));
     expect(disclosure, contains('Speechmatics'));
     expect(disclosure, contains('Google Firebase'));
-    expect(disclosure, contains('self-hosted Hermes'));
-    expect(disclosure, contains('Ella self-hosted Hermes, Honcho'));
+    expect(disclosure, contains('Ella’s own Hermes, Honcho'));
     expect(disclosure, contains('OpenRouter'));
     expect(disclosure, contains('Google Gemini'));
     expect(disclosure, contains('OpenAI'));
@@ -99,10 +94,24 @@ void main() {
     expect(disclosure, contains('Inworld AI'));
     expect(disclosure, contains('Kokoro'));
     expect(disclosure, contains('Fish'));
-    expect(disclosure, contains('selected memory context'));
-    expect(disclosure, contains('will not send audio, transcripts, messages, selected memory context'));
+    expect(disclosure, contains('details from your saved memories'));
     expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
+
+    final normalizedDisclosure = disclosure.toLowerCase();
+    for (final bannedWord in const [
+      'monitor',
+      'alert',
+      'emergency',
+      'detect',
+      'track',
+      'transcript',
+      'recording',
+      'omi',
+      'fragment',
+    ]) {
+      expect(normalizedDisclosure, isNot(contains(bannedWord)), reason: 'Consent copy contains "$bannedWord"');
+    }
   });
 
   testWidgets('accept records the current processor contract', (tester) async {
