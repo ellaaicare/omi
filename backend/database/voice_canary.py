@@ -877,7 +877,29 @@ async def reserve_session_cost(
             current = _as_int(active.get("estimated_cost_microusd"))
             daily_with_reservation = max(0, rollup["daily_cost_microusd"] - current) + reservation
             monthly_with_reservation = max(0, rollup["monthly_cost_microusd"] - current) + reservation
-            code = await _kill_switch_code(conn, uid, active["provider"])
+            code: Optional[str] = None
+            if entitlement["revision"] != active["entitlement_revision"]:
+                code = "entitlement_stale"
+            elif entitlement["status"] != "active":
+                code = entitlement["status"]
+            elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
+                code = "expired"
+            else:
+                code = await _kill_switch_code(conn, uid, active["provider"])
+            if not code and active["provider"] not in set(
+                entitlement.get("provider_allowlist") or []
+            ):
+                code = "provider_not_allowed"
+            if (
+                not code
+                and entitlement.get("model_allowlist")
+                and active["model"] not in set(entitlement["model_allowlist"])
+            ):
+                code = "model_not_allowed"
+            if not code and active["mode"] not in set(
+                entitlement.get("mode_allowlist") or []
+            ):
+                code = "mode_not_allowed"
             quota_code, soft_warning = quota_state(
                 entitlement,
                 daily_used_s=rollup["daily_used_s"],

@@ -121,6 +121,18 @@ def _row_dict(row: Any) -> Optional[dict[str, Any]]:
     return dict(row)
 
 
+def _json_object(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return dict(decoded) if isinstance(decoded, dict) else decoded
+    return value
+
+
 class EllaProvisioningRepository:
     def __init__(self, pool: asyncpg.Pool, *, firestore_db: Any = None):
         self.pool = pool
@@ -1145,9 +1157,9 @@ class EllaProvisioningRepository:
                 )
                 if running_other:
                     return None
-                previous_response_id = await connection.fetchval(
+                previous_response = await connection.fetchrow(
                     """
-                    SELECT provider_response_id
+                    SELECT provider_response_id, usage
                     FROM ella_runtime_interactions
                     WHERE scope_id = $1
                       AND id <> $2
@@ -1158,6 +1170,12 @@ class EllaProvisioningRepository:
                     """,
                     selected["scope_id"],
                     interaction_uuid,
+                )
+                previous_response_id = (
+                    previous_response["provider_response_id"] if previous_response else None
+                )
+                previous_response_usage = (
+                    _json_object(previous_response["usage"] or {}) if previous_response else {}
                 )
                 row = await connection.fetchrow(
                     """
@@ -1180,7 +1198,10 @@ class EllaProvisioningRepository:
                     interaction_uuid,
                     previous_response_id,
                 )
-                return _row_dict(row)
+                result = _row_dict(row)
+                if result is not None:
+                    result["previous_response_usage"] = previous_response_usage
+                return result
 
     async def record_runtime_provider_receipt(
         self,

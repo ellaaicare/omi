@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
+INPUT_TOKEN_ENVELOPE_ALLOWANCE = 32
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -62,6 +64,53 @@ def _turn_budget(runtime: IsolatedRuntime) -> dict[str, int]:
         ),
         "max_tool_calls": max_tool_calls,
     }
+
+
+def _usage_token_count(usage: Any, field: str) -> int:
+    if not isinstance(usage, dict) or field not in usage:
+        raise ProvisioningError("hermes_cloud_previous_usage_missing", retryable=False)
+    try:
+        value = int(usage[field])
+    except (TypeError, ValueError) as exc:
+        raise ProvisioningError("hermes_cloud_previous_usage_invalid", retryable=False) from exc
+    if value < 0:
+        raise ProvisioningError("hermes_cloud_previous_usage_invalid", retryable=False)
+    return value
+
+
+def conservative_input_token_upper_bound(
+    *,
+    user_input: str,
+    instructions: str,
+    previous_response_id: Optional[str],
+    previous_response_usage: Any,
+) -> int:
+    """Bound all state that Hermes expands into the next provider input.
+
+    UTF-8 byte length is a deterministic upper bound for tokens contributed by
+    the new JSON text fields. A chained response also replays the predecessor's
+    complete input and output, so its provider-reported usage is carried
+    forward instead of pricing only the visible new message.
+    """
+    current_envelope = {
+        "input": user_input,
+        "instructions": instructions,
+    }
+    current_bound = len(
+        json.dumps(
+            current_envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ) + INPUT_TOKEN_ENVELOPE_ALLOWANCE
+    if not previous_response_id:
+        return current_bound
+    return (
+        current_bound
+        + _usage_token_count(previous_response_usage, "input_tokens")
+        + _usage_token_count(previous_response_usage, "output_tokens")
+    )
 
 
 @dataclass(frozen=True)
@@ -308,6 +357,21 @@ class HermesCloudRuntimeService:
             lease_open = True
 
             budget = _turn_budget(runtime)
+            input_token_upper_bound = conservative_input_token_upper_bound(
+                user_input=request.user_input,
+                instructions=request.instructions,
+                previous_response_id=claimed.get("previous_response_id"),
+                previous_response_usage=claimed.get("previous_response_usage"),
+            )
+            if input_token_upper_bound > budget["max_input_tokens"]:
+                raise ProvisioningError(
+                    "hermes_cloud_input_budget_exceeded",
+                    retryable=False,
+                    detail={
+                        "input_token_upper_bound": input_token_upper_bound,
+                        "max_input_tokens": budget["max_input_tokens"],
+                    },
+                )
             reserved_cost = self.max_cost_estimator(
                 max_input_tokens=budget["max_input_tokens"],
                 max_output_tokens=budget["max_output_tokens"],

@@ -391,3 +391,132 @@ def test_cost_reservation_is_atomic_at_hard_boundary_and_settles(monkeypatch):
             )
 
     asyncio.run(_run_with_database(scenario))
+
+
+def test_cost_reservation_rejects_revocation_between_accept_and_reserve(monkeypatch):
+    started_at = datetime(2026, 7, 26, 22, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(voice_canary, "_utcnow", lambda: started_at)
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        revision = await _grant(pool, "uid-revoked-before-reserve")
+        assert (
+            await _accept(
+                "uid-revoked-before-reserve",
+                "session-revoked-before-reserve",
+                revision,
+            )
+        ).allowed
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET status = 'revoked'
+                WHERE uid = 'uid-revoked-before-reserve'
+                """
+            )
+
+        denied = await voice_canary.reserve_session_cost(
+            uid="uid-revoked-before-reserve",
+            session_id="session-revoked-before-reserve",
+            reservation_microusd=500,
+        )
+
+        assert denied.allowed is False
+        assert denied.code == "revoked"
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT estimated_cost_microusd
+                    FROM voice_active_sessions
+                    WHERE session_id = 'session-revoked-before-reserve'
+                    """
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+@pytest.mark.parametrize(
+    ("uid", "update_sql", "expected_code"),
+    [
+        (
+            "uid-stale-before-reserve",
+            "SET revision = revision + 1",
+            "entitlement_stale",
+        ),
+        (
+            "uid-provider-before-reserve",
+            "SET provider_allowlist = ARRAY[]::TEXT[]",
+            "provider_not_allowed",
+        ),
+        (
+            "uid-model-before-reserve",
+            "SET model_allowlist = ARRAY['other-model']",
+            "model_not_allowed",
+        ),
+        (
+            "uid-mode-before-reserve",
+            "SET mode_allowlist = ARRAY['other-mode']",
+            "mode_not_allowed",
+        ),
+    ],
+)
+def test_cost_reservation_revalidates_changed_entitlement_authority(
+    monkeypatch,
+    uid,
+    update_sql,
+    expected_code,
+):
+    started_at = datetime(2026, 7, 26, 22, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(voice_canary, "_utcnow", lambda: started_at)
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        revision = await _grant(pool, uid)
+        session_id = f"session-{uid}"
+        assert (await _accept(uid, session_id, revision)).allowed
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE voice_entitlements {update_sql} WHERE uid = $1",
+                uid,
+            )
+
+        denied = await voice_canary.reserve_session_cost(
+            uid=uid,
+            session_id=session_id,
+            reservation_microusd=500,
+        )
+
+        assert denied.allowed is False
+        assert denied.code == expected_code
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_cost_reservation_rechecks_expiry_after_accept(monkeypatch):
+    started_at = datetime(2026, 7, 26, 23, 0, tzinfo=timezone.utc)
+    clock = {"now": started_at}
+    monkeypatch.setattr(voice_canary, "_utcnow", lambda: clock["now"])
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "uid-expired-before-reserve"
+        revision = await _grant(
+            pool,
+            uid,
+            trial_expires_at=started_at + timedelta(seconds=5),
+        )
+        session_id = "session-expired-before-reserve"
+        assert (await _accept(uid, session_id, revision)).allowed
+        clock["now"] = started_at + timedelta(seconds=6)
+
+        denied = await voice_canary.reserve_session_cost(
+            uid=uid,
+            session_id=session_id,
+            reservation_microusd=500,
+        )
+
+        assert denied.allowed is False
+        assert denied.code == "expired"
+
+    asyncio.run(_run_with_database(scenario))

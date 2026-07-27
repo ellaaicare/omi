@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -323,6 +324,11 @@ class _InteractionClaimConnection:
                 "scope_id": self.scope_id,
                 "status": "pending",
             }
+        if "status = 'completed'" in query:
+            return {
+                "provider_response_id": "response-previous",
+                "usage": json.dumps({"input_tokens": 100, "output_tokens": 25}),
+            }
         if "UPDATE ella_runtime_interactions" in query:
             return {
                 "id": args[0],
@@ -336,8 +342,6 @@ class _InteractionClaimConnection:
         self.queries.append((query, args))
         if "status = 'running'" in query:
             return 1 if self.running_other else None
-        if "status = 'completed'" in query:
-            return "response-previous"
         raise AssertionError(query)
 
 
@@ -350,6 +354,10 @@ def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_c
 
     assert result["status"] == "running"
     assert result["previous_response_id"] == "response-previous"
+    assert result["previous_response_usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 25,
+    }
     joined = "\n".join(query for query, _args in connection.queries)
     assert "FOR UPDATE OF s, i" in joined
     assert "ORDER BY completed_at DESC, created_at DESC, id DESC" in joined

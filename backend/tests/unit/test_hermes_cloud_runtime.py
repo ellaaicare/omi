@@ -9,6 +9,7 @@ from ella.services.hermes_cloud import HermesCloudTurn
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    conservative_input_token_upper_bound,
 )
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
@@ -58,10 +59,12 @@ def _request(text: str = "Synthetic hello") -> HermesCloudTurnRequest:
 
 
 class FakeRepository:
-    def __init__(self):
+    def __init__(self, *, previous_response_id=None, previous_response_usage=None):
         self.interaction = None
         self.receipts = {}
         self.failures = []
+        self.previous_response_id = previous_response_id
+        self.previous_response_usage = previous_response_usage or {}
 
     async def get_or_create_runtime_scope(self, **kwargs):
         assert kwargs["allow_shadow"] is False
@@ -80,7 +83,8 @@ class FakeRepository:
             "request_hash": kwargs["request_hash"],
             "hermes_session_id": "interaction-a",
             "idempotency_key": "request-a",
-            "previous_response_id": None,
+            "previous_response_id": self.previous_response_id,
+            "previous_response_usage": self.previous_response_usage,
             "provider_response_id": None,
             "usage": {},
         }
@@ -307,6 +311,89 @@ def test_cost_reservation_denial_never_calls_provider_and_releases_no_reservatio
     assert policy.reserved[0]["reservation_microusd"] == 25
     assert policy.settled == []
     assert policy.released[0]["session_id"] == "interaction-a"
+
+
+def test_full_input_budget_includes_chained_context_and_is_conservative():
+    bound = conservative_input_token_upper_bound(
+        user_input="Synthetic follow-up",
+        instructions="Use the selected synthetic context.",
+        previous_response_id="response-previous",
+        previous_response_usage={"input_tokens": 100, "output_tokens": 40},
+    )
+
+    assert bound > 140
+
+
+def test_chained_context_over_input_budget_never_reaches_provider(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS", "256")
+    repository = FakeRepository(
+        previous_response_id="response-previous",
+        previous_response_usage={"input_tokens": 180, "output_tokens": 60},
+    )
+    cloud = FakeCloudClient()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 25,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request("short follow-up")))
+
+    assert error.value.code == "hermes_cloud_input_budget_exceeded"
+    assert cloud.calls == []
+    assert policy.reserved == []
+
+
+def test_over_input_budget_never_reserves_cost_or_calls_provider(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS", "256")
+    repository = FakeRepository()
+    cloud = FakeCloudClient()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 25,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request("x" * 300)))
+
+    assert error.value.code == "hermes_cloud_input_budget_exceeded"
+    assert cloud.calls == []
+    assert policy.reserved == []
+    assert policy.settled == []
+    assert policy.released == []
+    assert policy.completed[0]["normalized_error_code"] == "hermes_cloud_input_budget_exceeded"
+
+
+def test_chained_context_without_usage_fails_before_reservation_or_provider(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS", "8192")
+    repository = FakeRepository(previous_response_id="response-previous")
+    cloud = FakeCloudClient()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 25,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert error.value.code == "hermes_cloud_previous_usage_missing"
+    assert cloud.calls == []
+    assert policy.reserved == []
 
 
 def test_cancellation_closes_policy_lease():
