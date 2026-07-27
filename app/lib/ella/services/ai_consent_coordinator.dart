@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
-import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 
@@ -51,8 +50,13 @@ class AiConsentActionGate {
 class AiConsentCoordinator {
   static final AiConsentActionGate _gate = AiConsentActionGate();
 
-  static Future<bool> ensure(BuildContext context) {
+  static Future<bool> ensure(BuildContext context) async {
     final preferences = SharedPreferencesUtil();
+    if (preferences.aiConsentAccepted) return true;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (uid.isEmpty) return false;
+    if (await EllaAiConsentService().refreshServerAuthority(uid: uid)) return true;
+
     return _gate.ensure(
       hasConsent: () => preferences.aiConsentAccepted,
       requestConsent: () => _request(context),
@@ -61,25 +65,25 @@ class AiConsentCoordinator {
 
   static Future<bool> _request(BuildContext context) async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    if (isHermesProvisioningGateEnabled && uid.isEmpty) return false;
+    if (uid.isEmpty) return false;
+    final service = EllaAiConsentService();
 
     final accepted = await AiConsentSheet.show(
       context,
-      onAccept: isHermesProvisioningGateEnabled
-          ? () async {
-              final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
-              if (receiptId == null) return false;
-              if (context.mounted) {
-                try {
-                  context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-                } catch (_) {
-                  // The authenticated receipt is already persisted when this
-                  // action is rendered outside the provisioning provider tree.
-                }
-              }
-              return true;
-            }
-          : null,
+      onAccept: () async {
+        final receiptId = await service.grantCurrentConsent(uid: uid);
+        if (receiptId == null) return false;
+        if (context.mounted) {
+          try {
+            context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+          } catch (_) {
+            // The authenticated receipt is already persisted when this
+            // action is rendered outside the provisioning provider tree.
+          }
+        }
+        return true;
+      },
+      onDecline: () => service.declineCurrentConsent(uid: uid),
     );
     return accepted == true && SharedPreferencesUtil().aiConsentAccepted;
   }

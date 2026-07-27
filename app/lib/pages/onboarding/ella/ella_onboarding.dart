@@ -31,7 +31,10 @@ class EllaOnboarding extends StatefulWidget {
     required bool hasPriorAccountConsent,
     required bool deferredCurrentConsent,
   }) =>
-      !hasCurrentConsent && !hasPriorAccountConsent && !deferredCurrentConsent;
+      !hasCurrentConsent && !deferredCurrentConsent;
+
+  @visibleForTesting
+  static bool shouldStartProvisioning({required bool hasCurrentConsent}) => hasCurrentConsent;
 
   @override
   State<EllaOnboarding> createState() => _EllaOnboardingState();
@@ -65,7 +68,6 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
   Future<void> _onSignedIn() async {
     setState(() => _isSignedIn = true);
-    if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
   }
 
   Future<void> _startHermesProvisioning() async {
@@ -107,23 +109,26 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
       await preferences.prepareEllaProvisioningAccount(uid);
     }
     if (!mounted) return;
+    final consentService = EllaAiConsentService();
+    if (uid.isNotEmpty && !preferences.aiConsentAccepted) {
+      await consentService.refreshServerAuthority(uid: uid);
+    }
+    if (!mounted) return;
     final shouldPresentVoiceConsent = EllaOnboarding.shouldPresentVoiceConsent(
-      hasCurrentConsent:
-          isHermesProvisioningGateEnabled ? preferences.hasAccountBoundAiConsent(uid) : preferences.aiConsentAccepted,
+      hasCurrentConsent: preferences.hasAccountBoundAiConsent(uid),
       hasPriorAccountConsent: uid.isNotEmpty && preferences.hasPriorAccountBoundAiConsent(uid),
       deferredCurrentConsent: preferences.isCurrentAiConsentDeferred,
     );
     if (shouldPresentVoiceConsent && mounted) {
       await AiConsentSheet.show(
         context,
-        onAccept: isHermesProvisioningGateEnabled
-            ? () async {
-                final receiptId = await EllaAiConsentService().acknowledgePrivateCloudSync(uid: uid);
-                if (receiptId == null) return false;
-                if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
-                return true;
-              }
-            : null,
+        onAccept: () async {
+          final receiptId = await consentService.grantCurrentConsent(uid: uid);
+          if (receiptId == null) return false;
+          if (mounted) context.read<EllaProvisioningProvider>().setConsentReceiptId(receiptId);
+          return true;
+        },
+        onDecline: () => consentService.declineCurrentConsent(uid: uid),
       );
     }
     if (!mounted) return;
@@ -131,7 +136,11 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     SharedPreferencesUtil().onboardingCompleted = true;
     if (AuthService.instance.isSignedIn()) {
       updateUserOnboardingState(completed: true);
-      if (isHermesProvisioningGateEnabled) unawaited(_startHermesProvisioning());
+      final hasCurrentConsent = preferences.hasAccountBoundAiConsent(uid);
+      if (isHermesProvisioningGateEnabled &&
+          EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: hasCurrentConsent)) {
+        unawaited(_startHermesProvisioning());
+      }
     }
     _routeToAuthenticatedHome();
   }

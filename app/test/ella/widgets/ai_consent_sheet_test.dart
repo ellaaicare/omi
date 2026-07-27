@@ -14,10 +14,28 @@ void main() {
     await SharedPreferencesUtil.init();
   });
 
-  Widget buildApp() => const MaterialApp(
+  Widget buildApp() => MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(body: AiConsentSheet()),
+        home: Scaffold(
+          body: AiConsentSheet(
+            onAccept: () async {
+              final preferences = SharedPreferencesUtil();
+              preferences.uid = 'uid-a';
+              preferences.acceptAiConsent(
+                receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+                uid: 'uid-a',
+              );
+              preferences.markAiConsentServerVerified(
+                uid: 'uid-a',
+                receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+                policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+                processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+              );
+              return true;
+            },
+          ),
+        ),
       );
 
   testWidgets('presents as a bounded sheet with Not now always visible', (tester) async {
@@ -50,20 +68,27 @@ void main() {
 
     final disclosure =
         tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
-    expect(disclosure, contains("Ella's secure backend"));
-    expect(disclosure, contains('live microphone audio'));
+    expect(disclosure, contains('secure backend'));
+    expect(disclosure, contains('live or stored microphone audio'));
     expect(disclosure, contains('Deepgram'));
+    expect(disclosure, contains('Soniox'));
+    expect(disclosure, contains('Speechmatics'));
+    expect(disclosure, contains('Google Firebase'));
+    expect(disclosure, contains('self-hosted Hermes'));
+    expect(disclosure, contains('Honcho memory'));
     expect(disclosure, contains('OpenRouter'));
     expect(disclosure, contains('selected model provider'));
-    expect(disclosure, contains('Google (Gemini)'));
+    expect(disclosure, contains('Google Gemini'));
     expect(disclosure, contains('OpenAI'));
     expect(disclosure, contains('Groq'));
-    expect(disclosure, contains('xAI (Grok)'));
+    expect(disclosure, contains('xAI Grok'));
     expect(disclosure, contains('ElevenLabs'));
+    expect(disclosure, contains('Inworld AI'));
+    expect(disclosure, contains('Kokoro'));
+    expect(disclosure, contains('Fish'));
     expect(disclosure, contains('response text'));
-    expect(disclosure, contains('selected stored memory'));
-    expect(disclosure, contains('related people, topics, and dates'));
-    expect(disclosure, contains('Google (Gemini) or xAI (Grok) voice processor'));
+    expect(disclosure, contains('selected memory context'));
+    expect(disclosure, contains('will not send audio, transcripts, messages, or memory context'));
     expect(disclosure, contains('Full processor details in Privacy Policy'));
     expect(find.text('Not now'), findsOneWidget);
   });
@@ -80,12 +105,23 @@ void main() {
     final preferences = SharedPreferencesUtil();
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.aiConsentContractVersion, SharedPreferencesUtil.currentAiConsentContractVersion);
+    expect(preferences.aiConsentProcessorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
     expect(preferences.aiConsentDeferredVersion, isEmpty);
   });
 
   testWidgets('Not now defers the current processor contract', (tester) async {
     final preferences = SharedPreferencesUtil();
-    preferences.acceptAiConsent();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
 
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
@@ -97,5 +133,53 @@ void main() {
     expect(preferences.aiConsentAccepted, isFalse);
     expect(preferences.aiConsentContractVersion, isEmpty);
     expect(preferences.isCurrentAiConsentDeferred, isTrue);
+  });
+
+  testWidgets('review mode exposes revoke and deletion actions', (tester) async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+    );
+    preferences.markAiConsentServerVerified(
+      uid: 'uid-a',
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+      processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+    );
+    var revokeCalled = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => AiConsentSheet.show(
+                context,
+                reviewMode: true,
+                onDecline: () async => revokeCalled = true,
+                onRequestDeletion: () async {},
+              ),
+              child: const Text('Review consent'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Review consent'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Revoke AI permission'), findsOneWidget);
+    expect(find.text('Delete my account and data'), findsOneWidget);
+
+    await tester.tap(find.text('Revoke AI permission'));
+    await tester.pumpAndSettle();
+
+    expect(revokeCalled, isTrue);
+    expect(preferences.aiConsentAccepted, isFalse);
   });
 }

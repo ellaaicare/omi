@@ -9,11 +9,26 @@ import 'package:omi/utils/l10n_extensions.dart';
 class AiConsentSheet extends StatefulWidget {
   static final Uri privacyPolicyUri = Uri.parse('https://ella-ai-care.com/privacy');
 
-  const AiConsentSheet({super.key, this.onAccept});
+  const AiConsentSheet({
+    super.key,
+    this.onAccept,
+    this.onDecline,
+    this.onRequestDeletion,
+    this.reviewMode = false,
+  });
 
   final Future<bool> Function()? onAccept;
+  final Future<bool> Function()? onDecline;
+  final Future<void> Function()? onRequestDeletion;
+  final bool reviewMode;
 
-  static Future<bool?> show(BuildContext context, {Future<bool> Function()? onAccept}) {
+  static Future<bool?> show(
+    BuildContext context, {
+    Future<bool> Function()? onAccept,
+    Future<bool> Function()? onDecline,
+    Future<void> Function()? onRequestDeletion,
+    bool reviewMode = false,
+  }) {
     return showModalBottomSheet<bool>(
       context: context,
       isDismissible: false,
@@ -22,7 +37,15 @@ class AiConsentSheet extends StatefulWidget {
       useSafeArea: true,
       backgroundColor: EllaColors.paper,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
-      builder: (_) => FractionallySizedBox(heightFactor: 0.68, child: AiConsentSheet(onAccept: onAccept)),
+      builder: (_) => FractionallySizedBox(
+        heightFactor: reviewMode ? 0.78 : 0.68,
+        child: AiConsentSheet(
+          onAccept: onAccept,
+          onDecline: onDecline,
+          onRequestDeletion: onRequestDeletion,
+          reviewMode: reviewMode,
+        ),
+      ),
     );
   }
 
@@ -42,10 +65,9 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
     });
 
     try {
-      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(true));
+      final accepted = await (widget.onAccept?.call() ?? Future<bool>.value(false));
       if (!mounted) return;
       if (accepted) {
-        if (widget.onAccept == null) SharedPreferencesUtil().acceptAiConsent();
         Navigator.of(context).pop(true);
         return;
       }
@@ -59,6 +81,30 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
         _hasError = true;
       });
     }
+  }
+
+  Future<void> _decline() async {
+    if (_isSubmitting) return;
+    setState(() => _isSubmitting = true);
+
+    final preferences = SharedPreferencesUtil();
+    if (widget.reviewMode) {
+      preferences.declineAiConsent();
+    } else {
+      preferences.deferAiConsent();
+    }
+
+    try {
+      await widget.onDecline?.call();
+    } finally {
+      if (mounted) Navigator.of(context).pop(false);
+    }
+  }
+
+  Future<void> _requestDeletion() async {
+    if (_isSubmitting || widget.onRequestDeletion == null) return;
+    Navigator.of(context).pop(false);
+    await widget.onRequestDeletion!.call();
   }
 
   @override
@@ -79,6 +125,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     Text(context.l10n.aiConsentTitle, style: EllaTextStyles.display),
                     const SizedBox(height: 16),
                     Text(context.l10n.aiConsentCompactSummary, style: bodyStyle),
+                    const SizedBox(height: 12),
+                    Text(context.l10n.aiConsentNoSharingBeforeAllow, style: bodyStyle),
                     const SizedBox(height: 14),
                     Text.rich(
                       TextSpan(
@@ -127,14 +175,9 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     width: double.infinity,
                     height: 50,
                     child: TextButton(
-                      onPressed: _isSubmitting
-                          ? null
-                          : () {
-                              SharedPreferencesUtil().deferAiConsent();
-                              Navigator.of(context).pop(false);
-                            },
+                      onPressed: _isSubmitting ? null : _decline,
                       child: Text(
-                        context.l10n.notNow,
+                        widget.reviewMode ? context.l10n.aiConsentRevokeAction : context.l10n.notNow,
                         style: const TextStyle(
                           fontSize: 17,
                           color: EllaColors.inkSoft,
@@ -144,6 +187,14 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                       ),
                     ),
                   ),
+                  if (widget.reviewMode && widget.onRequestDeletion != null)
+                    TextButton(
+                      onPressed: _isSubmitting ? null : _requestDeletion,
+                      child: Text(
+                        context.l10n.aiConsentDeleteDataAction,
+                        style: const TextStyle(fontSize: 16, color: EllaColors.error),
+                      ),
+                    ),
                 ],
               ),
             ),

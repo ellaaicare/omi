@@ -13,7 +13,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
-import 'package:omi/gen/assets.gen.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
 import 'package:omi/pages/chat/widgets/ai_message.dart';
 import 'package:omi/pages/chat/widgets/user_message.dart';
@@ -685,8 +685,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
-  _sendMessageUtil(String text) {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  Future<void> _sendMessageUtil(String text) async {
+    if (!await AiConsentCoordinator.ensure(context) || !mounted) return;
     String? currentContext = _selectedContext;
     setState(() {
       _selectedContext = null;
@@ -933,8 +933,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   ),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  child: Text(
-                    context.l10n.syncingMessages,
+                    child: Text(
+                      context.l10n.syncingMessages,
                       style: const TextStyle(color: EllaColors.textSecondary, fontSize: 12),
                     ),
                   ),

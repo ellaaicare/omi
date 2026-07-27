@@ -21,6 +21,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/providers/calendar_provider.dart';
@@ -1362,6 +1363,10 @@ class CaptureProvider extends ChangeNotifier
     }
 
     notifyListeners();
+    if (!SharedPreferencesUtil().aiConsentAccepted) {
+      _keepAliveTimer?.cancel();
+      return;
+    }
     _startKeepAliveServices();
   }
 
@@ -1405,6 +1410,20 @@ class CaptureProvider extends ChangeNotifier
   void onError(Object err) {
     _transcriptionServiceStatuses = [];
     _transcriptServiceReady = false;
+
+    if (err is AiConsentAuthorityLostException) {
+      _keepAliveTimer?.cancel();
+      _shouldAutoResumeAfterWake = false;
+      ServiceManager.instance().mic.stop();
+      if (recordingState == RecordingState.systemAudioRecord && PlatformService.isDesktop) {
+        ServiceManager.instance().systemAudio.stopAndClearCallbacks();
+      }
+      unawaited(_closeBleStream());
+      updateRecordingState(RecordingState.stop);
+      AppSnackbar.showSnackbarError(MyApp.navigatorKey.currentContext?.l10n.aiConsentActiveAudioStopped ??
+          'AI permission could not be verified. Recording stopped.');
+      return;
+    }
 
     if (err.toString().contains('Failed to find any displays or windows to capture')) {
       if (recordingState == RecordingState.systemAudioRecord) {
