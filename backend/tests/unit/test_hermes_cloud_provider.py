@@ -60,6 +60,8 @@ def _binding():
             "schema_version": "ella-hermes-cloud-approval-v1",
             "prompt_pack_version": "prompt-v1",
             "model_policy_version": "models-v1",
+            "expected_model": "model-a",
+            "model_context_window_tokens": 16384,
             "policy_commit_sha": "b" * 40,
             "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/issues/1124",
             "approval_manifest_sha256": "c" * 64,
@@ -99,9 +101,7 @@ def cloud_env(monkeypatch):
 
 def test_preflight_requires_exact_model_capabilities_and_tools(cloud_env):
     fake = FakeClient(_preflight_responses())
-    receipt = asyncio.run(
-        HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding())
-    )
+    receipt = asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding()))
 
     assert receipt.model == "model-a"
     assert receipt.tools == ()
@@ -111,13 +111,9 @@ def test_preflight_requires_exact_model_capabilities_and_tools(cloud_env):
 
 
 def test_preflight_rejects_unexpected_enabled_tool(cloud_env):
-    fake = FakeClient(
-        _preflight_responses([{"enabled": True, "tools": ["shell"]}])
-    )
+    fake = FakeClient(_preflight_responses([{"enabled": True, "tools": ["shell"]}]))
     with pytest.raises(ProvisioningError) as error:
-        asyncio.run(
-            HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding())
-        )
+        asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding()))
     assert error.value.code == "hermes_cloud_tool_drift"
 
 
@@ -126,9 +122,9 @@ def test_preflight_rejects_missing_or_mismatched_prompt_artifacts(cloud_env):
     missing.pop("prompt_artifact_receipt")
     with pytest.raises(ProvisioningError) as error:
         asyncio.run(
-            HermesCloudClient(
-                http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())
-            ).preflight(missing)
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                missing
+            )
         )
     assert error.value.code == "prompt_artifact_receipt_missing"
 
@@ -136,11 +132,31 @@ def test_preflight_rejects_missing_or_mismatched_prompt_artifacts(cloud_env):
     mismatch["prompt_artifact_receipt"]["observed_soul_sha256"] = "b" * 64
     with pytest.raises(ProvisioningError) as error:
         asyncio.run(
-            HermesCloudClient(
-                http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())
-            ).preflight(mismatch)
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                mismatch
+            )
         )
     assert error.value.code == "prompt_artifact_checksum_mismatch"
+
+    missing_context = _binding()
+    missing_context["prompt_artifact_receipt"].pop("model_context_window_tokens")
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                missing_context
+            )
+        )
+    assert error.value.code == "prompt_artifact_model_context_invalid"
+
+    mismatched_context = _binding()
+    mismatched_context["model_context_window_tokens"] = 8192
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                mismatched_context
+            )
+        )
+    assert error.value.code == "prompt_artifact_model_context_mismatch"
 
 
 def test_preflight_wakes_sleeping_instance_within_bounded_poll(cloud_env, monkeypatch):
@@ -161,9 +177,7 @@ def test_preflight_wakes_sleeping_instance_within_bounded_poll(cloud_env, monkey
     fake = WakingClient(responses)
     monkeypatch.setattr(hermes_cloud.asyncio, "sleep", no_sleep)
 
-    receipt = asyncio.run(
-        HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding())
-    )
+    receipt = asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding()))
 
     assert receipt.model == "model-a"
     assert sum(1 for call in fake.calls if call[1] == health_url) == 2
@@ -302,6 +316,7 @@ def test_pool_registration_persists_server_approved_prompt_receipt():
         prompt_pack_version="prompt-v1",
         model_policy_version="models-v1",
         expected_model="model-a",
+        model_context_window_tokens=16384,
         allowed_tools=(),
         required_capabilities=("responses_api", "session_key_header"),
         artifact_sha256={
@@ -343,7 +358,9 @@ def test_pool_registration_persists_server_approved_prompt_receipt():
     assert result["status"] == "pool_available"
     assert repository.kwargs["prompt_artifact_receipt"]["policy_commit_sha"] == "b" * 40
     assert repository.kwargs["prompt_artifact_receipt"]["approval_manifest_sha256"] == "c" * 64
+    assert repository.kwargs["prompt_artifact_receipt"]["model_context_window_tokens"] == 16384
     assert "expected_model" not in candidate
+    assert "model_context_window_tokens" not in candidate
 
 
 def test_pool_registration_rejects_missing_server_approval_manifest():
@@ -375,6 +392,7 @@ def test_pool_registration_rejects_candidate_policy_self_attestation():
             HermesCloudPoolManager(repository=Repository()).register(
                 {
                     "expected_model": "candidate-controlled",
+                    "model_context_window_tokens": 1,
                     "observed_prompt_artifacts": {},
                 }
             )
@@ -413,6 +431,7 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     assert runtime.provider == "hermes_cloud"
     assert runtime.gateway_url == "https://cloud.example.test"
     assert runtime.workspace_root == ""
+    assert runtime.model_context_window_tokens == 16384
 
     binding["workspace_root"] = "/Users/ellaai/.hermes/profiles/legacy"
     with pytest.raises(ProvisioningError) as error:
@@ -462,6 +481,78 @@ def test_responses_api_fails_closed_on_model_or_usage_drift(
             )
         )
     assert error.value.code == expected_code
+
+
+def test_responses_api_rejects_usage_beyond_signed_model_context(cloud_env):
+    url = "https://cloud.example.test/v1/responses"
+    body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 120, "output_tokens": 9},
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            }
+        ],
+    }
+    binding = _binding()
+    binding["prompt_artifact_receipt"]["model_context_window_tokens"] = 128
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **kwargs: FakeClient({url: Response(200, body)})
+            ).create_response(
+                binding,
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=16,
+                max_tool_calls=0,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_provider_context_exceeded"
+
+
+def test_responses_api_allows_signed_context_for_each_tool_enabled_round(cloud_env):
+    url = "https://cloud.example.test/v1/responses"
+    body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 230, "output_tokens": 26},
+        "output": [
+            {"type": "function_call", "name": "honcho_recall"},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            },
+        ],
+    }
+    binding = _binding()
+    binding["allowed_tools"] = ["honcho_recall"]
+    binding["prompt_artifact_receipt"]["model_context_window_tokens"] = 128
+
+    turn = asyncio.run(
+        HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient({url: Response(200, body)})).create_response(
+            binding,
+            session_key="scope",
+            hermes_session_id="interaction",
+            idempotency_key="request",
+            user_input="Synthetic",
+            instructions="Synthetic",
+            max_output_tokens=16,
+            max_tool_calls=1,
+        )
+    )
+
+    assert turn.usage == {"input_tokens": 230, "output_tokens": 26}
+    assert turn.tool_calls == 1
 
 
 def test_responses_api_enforces_tool_allowlist_and_hard_count(cloud_env):

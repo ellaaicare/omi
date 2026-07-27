@@ -26,7 +26,6 @@ HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
-INPUT_TOKEN_ENVELOPE_ALLOWANCE = 32
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -40,6 +39,9 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 
 
 def _turn_budget(runtime: IsolatedRuntime) -> dict[str, int]:
+    model_context_window_tokens = int(runtime.model_context_window_tokens)
+    if model_context_window_tokens <= 0:
+        raise ProvisioningError("hermes_cloud_model_context_invalid", retryable=False)
     max_tool_calls = min(
         len(runtime.allowed_tools),
         _bounded_env_int(
@@ -49,20 +51,31 @@ def _turn_budget(runtime: IsolatedRuntime) -> dict[str, int]:
             32,
         ),
     )
+    max_input_tokens = _bounded_env_int(
+        "ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS",
+        DEFAULT_MAX_INPUT_TOKENS,
+        256,
+        262144,
+    )
+    max_output_tokens = _bounded_env_int(
+        "ELLA_HERMES_CLOUD_MAX_OUTPUT_TOKENS",
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        1,
+        32768,
+    )
+    if max_output_tokens > model_context_window_tokens:
+        raise ProvisioningError("hermes_cloud_turn_budget_invalid", retryable=False)
+    provider_call_upper_bound = max_tool_calls + 1
     return {
-        "max_input_tokens": _bounded_env_int(
-            "ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS",
-            DEFAULT_MAX_INPUT_TOKENS,
-            256,
-            262144,
-        ),
-        "max_output_tokens": _bounded_env_int(
-            "ELLA_HERMES_CLOUD_MAX_OUTPUT_TOKENS",
-            DEFAULT_MAX_OUTPUT_TOKENS,
-            1,
-            32768,
-        ),
+        "max_input_tokens": min(max_input_tokens, model_context_window_tokens),
+        "max_output_tokens": max_output_tokens,
         "max_tool_calls": max_tool_calls,
+        # The pinned model enforces its context ceiling per provider round.
+        # Reserving every tool-enabled round deliberately overprices
+        # input+output overlap, but covers all Hermes-owned prompt/tool/memory
+        # layers and each possible follow-up model call before execution.
+        "provider_input_token_upper_bound": (model_context_window_tokens * provider_call_upper_bound),
+        "provider_output_token_upper_bound": (max_output_tokens * provider_call_upper_bound),
     }
 
 
@@ -78,19 +91,20 @@ def _usage_token_count(usage: Any, field: str) -> int:
     return value
 
 
-def conservative_input_token_upper_bound(
+def conservative_client_input_token_upper_bound(
     *,
     user_input: str,
     instructions: str,
     previous_response_id: Optional[str],
     previous_response_usage: Any,
 ) -> int:
-    """Bound all state that Hermes expands into the next provider input.
+    """Bound caller-visible and predecessor input for local admission.
 
     UTF-8 byte length is a deterministic upper bound for tokens contributed by
     the new JSON text fields. A chained response also replays the predecessor's
     complete input and output, so its provider-reported usage is carried
-    forward instead of pricing only the visible new message.
+    forward. Remote Hermes prompt, policy, tool, memory, and profile layers are
+    covered separately by reserving the signed model context-window ceiling.
     """
     current_envelope = {
         "input": user_input,
@@ -103,7 +117,7 @@ def conservative_input_token_upper_bound(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-    ) + INPUT_TOKEN_ENVELOPE_ALLOWANCE
+    )
     if not previous_response_id:
         return current_bound
     return (
@@ -277,9 +291,7 @@ class HermesCloudRuntimeService:
             source_identity=source_identity,
         )
         if recovered:
-            provider_response_id = str(
-                (recovered.get("source_ref") or {}).get("provider_response_id") or ""
-            )
+            provider_response_id = str((recovered.get("source_ref") or {}).get("provider_response_id") or "")
             if not provider_response_id:
                 raise ProvisioningError(
                     "hermes_cloud_recovered_turn_missing_provider_ref",
@@ -357,24 +369,24 @@ class HermesCloudRuntimeService:
             lease_open = True
 
             budget = _turn_budget(runtime)
-            input_token_upper_bound = conservative_input_token_upper_bound(
+            client_input_token_upper_bound = conservative_client_input_token_upper_bound(
                 user_input=request.user_input,
                 instructions=request.instructions,
                 previous_response_id=claimed.get("previous_response_id"),
                 previous_response_usage=claimed.get("previous_response_usage"),
             )
-            if input_token_upper_bound > budget["max_input_tokens"]:
+            if client_input_token_upper_bound > budget["max_input_tokens"]:
                 raise ProvisioningError(
                     "hermes_cloud_input_budget_exceeded",
                     retryable=False,
                     detail={
-                        "input_token_upper_bound": input_token_upper_bound,
+                        "client_input_token_upper_bound": client_input_token_upper_bound,
                         "max_input_tokens": budget["max_input_tokens"],
                     },
                 )
             reserved_cost = self.max_cost_estimator(
-                max_input_tokens=budget["max_input_tokens"],
-                max_output_tokens=budget["max_output_tokens"],
+                max_input_tokens=budget["provider_input_token_upper_bound"],
+                max_output_tokens=budget["provider_output_token_upper_bound"],
             )
             reservation = await self.voice_policy.reserve_session_cost(
                 uid=request.uid,
@@ -388,6 +400,7 @@ class HermesCloudRuntimeService:
             turn = await self.cloud_client.create_response(
                 {
                     "expected_model": runtime.expected_model,
+                    "model_context_window_tokens": runtime.model_context_window_tokens,
                     "allowed_tools": list(runtime.allowed_tools),
                 },
                 session_key=str(scope["session_key"]),
@@ -403,6 +416,19 @@ class HermesCloudRuntimeService:
             )
             provider_response_ids = [turn.response_id]
             actual_tool_calls = turn.tool_calls
+            if (
+                int(turn.usage["input_tokens"]) + int(turn.usage["output_tokens"])
+                > budget["provider_input_token_upper_bound"]
+            ):
+                raise ProvisioningError(
+                    "hermes_cloud_provider_context_exceeded",
+                    retryable=False,
+                )
+            if int(turn.usage["output_tokens"]) > budget["provider_output_token_upper_bound"]:
+                raise ProvisioningError(
+                    "hermes_cloud_output_budget_exceeded",
+                    retryable=False,
+                )
             estimated_cost = self.cost_estimator(turn.usage)
             if estimated_cost > reserved_cost:
                 raise ProvisioningError("hermes_cloud_cost_reservation_exceeded", retryable=False)
@@ -536,8 +562,6 @@ class HermesCloudRuntimeService:
                     termination_reason=termination_reason,
                     normalized_error_code=normalized_error or None,
                     estimated_cost_microusd=(
-                        estimated_cost
-                        if reservation_settled
-                        else reserved_cost if provider_started else 0
+                        estimated_cost if reservation_settled else reserved_cost if provider_started else 0
                     ),
                 )

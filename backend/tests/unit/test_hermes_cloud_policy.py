@@ -21,6 +21,7 @@ def _manifest():
         "prompt_pack_version": "prompt-v1",
         "model_policy_version": "models-v1",
         "expected_model": "model-a",
+        "model_context_window_tokens": 16384,
         "allowed_tools": ["honcho_recall"],
         "required_capabilities": ["responses_api", "session_key_header"],
         "artifact_sha256": {
@@ -114,6 +115,7 @@ def test_approval_manifest_is_server_signed_and_tamper_evident(tmp_path):
     ).load()
     assert approved.policy_commit_sha == "a" * 40
     assert approved.expected_model == "model-a"
+    assert approved.model_context_window_tokens == 16384
 
     tampered = _signed_manifest(_manifest(), key)
     tampered["expected_model"] = "candidate-model"
@@ -121,3 +123,23 @@ def test_approval_manifest_is_server_signed_and_tamper_evident(tmp_path):
     with pytest.raises(ProvisioningError) as error:
         ApprovedRuntimeManifestStore(path=str(path), signing_key=key).load()
     assert error.value.code == "hermes_cloud_approval_signature_invalid"
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, "16384"])
+def test_approval_manifest_requires_positive_integer_model_context(
+    tmp_path,
+    value,
+):
+    key = "server-owned-signing-key-at-least-32-bytes"
+    manifest = _manifest()
+    if value is None:
+        manifest.pop("model_context_window_tokens")
+    else:
+        manifest["model_context_window_tokens"] = value
+    path = tmp_path / "approved.json"
+    path.write_text(json.dumps(_signed_manifest(manifest, key)), encoding="utf-8")
+
+    with pytest.raises(ProvisioningError) as error:
+        ApprovedRuntimeManifestStore(path=str(path), signing_key=key).load()
+
+    assert error.value.code == "hermes_cloud_approval_model_context_invalid"

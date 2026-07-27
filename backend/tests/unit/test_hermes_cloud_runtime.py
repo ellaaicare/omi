@@ -9,7 +9,7 @@ from ella.services.hermes_cloud import HermesCloudTurn
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
-    conservative_input_token_upper_bound,
+    conservative_client_input_token_upper_bound,
 )
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
@@ -20,8 +20,8 @@ def cloud_synthetic_identity(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
 
 
-def _runtime() -> IsolatedRuntime:
-    return IsolatedRuntime(
+def _runtime(**updates) -> IsolatedRuntime:
+    values = dict(
         uid="synthetic-user",
         binding_id="00000000-0000-0000-0000-000000000001",
         provider="hermes_cloud",
@@ -37,12 +37,15 @@ def _runtime() -> IsolatedRuntime:
         observer_peer="companion-a",
         prompt_pack_version="prompt-v1",
         expected_model="model-a",
+        model_context_window_tokens=16384,
         allowed_tools=(),
         required_capabilities=("responses_api", "session_key_header"),
         model_policy_version="models-v1",
         voice_policy_version="voice-v1",
         revision=2,
     )
+    values.update(updates)
+    return IsolatedRuntime(**values)
 
 
 def _request(text: str = "Synthetic hello") -> HermesCloudTurnRequest:
@@ -182,17 +185,19 @@ class FakePolicy:
 
 
 class FakeCloudClient:
-    def __init__(self):
+    def __init__(self, *, usage=None, tool_calls=0):
         self.calls = []
+        self.usage = usage or {"input_tokens": 10, "output_tokens": 5}
+        self.tool_calls = tool_calls
 
     async def create_response(self, binding, **kwargs):
         self.calls.append((binding, kwargs))
         return HermesCloudTurn(
             response_id="response-a",
             text="Synthetic acknowledgement.",
-            usage={"input_tokens": 10, "output_tokens": 5},
+            usage=self.usage,
             model="model-a",
-            tool_calls=0,
+            tool_calls=self.tool_calls,
         )
 
 
@@ -314,7 +319,7 @@ def test_cost_reservation_denial_never_calls_provider_and_releases_no_reservatio
 
 
 def test_full_input_budget_includes_chained_context_and_is_conservative():
-    bound = conservative_input_token_upper_bound(
+    bound = conservative_client_input_token_upper_bound(
         user_input="Synthetic follow-up",
         instructions="Use the selected synthetic context.",
         previous_response_id="response-previous",
@@ -322,6 +327,100 @@ def test_full_input_budget_includes_chained_context_and_is_conservative():
     )
 
     assert bound > 140
+
+
+def test_first_turn_reserves_signed_context_for_remote_prompt_and_tool_overhead(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS", "256")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_OUTPUT_TOKENS", "64")
+    runtime = _runtime(
+        model_context_window_tokens=1024,
+        allowed_tools=("honcho_search",),
+    )
+    request = _request("x" * 170)
+    client_bound = conservative_client_input_token_upper_bound(
+        user_input=request.user_input,
+        instructions=request.instructions,
+        previous_response_id=None,
+        previous_response_usage={},
+    )
+    assert 200 <= client_bound <= 256
+
+    estimator_calls = []
+
+    def max_cost_estimator(**kwargs):
+        estimator_calls.append(kwargs)
+        return 500
+
+    cloud = FakeCloudClient(
+        usage={"input_tokens": 2016, "output_tokens": 32},
+        tool_calls=1,
+    )
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 250,
+        max_cost_estimator=max_cost_estimator,
+    )
+
+    result = asyncio.run(service.run_turn(runtime, request))
+
+    assert result.usage["input_tokens"] > client_bound
+    assert estimator_calls == [{"max_input_tokens": 2048, "max_output_tokens": 128}]
+    assert policy.reserved[0]["reservation_microusd"] == 500
+    assert policy.settled[0]["actual_cost_microusd"] == 250
+    assert cloud.calls[0][0]["model_context_window_tokens"] == 1024
+
+
+def test_chained_turn_reserves_context_ceiling_for_fresh_remote_overhead(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_INPUT_TOKENS", "900")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_MAX_OUTPUT_TOKENS", "64")
+    previous_usage = {"input_tokens": 600, "output_tokens": 100}
+    request = _request("x" * 80)
+    client_bound = conservative_client_input_token_upper_bound(
+        user_input=request.user_input,
+        instructions=request.instructions,
+        previous_response_id="response-previous",
+        previous_response_usage=previous_usage,
+    )
+    assert 700 < client_bound <= 900
+
+    estimator_calls = []
+
+    def max_cost_estimator(**kwargs):
+        estimator_calls.append(kwargs)
+        return 500
+
+    cloud = FakeCloudClient(usage={"input_tokens": 950, "output_tokens": 32})
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(
+            previous_response_id="response-previous",
+            previous_response_usage=previous_usage,
+        ),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 250,
+        max_cost_estimator=max_cost_estimator,
+    )
+
+    result = asyncio.run(
+        service.run_turn(
+            _runtime(model_context_window_tokens=1024),
+            request,
+        )
+    )
+
+    assert result.usage["input_tokens"] > client_bound
+    assert estimator_calls == [{"max_input_tokens": 1024, "max_output_tokens": 64}]
+    assert policy.reserved[0]["reservation_microusd"] == 500
 
 
 def test_chained_context_over_input_budget_never_reaches_provider(monkeypatch):

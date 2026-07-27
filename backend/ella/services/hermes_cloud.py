@@ -31,9 +31,7 @@ CLOUD_SECRET_REF_RE = re.compile(
 )
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 HERMES_CLOUD_TIMEOUT_SECONDS = float(os.getenv("ELLA_HERMES_CLOUD_TIMEOUT_SECONDS", "60"))
-HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS = float(
-    os.getenv("ELLA_HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS", "15")
-)
+HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS = float(os.getenv("ELLA_HERMES_CLOUD_PREFLIGHT_TIMEOUT_SECONDS", "15"))
 HONCHO_CLOUD_BASE_URL = os.getenv("ELLA_HONCHO_CLOUD_BASE_URL", "https://api.honcho.dev").rstrip("/")
 POOL_ALERT_TIMEOUT_SECONDS = float(os.getenv("ELLA_RUNTIME_POOL_ALERT_TIMEOUT_SECONDS", "5"))
 
@@ -100,6 +98,9 @@ def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
         raise ProvisioningError("prompt_artifact_receipt_missing", retryable=False)
     prompt_pack_version = str(binding.get("prompt_pack_version") or "").strip()
     model_policy_version = str(binding.get("model_policy_version") or "").strip()
+    expected_model = str(binding.get("expected_model") or "").strip()
+    model_context_window_tokens = receipt.get("model_context_window_tokens")
+    declared_model_context_window_tokens = binding.get("model_context_window_tokens")
     if (
         not prompt_pack_version
         or str(receipt.get("prompt_pack_version") or "") != prompt_pack_version
@@ -117,11 +118,26 @@ def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
         or not review_receipt.startswith("https://github.com/ellaaicare/ella-ai/")
     ):
         raise ProvisioningError("prompt_artifact_review_missing", retryable=False)
+    if not expected_model or str(receipt.get("expected_model") or "") != expected_model:
+        raise ProvisioningError("prompt_artifact_model_mismatch", retryable=False)
+    if (
+        isinstance(model_context_window_tokens, bool)
+        or not isinstance(model_context_window_tokens, int)
+        or model_context_window_tokens <= 0
+    ):
+        raise ProvisioningError("prompt_artifact_model_context_invalid", retryable=False)
+    if (
+        declared_model_context_window_tokens is not None
+        and declared_model_context_window_tokens != model_context_window_tokens
+    ):
+        raise ProvisioningError("prompt_artifact_model_context_mismatch", retryable=False)
 
     normalized = {
         "schema_version": "ella-hermes-cloud-approval-v1",
         "prompt_pack_version": prompt_pack_version,
         "model_policy_version": model_policy_version,
+        "expected_model": expected_model,
+        "model_context_window_tokens": model_context_window_tokens,
         "policy_commit_sha": policy_commit_sha,
         "lane_s_review_url": review_receipt,
         "approval_manifest_sha256": manifest_sha256,
@@ -135,6 +151,15 @@ def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
         normalized[f"{artifact}_sha256"] = expected
         normalized[f"observed_{artifact}_sha256"] = observed
     return normalized
+
+
+def _model_context_window_tokens(binding: dict[str, Any]) -> int:
+    value = binding.get("model_context_window_tokens")
+    if value is None and isinstance(binding.get("prompt_artifact_receipt"), dict):
+        value = binding["prompt_artifact_receipt"].get("model_context_window_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ProvisioningError("cloud_model_context_policy_missing", retryable=False)
+    return value
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -215,10 +240,7 @@ def estimate_turn_cost_microusd(usage: dict[str, Any]) -> int:
 
     input_rate = rate("ELLA_HERMES_CLOUD_INPUT_MICROUSD_PER_MILLION_TOKENS")
     output_rate = rate("ELLA_HERMES_CLOUD_OUTPUT_MICROUSD_PER_MILLION_TOKENS")
-    total = (
-        Decimal(input_tokens) * input_rate
-        + Decimal(output_tokens) * output_rate
-    ) / Decimal(1_000_000)
+    total = (Decimal(input_tokens) * input_rate + Decimal(output_tokens) * output_rate) / Decimal(1_000_000)
     return max(0, int(total.to_integral_value()))
 
 
@@ -266,15 +288,9 @@ class HermesCloudClient:
         prompt_artifacts = validate_prompt_artifact_receipt(binding)
         base_url, token = self.credentials(binding)
         expected_model = str(binding.get("expected_model") or "").strip()
-        allowed_tools = {
-            str(value)
-            for value in (binding.get("allowed_tools") or [])
-            if str(value).strip()
-        }
+        allowed_tools = {str(value) for value in (binding.get("allowed_tools") or []) if str(value).strip()}
         required_capabilities = {
-            str(value)
-            for value in (binding.get("required_capabilities") or [])
-            if str(value).strip()
+            str(value) for value in (binding.get("required_capabilities") or []) if str(value).strip()
         }
         if not expected_model:
             raise ProvisioningError("cloud_model_policy_missing", retryable=False)
@@ -419,6 +435,7 @@ class HermesCloudClient:
             if not token:
                 raise ProvisioningError("cloud_secret_unavailable", retryable=True)
         expected_model = str(binding.get("expected_model") or "").strip()
+        model_context_window_tokens = _model_context_window_tokens(binding)
         if not expected_model:
             raise ProvisioningError("cloud_model_policy_missing", retryable=False)
         if not 1 <= int(max_output_tokens) <= 32768 or not 0 <= int(max_tool_calls) <= 32:
@@ -492,6 +509,20 @@ class HermesCloudClient:
             raise ProvisioningError("hermes_cloud_unapproved_tool_call", retryable=False)
         if len(unexpected_calls) > int(max_tool_calls):
             raise ProvisioningError("hermes_cloud_tool_budget_exceeded", retryable=False)
+        provider_call_upper_bound = int(max_tool_calls) + 1
+        if (
+            normalized_usage["input_tokens"] + normalized_usage["output_tokens"]
+            > model_context_window_tokens * provider_call_upper_bound
+        ):
+            raise ProvisioningError(
+                "hermes_cloud_provider_context_exceeded",
+                retryable=False,
+            )
+        if normalized_usage["output_tokens"] > int(max_output_tokens) * provider_call_upper_bound:
+            raise ProvisioningError(
+                "hermes_cloud_output_budget_exceeded",
+                retryable=False,
+            )
         return HermesCloudTurn(
             response_id=response_id,
             text=text,
@@ -689,6 +720,7 @@ class HermesCloudPoolManager:
             "prompt_artifact_receipt",
             "model_policy_version",
             "expected_model",
+            "model_context_window_tokens",
             "allowed_tools",
             "required_capabilities",
             "lane_s_review_url",
@@ -703,6 +735,7 @@ class HermesCloudPoolManager:
             "prompt_pack_version": manifest.prompt_pack_version,
             "model_policy_version": manifest.model_policy_version,
             "expected_model": manifest.expected_model,
+            "model_context_window_tokens": manifest.model_context_window_tokens,
             "allowed_tools": list(manifest.allowed_tools),
             "required_capabilities": list(manifest.required_capabilities),
             "prompt_artifact_receipt": manifest.binding_receipt(observed),
@@ -731,6 +764,7 @@ class HermesCloudPoolManager:
             "status": str(binding["status"]),
             "health_state": str(binding["health_state"]),
             "model": preflight.model,
+            "model_context_window_tokens": manifest.model_context_window_tokens,
             "tools": list(preflight.tools),
             "capabilities": list(preflight.capabilities),
             "content_free": True,

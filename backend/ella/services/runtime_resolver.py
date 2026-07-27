@@ -54,6 +54,7 @@ class IsolatedRuntime:
     observer_peer: str
     prompt_pack_version: str
     expected_model: str
+    model_context_window_tokens: int
     allowed_tools: tuple[str, ...]
     required_capabilities: tuple[str, ...]
     model_policy_version: str
@@ -72,8 +73,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     if (binding.get("active") is not True and not shadow_allowed) or binding.get("health_state") != "healthy":
         raise ProvisioningError("runtime_not_ready", retryable=True)
     if provider == "hermes_cloud" and (
-        status not in {"shadow", "internal_canary", "active"}
-        or (status == "shadow" and not allow_shadow)
+        status not in {"shadow", "internal_canary", "active"} or (status == "shadow" and not allow_shadow)
     ):
         raise ProvisioningError(f"hermes_cloud_{status or 'not_ready'}", retryable=status == "claiming")
 
@@ -95,10 +95,11 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         ):
             raise ProvisioningError("cloud_binding_contains_local_runtime", retryable=False)
         gateway_url, gateway_token = HermesCloudClient.credentials(binding)
-        validate_prompt_artifact_receipt(binding)
+        prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
         workspace_root = ""
         runtime_instance_id = str(binding.get("runtime_instance_id") or "")
         expected_model = str(binding.get("expected_model") or "")
+        model_context_window_tokens = int(prompt_artifact_receipt["model_context_window_tokens"])
         if not runtime_instance_id or not expected_model:
             raise ProvisioningError("cloud_runtime_receipt_incomplete", retryable=False)
     else:
@@ -118,6 +119,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         gateway_token = resolve_gateway_credential(binding.get("credential_ref"))
         runtime_instance_id = ""
         expected_model = str(binding.get("agent_id") or "")
+        model_context_window_tokens = 0
 
     honcho_workspace = str(binding.get("honcho_workspace") or "")
     observed_peer = str(binding.get("observed_peer") or "")
@@ -144,10 +146,9 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         observer_peer=observer_peer,
         prompt_pack_version=str(binding.get("prompt_pack_version") or binding.get("template_version") or ""),
         expected_model=expected_model,
+        model_context_window_tokens=model_context_window_tokens,
         allowed_tools=tuple(sorted(str(item) for item in (binding.get("allowed_tools") or []))),
-        required_capabilities=tuple(
-            sorted(str(item) for item in (binding.get("required_capabilities") or []))
-        ),
+        required_capabilities=tuple(sorted(str(item) for item in (binding.get("required_capabilities") or []))),
         model_policy_version=str(binding.get("model_policy_version") or ""),
         voice_policy_version=str(binding.get("voice_policy_version") or ""),
         revision=revision,

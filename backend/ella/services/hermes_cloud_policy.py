@@ -27,11 +27,7 @@ def _stable_json(value: Any) -> str:
 
 
 def _synthetic_uids() -> set[str]:
-    return {
-        value.strip()
-        for value in os.getenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "").split(",")
-        if value.strip()
-    }
+    return {value.strip() for value in os.getenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "").split(",") if value.strip()}
 
 
 def cloud_synthetic_only() -> bool:
@@ -73,11 +69,7 @@ def _assert_deployed_cloud_consent_policy() -> tuple[str, str]:
         or required_version != ai_consent.CURRENT_POLICY_VERSION
         or required_hash != ai_consent.CURRENT_PROCESSOR_SET_HASH
         or not MANAGED_CLOUD_PROCESSORS.issubset(
-            {
-                str(processor.get("id") or "")
-                for processor in ai_consent.PROCESSORS
-                if isinstance(processor, dict)
-            }
+            {str(processor.get("id") or "") for processor in ai_consent.PROCESSORS if isinstance(processor, dict)}
         )
     ):
         raise ProvisioningError("hermes_cloud_consent_policy_not_deployed", retryable=False)
@@ -91,6 +83,7 @@ class ApprovedRuntimeManifest:
     prompt_pack_version: str
     model_policy_version: str
     expected_model: str
+    model_context_window_tokens: int
     allowed_tools: tuple[str, ...]
     required_capabilities: tuple[str, ...]
     artifact_sha256: dict[str, str]
@@ -103,6 +96,8 @@ class ApprovedRuntimeManifest:
             "lane_s_review_url": self.lane_s_review_url,
             "prompt_pack_version": self.prompt_pack_version,
             "model_policy_version": self.model_policy_version,
+            "expected_model": self.expected_model,
+            "model_context_window_tokens": self.model_context_window_tokens,
             "approval_manifest_sha256": self.manifest_sha256,
             "content_free": True,
         }
@@ -150,10 +145,7 @@ class ApprovedRuntimeManifestStore:
         ).hexdigest()
         if not SHA256_RE.fullmatch(signature) or not hmac.compare_digest(signature, expected_signature):
             raise ProvisioningError("hermes_cloud_approval_signature_invalid", retryable=False)
-        if (
-            raw.get("schema_version") != APPROVAL_SCHEMA_VERSION
-            or raw.get("review_disposition") != "approved"
-        ):
+        if raw.get("schema_version") != APPROVAL_SCHEMA_VERSION or raw.get("review_disposition") != "approved":
             raise ProvisioningError("hermes_cloud_policy_not_approved", retryable=False)
 
         policy_commit_sha = str(raw.get("policy_commit_sha") or "").lower()
@@ -176,6 +168,7 @@ class ApprovedRuntimeManifestStore:
         prompt_pack_version = str(raw.get("prompt_pack_version") or "").strip()
         model_policy_version = str(raw.get("model_policy_version") or "").strip()
         expected_model = str(raw.get("expected_model") or "").strip()
+        model_context_window_tokens = raw.get("model_context_window_tokens")
         allowed_tools = tuple(sorted({str(value) for value in raw.get("allowed_tools") or [] if str(value)}))
         required_capabilities = tuple(
             sorted({str(value) for value in raw.get("required_capabilities") or [] if str(value)})
@@ -188,12 +181,22 @@ class ApprovedRuntimeManifestStore:
             or "session_key_header" not in required_capabilities
         ):
             raise ProvisioningError("hermes_cloud_approval_policy_incomplete", retryable=False)
+        if (
+            isinstance(model_context_window_tokens, bool)
+            or not isinstance(model_context_window_tokens, int)
+            or model_context_window_tokens <= 0
+        ):
+            raise ProvisioningError(
+                "hermes_cloud_approval_model_context_invalid",
+                retryable=False,
+            )
         return ApprovedRuntimeManifest(
             policy_commit_sha=policy_commit_sha,
             lane_s_review_url=lane_s_review_url,
             prompt_pack_version=prompt_pack_version,
             model_policy_version=model_policy_version,
             expected_model=expected_model,
+            model_context_window_tokens=model_context_window_tokens,
             allowed_tools=allowed_tools,
             required_capabilities=required_capabilities,
             artifact_sha256=normalized_artifacts,
