@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 from dataclasses import dataclass
@@ -33,8 +34,8 @@ DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
 
 
-def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> None:
-    assert_cloud_identity_gate(
+def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
+    return assert_cloud_identity_gate(
         runtime.uid,
         profile_uid=runtime.uid,
         runtime_provider=runtime.provider,
@@ -153,6 +154,7 @@ class HermesCloudTurnRequest:
     instructions: str
     started_at: datetime
     client_metadata: dict[str, Any]
+    consent_grant_epoch: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,7 @@ def _request_hash(request: HermesCloudTurnRequest) -> str:
             request.channel,
             request.client_interaction_id,
             request.user_input,
+            request.consent_grant_epoch or "",
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -256,7 +259,15 @@ class HermesCloudRuntimeService:
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
-        assert_runtime_managed_consent(runtime)
+        current_grant_epoch = assert_runtime_managed_consent(runtime)
+        if request.consent_grant_epoch and not hmac.compare_digest(
+            request.consent_grant_epoch,
+            current_grant_epoch,
+        ):
+            raise ProvisioningError(
+                "managed_cloud_consent_grant_changed",
+                retryable=False,
+            )
         if runtime.status == "shadow" and not self.allow_shadow:
             raise ProvisioningError("hermes_cloud_shadow_not_routable", retryable=False)
         if not request.client_interaction_id.strip():
@@ -418,7 +429,15 @@ class HermesCloudRuntimeService:
             # Consent may be revoked while canonical ingest/admission work is in
             # flight. Recheck at the last boundary before protected content is
             # sent to Hermes Cloud and its OpenAI model route.
-            assert_runtime_managed_consent(runtime)
+            current_grant_epoch = assert_runtime_managed_consent(runtime)
+            if request.consent_grant_epoch and not hmac.compare_digest(
+                request.consent_grant_epoch,
+                current_grant_epoch,
+            ):
+                raise ProvisioningError(
+                    "managed_cloud_consent_grant_changed",
+                    retryable=False,
+                )
             provider_started = True
             turn = await self.cloud_client.create_response(
                 {

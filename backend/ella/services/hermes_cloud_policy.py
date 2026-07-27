@@ -54,15 +54,17 @@ def assert_cloud_identity_gate(
     model_route: Optional[str] = None,
     memory_provider: Optional[str] = None,
     photon_scope: Optional[str] = None,
-) -> None:
-    """Reject real identities until an exact managed-cloud consent grant exists."""
+) -> str:
+    """Return the server-owned grant epoch for an allowed cloud identity."""
     if cloud_synthetic_only():
         if uid not in _synthetic_uids():
             raise ProvisioningError("hermes_cloud_synthetic_identity_required", retryable=False)
-        return
+        return (
+            "synthetic:" + hashlib.sha256(f"{ai_consent.CURRENT_POLICY_VERSION}\x1f{uid}".encode("utf-8")).hexdigest()
+        )
     _assert_deployed_cloud_consent_policy()
     try:
-        ai_consent.assert_managed_cloud_consent(
+        return ai_consent.assert_managed_cloud_consent(
             uid,
             profile_uid=str(profile_uid or ""),
             runtime_provider=str(runtime_provider or ""),

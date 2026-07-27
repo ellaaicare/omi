@@ -284,6 +284,43 @@ def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
     assert policy.released
 
 
+def test_consent_regrant_epoch_change_after_reservation_blocks_provider_call(
+    monkeypatch,
+):
+    repository = FakeRepository()
+    policy = FakePolicy()
+    cloud = FakeCloudClient()
+    epochs = iter(("aicr_" + ("a" * 32), "aicr_" + ("c" * 32)))
+
+    monkeypatch.setattr(
+        hermes_cloud_runtime,
+        "assert_runtime_managed_consent",
+        lambda _runtime: next(epochs),
+    )
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    request = HermesCloudTurnRequest(
+        **{
+            **_request().__dict__,
+            "consent_grant_epoch": "aicr_" + ("a" * 32),
+        }
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), request))
+
+    assert error.value.code == "managed_cloud_consent_grant_changed"
+    assert cloud.calls == []
+    assert policy.reserved
+    assert policy.released
+
+
 def test_same_interaction_id_with_changed_payload_fails_closed():
     repository = FakeRepository()
     service = HermesCloudRuntimeService(

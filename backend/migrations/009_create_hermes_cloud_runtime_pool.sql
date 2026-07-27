@@ -276,6 +276,11 @@ CREATE TABLE ella_photon_message_receipts (
     expected_model TEXT,
     policy_commit_sha VARCHAR(40),
     command_tier_version TEXT,
+    consent_grant_epoch VARCHAR(96) NOT NULL
+        CHECK (
+            length(consent_grant_epoch) >= 16
+            AND length(consent_grant_epoch) <= 96
+        ),
     usage JSONB NOT NULL DEFAULT '{}'::jsonb,
     preflight_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
     writeback_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,

@@ -347,7 +347,7 @@ def test_exact_v6_account_profile_and_scope_authorize_managed_cloud(monkeypatch)
     monkeypatch.setattr(consent, "_repository", repository)
     _enable_managed_cloud(monkeypatch)
 
-    assert _assert_exact_managed_cloud_consent() == "user-a"
+    assert _assert_exact_managed_cloud_consent() == result["consent"]["receipt_id"]
     assert result["consent"]["profile_binding_id"] == consent.derive_profile_binding_id(
         account_uid="user-a",
         profile_uid="user-a",

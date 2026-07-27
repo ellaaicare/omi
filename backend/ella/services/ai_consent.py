@@ -663,7 +663,7 @@ def assert_managed_cloud_consent(
     memory_provider: str,
     photon_scope: str,
 ) -> str:
-    """Authorize one exact managed-cloud egress contract for one account/profile."""
+    """Return the immutable receipt id authorizing one exact egress contract."""
     if not managed_cloud_real_data_enabled(account_uid):
         raise ManagedCloudConsentError("managed_cloud_real_data_disabled")
     if (
@@ -691,7 +691,10 @@ def assert_managed_cloud_consent(
         or not _valid_server_timestamp(state.get("server_decided_at"))
     ):
         raise ManagedCloudConsentError("managed_cloud_consent_stale")
-    return account_uid
+    receipt_id = str(state.get("receipt_id") or "")
+    if not receipt_id:
+        raise ManagedCloudConsentError("managed_cloud_consent_stale")
+    return receipt_id
 
 
 def assert_current_ai_consent(uid: str) -> str:
