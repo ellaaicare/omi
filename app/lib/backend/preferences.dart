@@ -25,6 +25,7 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeVersion = '';
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
+  static int _aiConsentAuthorityGeneration = 0;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
@@ -51,11 +52,13 @@ class SharedPreferencesUtil {
   }
 
   set uid(String value) {
-    if (value != uid) clearAiConsentServerVerification();
+    if (value != uid) _invalidateAiConsentAuthority();
     saveString('uid', value);
   }
 
   String get uid => getString('uid');
+
+  int get aiConsentAuthorityGeneration => _aiConsentAuthorityGeneration;
 
   //-------------------------------- Device ----------------------------------//
 
@@ -76,7 +79,7 @@ class SharedPreferencesUtil {
   String? get verifiedPersonaId => getString('verifiedPersonaId');
 
   set verifiedPersonaId(String? value) {
-    if (value != verifiedPersonaId) clearAiConsentServerVerification();
+    if (value != verifiedPersonaId) _invalidateAiConsentAuthority();
     if (value != null) {
       _preferences?.setString('verifiedPersonaId', value);
     } else {
@@ -343,6 +346,11 @@ class SharedPreferencesUtil {
     _verifiedAiConsentAt = null;
   }
 
+  static void _invalidateAiConsentAuthority() {
+    _aiConsentAuthorityGeneration++;
+    clearAiConsentServerVerification();
+  }
+
   void acceptAiConsent({
     String receiptId = '',
     String uid = '',
@@ -351,6 +359,9 @@ class SharedPreferencesUtil {
     String profileBindingId = '',
     String serverDecidedAt = '',
   }) {
+    if (uid != aiConsentReceiptUid || profileBindingId != aiConsentProfileBindingId) {
+      _invalidateAiConsentAuthority();
+    }
     aiConsentAccepted = true;
     aiConsentAcceptedAt = DateTime.now().toUtc().toIso8601String();
     saveString('aiConsentContractVersion', currentAiConsentContractVersion);
@@ -377,7 +388,7 @@ class SharedPreferencesUtil {
   }
 
   void declineAiConsent() {
-    clearAiConsentServerVerification();
+    _invalidateAiConsentAuthority();
     aiConsentAccepted = false;
     remove('aiConsentAcceptedAt');
     remove('aiConsentReceiptId');
@@ -731,7 +742,7 @@ class SharedPreferencesUtil {
 
     if (previousUid == newUid) return;
 
-    clearAiConsentServerVerification();
+    _invalidateAiConsentAuthority();
 
     if (previousUid.isNotEmpty) {
       // Retained users keep compatibility preferences when returning to the

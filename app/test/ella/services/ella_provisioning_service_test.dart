@@ -501,6 +501,85 @@ void main() {
     expect(preferences.aiConsentAccepted, isTrue);
   });
 
+  test('profile switch during delayed policy refresh cannot persist the stale grant', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentPolicyTransport(statusResponse: _consentStatus());
+    final service = EllaAiConsentService(transport: transport);
+
+    final refresh = service.refreshServerAuthority(uid: 'uid-a');
+    await transport.policyStarted.future;
+    preferences.verifiedPersonaId = 'persona-b';
+    transport.completePolicy(AiConsentPolicy.bundled);
+
+    expect(await refresh, isFalse);
+    expect(transport.statusCalls, 0);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('account switch during delayed policy grant prevents submission and persistence', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentPolicyTransport(submitResponse: _consentStatus());
+    final service = EllaAiConsentService(
+      transport: transport,
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final grant = service.grantCurrentConsent(uid: 'uid-a');
+    await transport.policyStarted.future;
+    preferences.uid = 'uid-b';
+    transport.completePolicy(AiConsentPolicy.bundled);
+
+    expect(await grant, isNull);
+    expect(transport.submissions, isEmpty);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('account switch during delayed status refresh cannot persist the stale grant', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentStatusTransport();
+    final service = EllaAiConsentService(transport: transport);
+
+    final refresh = service.refreshServerAuthority(uid: 'uid-a');
+    await transport.statusStarted.future;
+    preferences.uid = 'uid-b';
+    transport.complete(_consentStatus());
+
+    expect(await refresh, isFalse);
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
+  test('profile switch during delayed grant submission cannot persist the stale receipt', () async {
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
+    final transport = _DeferredConsentSubmitTransport();
+    final service = EllaAiConsentService(
+      transport: transport,
+      clientVersionFactory: () => '1.0.528+804',
+      localeFactory: () => 'en-US',
+    );
+
+    final grant = service.grantCurrentConsent(uid: 'uid-a');
+    await transport.submitStarted.future;
+    preferences.verifiedPersonaId = 'persona-b';
+    transport.complete(_consentStatus());
+
+    expect(await grant, isNull);
+    expect(transport.submissions, hasLength(1));
+    expect(preferences.aiConsentAccepted, isFalse);
+    expect(preferences.aiConsentReceiptId, isEmpty);
+  });
+
   test('stale server status fails closed even if it claims authorization', () async {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
@@ -709,8 +788,40 @@ class _FakeConsentTransport implements EllaAiConsentTransport {
   }
 }
 
+class _DeferredConsentPolicyTransport implements EllaAiConsentTransport {
+  _DeferredConsentPolicyTransport({this.statusResponse, this.submitResponse});
+
+  final AiConsentStatus? statusResponse;
+  final AiConsentStatus? submitResponse;
+  final Completer<void> policyStarted = Completer<void>();
+  final Completer<AiConsentPolicy?> _policy = Completer<AiConsentPolicy?>();
+  final List<AiConsentSubmission> submissions = [];
+  int statusCalls = 0;
+
+  void completePolicy(AiConsentPolicy? policy) => _policy.complete(policy);
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() {
+    policyStarted.complete();
+    return _policy.future;
+  }
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() async {
+    statusCalls++;
+    return statusResponse;
+  }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) async {
+    submissions.add(submission);
+    return submitResponse;
+  }
+}
+
 class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
+  final Completer<void> statusStarted = Completer<void>();
 
   void complete(AiConsentStatus? status) => _status.complete(status);
 
@@ -718,11 +829,37 @@ class _DeferredConsentStatusTransport implements EllaAiConsentTransport {
   Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
 
   @override
-  Future<AiConsentStatus?> fetchStatus() => _status.future;
+  Future<AiConsentStatus?> fetchStatus() {
+    statusStarted.complete();
+    return _status.future;
+  }
 
   @override
   Future<AiConsentStatus?> submit(AiConsentSubmission submission) {
     throw StateError('submit should not be called');
+  }
+}
+
+class _DeferredConsentSubmitTransport implements EllaAiConsentTransport {
+  final Completer<AiConsentStatus?> _status = Completer<AiConsentStatus?>();
+  final Completer<void> submitStarted = Completer<void>();
+  final List<AiConsentSubmission> submissions = [];
+
+  void complete(AiConsentStatus? status) => _status.complete(status);
+
+  @override
+  Future<AiConsentPolicy?> fetchPolicy() async => AiConsentPolicy.bundled;
+
+  @override
+  Future<AiConsentStatus?> fetchStatus() {
+    throw StateError('status should not be called');
+  }
+
+  @override
+  Future<AiConsentStatus?> submit(AiConsentSubmission submission) {
+    submissions.add(submission);
+    submitStarted.complete();
+    return _status.future;
   }
 }
 
