@@ -193,6 +193,9 @@ class FakeCloudClient:
 
     async def create_response(self, binding, **kwargs):
         self.calls.append((binding, kwargs))
+        before_provider_send = kwargs.get("before_provider_send")
+        if before_provider_send is not None:
+            await before_provider_send()
         return HermesCloudTurn(
             response_id="response-a",
             text="Synthetic acknowledgement.",
@@ -264,8 +267,9 @@ def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
 
     class OrderedCloud(FakeCloudClient):
         async def create_response(self, binding, **kwargs):
+            result = await super().create_response(binding, **kwargs)
             events.append("provider")
-            return await super().create_response(binding, **kwargs)
+            return result
 
     async def mark_provider_started():
         assert policy.reserved
@@ -646,6 +650,7 @@ def test_cancellation_closes_policy_lease():
     class BlockingCloud(FakeCloudClient):
         async def create_response(self, binding, **kwargs):
             self.calls.append((binding, kwargs))
+            await kwargs["before_provider_send"]()
             await asyncio.Event().wait()
 
     async def scenario():

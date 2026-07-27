@@ -427,6 +427,7 @@ class HermesCloudClient:
         token: Optional[str] = None,
         max_output_tokens: int,
         max_tool_calls: int,
+        before_provider_send: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> HermesCloudTurn:
         if base_url is None or token is None:
             base_url, token = self.credentials(binding)
@@ -458,6 +459,8 @@ class HermesCloudClient:
             payload["previous_response_id"] = previous_response_id
         try:
             async with self.http_client_factory(timeout=HERMES_CLOUD_TIMEOUT_SECONDS) as client:
+                if before_provider_send is not None:
+                    await before_provider_send()
                 response = await client.post(
                     f"{base_url}/v1/responses",
                     headers=headers,

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncpg
@@ -185,5 +186,209 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
             "claim_job_id": None,
             "claim_token": None,
         }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+async def _seed_claim(
+    pool,
+    *,
+    uid: str,
+    runtime_instance_id: str,
+    daily_limit_s: int = 2700,
+):
+    model = "gpt-5.6-terra"
+    async with pool.acquire() as conn:
+        user_id = await conn.fetchval(
+            "INSERT INTO users (omi_uid) VALUES ($1) RETURNING id",
+            uid,
+        )
+        job_id = await conn.fetchval(
+            """
+            INSERT INTO ella_provisioning_jobs (
+                user_id, target_schema_version
+            ) VALUES ($1, 'hermes-cloud-user-v1')
+            RETURNING id
+            """,
+            user_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO voice_entitlements (
+                uid, status, provider_allowlist, model_allowlist, daily_limit_s
+            ) VALUES ($1, 'active', ARRAY['hermes_cloud'], ARRAY[$2], $3)
+            """,
+            uid,
+            model,
+            daily_limit_s,
+        )
+    repository = EllaProvisioningRepository(pool)
+    await repository.register_cloud_pool_binding(
+        runtime_instance_id=runtime_instance_id,
+        profile_name=f"profile-{runtime_instance_id}",
+        agent_id="hermes-cloud",
+        api_base_url_ref="env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        api_key_ref="env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        honcho_api_key_ref="env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+        template_version="template-v1",
+        prompt_pack_version="prompt-v1",
+        prompt_artifact_receipt={"status": "approved", "content_free": True},
+        model_policy_version="model-policy-v1",
+        voice_policy_version="voice-policy-v1",
+        expected_model=model,
+        allowed_tools=[],
+        required_capabilities=["responses_api"],
+        health_receipt={"status": "ok", "content_free": True},
+    )
+    admitted = await voice_canary.evaluate_runtime_activation(
+        uid=uid,
+        provider="hermes_cloud",
+        model=model,
+    )
+    assert admitted.allowed
+    return repository, str(job_id), model, int(admitted.entitlement["revision"])
+
+
+async def _assert_pool_available(pool, runtime_instance_id: str):
+    async with pool.acquire() as conn:
+        row = dict(
+            await conn.fetchrow(
+                """
+                SELECT status, user_id, claim_job_id, claim_token
+                FROM ella_runtime_bindings
+                WHERE runtime_instance_id = $1
+                """,
+                runtime_instance_id,
+            )
+        )
+    assert row == {
+        "status": "pool_available",
+        "user_id": None,
+        "claim_job_id": None,
+        "claim_token": None,
+    }
+
+
+def test_provider_kill_switch_interleaving_consumes_no_pool_row():
+    async def scenario(pool):
+        uid = "synthetic-kill-switch-interleaving"
+        instance = "synthetic-instance-kill"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+        )
+
+        async with pool.acquire() as writer:
+            transaction = writer.transaction()
+            await transaction.start()
+            committed = False
+            try:
+                await voice_canary.set_kill_switch_on_connection(
+                    writer,
+                    scope_type="provider",
+                    scope_value="hermes_cloud",
+                    enabled=True,
+                    reason="synthetic interleaving",
+                    updated_by="test",
+                )
+                claim_task = asyncio.create_task(
+                    repository.claim_cloud_pool_binding(
+                        uid=uid,
+                        job_id=job_id,
+                        lease_seconds=120,
+                        admitted_entitlement_revision=revision,
+                        provider="hermes_cloud",
+                        model=model,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert not claim_task.done()
+                await _assert_pool_available(pool, instance)
+                await transaction.commit()
+                committed = True
+            finally:
+                if not committed:
+                    await transaction.rollback()
+
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await claim_task
+        assert error.value.code == "runtime_admission_provider_disabled"
+        await _assert_pool_available(pool, instance)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_completed_usage_interleaving_consumes_no_pool_row():
+    async def scenario(pool):
+        uid = "synthetic-quota-interleaving"
+        instance = "synthetic-instance-quota"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+            daily_limit_s=10,
+        )
+
+        async with pool.acquire() as writer:
+            transaction = writer.transaction()
+            await transaction.start()
+            committed = False
+            try:
+                await writer.execute(
+                    """
+                    INSERT INTO voice_active_sessions (
+                        session_id, uid, correlation_id, entitlement_revision,
+                        provider, model, mode, accepted_at, last_seen_at
+                    ) VALUES (
+                        'synthetic-quota-session', $1, 'synthetic-correlation', $2,
+                        'hermes_cloud', $3, 'hermes-cloud-chat',
+                        NOW() - INTERVAL '20 seconds', NOW()
+                    )
+                    """,
+                    uid,
+                    revision,
+                    model,
+                )
+                await voice_canary._complete_session_on_connection(
+                    writer,
+                    uid=uid,
+                    session_id="synthetic-quota-session",
+                    input_audio_s=0,
+                    output_audio_s=0,
+                    connection_s=20,
+                    input_audio_bytes=0,
+                    output_audio_bytes=0,
+                    tool_calls=0,
+                    reconnects=0,
+                    provider_request_ids=[],
+                    termination_reason="completed",
+                    normalized_error_code=None,
+                    estimated_cost_microusd=0,
+                    now=datetime.now(timezone.utc),
+                )
+                claim_task = asyncio.create_task(
+                    repository.claim_cloud_pool_binding(
+                        uid=uid,
+                        job_id=job_id,
+                        lease_seconds=120,
+                        admitted_entitlement_revision=revision,
+                        provider="hermes_cloud",
+                        model=model,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert not claim_task.done()
+                await _assert_pool_available(pool, instance)
+                await transaction.commit()
+                committed = True
+            finally:
+                if not committed:
+                    await transaction.rollback()
+
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await claim_task
+        assert error.value.code == "runtime_admission_quota_daily"
+        await _assert_pool_available(pool, instance)
 
     asyncio.run(_run_with_database(scenario))

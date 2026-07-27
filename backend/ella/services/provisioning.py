@@ -633,6 +633,23 @@ class ProvisioningCoordinator:
             if str(binding.get("expected_model") or "") != expected_model:
                 raise ProvisioningError("runtime_pool_policy_changed", retryable=False)
 
+            side_effect_admission = await runtime_admission(
+                uid=identity.uid,
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
+            )
+            if not side_effect_admission.allowed:
+                raise ProvisioningError(
+                    f"runtime_admission_{side_effect_admission.code}",
+                    retryable=False,
+                )
+            side_effect_revision = int((side_effect_admission.entitlement or {}).get("revision") or 0)
+            if side_effect_revision != admitted_entitlement_revision:
+                raise ProvisioningError(
+                    "runtime_admission_entitlement_stale",
+                    retryable=False,
+                )
+
             async def record_side_effect(effect: dict[str, str]) -> None:
                 await self.repository.record_cloud_side_effect(
                     uid=identity.uid,

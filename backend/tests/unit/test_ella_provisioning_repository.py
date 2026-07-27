@@ -125,6 +125,12 @@ class _CloudClaimConnection:
     def transaction(self):
         return _AsyncContext(self)
 
+    async def execute(self, query, *args):
+        self.queries.append(query)
+        if "pg_advisory_xact_lock" in query:
+            return "SELECT 1"
+        raise AssertionError(query)
+
     async def fetch(self, query, *args):
         self.queries.append(query)
         if "FROM voice_kill_switches" in query:

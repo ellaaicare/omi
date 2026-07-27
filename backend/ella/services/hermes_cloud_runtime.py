@@ -441,9 +441,13 @@ class HermesCloudRuntimeService:
                     "managed_cloud_consent_grant_changed",
                     retryable=False,
                 )
-            if before_provider_call is not None:
-                await before_provider_call()
-            provider_started = True
+
+            async def mark_provider_send_boundary() -> None:
+                nonlocal provider_started
+                if before_provider_call is not None:
+                    await before_provider_call()
+                provider_started = True
+
             turn = await self.cloud_client.create_response(
                 {
                     "expected_model": runtime.expected_model,
@@ -460,6 +464,7 @@ class HermesCloudRuntimeService:
                 token=runtime.gateway_token,
                 max_output_tokens=budget["max_output_tokens"],
                 max_tool_calls=budget["max_tool_calls"],
+                before_provider_send=mark_provider_send_boundary,
             )
             provider_response_ids = [turn.response_id]
             actual_tool_calls = turn.tool_calls

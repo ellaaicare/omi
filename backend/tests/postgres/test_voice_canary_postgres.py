@@ -10,13 +10,8 @@ import pytest
 
 from database import voice_canary
 
-
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
-MIGRATION_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "migrations"
-    / "008_create_voice_canary_controls.sql"
-)
+MIGRATION_PATH = Path(__file__).resolve().parents[2] / "migrations" / "008_create_voice_canary_controls.sql"
 
 pytestmark = pytest.mark.skipif(
     not TEST_DSN,
@@ -33,8 +28,7 @@ async def _run_with_database(
     try:
         async with pool.acquire() as conn:
             await conn.execute(MIGRATION_PATH.read_text(encoding="utf-8"))
-            await conn.execute(
-                """
+            await conn.execute("""
                 TRUNCATE TABLE
                     voice_active_sessions,
                     voice_usage_events,
@@ -42,8 +36,7 @@ async def _run_with_database(
                     voice_kill_switches,
                     voice_entitlements
                 RESTART IDENTITY CASCADE
-                """
-            )
+                """)
         await scenario(pool)
     finally:
         voice_canary._pool = previous_pool
@@ -208,17 +201,21 @@ def test_lease_expiry_keeps_last_metered_usage_after_proxy_crash(monkeypatch):
         clock["now"] = started_at + timedelta(seconds=60)
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await voice_canary._expire_stale_sessions(conn, clock["now"])
-            event = dict(
-                await conn.fetchrow(
-                    """
+                await voice_canary.lock_runtime_authority_on_connection(
+                    conn,
+                    uid="uid-proxy-crash",
+                )
+                await voice_canary._expire_stale_sessions(
+                    conn,
+                    clock["now"],
+                    uid="uid-proxy-crash",
+                )
+            event = dict(await conn.fetchrow("""
                     SELECT *
                     FROM voice_usage_events
                     WHERE session_id = 'session-crash'
                       AND event_type = 'session_terminated'
-                    """
-                )
-            )
+                    """))
             active_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM voice_active_sessions WHERE session_id = 'session-crash'"
             )
@@ -294,24 +291,16 @@ def test_trial_expiry_is_rechecked_at_accept_and_heartbeat(monkeypatch):
         assert heartbeat.code == "expired"
 
         async with pool.acquire() as conn:
-            persisted = dict(
-                await conn.fetchrow(
-                    """
+            persisted = dict(await conn.fetchrow("""
                     SELECT input_audio_s, output_audio_s, estimated_cost_microusd
                     FROM voice_active_sessions
                     WHERE session_id = 'session-expired-heartbeat'
-                    """
-                )
-            )
-            entitlement = dict(
-                await conn.fetchrow(
-                    """
+                    """))
+            entitlement = dict(await conn.fetchrow("""
                     SELECT provider_allowlist, mode_allowlist, fallback_policy
                     FROM voice_entitlements
                     WHERE uid = 'uid-expires-during-session'
-                    """
-                )
-            )
+                    """))
         assert float(persisted["input_audio_s"]) == 1
         assert float(persisted["output_audio_s"]) == 0.5
         assert persisted["estimated_cost_microusd"] == 2_000
@@ -332,14 +321,12 @@ def test_cost_reservation_is_atomic_at_hard_boundary_and_settles(monkeypatch):
     async def scenario(pool: asyncpg.Pool) -> None:
         revision = await _grant(pool, "uid-cost-reservation")
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 UPDATE voice_entitlements
                 SET daily_cost_limit_microusd = 1000,
                     monthly_cost_limit_microusd = 1000
                 WHERE uid = 'uid-cost-reservation'
-                """
-            )
+                """)
         assert (await _accept("uid-cost-reservation", "session-cost", revision)).allowed
 
         denied = await voice_canary.reserve_session_cost(
@@ -363,15 +350,11 @@ def test_cost_reservation_is_atomic_at_hard_boundary_and_settles(monkeypatch):
             tool_calls=1,
         )
         async with pool.acquire() as conn:
-            settled = dict(
-                await conn.fetchrow(
-                    """
+            settled = dict(await conn.fetchrow("""
                     SELECT estimated_cost_microusd, tool_calls
                     FROM voice_active_sessions
                     WHERE session_id = 'session-cost'
-                    """
-                )
-            )
+                    """))
         assert settled == {"estimated_cost_microusd": 300, "tool_calls": 1}
 
         await voice_canary.release_session_cost(
@@ -379,16 +362,11 @@ def test_cost_reservation_is_atomic_at_hard_boundary_and_settles(monkeypatch):
             session_id="session-cost",
         )
         async with pool.acquire() as conn:
-            assert (
-                await conn.fetchval(
-                    """
+            assert await conn.fetchval("""
                     SELECT estimated_cost_microusd
                     FROM voice_active_sessions
                     WHERE session_id = 'session-cost'
-                    """
-                )
-                == 0
-            )
+                    """) == 0
 
     asyncio.run(_run_with_database(scenario))
 
@@ -407,13 +385,11 @@ def test_cost_reservation_rejects_revocation_between_accept_and_reserve(monkeypa
             )
         ).allowed
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 UPDATE voice_entitlements
                 SET status = 'revoked'
                 WHERE uid = 'uid-revoked-before-reserve'
-                """
-            )
+                """)
 
         denied = await voice_canary.reserve_session_cost(
             uid="uid-revoked-before-reserve",
@@ -424,16 +400,11 @@ def test_cost_reservation_rejects_revocation_between_accept_and_reserve(monkeypa
         assert denied.allowed is False
         assert denied.code == "revoked"
         async with pool.acquire() as conn:
-            assert (
-                await conn.fetchval(
-                    """
+            assert await conn.fetchval("""
                     SELECT estimated_cost_microusd
                     FROM voice_active_sessions
                     WHERE session_id = 'session-revoked-before-reserve'
-                    """
-                )
-                == 0
-            )
+                    """) == 0
 
     asyncio.run(_run_with_database(scenario))
 

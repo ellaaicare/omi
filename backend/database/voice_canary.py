@@ -4,6 +4,7 @@ The billing/operations ledger is deliberately content-free. Transcript text and
 audio never enter these tables.
 """
 
+import hashlib
 import json
 import os
 import uuid
@@ -76,6 +77,99 @@ def _as_float(value: Any) -> float:
 
 def _record_dict(record: Any) -> dict[str, Any]:
     return dict(record) if record else {}
+
+
+def _authority_lock_key(scope_type: str, scope_value: str) -> int:
+    payload = f"ella-voice-authority-v1\0{scope_type}\0{scope_value}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big", signed=True)
+
+
+def _channel_for_mode(mode: Optional[str]) -> str:
+    return "photon" if mode == "hermes-cloud-photon" else ""
+
+
+async def lock_runtime_authority_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    provider: str = "",
+    mode: Optional[str] = None,
+) -> None:
+    """Serialize admission reads with every matching authority/quota writer."""
+    scopes = [("global", "*")]
+    if provider:
+        scopes.append(("provider", provider))
+    channel = _channel_for_mode(mode)
+    if channel:
+        scopes.append(("channel", channel))
+    scopes.append(("user", uid))
+    for scope_type, scope_value in scopes:
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock($1)",
+            _authority_lock_key(scope_type, scope_value),
+        )
+
+
+async def set_kill_switch_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    scope_type: str,
+    scope_value: str,
+    enabled: bool,
+    reason: str,
+    updated_by: str,
+) -> dict[str, Any]:
+    """Mutate one kill switch under the same lock read by admission."""
+    if scope_type not in {"global", "user", "provider", "channel"}:
+        raise ValueError("invalid_kill_switch_scope")
+    normalized_value = "*" if scope_type == "global" else str(scope_value or "").strip()
+    if not normalized_value:
+        raise ValueError("kill_switch_scope_value_required")
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock($1)",
+        _authority_lock_key(scope_type, normalized_value),
+    )
+    row = await conn.fetchrow(
+        """
+        INSERT INTO voice_kill_switches (
+            scope_type, scope_value, enabled, reason, updated_by
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (scope_type, scope_value) DO UPDATE SET
+            enabled = EXCLUDED.enabled,
+            reason = EXCLUDED.reason,
+            revision = voice_kill_switches.revision + 1,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW()
+        RETURNING *
+        """,
+        scope_type,
+        normalized_value,
+        bool(enabled),
+        reason,
+        updated_by,
+    )
+    return _record_dict(row)
+
+
+async def set_kill_switch(
+    *,
+    scope_type: str,
+    scope_value: str,
+    enabled: bool,
+    reason: str,
+    updated_by: str,
+) -> dict[str, Any]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            return await set_kill_switch_on_connection(
+                conn,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                enabled=enabled,
+                reason=reason,
+                updated_by=updated_by,
+            )
 
 
 def _json_list(value: Any) -> list[str]:
@@ -234,15 +328,22 @@ async def _append_event(
     return event_id
 
 
-async def _expire_stale_sessions(conn: asyncpg.Connection, now: datetime) -> None:
+async def _expire_stale_sessions(
+    conn: asyncpg.Connection,
+    now: datetime,
+    *,
+    uid: str,
+) -> None:
     stale_before = now - timedelta(seconds=VOICE_SESSION_LEASE_SECONDS)
     stale = await conn.fetch(
         """
         DELETE FROM voice_active_sessions
         WHERE last_seen_at < $1
+          AND uid = $2
         RETURNING *
         """,
         stale_before,
+        uid,
     )
     for record in stale:
         row = _record_dict(record)
@@ -326,7 +427,7 @@ async def _kill_switch_code(
     provider: str,
     mode: Optional[str] = None,
 ) -> Optional[str]:
-    channel = "photon" if mode == "hermes-cloud-photon" else ""
+    channel = _channel_for_mode(mode)
     rows = await conn.fetch(
         """
         SELECT scope_type
@@ -385,6 +486,11 @@ async def _runtime_activation_decision(
     admitted_entitlement_revision: Optional[int] = None,
 ) -> VoicePolicyDecision:
     now = _utcnow()
+    await lock_runtime_authority_on_connection(
+        conn,
+        uid=uid,
+        provider=provider,
+    )
     row = await conn.fetchrow(
         "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
         uid,
@@ -487,7 +593,8 @@ async def get_entitlement_contract(uid: str) -> dict[str, Any]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await _expire_stale_sessions(conn, now)
+            await lock_runtime_authority_on_connection(conn, uid=uid)
+            await _expire_stale_sessions(conn, now, uid=uid)
             row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
             if not row:
                 return {
@@ -526,7 +633,13 @@ async def evaluate_issuance(
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await _expire_stale_sessions(conn, now)
+            await lock_runtime_authority_on_connection(
+                conn,
+                uid=uid,
+                provider=provider,
+                mode=mode,
+            )
+            await _expire_stale_sessions(conn, now, uid=uid)
             row = await conn.fetchrow(
                 "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
                 uid,
@@ -653,7 +766,13 @@ async def accept_session(
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await _expire_stale_sessions(conn, now)
+            await lock_runtime_authority_on_connection(
+                conn,
+                uid=uid,
+                provider=provider,
+                mode=mode,
+            )
+            await _expire_stale_sessions(conn, now, uid=uid)
             row = await conn.fetchrow(
                 "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
                 uid,
@@ -789,6 +908,23 @@ async def update_session(
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            scope_row = await conn.fetchrow(
+                """
+                SELECT provider, mode
+                FROM voice_active_sessions
+                WHERE session_id = $1 AND uid = $2
+                """,
+                session_id,
+                uid,
+            )
+            if not scope_row:
+                return VoicePolicyDecision(False, "voice_session_not_active", None, {})
+            await lock_runtime_authority_on_connection(
+                conn,
+                uid=uid,
+                provider=str(scope_row["provider"]),
+                mode=str(scope_row["mode"]),
+            )
             active_row = await conn.fetchrow(
                 """
                 SELECT *
@@ -899,6 +1035,23 @@ async def reserve_session_cost(
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            scope_row = await conn.fetchrow(
+                """
+                SELECT provider, mode
+                FROM voice_active_sessions
+                WHERE session_id = $1 AND uid = $2
+                """,
+                session_id,
+                uid,
+            )
+            if not scope_row:
+                return VoicePolicyDecision(False, "voice_session_not_active", None, {})
+            await lock_runtime_authority_on_connection(
+                conn,
+                uid=uid,
+                provider=str(scope_row["provider"]),
+                mode=str(scope_row["mode"]),
+            )
             active_row = await conn.fetchrow(
                 """
                 SELECT *
@@ -996,35 +1149,113 @@ async def settle_session_cost(
     actual_cost_microusd: int,
     tool_calls: int,
 ) -> None:
-    result = await (await get_pool()).execute(
-        """
-        UPDATE voice_active_sessions
-        SET estimated_cost_microusd = $3,
-            tool_calls = GREATEST(tool_calls, $4),
-            last_seen_at = $5
-        WHERE session_id = $1 AND uid = $2
-        """,
-        session_id,
-        uid,
-        max(0, int(actual_cost_microusd)),
-        max(0, int(tool_calls)),
-        _utcnow(),
-    )
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await lock_runtime_authority_on_connection(conn, uid=uid)
+            result = await conn.execute(
+                """
+                UPDATE voice_active_sessions
+                SET estimated_cost_microusd = $3,
+                    tool_calls = GREATEST(tool_calls, $4),
+                    last_seen_at = $5
+                WHERE session_id = $1 AND uid = $2
+                """,
+                session_id,
+                uid,
+                max(0, int(actual_cost_microusd)),
+                max(0, int(tool_calls)),
+                _utcnow(),
+            )
     if result == "UPDATE 0":
         raise LookupError("voice_session_not_active")
 
 
 async def release_session_cost(*, uid: str, session_id: str) -> None:
-    await (await get_pool()).execute(
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await lock_runtime_authority_on_connection(conn, uid=uid)
+            await conn.execute(
+                """
+                UPDATE voice_active_sessions
+                SET estimated_cost_microusd = 0,
+                    last_seen_at = $3
+                WHERE session_id = $1 AND uid = $2
+                """,
+                session_id,
+                uid,
+                _utcnow(),
+            )
+
+
+async def _complete_session_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    session_id: str,
+    input_audio_s: float,
+    output_audio_s: float,
+    connection_s: float,
+    input_audio_bytes: int,
+    output_audio_bytes: int,
+    tool_calls: int,
+    reconnects: int,
+    provider_request_ids: list[str],
+    termination_reason: str,
+    normalized_error_code: Optional[str],
+    estimated_cost_microusd: int,
+    now: datetime,
+) -> Optional[str]:
+    await lock_runtime_authority_on_connection(conn, uid=uid)
+    active_row = await conn.fetchrow(
         """
-        UPDATE voice_active_sessions
-        SET estimated_cost_microusd = 0,
-            last_seen_at = $3
+        DELETE FROM voice_active_sessions
         WHERE session_id = $1 AND uid = $2
+        RETURNING *
         """,
         session_id,
         uid,
-        _utcnow(),
+    )
+    if not active_row:
+        return None
+    active = _record_dict(active_row)
+    provider_ids = _merge_provider_request_ids(
+        active.get("provider_request_ids"),
+        provider_request_ids,
+    )
+    server_connection_s = max(0.0, (now - active["accepted_at"]).total_seconds())
+    event_type = (
+        "session_completed"
+        if termination_reason in {"client_disconnect", "signoff", "completed"}
+        else "session_terminated"
+    )
+    return await _append_event(
+        conn,
+        event_type=event_type,
+        uid=uid,
+        session_id=session_id,
+        correlation_id=active["correlation_id"],
+        entitlement_revision=active["entitlement_revision"],
+        provider=active["provider"],
+        model=active["model"],
+        mode=active["mode"],
+        started_at=active["accepted_at"],
+        ended_at=now,
+        input_audio_s=max(_as_float(active.get("input_audio_s")), input_audio_s),
+        output_audio_s=max(_as_float(active.get("output_audio_s")), output_audio_s),
+        connection_s=server_connection_s,
+        input_audio_bytes=max(_as_int(active.get("input_audio_bytes")), input_audio_bytes),
+        output_audio_bytes=max(_as_int(active.get("output_audio_bytes")), output_audio_bytes),
+        tool_calls=max(_as_int(active.get("tool_calls")), tool_calls),
+        reconnects=max(_as_int(active.get("reconnects")), reconnects),
+        provider_request_ids=provider_ids,
+        termination_reason=termination_reason,
+        normalized_error_code=normalized_error_code,
+        estimated_cost_microusd=max(
+            _as_int(active.get("estimated_cost_microusd")),
+            estimated_cost_microusd,
+        ),
     )
 
 
@@ -1048,54 +1279,22 @@ async def complete_session(
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            active_row = await conn.fetchrow(
-                """
-                DELETE FROM voice_active_sessions
-                WHERE session_id = $1 AND uid = $2
-                RETURNING *
-                """,
-                session_id,
-                uid,
-            )
-            if not active_row:
-                return None
-            active = _record_dict(active_row)
-            provider_ids = _merge_provider_request_ids(
-                active.get("provider_request_ids"),
-                provider_request_ids,
-            )
-            server_connection_s = max(0.0, (now - active["accepted_at"]).total_seconds())
-            event_type = (
-                "session_completed"
-                if termination_reason in {"client_disconnect", "signoff", "completed"}
-                else "session_terminated"
-            )
-            return await _append_event(
+            return await _complete_session_on_connection(
                 conn,
-                event_type=event_type,
                 uid=uid,
                 session_id=session_id,
-                correlation_id=active["correlation_id"],
-                entitlement_revision=active["entitlement_revision"],
-                provider=active["provider"],
-                model=active["model"],
-                mode=active["mode"],
-                started_at=active["accepted_at"],
-                ended_at=now,
-                input_audio_s=max(_as_float(active.get("input_audio_s")), input_audio_s),
-                output_audio_s=max(_as_float(active.get("output_audio_s")), output_audio_s),
-                connection_s=server_connection_s,
-                input_audio_bytes=max(_as_int(active.get("input_audio_bytes")), input_audio_bytes),
-                output_audio_bytes=max(_as_int(active.get("output_audio_bytes")), output_audio_bytes),
-                tool_calls=max(_as_int(active.get("tool_calls")), tool_calls),
-                reconnects=max(_as_int(active.get("reconnects")), reconnects),
-                provider_request_ids=provider_ids,
+                input_audio_s=input_audio_s,
+                output_audio_s=output_audio_s,
+                connection_s=connection_s,
+                input_audio_bytes=input_audio_bytes,
+                output_audio_bytes=output_audio_bytes,
+                tool_calls=tool_calls,
+                reconnects=reconnects,
+                provider_request_ids=provider_request_ids,
                 termination_reason=termination_reason,
                 normalized_error_code=normalized_error_code,
-                estimated_cost_microusd=max(
-                    _as_int(active.get("estimated_cost_microusd")),
-                    estimated_cost_microusd,
-                ),
+                estimated_cost_microusd=estimated_cost_microusd,
+                now=now,
             )
 
 
@@ -1142,6 +1341,7 @@ async def delete_user_voice_data(uid: str) -> dict[str, int]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await lock_runtime_authority_on_connection(conn, uid=uid)
             counts = {
                 "active_sessions": _as_int(
                     await conn.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid)

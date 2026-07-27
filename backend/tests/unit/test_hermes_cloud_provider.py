@@ -228,6 +228,98 @@ def test_responses_api_uses_distinct_session_headers_and_idempotency(cloud_env):
     assert fake.calls[0][2]["json"]["max_tool_calls"] == 0
 
 
+def test_responses_api_validation_failure_does_not_cross_provider_boundary(cloud_env):
+    boundary = []
+
+    async def mark_boundary():
+        boundary.append("provider_send")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **_kwargs: pytest.fail("client must not be created for invalid local budget")
+            ).create_response(
+                _binding(),
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=0,
+                max_tool_calls=0,
+                before_provider_send=mark_boundary,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_turn_budget_invalid"
+    assert boundary == []
+
+
+def test_responses_api_client_entry_failure_does_not_cross_provider_boundary(cloud_env):
+    boundary = []
+
+    class EntryFailureClient:
+        async def __aenter__(self):
+            raise hermes_cloud.httpx.ConnectError("synthetic client entry failure")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def mark_boundary():
+        boundary.append("provider_send")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **_kwargs: EntryFailureClient()).create_response(
+                _binding(),
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+                before_provider_send=mark_boundary,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_unavailable"
+    assert boundary == []
+
+
+def test_responses_api_post_failure_crosses_provider_boundary_first(cloud_env):
+    boundary = []
+
+    class PostFailureClient(FakeClient):
+        async def post(self, url, **kwargs):
+            self.calls.append(("POST", url, kwargs))
+            raise hermes_cloud.httpx.ConnectError("synthetic post failure")
+
+    fake = PostFailureClient({})
+
+    async def mark_boundary():
+        boundary.append("provider_send")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **_kwargs: fake).create_response(
+                _binding(),
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+                before_provider_send=mark_boundary,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_unavailable"
+    assert boundary == ["provider_send"]
+    assert [call[0] for call in fake.calls] == ["POST"]
+
+
 def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
     responses = {}
     effects = []

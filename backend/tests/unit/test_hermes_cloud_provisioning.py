@@ -346,6 +346,51 @@ def test_atomic_claim_revalidation_denial_has_zero_honcho_or_cloud_side_effects(
     assert repository.jobs[-1]["error_code"] == "runtime_admission_revoked"
 
 
+def test_authority_change_after_claim_blocks_honcho_and_quarantines_claim(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    admissions = 0
+
+    async def change_authority_after_claim(**_kwargs):
+        nonlocal admissions
+        admissions += 1
+        if admissions == 1:
+            return SimpleNamespace(
+                allowed=True,
+                code="ok",
+                entitlement={"revision": 3, "status": "invited"},
+            )
+        return SimpleNamespace(
+            allowed=False,
+            code="provider_disabled",
+            entitlement={"revision": 3, "status": "invited"},
+        )
+
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=change_authority_after_claim,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert admissions == 2
+    assert repository.claims == 1
+    assert repository.side_effects == []
+    assert honcho.calls == []
+    assert cloud.calls == []
+    assert repository.finalized == []
+    assert repository.quarantined[0]["reason"] == "runtime_admission_provider_disabled"
+
+
 def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
