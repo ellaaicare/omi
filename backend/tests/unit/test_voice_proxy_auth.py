@@ -1109,3 +1109,39 @@ def test_isolated_tool_calls_exact_runtime_without_returning_credentials(monkeyp
     assert requests[0][0] == "http://hermes-8210/runtime/ella-uid-a/chat"
     assert requests[0][1]["X-Ella-Owner-Uid"] == "uid-a"
     assert "test-hermes-secret" not in str(result)
+
+
+def test_cloud_voice_tool_never_calls_mini_provisioning_shim(monkeypatch):
+    runtime = SimpleNamespace(
+        provider="hermes_cloud",
+        agent_id="hermes-cloud",
+        revision=2,
+    )
+
+    async def resolve_runtime(principal):
+        return runtime
+
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Hermes Cloud voice tool must not call the Mini")
+
+    monkeypatch.setattr(voice, "_resolve_voice_runtime", resolve_runtime)
+    monkeypatch.setattr(voice.httpx, "AsyncClient", ForbiddenClient)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            voice.execute_voice_tool(
+                _request(
+                    {
+                        "uid": "uid-a",
+                        "tool_name": "ask_ella",
+                        "arguments": {"query": "Synthetic question"},
+                    },
+                    token=_token("uid-a"),
+                    service_token="test-proxy-secret",
+                )
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {"code": "hermes_cloud_voice_tool_not_enabled"}

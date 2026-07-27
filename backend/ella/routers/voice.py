@@ -43,7 +43,7 @@ from ella.services.ai_consent import (
     require_current_ai_consent_or_internal_tts,
     resolve_processor,
 )
-from ella.services.provisioning import ProvisioningError, rollout_enabled
+from ella.services.provisioning import ProvisioningError, cloud_provisioning_enabled, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
 from ella.services.voice_canary_alerts import (
     VOICE_SPEND_ANOMALY_MICROUSD,
@@ -275,7 +275,9 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
 
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
-    bindings_enabled = runtime_bindings_enabled(principal.uid)
+    bindings_enabled = runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(
+        principal.uid
+    )
     voice_enabled = isolated_voice_routing_enabled(principal.uid)
     if bindings_enabled != voice_enabled:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
@@ -284,9 +286,12 @@ async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     if not bindings_enabled:
         return None
     try:
-        return await resolve_isolated_runtime(principal.uid)
+        runtime = await resolve_isolated_runtime(principal.uid)
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    if not runtime:
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
+    return runtime
 
 
 async def _resolve_voice_honcho_binding(uid: str, runtime: Any = None):
@@ -955,7 +960,7 @@ async def create_voice_session(
     voice_mode = (body.voice_mode if body else None) or voice_mode
     requested_scope = body.session_scope if body else None
 
-    runtime_bound = runtime_bindings_enabled(uid)
+    runtime_bound = runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid)
     voice_rollout_enabled = isolated_voice_routing_enabled(uid)
     if voice_rollout_enabled and not runtime_bound:
         raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
@@ -1658,8 +1663,13 @@ async def get_voice_context(request: Request):
         agent_id = runtime.agent_id
         gateway_url = ""
         gateway_token = ""
-        workspace_api_url = HERMES_PROVISION_API_URL
-        workspace_headers = _hermes_workspace_headers(uid)
+        cloud_runtime = getattr(runtime, "provider", "hermes") == "hermes_cloud"
+        workspace_api_url = "" if cloud_runtime else HERMES_PROVISION_API_URL
+        workspace_headers = (
+            {}
+            if cloud_runtime
+            else _hermes_workspace_headers(uid)
+        )
     else:
         agent_id = agents.get("userAgentId", "")
         gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
@@ -1827,7 +1837,7 @@ async def get_voice_context(request: Request):
         "user_name": row["name"],
         "user_agent_id": agent_id,
         "runtime": {
-            "provider": "hermes" if runtime else "legacy",
+            "provider": getattr(runtime, "provider", "hermes") if runtime else "legacy",
             "agent_id": agent_id,
             "binding_revision": runtime.revision if runtime else None,
         },
@@ -1872,6 +1882,10 @@ async def execute_voice_tool(request: Request):
         raise HTTPException(status_code=409, detail={"code": "isolated_runtime_required"})
     if tool_name != "ask_ella":
         raise HTTPException(status_code=400, detail={"code": "voice_tool_not_allowed"})
+    if getattr(runtime, "provider", "hermes") == "hermes_cloud":
+        # Cloud tools must execute through the durable first-party turn service.
+        # The initial shadow cohort exposes no mutating or Mini-backed tool path.
+        raise HTTPException(status_code=409, detail={"code": "hermes_cloud_voice_tool_not_enabled"})
 
     prompt = str(arguments.get("query") or "").strip()
     if not prompt:

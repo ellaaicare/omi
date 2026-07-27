@@ -33,13 +33,22 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ella.config import ELLA_CONFIG
+from database.ella_provisioning import EllaProvisioningRepository
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.routers.resolve import resolve_user_routing
 from ella.routers.trace import RouteTrace, record_trace
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from ella.services.hermes_cloud_runtime import (
+    HermesCloudRuntimeService,
+    HermesCloudTurnRequest,
+)
 from ella.services.ai_consent import require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
-from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.runtime_resolver import (
+    IsolatedRuntime,
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+)
 from utils.ella.canonical_context import (
     DEFAULT_CONTEXT_CHANNELS,
     canonical_events_to_server_messages,
@@ -893,6 +902,87 @@ async def _stream_hermes_chat(
         yield f"data: Error: {str(e)}\n\n"
 
 
+async def _stream_hermes_cloud_chat(
+    user_message: str,
+    uid: str,
+    client_info: dict,
+    *,
+    turn_id: str,
+    client_sent_at: datetime,
+    runtime: IsolatedRuntime,
+):
+    """Execute one durable cloud turn; vendor credentials stay server-side."""
+    canonical_events = await _fetch_chat_canonical_events(uid, limit=CHAT_CONTEXT_LIMIT)
+    canonical_context = format_canonical_context(
+        canonical_events,
+        max_chars=CHAT_CONTEXT_MAX_CHARS,
+    )
+    temporal_label, temporal_events = await _fetch_temporal_chat_context(uid, user_message)
+    temporal_context = format_canonical_context(
+        temporal_events,
+        max_chars=CHAT_TEMPORAL_CONTEXT_MAX_CHARS,
+        user_timezone=CHAT_USER_TIMEZONE,
+    )
+    instructions = [ELLA_SYSTEM_PROMPT]
+    if canonical_context:
+        instructions.append(
+            "The canonical timeline below is the freshest server-authoritative context. "
+            "Use only relevant facts and do not claim absent information is present.\n\n"
+            f"{canonical_context}"
+        )
+    if temporal_context:
+        instructions.append(f"Additional {temporal_label}:\n\n{temporal_context}")
+
+    try:
+        repository = await EllaProvisioningRepository.create()
+        result = await HermesCloudRuntimeService(
+            repository=repository,
+            event_store=_canonical_event_store,
+        ).run_turn(
+            runtime,
+            HermesCloudTurnRequest(
+                uid=uid,
+                client_interaction_id=turn_id,
+                correlation_id=f"ios-chat:{turn_id}",
+                channel="ios_chat",
+                user_input=user_message,
+                instructions="\n\n".join(instructions),
+                started_at=client_sent_at,
+                client_metadata=client_info or {},
+            ),
+        )
+        yield f"data: {result.text.replace(chr(10), '__CRLF__')}\n\n"
+        message = {
+            "id": result.canonical_assistant_event_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": result.text,
+            "sender": "ai",
+            "type": "text",
+            "plugin_id": None,
+            "from_integration": False,
+            "memories": [],
+            "files": [],
+            "ask_for_nps": False,
+        }
+        yield f"done: {base64.b64encode(json.dumps(message).encode()).decode()}\n\n"
+        logger.info(
+            "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s duplicate=%s response=%s",
+            uid,
+            runtime.binding_id,
+            result.duplicate,
+            bool(result.response_id),
+        )
+    except ProvisioningError as exc:
+        logger.warning(
+            "[FLOW:CHAT-HERMES-CLOUD] uid=%s binding=%s code=%s retryable=%s",
+            uid,
+            runtime.binding_id,
+            exc.code,
+            exc.retryable,
+        )
+        yield "data: Ella is temporarily unavailable. Please try again.\n\n"
+
+
 @router.post("/chat/stream")
 async def ella_chat_stream(
     request: EllaChatRequest,
@@ -961,8 +1051,21 @@ async def ella_chat_stream(
         trace.resolve_source = "isolated_runtime_binding" if runtime else "hermes_platform"
         trace.total_latency_ms = int((_time.time() - _trace_start) * 1000)
         record_trace(trace)
-        return StreamingResponse(
-            _stream_hermes_chat(
+        stream = (
+            _stream_hermes_cloud_chat(
+                request.message,
+                uid,
+                {
+                    "type": x_ella_client_type or "",
+                    "version": x_ella_client_version or "",
+                    "route": x_ella_route or "",
+                },
+                turn_id=turn_id,
+                client_sent_at=client_sent_at,
+                runtime=runtime,
+            )
+            if runtime and runtime.provider == "hermes_cloud"
+            else _stream_hermes_chat(
                 request.message,
                 uid,
                 {
@@ -975,7 +1078,10 @@ async def ella_chat_stream(
                 turn_id=turn_id,
                 client_sent_at=client_sent_at,
                 runtime=runtime,
-            ),
+            )
+        )
+        return StreamingResponse(
+            stream,
             media_type="text/event-stream",
         )
 
@@ -1078,7 +1184,8 @@ async def ella_chat_history(
     if uid and uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
     uid = authenticated_uid
-    if runtime_bindings_enabled(authenticated_uid):
+    runtime_bound = runtime_authority_enabled(authenticated_uid)
+    if runtime_bound:
         try:
             await resolve_isolated_runtime(authenticated_uid)
         except ProvisioningError as exc:
@@ -1107,7 +1214,7 @@ async def ella_chat_history(
         uid,
     )
 
-    if runtime_bindings_enabled(uid):
+    if runtime_bound:
         return {"messages": [], "hasMore": False, "source": "canonical_timeline_empty", "fallback": False}
 
     # Resolve user to get their OpenClaw user ID for migration fallback only.

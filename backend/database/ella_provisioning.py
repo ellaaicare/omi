@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import asyncpg
@@ -26,6 +26,53 @@ REQUIRED_PROVISIONING_INDEXES = (
     "ella_runtime_bindings_user_role_active_idx",
     "ella_runtime_bindings_health_updated_idx",
 )
+REQUIRED_CLOUD_RUNTIME_INDEXES = (
+    "ella_runtime_bindings_runtime_instance_key",
+    "ella_runtime_bindings_claim_job_key",
+    "ella_runtime_bindings_claim_token_key",
+    "ella_runtime_bindings_pool_lookup_idx",
+    "ella_runtime_session_scopes_session_key",
+    "ella_runtime_session_scopes_binding_role_channel_key",
+    "ella_runtime_session_scopes_user_updated_idx",
+    "ella_runtime_interactions_scope_client_key",
+    "ella_runtime_interactions_hermes_session_key",
+    "ella_runtime_interactions_idempotency_key",
+    "ella_runtime_interactions_scope_status_idx",
+    "ella_runtime_ingestion_event_revision_key",
+    "ella_runtime_ingestion_status_idx",
+    "ella_runtime_pool_alerts_one_pending_key",
+    "ella_runtime_pool_alerts_provider_state_idx",
+)
+CLOUD_RUNTIME_TABLES = (
+    "ella_runtime_session_scopes",
+    "ella_runtime_interactions",
+    "ella_runtime_ingestion_receipts",
+    "ella_runtime_pool_alerts",
+)
+REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS = (
+    "status",
+    "runtime_instance_id",
+    "api_base_url_ref",
+    "api_key_ref",
+    "honcho_api_key_ref",
+    "prompt_pack_version",
+    "prompt_artifact_receipt",
+    "expected_model",
+    "allowed_tools",
+    "required_capabilities",
+    "claim_job_id",
+    "claim_token",
+    "claim_lease_expires_at",
+    "claimed_at",
+    "disabled_at",
+    "quarantined_at",
+    "quarantine_reason",
+)
+REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
+    "ella_runtime_bindings_claim_job_id_fkey",
+    "ella_runtime_bindings_status_check",
+    "ella_runtime_bindings_cloud_pool_shape_check",
+)
 
 
 class IdentityConflictError(RuntimeError):
@@ -38,6 +85,14 @@ class ProvisioningSchemaNotReadyError(RuntimeError):
     def __init__(self, missing: list[str]):
         self.missing = tuple(missing)
         super().__init__("provisioning_schema_not_ready")
+
+
+class RuntimePoolClaimError(RuntimeError):
+    """A warm runtime claim no longer has an unambiguous owner."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -98,6 +153,76 @@ class EllaProvisioningRepository:
             missing.append("table:ella_runtime_bindings")
         if row:
             missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
+        if missing:
+            raise ProvisioningSchemaNotReadyError(missing)
+
+    async def assert_cloud_schema_ready(self) -> None:
+        """Fail before cloud claims when the pool/session migration is absent."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                ARRAY(
+                    SELECT required.table_name
+                    FROM unnest($1::text[]) AS required(table_name)
+                    WHERE to_regclass('public.' || required.table_name) IS NULL
+                    ORDER BY required.table_name
+                ) AS missing_tables,
+                ARRAY(
+                    SELECT required.index_name
+                    FROM unnest($2::text[]) AS required(index_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND indexname = required.index_name
+                    )
+                    ORDER BY required.index_name
+                ) AS missing_indexes,
+                ARRAY(
+                    SELECT required.column_name
+                    FROM unnest($3::text[]) AS required(column_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'ella_runtime_bindings'
+                          AND column_name = required.column_name
+                    )
+                    ORDER BY required.column_name
+                ) AS missing_columns,
+                ARRAY(
+                    SELECT required.constraint_name
+                    FROM unnest($4::text[]) AS required(constraint_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = required.constraint_name
+                    )
+                    ORDER BY required.constraint_name
+                ) AS missing_constraints,
+                (
+                    SELECT is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'ella_runtime_bindings'
+                      AND column_name = 'user_id'
+                ) AS binding_user_nullable
+            """,
+            list(CLOUD_RUNTIME_TABLES),
+            list(REQUIRED_CLOUD_RUNTIME_INDEXES),
+            list(REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS),
+            list(REQUIRED_CLOUD_RUNTIME_CONSTRAINTS),
+        )
+        missing: list[str] = []
+        if row:
+            missing.extend(f"table:{name}" for name in (row["missing_tables"] or []))
+            missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
+            missing.extend(f"column:ella_runtime_bindings.{name}" for name in (row["missing_columns"] or []))
+            missing.extend(f"constraint:{name}" for name in (row["missing_constraints"] or []))
+            if row["binding_user_nullable"] != "YES":
+                missing.append("column:ella_runtime_bindings.user_id_nullable")
+        else:
+            missing.append("cloud_runtime_schema_probe")
         if missing:
             raise ProvisioningSchemaNotReadyError(missing)
 
@@ -334,6 +459,636 @@ class EllaProvisioningRepository:
         )
         return _row_dict(row)
 
+    async def register_cloud_pool_binding(
+        self,
+        *,
+        runtime_instance_id: str,
+        profile_name: str,
+        agent_id: str,
+        api_base_url_ref: str,
+        api_key_ref: str,
+        honcho_api_key_ref: str,
+        template_version: str,
+        prompt_pack_version: str,
+        prompt_artifact_receipt: dict[str, Any],
+        model_policy_version: str,
+        voice_policy_version: str,
+        expected_model: str,
+        allowed_tools: list[str],
+        required_capabilities: list[str],
+        health_receipt: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish a preflighted instance into the unbound warm pool."""
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO ella_runtime_bindings (
+                id, user_id, role, provider, status, profile_name, agent_id,
+                workspace_root, internal_gateway_url, gateway_port, service_label,
+                credential_ref, runtime_instance_id, api_base_url_ref, api_key_ref,
+                honcho_api_key_ref, honcho_workspace, observed_peer, observer_peer,
+                template_version, prompt_pack_version, prompt_artifact_receipt, model_policy_version,
+                voice_policy_version, expected_model, allowed_tools,
+                required_capabilities, health_state, health_receipt, revision, active
+            )
+            VALUES (
+                $1, NULL, 'user', 'hermes_cloud', 'pool_available', $3, $4,
+                NULL, NULL, NULL, NULL, NULL, $2, $5, $6, $7,
+                NULL, NULL, NULL, $8, $9, $10::jsonb, $11, $12, $13, $14::jsonb,
+                $15::jsonb, 'healthy', $16::jsonb, 1, false
+            )
+            ON CONFLICT (runtime_instance_id)
+            WHERE runtime_instance_id IS NOT NULL
+            DO NOTHING
+            RETURNING *
+            """,
+            uuid.uuid4(),
+            runtime_instance_id,
+            profile_name,
+            agent_id,
+            api_base_url_ref,
+            api_key_ref,
+            honcho_api_key_ref,
+            template_version,
+            prompt_pack_version,
+            json.dumps(prompt_artifact_receipt),
+            model_policy_version,
+            voice_policy_version,
+            expected_model,
+            json.dumps(sorted(set(allowed_tools))),
+            json.dumps(sorted(set(required_capabilities))),
+            json.dumps(health_receipt),
+        )
+        if row:
+            return dict(row)
+        existing = await self.pool.fetchrow(
+            """
+            SELECT *
+            FROM ella_runtime_bindings
+            WHERE provider = 'hermes_cloud' AND runtime_instance_id = $1
+            """,
+            runtime_instance_id,
+        )
+        if not existing:
+            raise RuntimePoolClaimError("runtime_pool_registration_lost")
+        if existing["status"] != "pool_available" or existing["user_id"] is not None:
+            raise RuntimePoolClaimError("runtime_instance_already_claimed")
+        return dict(existing)
+
+    async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT id, runtime_instance_id, status, health_state, expected_model,
+                   prompt_pack_version, revision, claimed_at, quarantined_at,
+                   quarantine_reason, created_at, updated_at
+            FROM ella_runtime_bindings
+            WHERE provider = 'hermes_cloud'
+            ORDER BY created_at ASC, id ASC
+            """
+        )
+        return [dict(row) for row in rows]
+
+    async def claim_cloud_pool_binding(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        lease_seconds: int,
+    ) -> Optional[dict[str, Any]]:
+        """Atomically reserve one healthy unbound Hermes Cloud instance.
+
+        A reconnect for the same provisioning receipt gets the same claim.
+        Claims are never recycled automatically after external side effects.
+        """
+        claim_token = uuid.uuid4()
+        lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(30, lease_seconds))
+        job_uuid = uuid.UUID(str(job_id))
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                existing = await connection.fetchrow(
+                    """
+                    SELECT b.*, u.omi_uid
+                    FROM ella_runtime_bindings b
+                    JOIN users u ON u.id = b.user_id
+                    WHERE u.omi_uid = $1
+                      AND b.provider = 'hermes_cloud'
+                      AND b.claim_job_id = $2
+                      AND b.status IN ('claiming', 'shadow', 'internal_canary', 'active')
+                    FOR UPDATE
+                    """,
+                    uid,
+                    job_uuid,
+                )
+                if existing:
+                    return dict(existing)
+
+                user_row = await connection.fetchrow(
+                    "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
+                    uid,
+                )
+                if not user_row:
+                    raise LookupError("user_not_found")
+
+                candidate = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM ella_runtime_bindings
+                    WHERE provider = 'hermes_cloud'
+                      AND status = 'pool_available'
+                      AND health_state = 'healthy'
+                      AND active = false
+                      AND user_id IS NULL
+                      AND runtime_instance_id IS NOT NULL
+                      AND api_base_url_ref IS NOT NULL
+                      AND api_key_ref IS NOT NULL
+                      AND honcho_api_key_ref IS NOT NULL
+                      AND prompt_artifact_receipt <> '{}'::jsonb
+                      AND expected_model IS NOT NULL
+                      AND jsonb_typeof(allowed_tools) = 'array'
+                      AND jsonb_typeof(required_capabilities) = 'array'
+                    ORDER BY updated_at ASC, id ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """
+                )
+                if not candidate:
+                    return None
+
+                claimed = await connection.fetchrow(
+                    """
+                    UPDATE ella_runtime_bindings
+                    SET user_id = $2,
+                        claim_job_id = $3,
+                        claim_token = $4,
+                        claim_lease_expires_at = $5,
+                        status = 'claiming',
+                        health_state = 'pending',
+                        health_receipt = '{}'::jsonb,
+                        quarantine_reason = NULL,
+                        quarantined_at = NULL,
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                      AND status = 'pool_available'
+                      AND user_id IS NULL
+                    RETURNING *
+                    """,
+                    candidate["id"],
+                    user_row["id"],
+                    job_uuid,
+                    claim_token,
+                    lease_expires_at,
+                )
+                if not claimed:
+                    return None
+                result = dict(claimed)
+                result["omi_uid"] = uid
+                return result
+
+    async def finalize_cloud_pool_claim(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        claim_token: str,
+        honcho_workspace: str,
+        observed_peer: str,
+        observer_peer: str,
+        health_receipt: dict[str, Any],
+        status: str = "internal_canary",
+    ) -> dict[str, Any]:
+        if status not in {"shadow", "internal_canary", "active"}:
+            raise ValueError("invalid_cloud_binding_status")
+        job_uuid = uuid.UUID(str(job_id))
+        token_uuid = uuid.UUID(str(claim_token))
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                selected = await connection.fetchrow(
+                    """
+                    SELECT b.*, u.omi_uid
+                    FROM ella_runtime_bindings b
+                    JOIN users u ON u.id = b.user_id
+                    WHERE u.omi_uid = $1
+                      AND b.provider = 'hermes_cloud'
+                      AND b.claim_job_id = $2
+                      AND b.claim_token = $3
+                    FOR UPDATE
+                    """,
+                    uid,
+                    job_uuid,
+                    token_uuid,
+                )
+                if not selected:
+                    raise RuntimePoolClaimError("runtime_pool_claim_lost")
+                if selected["status"] in {"shadow", "internal_canary", "active"}:
+                    return dict(selected)
+                if selected["status"] != "claiming":
+                    raise RuntimePoolClaimError("runtime_pool_claim_not_finalizable")
+                if not selected["claim_lease_expires_at"] or selected["claim_lease_expires_at"] <= datetime.now(
+                    timezone.utc
+                ):
+                    raise RuntimePoolClaimError("runtime_pool_claim_expired")
+
+                await connection.execute(
+                    """
+                    UPDATE ella_runtime_bindings
+                    SET active = false, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $1
+                      AND role = $2
+                      AND active = true
+                      AND id <> $3
+                    """,
+                    selected["user_id"],
+                    selected["role"],
+                    selected["id"],
+                )
+                activated = await connection.fetchrow(
+                    """
+                    UPDATE ella_runtime_bindings
+                    SET honcho_workspace = $2,
+                        observed_peer = $3,
+                        observer_peer = $4,
+                        status = $5,
+                        health_state = 'healthy',
+                        health_receipt = $6::jsonb,
+                        active = true,
+                        claimed_at = CURRENT_TIMESTAMP,
+                        claim_lease_expires_at = NULL,
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    RETURNING *
+                    """,
+                    selected["id"],
+                    honcho_workspace,
+                    observed_peer,
+                    observer_peer,
+                    status,
+                    json.dumps(health_receipt),
+                )
+                await connection.execute(
+                    """
+                    UPDATE users
+                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    """,
+                    selected["user_id"],
+                )
+                result = dict(activated)
+                result["omi_uid"] = uid
+                return result
+
+    async def quarantine_cloud_pool_claim(
+        self,
+        *,
+        uid: str,
+        job_id: str,
+        claim_token: str,
+        reason: str,
+        health_receipt: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_runtime_bindings b
+            SET status = 'quarantined',
+                active = false,
+                health_state = 'unhealthy',
+                health_receipt = $4::jsonb,
+                quarantine_reason = $5,
+                quarantined_at = CURRENT_TIMESTAMP,
+                claim_lease_expires_at = NULL,
+                revision = revision + 1,
+                updated_at = CURRENT_TIMESTAMP
+            FROM users u
+            WHERE b.user_id = u.id
+              AND u.omi_uid = $1
+              AND b.provider = 'hermes_cloud'
+              AND b.claim_job_id = $2
+              AND b.claim_token = $3
+              AND b.status = 'claiming'
+            RETURNING b.*
+            """,
+            uid,
+            uuid.UUID(str(job_id)),
+            uuid.UUID(str(claim_token)),
+            json.dumps(health_receipt or {}),
+            reason[:200],
+        )
+        return _row_dict(row)
+
+    async def reconcile_cloud_pool_alert(
+        self,
+        *,
+        threshold: int,
+        provider: str = "hermes_cloud",
+    ) -> dict[str, Any]:
+        threshold = max(1, threshold)
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                available = int(
+                    await connection.fetchval(
+                        """
+                        SELECT COUNT(*)
+                        FROM ella_runtime_bindings
+                        WHERE provider = $1
+                          AND status = 'pool_available'
+                          AND health_state = 'healthy'
+                          AND active = false
+                          AND user_id IS NULL
+                        """,
+                        provider,
+                    )
+                    or 0
+                )
+                if available < threshold:
+                    alert = await connection.fetchrow(
+                        """
+                        INSERT INTO ella_runtime_pool_alerts (
+                            provider, alert_type, state, available_count, threshold, metadata
+                        )
+                        VALUES ($1, 'low_water', 'pending', $2, $3, $4::jsonb)
+                        ON CONFLICT (provider, alert_type) WHERE state = 'pending'
+                        DO UPDATE SET
+                            available_count = EXCLUDED.available_count,
+                            threshold = EXCLUDED.threshold,
+                            metadata = EXCLUDED.metadata
+                        RETURNING *
+                        """,
+                        provider,
+                        available,
+                        threshold,
+                        json.dumps({"content_free": True}),
+                    )
+                    return {"available": available, "low_water": True, "alert": dict(alert)}
+
+                await connection.execute(
+                    """
+                    UPDATE ella_runtime_pool_alerts
+                    SET state = 'resolved', resolved_at = CURRENT_TIMESTAMP
+                    WHERE provider = $1
+                      AND alert_type = 'low_water'
+                      AND state = 'pending'
+                    """,
+                    provider,
+                )
+                return {"available": available, "low_water": False, "alert": None}
+
+    async def mark_cloud_pool_alert_delivered(self, alert_id: str) -> None:
+        await self.pool.execute(
+            """
+            UPDATE ella_runtime_pool_alerts
+            SET delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+            WHERE id = $1
+              AND state = 'pending'
+            """,
+            uuid.UUID(str(alert_id)),
+        )
+
+    async def resolve_cloud_binding_state(self, uid: str, role: str = "user") -> Optional[dict[str, Any]]:
+        row = await self.pool.fetchrow(
+            """
+            SELECT b.*, u.omi_uid, u.name, u.status AS user_status
+            FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
+            WHERE u.omi_uid = $1
+              AND b.role = $2
+              AND b.provider = 'hermes_cloud'
+            ORDER BY b.updated_at DESC, b.id DESC
+            LIMIT 1
+            """,
+            uid,
+            role,
+        )
+        return _row_dict(row)
+
+    async def get_or_create_runtime_scope(
+        self,
+        *,
+        uid: str,
+        binding_id: str,
+        role: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        opaque_key = f"ella:scope:{uuid.uuid4()}"
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO ella_runtime_session_scopes (
+                id, binding_id, user_id, role, channel, session_key
+            )
+            SELECT $1, b.id, b.user_id, $4, $5, $6
+            FROM ella_runtime_bindings b
+            JOIN users u ON u.id = b.user_id
+            WHERE b.id = $2
+              AND u.omi_uid = $3
+              AND b.provider = 'hermes_cloud'
+              AND b.active = true
+              AND b.status IN ('shadow', 'internal_canary', 'active')
+            ON CONFLICT (binding_id, role, channel)
+            DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+            """,
+            uuid.uuid4(),
+            uuid.UUID(str(binding_id)),
+            uid,
+            role,
+            channel,
+            opaque_key,
+        )
+        if not row:
+            raise LookupError("runtime_scope_binding_not_ready")
+        return dict(row)
+
+    async def get_or_create_runtime_interaction(
+        self,
+        *,
+        scope_id: str,
+        client_interaction_id: str,
+        request_hash: str,
+        correlation_id: str,
+        canonical_user_event_id: str,
+        canonical_assistant_event_id: str,
+    ) -> dict[str, Any]:
+        previous_response_id = await self.pool.fetchval(
+            """
+            SELECT provider_response_id
+            FROM ella_runtime_interactions
+            WHERE scope_id = $1
+              AND status = 'completed'
+              AND provider_response_id IS NOT NULL
+            ORDER BY completed_at DESC, created_at DESC
+            LIMIT 1
+            """,
+            uuid.UUID(str(scope_id)),
+        )
+        row = await self.pool.fetchrow(
+            """
+            INSERT INTO ella_runtime_interactions (
+                id, scope_id, client_interaction_id, request_hash, hermes_session_id,
+                idempotency_key, correlation_id, previous_response_id,
+                canonical_user_event_id, canonical_assistant_event_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (scope_id, client_interaction_id)
+            DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+            """,
+            uuid.uuid4(),
+            uuid.UUID(str(scope_id)),
+            client_interaction_id,
+            request_hash,
+            f"ella:interaction:{uuid.uuid4()}",
+            f"ella:request:{uuid.uuid4()}",
+            correlation_id,
+            previous_response_id,
+            canonical_user_event_id,
+            canonical_assistant_event_id,
+        )
+        result = dict(row)
+        if str(result.get("request_hash") or "") != request_hash:
+            raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
+        return result
+
+    async def claim_runtime_interaction(self, interaction_id: str) -> Optional[dict[str, Any]]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_runtime_interactions
+            SET status = 'running',
+                error_code = NULL,
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND (
+                  status IN ('pending', 'failed')
+                  OR (
+                      status = 'running'
+                      AND updated_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+                  )
+              )
+            RETURNING *
+            """,
+            uuid.UUID(str(interaction_id)),
+        )
+        return _row_dict(row)
+
+    async def complete_runtime_interaction(
+        self,
+        *,
+        interaction_id: str,
+        provider_response_id: str,
+        usage: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_runtime_interactions
+            SET status = 'completed',
+                provider_response_id = $2,
+                usage = $3::jsonb,
+                completed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'running'
+            RETURNING *
+            """,
+            uuid.UUID(str(interaction_id)),
+            provider_response_id,
+            json.dumps(usage),
+        )
+        if not row:
+            raise LookupError("runtime_interaction_not_running")
+        return dict(row)
+
+    async def fail_runtime_interaction(self, *, interaction_id: str, error_code: str) -> None:
+        await self.pool.execute(
+            """
+            UPDATE ella_runtime_interactions
+            SET status = 'failed',
+                error_code = $2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'running'
+            """,
+            uuid.UUID(str(interaction_id)),
+            error_code[:120],
+        )
+
+    async def claim_runtime_ingestion(
+        self,
+        *,
+        binding_id: str,
+        canonical_event_id: str,
+        source_identity: str,
+        event_revision: int,
+        provenance: str,
+    ) -> dict[str, Any]:
+        inserted = await self.pool.fetchrow(
+            """
+            INSERT INTO ella_runtime_ingestion_receipts (
+                id, binding_id, canonical_event_id, source_identity,
+                event_revision, provenance, status
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'claimed')
+            ON CONFLICT (
+                binding_id, canonical_event_id, source_identity, event_revision
+            ) DO NOTHING
+            RETURNING *
+            """,
+            uuid.uuid4(),
+            uuid.UUID(str(binding_id)),
+            canonical_event_id,
+            source_identity,
+            max(1, int(event_revision)),
+            provenance,
+        )
+        if inserted:
+            result = dict(inserted)
+            result["inserted"] = True
+            return result
+        existing = await self.pool.fetchrow(
+            """
+            SELECT *
+            FROM ella_runtime_ingestion_receipts
+            WHERE binding_id = $1
+              AND canonical_event_id = $2
+              AND source_identity = $3
+              AND event_revision = $4
+            """,
+            uuid.UUID(str(binding_id)),
+            canonical_event_id,
+            source_identity,
+            max(1, int(event_revision)),
+        )
+        result = dict(existing)
+        result["inserted"] = False
+        return result
+
+    async def complete_runtime_ingestion(
+        self,
+        *,
+        receipt_id: str,
+        status: str,
+        provider_ref: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        if status not in {"written", "skipped", "failed"}:
+            raise ValueError("invalid_runtime_ingestion_status")
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_runtime_ingestion_receipts
+            SET status = $2,
+                provider_ref = $3,
+                metadata = $4::jsonb,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING *
+            """,
+            uuid.UUID(str(receipt_id)),
+            status,
+            provider_ref,
+            json.dumps(metadata or {}),
+        )
+        if not row:
+            raise LookupError("runtime_ingestion_receipt_not_found")
+        return dict(row)
+
     async def update_job(
         self,
         *,
@@ -388,7 +1143,9 @@ class EllaProvisioningRepository:
                 $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
             FROM users u
             WHERE u.omi_uid = $2
-            ON CONFLICT (user_id, role, provider) DO UPDATE
+            ON CONFLICT (user_id, role, provider)
+            WHERE provider <> 'hermes_cloud'
+            DO UPDATE
             SET profile_name = EXCLUDED.profile_name,
                 agent_id = EXCLUDED.agent_id,
                 workspace_root = EXCLUDED.workspace_root,

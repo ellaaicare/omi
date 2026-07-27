@@ -19,9 +19,11 @@ import httpx
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
+    RuntimePoolClaimError,
 )
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
+CLOUD_TARGET_SCHEMA_VERSION = "hermes-cloud-user-v1"
 DEFAULT_TEMPLATE_VERSION = "hermes-user-v1"
 DEFAULT_MODEL_POLICY_VERSION = "frontier-v1"
 DEFAULT_VOICE_POLICY_VERSION = "ella-voice-v1"
@@ -34,6 +36,8 @@ DEFAULT_PROVISION_TIMEOUT_SECONDS = 180.0
 MIN_PROVISION_TIMEOUT_SECONDS = 30.0
 MAX_PROVISION_TIMEOUT_SECONDS = 300.0
 RETAINED_COMPATIBILITY_POLICY_REVISION = "retained-compatibility-v1"
+DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS = 120
+DEFAULT_CLOUD_POOL_LOW_WATER = 2
 
 
 class ProvisioningError(RuntimeError):
@@ -68,6 +72,44 @@ def provisioning_enabled(uid: Optional[str] = None) -> bool:
         "ELLA_HERMES_PROVISIONING_ENABLED_UIDS",
         uid,
     )
+
+
+def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return rollout_enabled(
+        "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED",
+        "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
+        uid,
+    )
+
+
+def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid)
+
+
+def effective_target_schema_version(uid: str, requested: str) -> str:
+    if not cloud_provisioning_enabled(uid):
+        return requested
+    if requested not in {DEFAULT_TARGET_SCHEMA_VERSION, CLOUD_TARGET_SCHEMA_VERSION}:
+        raise ProvisioningError("cloud_target_schema_version_required", retryable=False)
+    return CLOUD_TARGET_SCHEMA_VERSION
+
+
+def cloud_pool_claim_lease_seconds() -> int:
+    raw = os.getenv("ELLA_HERMES_CLOUD_POOL_CLAIM_LEASE_SECONDS", "").strip()
+    try:
+        parsed = int(raw) if raw else DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS
+    except ValueError:
+        parsed = DEFAULT_CLOUD_POOL_CLAIM_LEASE_SECONDS
+    return min(600, max(30, parsed))
+
+
+def cloud_pool_low_water_threshold() -> int:
+    raw = os.getenv("ELLA_HERMES_CLOUD_POOL_LOW_WATER", "").strip()
+    try:
+        parsed = int(raw) if raw else DEFAULT_CLOUD_POOL_LOW_WATER
+    except ValueError:
+        parsed = DEFAULT_CLOUD_POOL_LOW_WATER
+    return min(20, max(1, parsed))
 
 
 def provision_timeout_seconds() -> float:
@@ -130,6 +172,8 @@ def public_receipt(job: dict[str, Any], binding: Optional[dict[str, Any]] = None
         "effective_policy_revision": (
             f"{binding['model_policy_version']}:{binding['voice_policy_version']}" if binding else None
         ),
+        "runtime_provider": str(binding.get("provider") or "") if binding else None,
+        "runtime_status": str(binding.get("status") or "") if binding else None,
     }
     if job.get("error_code"):
         result["error_code"] = job["error_code"]
@@ -349,9 +393,18 @@ class ProvisioningCoordinator:
         self,
         repository: EllaProvisioningRepository,
         client: Optional[HermesProvisionClient] = None,
+        *,
+        cloud_client: Any = None,
+        honcho_client: Any = None,
+        alert_publisher: Any = None,
+        runtime_admission: Any = None,
     ):
         self.repository = repository
         self.client = client or HermesProvisionClient()
+        self.cloud_client = cloud_client
+        self.honcho_client = honcho_client
+        self.alert_publisher = alert_publisher
+        self.runtime_admission = runtime_admission
 
     async def ensure_job(
         self,
@@ -361,8 +414,11 @@ class ProvisioningCoordinator:
         client_request_id: Optional[str],
         request_payload: dict[str, Any],
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
+        cloud_required = cloud_provisioning_enabled(identity.uid)
         try:
             await self.repository.assert_schema_ready()
+            if cloud_required:
+                await self.repository.assert_cloud_schema_ready()
         except ProvisioningSchemaNotReadyError as exc:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
@@ -401,6 +457,8 @@ class ProvisioningCoordinator:
             template_version=target_schema_version,
         )
         if binding:
+            if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
+                raise ProvisioningError("cloud_runtime_binding_conflict", retryable=False)
             if str(binding.get("user_status") or "") != "ACTIVE":
                 await self.repository.activate_user(identity.uid)
             if job.get("state") != "ready":
@@ -412,7 +470,7 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not provisioning_enabled(identity.uid):
+        if not cloud_required and not provisioning_enabled(identity.uid):
             job = await self.repository.update_job(
                 job_id=str(job["id"]),
                 state="degraded",
@@ -425,6 +483,9 @@ class ProvisioningCoordinator:
         return claimed or job, None, claimed is not None
 
     async def process_claimed_job(self, *, job: dict[str, Any], identity: VerifiedIdentity) -> None:
+        if cloud_provisioning_enabled(identity.uid):
+            await self._process_cloud_claimed_job(job=job, identity=identity)
+            return
         try:
             result = await self.client.provision(identity, str(job["target_schema_version"]))
             binding_data = extract_runtime_binding(
@@ -472,4 +533,158 @@ class ProvisioningCoordinator:
                 stage="runtime_ready",
                 retryable=True,
                 error_code="provisioning_internal_error",
+            )
+
+    async def _process_cloud_claimed_job(
+        self,
+        *,
+        job: dict[str, Any],
+        identity: VerifiedIdentity,
+    ) -> None:
+        from database import voice_canary as voice_canary_db
+        from ella.services.hermes_cloud import (
+            HermesCloudClient,
+            HonchoCloudProvisionClient,
+            RuntimePoolAlertPublisher,
+        )
+
+        cloud_client = self.cloud_client or HermesCloudClient()
+        honcho_client = self.honcho_client or HonchoCloudProvisionClient()
+        alert_publisher = self.alert_publisher or RuntimePoolAlertPublisher()
+        runtime_admission = self.runtime_admission or voice_canary_db.evaluate_runtime_activation
+        binding: Optional[dict[str, Any]] = None
+        claim_token = ""
+        try:
+            binding = await self.repository.claim_cloud_pool_binding(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                lease_seconds=cloud_pool_claim_lease_seconds(),
+            )
+            pool_state = await self.repository.reconcile_cloud_pool_alert(
+                threshold=cloud_pool_low_water_threshold()
+            )
+            try:
+                alert = pool_state.get("alert")
+                delivered = bool(
+                    alert
+                    and not alert.get("delivered_at")
+                    and await alert_publisher.publish(pool_state)
+                )
+                if delivered:
+                    await self.repository.mark_cloud_pool_alert_delivered(str(alert["id"]))
+            except Exception:
+                logger.exception("Runtime pool alert mirror failed; durable outbox remains pending")
+            if not binding:
+                await self.repository.update_job(
+                    job_id=str(job["id"]),
+                    state="degraded",
+                    stage="profile_ready",
+                    retryable=True,
+                    error_code="runtime_pool_empty",
+                    error_detail={
+                        "available": int(pool_state["available"]),
+                        "threshold": cloud_pool_low_water_threshold(),
+                    },
+                )
+                return
+
+            claim_token = str(binding.get("claim_token") or "")
+            if not claim_token:
+                raise ProvisioningError("runtime_pool_claim_incomplete", retryable=False)
+
+            admission = await runtime_admission(
+                uid=identity.uid,
+                provider="hermes_cloud",
+                model=str(binding.get("expected_model") or ""),
+            )
+            if not admission.allowed:
+                raise ProvisioningError(
+                    f"runtime_admission_{admission.code}",
+                    retryable=admission.code in {"no_entitlement", "invited"},
+                )
+
+            honcho = await honcho_client.ensure_profile(binding)
+            preflight = await cloud_client.preflight(binding)
+            health_receipt = {
+                **preflight.receipt,
+                "honcho": {
+                    "workspace_sha256": hashlib.sha256(honcho["workspace"].encode("utf-8")).hexdigest(),
+                    "observed_peer_sha256": hashlib.sha256(honcho["observed_peer"].encode("utf-8")).hexdigest(),
+                    "observer_peer_sha256": hashlib.sha256(honcho["observer_peer"].encode("utf-8")).hexdigest(),
+                },
+                "admission_revision": (
+                    int(admission.entitlement.get("revision") or 0) if admission.entitlement else 0
+                ),
+            }
+            activated = await self.repository.finalize_cloud_pool_claim(
+                uid=identity.uid,
+                job_id=str(job["id"]),
+                claim_token=claim_token,
+                honcho_workspace=honcho["workspace"],
+                observed_peer=honcho["observed_peer"],
+                observer_peer=honcho["observer_peer"],
+                health_receipt=health_receipt,
+                status=os.getenv("ELLA_HERMES_CLOUD_INITIAL_STATUS", "shadow").strip().lower(),
+            )
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="ready",
+                stage="active",
+                retryable=False,
+                receipt={
+                    "type": "hermes_cloud_binding_activated",
+                    "binding_revision": int(activated["revision"]),
+                    "runtime_instance_sha256": hashlib.sha256(
+                        str(activated["runtime_instance_id"]).encode("utf-8")
+                    ).hexdigest(),
+                    "content_free": True,
+                },
+            )
+        except (ProvisioningError, RuntimePoolClaimError) as exc:
+            code = exc.code
+            retryable = exc.retryable if isinstance(exc, ProvisioningError) else False
+            if binding and claim_token:
+                try:
+                    await self.repository.quarantine_cloud_pool_claim(
+                        uid=identity.uid,
+                        job_id=str(job["id"]),
+                        claim_token=claim_token,
+                        reason=code,
+                        health_receipt={"status": "failed", "code": code, "content_free": True},
+                    )
+                except Exception:
+                    logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
+                    code = "runtime_pool_quarantine_failed"
+                    retryable = False
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="degraded" if retryable else "blocked",
+                stage="runtime_ready",
+                retryable=retryable,
+                error_code=code,
+                error_detail=getattr(exc, "detail", {}),
+            )
+        except Exception:
+            logger.exception("Unexpected Hermes Cloud provisioning failure for uid=%s", identity.uid)
+            if binding and claim_token:
+                try:
+                    await self.repository.quarantine_cloud_pool_claim(
+                        uid=identity.uid,
+                        job_id=str(job["id"]),
+                        claim_token=claim_token,
+                        reason="cloud_provisioning_internal_error",
+                        health_receipt={
+                            "status": "failed",
+                            "code": "cloud_provisioning_internal_error",
+                            "content_free": True,
+                        },
+                    )
+                except Exception:
+                    logger.exception("Cloud runtime quarantine failed for uid=%s", identity.uid)
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="blocked",
+                stage="runtime_ready",
+                retryable=False,
+                error_code="cloud_provisioning_internal_error",
             )

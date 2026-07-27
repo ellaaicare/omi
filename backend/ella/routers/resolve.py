@@ -90,8 +90,33 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     if not row:
         return None
 
-    if runtime_bindings_enabled(uid):
-        runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool))
+    runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool))
+    if runtime:
+        cloud = runtime.provider == "hermes_cloud"
+        routing = {
+            "agentId": runtime.agent_id,
+            "sessionKey": f"ella:omi:{uid.lower()}:canonical",
+            "historyUrl": "/v1/ella/chat/history",
+            "platform": runtime.provider,
+            "profileName": runtime.profile_name,
+            "bindingRevision": runtime.revision,
+            "modelPolicyVersion": runtime.model_policy_version,
+            "voicePolicyVersion": runtime.voice_policy_version,
+        }
+        if cloud:
+            routing.update(
+                {
+                    "chatUrl": "/v1/ella/chat/stream",
+                    "runtimeBound": True,
+                }
+            )
+        else:
+            routing.update(
+                {
+                    "gatewayUrl": runtime.gateway_url,
+                    "token": runtime.gateway_token,
+                }
+            )
         return {
             "user": {
                 "id": str(row["id"]),
@@ -103,18 +128,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
                 "conditions": row["conditions"],
                 "medications": row["medications"],
             },
-            "routing": {
-                "agentId": runtime.agent_id,
-                "sessionKey": f"ella:omi:{uid.lower()}:canonical",
-                "gatewayUrl": runtime.gateway_url,
-                "token": runtime.gateway_token,
-                "historyUrl": "/v1/ella/chat/history",
-                "platform": "hermes",
-                "profileName": runtime.profile_name,
-                "bindingRevision": runtime.revision,
-                "modelPolicyVersion": runtime.model_policy_version,
-                "voicePolicyVersion": runtime.voice_policy_version,
-            },
+            "routing": routing,
         }
 
     agents = json.loads(row["agents"]) if row["agents"] else None
@@ -192,24 +206,28 @@ async def resolve_endpoint(
     if uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
 
-    if runtime_bindings_enabled(authenticated_uid):
-        try:
-            resolved = await resolve_user_routing(authenticated_uid)
-        except ProvisioningError as exc:
-            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    try:
+        resolved = await resolve_user_routing(authenticated_uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    routed_platform = str(((resolved or {}).get("routing") or {}).get("platform") or "")
+    if runtime_bindings_enabled(authenticated_uid) or routed_platform == "hermes_cloud":
         if not resolved:
             raise HTTPException(status_code=404, detail={"code": "user_not_found"})
         routing = resolved.get("routing") or {}
+        public_routing = {
+            "agentId": routing.get("agentId"),
+            "historyUrl": "/v1/ella/chat/history",
+            "platform": routing.get("platform") or "hermes",
+            "bindingRevision": routing.get("bindingRevision"),
+            "modelPolicyVersion": routing.get("modelPolicyVersion"),
+            "voicePolicyVersion": routing.get("voicePolicyVersion"),
+        }
+        if routing.get("runtimeBound") is not None:
+            public_routing["runtimeBound"] = routing.get("runtimeBound")
         return {
             "user": resolved["user"],
-            "routing": {
-                "agentId": routing.get("agentId"),
-                "historyUrl": "/v1/ella/chat/history",
-                "platform": "hermes",
-                "bindingRevision": routing.get("bindingRevision"),
-                "modelPolicyVersion": routing.get("modelPolicyVersion"),
-                "voicePolicyVersion": routing.get("voicePolicyVersion"),
-            },
+            "routing": public_routing,
         }
 
     pool = await _get_pool()
@@ -305,7 +323,11 @@ async def proxy_chat_history(
     The iOS app can't reach the Mac Mini's Tailscale IP directly,
     so this endpoint forwards the request.
     """
-    if runtime_bindings_enabled(authenticated_uid):
+    runtime = await resolve_isolated_runtime(
+        authenticated_uid,
+        EllaProvisioningRepository(await _get_pool()),
+    )
+    if runtime:
         raise HTTPException(status_code=410, detail={"code": "legacy_history_disabled"})
 
     resolved = await resolve_user_routing(authenticated_uid)

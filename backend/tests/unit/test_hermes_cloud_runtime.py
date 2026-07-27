@@ -1,0 +1,277 @@
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from ella.routers.canonical_events import InMemoryCanonicalEventStore
+from ella.services.hermes_cloud import HermesCloudTurn
+from ella.services.hermes_cloud_runtime import (
+    HermesCloudRuntimeService,
+    HermesCloudTurnRequest,
+)
+from ella.services.provisioning import ProvisioningError
+from ella.services.runtime_resolver import IsolatedRuntime
+
+
+def _runtime() -> IsolatedRuntime:
+    return IsolatedRuntime(
+        uid="synthetic-user",
+        binding_id="00000000-0000-0000-0000-000000000001",
+        provider="hermes_cloud",
+        status="shadow",
+        profile_name="synthetic-profile",
+        agent_id="hermes-cloud",
+        runtime_instance_id="instance-a",
+        gateway_url="https://cloud.example.test",
+        gateway_token="server-secret",
+        workspace_root="",
+        honcho_workspace="workspace-a",
+        observed_peer="user-a",
+        observer_peer="companion-a",
+        prompt_pack_version="prompt-v1",
+        expected_model="model-a",
+        allowed_tools=(),
+        required_capabilities=("responses_api", "session_key_header"),
+        model_policy_version="models-v1",
+        voice_policy_version="voice-v1",
+        revision=2,
+    )
+
+
+def _request(text: str = "Synthetic hello") -> HermesCloudTurnRequest:
+    return HermesCloudTurnRequest(
+        uid="synthetic-user",
+        client_interaction_id="client-turn-1",
+        correlation_id="trace-1",
+        channel="synthetic_shadow",
+        user_input=text,
+        instructions="Synthetic test only.",
+        started_at=datetime.now(timezone.utc),
+        client_metadata={"synthetic": True},
+    )
+
+
+class FakeRepository:
+    def __init__(self):
+        self.interaction = None
+        self.receipts = {}
+        self.failures = []
+
+    async def get_or_create_runtime_scope(self, **kwargs):
+        return {"id": "00000000-0000-0000-0000-000000000002", "session_key": "scope-a"}
+
+    async def get_or_create_runtime_interaction(self, **kwargs):
+        if self.interaction:
+            if self.interaction["request_hash"] != kwargs["request_hash"]:
+                from database.ella_provisioning import RuntimePoolClaimError
+
+                raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
+            return dict(self.interaction)
+        self.interaction = {
+            "id": "00000000-0000-0000-0000-000000000003",
+            "status": "pending",
+            "request_hash": kwargs["request_hash"],
+            "hermes_session_id": "interaction-a",
+            "idempotency_key": "request-a",
+            "previous_response_id": None,
+            "provider_response_id": None,
+            "usage": {},
+        }
+        return dict(self.interaction)
+
+    async def claim_runtime_interaction(self, interaction_id):
+        if self.interaction["status"] not in {"pending", "failed"}:
+            return None
+        self.interaction["status"] = "running"
+        return dict(self.interaction)
+
+    async def complete_runtime_interaction(self, **kwargs):
+        self.interaction.update(
+            status="completed",
+            provider_response_id=kwargs["provider_response_id"],
+            usage=kwargs["usage"],
+        )
+        return dict(self.interaction)
+
+    async def fail_runtime_interaction(self, **kwargs):
+        self.interaction["status"] = "failed"
+        self.failures.append(kwargs["error_code"])
+
+    async def claim_runtime_ingestion(self, **kwargs):
+        key = (
+            kwargs["binding_id"],
+            kwargs["canonical_event_id"],
+            kwargs["source_identity"],
+            kwargs["event_revision"],
+        )
+        receipt = self.receipts.setdefault(
+            key,
+            {
+                "id": f"receipt-{len(self.receipts) + 1}",
+                "status": "claimed",
+                "inserted": True,
+            },
+        )
+        return dict(receipt)
+
+    async def complete_runtime_ingestion(self, **kwargs):
+        for receipt in self.receipts.values():
+            if receipt["id"] == kwargs["receipt_id"]:
+                receipt.update(status=kwargs["status"], provider_ref=kwargs.get("provider_ref"))
+                return dict(receipt)
+        raise AssertionError("unknown receipt")
+
+
+class FakePolicy:
+    def __init__(self, *, admission=True):
+        self.admission = admission
+        self.accepted = []
+        self.updated = []
+        self.completed = []
+
+    async def get_entitlement(self, uid):
+        return {"revision": 3}
+
+    async def accept_session(self, **kwargs):
+        self.accepted.append(kwargs)
+        return SimpleNamespace(allowed=self.admission, code="ok" if self.admission else "global_kill_switch")
+
+    async def update_session(self, **kwargs):
+        self.updated.append(kwargs)
+        return SimpleNamespace(allowed=True, code="ok")
+
+    async def complete_session(self, **kwargs):
+        self.completed.append(kwargs)
+        return "usage-event"
+
+
+class FakeCloudClient:
+    def __init__(self):
+        self.calls = []
+
+    async def create_response(self, binding, **kwargs):
+        self.calls.append((binding, kwargs))
+        return HermesCloudTurn(
+            response_id="response-a",
+            text="Synthetic acknowledgement.",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            model="model-a",
+        )
+
+
+def test_cloud_turn_writes_once_and_same_interaction_replays():
+    repository = FakeRepository()
+    event_store = InMemoryCanonicalEventStore()
+    policy = FakePolicy()
+    cloud = FakeCloudClient()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=event_store,
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 7,
+    )
+
+    first = asyncio.run(service.run_turn(_runtime(), _request()))
+    replay = asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert first.duplicate is False
+    assert replay.duplicate is True
+    assert replay.text == first.text
+    assert len(cloud.calls) == 1
+    assert len(repository.receipts) == 2
+    assert all(receipt["status"] == "written" for receipt in repository.receipts.values())
+    assert policy.accepted[0]["provider"] == "hermes_cloud"
+    assert policy.accepted[0]["model"] == "model-a"
+    assert policy.updated[0]["estimated_cost_microusd"] == 7
+    assert policy.completed[0]["termination_reason"] == "completed"
+
+
+def test_same_interaction_id_with_changed_payload_fails_closed():
+    repository = FakeRepository()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=FakeCloudClient(),
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+    )
+    asyncio.run(service.run_turn(_runtime(), _request()))
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request("Different payload")))
+
+    assert error.value.code == "runtime_interaction_payload_conflict"
+
+
+def test_retry_recovers_canonical_assistant_without_second_provider_call():
+    repository = FakeRepository()
+    event_store = InMemoryCanonicalEventStore()
+    cloud = FakeCloudClient()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=event_store,
+        cloud_client=cloud,
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+    )
+    first = asyncio.run(service.run_turn(_runtime(), _request()))
+    repository.interaction["status"] = "failed"
+
+    recovered = asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert first.duplicate is False
+    assert recovered.duplicate is True
+    assert recovered.response_id == "response-a"
+    assert len(cloud.calls) == 1
+
+
+def test_kill_switch_denial_never_calls_cloud_and_records_terminal_failure():
+    repository = FakeRepository()
+    cloud = FakeCloudClient()
+    policy = FakePolicy(admission=False)
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert error.value.code == "global_kill_switch"
+    assert cloud.calls == []
+    assert repository.failures == ["global_kill_switch"]
+    assert policy.completed == []
+
+
+def test_cancellation_closes_policy_lease():
+    class BlockingCloud(FakeCloudClient):
+        async def create_response(self, binding, **kwargs):
+            self.calls.append((binding, kwargs))
+            await asyncio.Event().wait()
+
+    async def scenario():
+        repository = FakeRepository()
+        policy = FakePolicy()
+        service = HermesCloudRuntimeService(
+            repository=repository,
+            event_store=InMemoryCanonicalEventStore(),
+            cloud_client=BlockingCloud(),
+            voice_policy=policy,
+            cost_estimator=lambda usage: 0,
+        )
+        task = asyncio.create_task(service.run_turn(_runtime(), _request()))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert repository.failures == ["client_cancelled"]
+        assert policy.completed[0]["termination_reason"] == "client_disconnect"
+        assert policy.completed[0]["normalized_error_code"] == "client_cancelled"
+
+    asyncio.run(scenario())
