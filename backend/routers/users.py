@@ -56,6 +56,7 @@ from utils.llm.followup import followup_question_prompt
 from utils.notifications import send_notification, send_training_data_submitted_notification
 from utils.llm.external_integrations import generate_comprehensive_daily_summary
 from models.notification_message import NotificationMessage
+from ella.services.ai_consent import build_account_deletion_receipt
 from utils.other import endpoints as auth
 from utils.other.storage import (
     delete_all_conversation_recordings,
@@ -97,7 +98,11 @@ def delete_account(uid: str = Depends(auth.get_current_user_uid)):
         delete_user_data(uid)
         # delete user from firebase auth
         auth.delete_account(uid)
-        return {'status': 'ok', 'message': 'Account deleted successfully'}
+        return {
+            'status': 'ok',
+            'message': 'Account deleted successfully',
+            'deletion_receipt': build_account_deletion_receipt(),
+        }
     except Exception as e:
         print('delete_account', str(e))
         raise HTTPException(status_code=500, detail=str(e))

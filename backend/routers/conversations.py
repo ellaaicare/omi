@@ -34,6 +34,7 @@ from utils.conversations.search import search_conversations
 from utils.llm.conversation_processing import generate_summary_with_prompt
 from utils.speaker_identification import extract_speaker_samples
 from utils.other import endpoints as auth
+from ella.services.ai_consent import require_current_ai_consent
 from utils.other.storage import get_conversation_recording_if_exists
 from utils.app_integrations import trigger_external_integrations
 from utils.conversations.location import get_google_maps_location
@@ -56,7 +57,12 @@ class ProcessConversationRequest(BaseModel):
     calendar_meeting_context: Optional[CalendarMeetingContext] = None
 
 
-@router.post("/v1/conversations", response_model=CreateConversationResponse, tags=['conversations'])
+@router.post(
+    "/v1/conversations",
+    response_model=CreateConversationResponse,
+    tags=['conversations'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def process_in_progress_conversation(
     request: ProcessConversationRequest = None, uid: str = Depends(auth.get_current_user_uid)
 ):
@@ -86,7 +92,12 @@ def process_in_progress_conversation(
     return CreateConversationResponse(conversation=conversation, messages=messages)
 
 
-@router.post('/v1/conversations/{conversation_id}/reprocess', response_model=Conversation, tags=['conversations'])
+@router.post(
+    '/v1/conversations/{conversation_id}/reprocess',
+    response_model=Conversation,
+    tags=['conversations'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def reprocess_conversation(
     conversation_id: str,
     language_code: Optional[str] = None,
@@ -671,7 +682,12 @@ def get_conversation_suggested_apps(conversation_id: str, uid: str = Depends(aut
     return {"suggested_apps": [app.dict() for app in suggested_apps], "conversation_id": conversation_id}
 
 
-@router.post("/v1/conversations/{conversation_id}/test-prompt", response_model=dict, tags=['conversations'])
+@router.post(
+    "/v1/conversations/{conversation_id}/test-prompt",
+    response_model=dict,
+    tags=['conversations'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def test_prompt(conversation_id: str, request: TestPromptRequest, uid: str = Depends(auth.get_current_user_uid)):
     conversation_data = _get_valid_conversation_by_id(uid, conversation_id)
     conversation = Conversation(**conversation_data)
@@ -692,7 +708,12 @@ def test_prompt(conversation_id: str, request: TestPromptRequest, uid: str = Dep
 # *********************************************
 
 
-@router.post('/v1/conversations/merge', response_model=MergeConversationsResponse, tags=['conversations'])
+@router.post(
+    '/v1/conversations/merge',
+    response_model=MergeConversationsResponse,
+    tags=['conversations'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 async def merge_conversations(
     request: MergeConversationsRequest,
     background_tasks: BackgroundTasks,

@@ -273,6 +273,61 @@ Enable provisioning first for two synthetic Firebase users; enable runtime dispa
 
 The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Missing cloud-sync and raw-recording permissions are initialized to `false`; iOS must enable the appropriate setting only after the account-bound consent flow completes.
 
+### AI processing consent
+
+`/v1/users/ai-consent` is the server authority for the versioned AI/data-sharing
+policy. The current `ai-data-processors-v5` manifest includes Soniox and
+Speechmatics STT, Inworld TTS, and Ella's self-hosted Kokoro/Fish TTS in
+addition to the model, memory, infrastructure, and fallback recipients. The
+authenticated Firebase UID selects both the current state and the
+immutable receipt subcollection; callers cannot submit or select another UID.
+
+- `GET /v1/users/ai-consent/policy` returns the required legal-recipient
+  manifest, policy version, and processor-set hash.
+- `GET /v1/users/ai-consent` returns the current decision and whether the exact
+  current policy authorizes protected routes.
+- `POST /v1/users/ai-consent` records `granted`, `declined`, or `revoked` with a
+  caller request ID, app/build, locale, and server timestamp. The same request
+  ID is idempotent; reuse with different metadata fails with `409`.
+- `GET /v1/users/ai-consent/receipts/{receipt_id}` verifies a receipt only
+  within the authenticated user's path.
+- Account/data deletion remains `DELETE /v1/users/delete-account`; deletion
+  also removes the user's consent receipt subcollection and returns a
+  non-identifying synchronous completion receipt with request ID and server
+  completion time.
+
+Exact-policy grants are required at the Ella chat stream, Hermes onboarding
+ensure, voice-session issuance, necklace/web transcription sockets, direct TTS,
+legacy message/audio/file upload routes, shared conversation processing,
+stored-audio transcription, Guardian consolidation, and legacy callback TTS.
+Signed voice-proxy requests recheck current consent on every request so a token
+issued before revocation cannot continue sending audio. The consent authority
+router remains registered when `ELLA_ENABLED=false`; a rollback cannot leave
+generic OMI route gates active without grant/revoke endpoints. Read-only
+status/history and first-party canonical storage remain available so
+decline/revoke does not silently retransmit data.
+
+Rollout is fail-safe and non-breaking:
+
+1. Deploy the receipt API with `ELLA_AI_CONSENT_ENFORCEMENT_ENABLED=false`.
+2. Update iOS to replace the legacy private-cloud boolean/client UUID with the
+   authenticated receipt API.
+3. Set `ELLA_INTERNAL_VOICE_TTS_TOKEN` on both the OMI backend and internal
+   Guardian caller. Never expose it to iOS. Guardian also sends the target UID
+   in `X-Ella-Subject-Uid`; the backend rechecks that user's current receipt,
+   so the service token is not a consent bypass.
+4. Add synthetic Firebase UIDs to `ELLA_AI_CONSENT_ENFORCEMENT_UIDS` and prove
+   grant, stale-policy, decline, revoke, chat, voice, STT, and Guardian TTS.
+   Canary clients must authenticate direct TTS calls. Legacy anonymous TTS has
+   no trustworthy UID and remains a migration bridge during UID-only canaries;
+   global enforcement rejects those unattributed calls.
+5. Enable `ELLA_AI_CONSENT_ENFORCEMENT_ENABLED=true` only after the live
+   privacy policy and App Store metadata match the server manifest.
+
+Changing the canonical processor set or its legal recipients requires a new
+policy version/hash. Do not reuse a prior hash or silently map an undisclosed
+fallback provider.
+
 Upstream-managed patch points are tracked in `docs/POST_MERGE_PATCHES.md`. Review that file after every Basehardware upstream sync.
 
 ---

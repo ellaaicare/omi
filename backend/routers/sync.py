@@ -20,6 +20,7 @@ from database.conversations import get_closest_conversation_to_timestamps, updat
 from models.conversation import CreateConversation, ConversationSource, Conversation
 from models.transcript_segment import TranscriptSegment
 from utils.conversations.process_conversation import process_conversation
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from utils.other import endpoints as auth
 from utils.other.storage import (
     get_syncing_file_temporal_signed_url,
@@ -615,6 +616,7 @@ def _reprocess_conversation_after_update(uid: str, conversation_id: str, languag
 
 
 def process_segment(path: str, uid: str, response: dict, source: ConversationSource = ConversationSource.omi):
+    assert_current_ai_consent(uid)
     url = get_syncing_file_temporal_signed_url(path)
 
     def delete_file():
@@ -699,7 +701,7 @@ def _cleanup_files(file_paths):
 
 
 @router.post("/v1/sync-local-files")
-async def sync_local_files(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_current_user_uid)):
+async def sync_local_files(files: List[UploadFile] = File(...), uid: str = Depends(require_current_ai_consent)):
     # Improve a version without timestamp, to consider uploads from the stored in v2 device bytes.
     # Detect source from filenames
     source = ConversationSource.omi

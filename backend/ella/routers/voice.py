@@ -37,6 +37,12 @@ from pydantic import BaseModel, Field
 
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
+from ella.services.ai_consent import (
+    assert_current_ai_consent,
+    require_current_ai_consent,
+    require_current_ai_consent_or_internal_tts,
+    resolve_processor,
+)
 from ella.services.provisioning import ProvisioningError, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
 from ella.services.voice_canary_alerts import (
@@ -201,6 +207,7 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         subject = str(claims.get("uid") or "").strip()
         if not subject or str(requested_uid or "").strip() != subject:
             raise HTTPException(status_code=403, detail={"code": "voice_session_ownership_mismatch"})
+        assert_current_ai_consent(subject)
         return VoiceProxyPrincipal(
             uid=subject,
             session_id=str(claims.get("jti") or ""),
@@ -250,6 +257,7 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
     ):
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
+    assert_current_ai_consent(subject)
     return VoiceProxyPrincipal(
         uid=subject,
         session_id=str(claims.get("jti") or ""),
@@ -911,7 +919,7 @@ async def create_voice_session(
     uid: Optional[str] = None,
     provider: Optional[str] = None,
     voice_mode: Optional[str] = None,
-    authenticated_uid: str = Depends(auth.get_current_user_uid),
+    authenticated_uid: str = Depends(require_current_ai_consent),
 ):
     """
     Create a voice session token for connecting to V2V service.
@@ -968,6 +976,8 @@ async def create_voice_session(
             status_code=400,
             detail=f"Unknown V2V provider: {provider!r}. Valid: {valid}",
         )
+    if resolve_processor(provider) is None:
+        raise HTTPException(status_code=503, detail={"code": "ai_processor_not_disclosed"})
 
     provider_info = V2V_PROVIDERS[provider]
     provider_model = str(provider_info.get("model") or "")
@@ -1213,7 +1223,7 @@ async def get_voice_config():
     return VoiceConfigResponse(sample_rate=24000, channels=1, encoding="pcm_int16", byte_order="little_endian")
 
 
-@router.post("/tts")
+@router.post("/tts", dependencies=[Depends(require_current_ai_consent_or_internal_tts)])
 async def synthesize_speech(
     request: TtsRequest,
     x_tts_provider: Optional[str] = Header(default=None, alias="X-TTS-Provider"),
@@ -1238,6 +1248,11 @@ async def synthesize_speech(
     provider = (x_tts_provider or "elevenlabs").lower()
     text = request.text[:500]  # Cap at 500 chars
     print(f"[FLOW:VOICE-TTS] header=X-TTS-Provider raw={x_tts_provider!r} resolved={provider}", flush=True)
+    if resolve_processor(provider) is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ai_processor_not_disclosed", "provider": provider},
+        )
 
     # --- V2V providers — redirect to session flow ---
     if provider in V2V_PROVIDERS:

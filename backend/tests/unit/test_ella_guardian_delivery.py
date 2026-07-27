@@ -39,6 +39,10 @@ ella_app_settings_module.build_effective_voice_settings = lambda _uid, voice: {
 }
 sys.modules["ella.services.app_settings"] = ella_app_settings_module
 
+ai_consent_module = types.ModuleType("ella.services.ai_consent")
+ai_consent_module.assert_current_ai_consent = lambda uid: uid
+sys.modules["ella.services.ai_consent"] = ai_consent_module
+
 runtime_resolver_module = types.ModuleType("ella.services.runtime_resolver")
 runtime_resolver_module.runtime_bindings_enabled = lambda _uid: False
 sys.modules["ella.services.runtime_resolver"] = runtime_resolver_module
@@ -559,3 +563,26 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
     assert body["uid"] == "auth-uid"
     assert body["alerts"][0]["queue_item_id"] == "guardian_auth"
     assert pool.fetch_args[0] == ("auth-uid", 50)
+
+
+def test_guardian_consolidation_stops_before_provider_after_revoke(monkeypatch):
+    def reject(uid):
+        assert uid == "auth-uid"
+        raise HTTPException(status_code=403, detail={"code": "ai_consent_required", "decision": "revoked"})
+
+    monkeypatch.setattr(guardian, "assert_current_ai_consent", reject)
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.posts.clear()
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            guardian._consolidate_queue(
+                uid="auth-uid",
+                pending=[{"trigger_type": "wake_word", "created_at": "now", "message": "Private alert"}],
+                recently_consumed=[],
+                chat_turns=[{"role": "user", "content": "Private context"}],
+            )
+        )
+
+    assert error.value.detail["decision"] == "revoked"
+    assert _FakeAsyncClient.posts == []

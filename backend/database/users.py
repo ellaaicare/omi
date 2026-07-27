@@ -412,7 +412,15 @@ def delete_user_data(uid: str):
     if not user_ref.get().exists:
         return {'status': 'error', 'message': 'User not found'}
 
-    subcollections_to_delete = ['conversations', 'messages', 'chat_sessions', 'people', 'memories', 'files']
+    subcollections_to_delete = [
+        'conversations',
+        'messages',
+        'chat_sessions',
+        'people',
+        'memories',
+        'files',
+        'ai_consent_receipts',
+    ]
     batch_size = 450
 
     for cname in subcollections_to_delete:

@@ -45,6 +45,7 @@ from database._client import db
 from models.conversation import CategoryEnum
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
+from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
@@ -616,6 +617,7 @@ async def ella_notification(request: NotificationRequest):
     Flow:
         Letta agent tool call -> n8n webhook -> this endpoint -> TTS -> GCS -> FCM -> iOS
     """
+    assert_current_ai_consent(request.uid)
     logger.info(f"[Ella] Notification: uid={request.uid}, urgency={request.urgency}, audio={request.generate_audio}")
 
     audio_url = request.audio_url

@@ -102,6 +102,7 @@ from ella.routers.auto_provision import (
     get_agent_cluster,
     listen_runtime_gate,
 )
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent, resolve_processor
 
 from utils.aac import AACDecoder
 from utils.audio import AudioRingBuffer
@@ -395,6 +396,10 @@ async def _stream_handler(
     if not stt_service or not stt_language:
         _latency_log("stt_provider_unsupported", requested_language=language)
         await websocket.close(code=1008, reason=f"The language is not supported, {language}")
+        return
+    if resolve_processor(_stt_service_value(stt_service) or "") is None:
+        _latency_log("stt_provider_not_disclosed", provider=_stt_service_value(stt_service))
+        await websocket.close(code=1011, reason="STT processor disclosure is incomplete")
         return
 
     # Translation language (disabled in single language mode)
@@ -2519,7 +2524,7 @@ async def _listen(
 @router.websocket("/v4/listen")
 async def listen_handler(
     websocket: WebSocket,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(require_current_ai_consent),
     language: str = 'en',
     sample_rate: int = 8000,
     codec: str = 'pcm8',
@@ -2633,6 +2638,20 @@ async def web_listen_handler(
         print(f"web_listen_handler: auth error {e}")
         await websocket.send_json({"type": "auth_response", "success": False})
         await websocket.close(code=1008, reason="Auth error")
+        return
+
+    try:
+        assert_current_ai_consent(uid)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        await websocket.send_json(
+            {
+                "type": "auth_response",
+                "success": False,
+                "error": detail.get("code", "ai_consent_required"),
+            }
+        )
+        await websocket.close(code=1008, reason="AI consent required")
         return
 
     runtime_gate = await listen_runtime_gate(uid, user_db.is_exists_user)

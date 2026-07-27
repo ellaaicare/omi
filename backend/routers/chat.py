@@ -36,6 +36,7 @@ from utils.llm.persona import initial_persona_chat_message
 from utils.llm.chat import initial_chat_message
 from utils.llm.goals import extract_and_update_goal_progress
 from utils.other import endpoints as auth, storage
+from ella.services.ai_consent import assert_current_ai_consent, require_current_ai_consent
 from utils.other.chat_file import FileChatTool
 from utils.retrieval.graph import execute_graph_chat, execute_graph_chat_stream, execute_persona_chat_stream
 from utils.retrieval.agentic import execute_agentic_chat, execute_agentic_chat_stream
@@ -62,7 +63,12 @@ def acquire_chat_session(uid: str, app_id: Optional[str] = None):
     return chat_session
 
 
-@router.post('/v2/messages', tags=['chat'], response_model=ResponseMessage)
+@router.post(
+    '/v2/messages',
+    tags=['chat'],
+    response_model=ResponseMessage,
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def send_message(
     data: SendMessageRequest,
     plugin_id: Optional[str] = None,
@@ -237,6 +243,7 @@ def clear_chat_messages(
 
 
 def initial_message_util(uid: str, app_id: Optional[str] = None):
+    assert_current_ai_consent(uid)
     print('initial_message_util', app_id)
 
     # init chat session
@@ -276,7 +283,12 @@ def initial_message_util(uid: str, app_id: Optional[str] = None):
     return ai_message
 
 
-@router.post('/v2/initial-message', tags=['chat'], response_model=Message)
+@router.post(
+    '/v2/initial-message',
+    tags=['chat'],
+    response_model=Message,
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def create_initial_message(
     app_id: Optional[str] = None, plugin_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
 ):
@@ -312,7 +324,7 @@ def get_messages(
     return messages
 
 
-@router.post("/v2/voice-messages")
+@router.post("/v2/voice-messages", dependencies=[Depends(require_current_ai_consent)])
 async def create_voice_message_stream(
     files: List[UploadFile] = File(...),
     language: Optional[str] = Form(None),
@@ -337,7 +349,7 @@ async def create_voice_message_stream(
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 
-@router.post("/v2/voice-message/transcribe")
+@router.post("/v2/voice-message/transcribe", dependencies=[Depends(require_current_ai_consent)])
 async def transcribe_voice_message(
     files: List[UploadFile] = File(...),
     language: Optional[str] = Form(None),
@@ -432,7 +444,12 @@ async def transcribe_voice_message(
     return response
 
 
-@router.post('/v2/files', response_model=List[FileChat], tags=['chat'])
+@router.post(
+    '/v2/files',
+    response_model=List[FileChat],
+    tags=['chat'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_current_user_uid)):
     thumbs_name = []
     files_chat = []
@@ -485,7 +502,12 @@ def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(aut
 # CLEANUP: Remove after new app goes to prod ----------------------------------------------------------
 
 
-@router.post('/v1/files', response_model=List[FileChat], tags=['chat'])
+@router.post(
+    '/v1/files',
+    response_model=List[FileChat],
+    tags=['chat'],
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def upload_file_chat(files: List[UploadFile] = File(...), uid: str = Depends(auth.get_current_user_uid)):
     thumbs_name = []
     files_chat = []
@@ -579,7 +601,12 @@ def clear_chat_messages(
     return initial_message_util(uid, compat_app_id)
 
 
-@router.post('/v1/initial-message', tags=['chat'], response_model=Message)
+@router.post(
+    '/v1/initial-message',
+    tags=['chat'],
+    response_model=Message,
+    dependencies=[Depends(require_current_ai_consent)],
+)
 def create_initial_message(
     plugin_id: Optional[str] = None, app_id: Optional[str] = None, uid: str = Depends(auth.get_current_user_uid)
 ):

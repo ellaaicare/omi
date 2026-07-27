@@ -24,6 +24,7 @@ from ella.config import ELLA_CONFIG
 from ella.routers.canonical_events import CanonicalEventIn, PostgresCanonicalEventStore
 from ella.services.correction_propagation import propagation_run_to_dict, run_correction_propagation
 from ella.services.hermes_session import canonical_omi_session_key, safe_session_component
+from ella.services.ai_consent import require_current_ai_consent
 from ella.services.summary_recovery import (
     SummaryProviderConfig,
     apply_summary_update,
@@ -1794,7 +1795,7 @@ async def submit_conversation_correction_ella(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(require_current_ai_consent),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
 
@@ -1970,6 +1971,6 @@ async def submit_conversation_correction(
     conversation_id: str,
     request: ConversationCorrectionRequest,
     background_tasks: BackgroundTasks,
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(require_current_ai_consent),
 ) -> ConversationCorrectionResponse:
     return await _submit_conversation_correction(conversation_id, request, background_tasks, uid)
