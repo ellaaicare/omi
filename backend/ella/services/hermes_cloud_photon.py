@@ -18,6 +18,7 @@ from ella.services.hermes_cloud_policy import cloud_synthetic_only
 from ella.services.hermes_cloud_runtime import (
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    assert_runtime_managed_consent,
 )
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime
@@ -437,6 +438,7 @@ class HermesCloudPhotonAdapter:
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(exc.code, retryable=False) from exc
         if not receipt.get("acquired"):
+            assert_runtime_managed_consent(runtime)
             return await self._replay(receipt)
 
         receipt_id = str(receipt["id"])
@@ -491,6 +493,7 @@ class HermesCloudPhotonAdapter:
                 "runtime_interaction_id": result.runtime_interaction_id,
                 "content_free": True,
             }
+            assert_runtime_managed_consent(runtime)
             completed = await self.repository.complete_photon_message(
                 receipt_id=receipt_id,
                 lease_token=lease_token,
@@ -512,6 +515,9 @@ class HermesCloudPhotonAdapter:
                 binding=refreshed_binding,
                 connection_id=request.connection_id,
             )
+            # The sidecar response is the Photon egress boundary. A revocation
+            # after model completion must prevent delivery of the stored text.
+            assert_runtime_managed_consent(runtime)
             return PhotonAdapterResult(
                 receipt_id=receipt_id,
                 status="awaiting_delivery",

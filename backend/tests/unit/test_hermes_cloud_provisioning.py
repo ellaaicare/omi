@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from ella.services import provisioning
 from ella.services.hermes_cloud import HermesCloudPreflight
 from ella.services.provisioning import (
     HermesProvisionClient,
@@ -202,9 +203,7 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     coordinator = ProvisioningCoordinator(
         repository,
         ForbiddenLocalClient(),
-        cloud_client=FakeCloud(
-            error=ProvisioningError("hermes_cloud_tool_drift", retryable=False)
-        ),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=False)),
         honcho_client=FakeHoncho(),
         alert_publisher=FakeAlert(),
         runtime_admission=allow_runtime,
@@ -216,6 +215,39 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     assert repository.quarantined[0]["reason"] == "hermes_cloud_tool_drift"
     assert repository.jobs[-1]["state"] == "blocked"
     assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "cleaned"
+
+
+def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    checks = 0
+
+    def consent_gate(*_args, **_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(provisioning, "assert_cloud_identity_gate", consent_gate)
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert checks == 2
+    assert repository.claims == 1
+    assert honcho.calls == []
+    assert cloud.calls == []
+    assert repository.finalized == []
+    assert repository.quarantined[0]["reason"] == "managed_cloud_consent_required"
 
 
 def test_empty_pool_emits_durable_low_water_and_stays_retryable(monkeypatch):
@@ -279,9 +311,7 @@ def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkey
     coordinator = ProvisioningCoordinator(
         repository,
         ForbiddenLocalClient(),
-        cloud_client=FakeCloud(
-            error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)
-        ),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)),
         honcho_client=honcho,
         alert_publisher=FakeAlert(),
         runtime_admission=allow_runtime,
@@ -302,9 +332,7 @@ def test_cleanup_failure_requires_manual_intervention(monkeypatch):
     coordinator = ProvisioningCoordinator(
         repository,
         ForbiddenLocalClient(),
-        cloud_client=FakeCloud(
-            error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)
-        ),
+        cloud_client=FakeCloud(error=ProvisioningError("hermes_cloud_tool_drift", retryable=True)),
         honcho_client=FakeHoncho(cleanup_error=RuntimeError("cleanup failed")),
         alert_publisher=FakeAlert(),
         runtime_admission=allow_runtime,

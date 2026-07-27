@@ -2,17 +2,18 @@ name: Hermes Cloud Runtime Tests
 
 on:
   pull_request:
-    branches: [main]
     paths:
       - "backend/database/ella_provisioning.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -23,6 +24,8 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -33,12 +36,14 @@ on:
       - "backend/database/ella_provisioning.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/canonical_events.py"
+      - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -49,6 +54,8 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/unit/test_ella_ai_consent.py"
+      - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
@@ -60,6 +67,8 @@ jobs:
     env:
       ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED: "false"
       FIRESTORE_EMULATOR_HOST: localhost:9999
+      GCLOUD_PROJECT: omi-ci
+      GOOGLE_CLOUD_PROJECT: omi-ci
       ENCRYPTION_SECRET: omi_ci_hermes_cloud_test_only
     defaults:
       run:
@@ -91,6 +100,8 @@ jobs:
           python -m py_compile
           database/ella_provisioning.py
           database/voice_canary.py
+          ella/routers/ai_consent.py
+          ella/services/ai_consent.py
           ella/services/hermes_cloud.py
           ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
@@ -105,6 +116,8 @@ jobs:
       - name: Run Hermes Cloud and isolation failure-path tests
         run: >-
           pytest
+          tests/unit/test_ella_ai_consent.py
+          tests/unit/test_ella_ai_consent_route_gates.py
           tests/unit/test_hermes_cloud_migration.py
           tests/unit/test_hermes_cloud_policy.py
           tests/unit/test_hermes_cloud_photon.py

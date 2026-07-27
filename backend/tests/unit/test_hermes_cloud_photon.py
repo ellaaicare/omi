@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from database.ella_provisioning import RuntimePoolClaimError
 from ella.routers.photon import create_photon_router
 from ella.routers.canonical_events import CanonicalEventIn, InMemoryCanonicalEventStore
+from ella.services import hermes_cloud_photon
 from ella.services.hermes_cloud import HermesCloudPreflight
 from ella.services.hermes_cloud_photon import (
     PHOTON_ALLOWED_REGULAR_COMMANDS,
@@ -36,6 +37,12 @@ PROVIDER_MESSAGE_ID = "provider-message-raw"
 
 class SimulatedProcessCrash(BaseException):
     pass
+
+
+@pytest.fixture(autouse=True)
+def synthetic_owner_gate(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-owner")
 
 
 def _opaque_key(namespace: str, raw_value: str) -> str:
@@ -480,6 +487,23 @@ def test_sidecar_preflight_turn_replay_and_delivery_ack_are_idempotent_and_opaqu
     assert len(runtime_service.calls) == 1
 
 
+def test_consent_revoked_after_model_turn_blocks_photon_outbound_handoff(monkeypatch):
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+
+    def revoked(_runtime):
+        raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(hermes_cloud_photon, "assert_runtime_managed_consent", revoked)
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert error.value.code == "managed_cloud_consent_required"
+    assert len(runtime_service.calls) == 1
+    assert next(iter(repository.messages.values()))["status"] == "uncertain"
+
+
 def _stable_persisted(repository):
     return json.dumps(
         {
@@ -635,7 +659,7 @@ def test_sidecar_disconnect_after_writeback_returns_no_delivery():
 
     assert error.value.code == "photon_sidecar_not_ready"
     receipt = next(iter(repository.messages.values()))
-    assert receipt["status"] == "awaiting_delivery"
+    assert receipt["status"] == "uncertain"
     assert receipt["canonical_outbound_event_id"] == "canonical-outbound"
 
 
