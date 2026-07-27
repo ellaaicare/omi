@@ -588,37 +588,50 @@ async def evaluate_runtime_activation(
             return decision
 
 
+async def get_entitlement_contract_for_connection(
+    conn: asyncpg.Connection,
+    uid: str,
+    *,
+    now: Optional[datetime] = None,
+    expire_stale_sessions: bool = True,
+) -> dict[str, Any]:
+    """Build the public entitlement contract inside an existing transaction."""
+    current = now or _utcnow()
+    await lock_runtime_authority_on_connection(conn, uid=uid)
+    if expire_stale_sessions:
+        await _expire_stale_sessions(conn, current, uid=uid)
+    row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
+    if not row:
+        return {
+            "status": "none",
+            "quota": {
+                "daily_used_s": 0,
+                "daily_limit_s": 0,
+                "monthly_used_s": 0,
+                "monthly_limit_s": 0,
+                "max_session_s": 0,
+                "max_concurrent": 0,
+                "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
+                "resets_at": (_day_start(current) + timedelta(days=1)).isoformat(),
+                "monthly_resets_at": _next_month(current).isoformat(),
+            },
+        }
+    entitlement = _record_dict(row)
+    rollup = await _usage_rollup(conn, uid, current)
+    return {
+        "status": entitlement["status"],
+        "plan": entitlement["plan"],
+        "revision": entitlement["revision"],
+        "quota": _quota_payload(entitlement, rollup),
+    }
+
+
 async def get_entitlement_contract(uid: str) -> dict[str, Any]:
     now = _utcnow()
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await lock_runtime_authority_on_connection(conn, uid=uid)
-            await _expire_stale_sessions(conn, now, uid=uid)
-            row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
-            if not row:
-                return {
-                    "status": "none",
-                    "quota": {
-                        "daily_used_s": 0,
-                        "daily_limit_s": 0,
-                        "monthly_used_s": 0,
-                        "monthly_limit_s": 0,
-                        "max_session_s": 0,
-                        "max_concurrent": 0,
-                        "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
-                        "resets_at": (_day_start(now) + timedelta(days=1)).isoformat(),
-                        "monthly_resets_at": _next_month(now).isoformat(),
-                    },
-                }
-            entitlement = _record_dict(row)
-            rollup = await _usage_rollup(conn, uid, now)
-            return {
-                "status": entitlement["status"],
-                "plan": entitlement["plan"],
-                "revision": entitlement["revision"],
-                "quota": _quota_payload(entitlement, rollup),
-            }
+            return await get_entitlement_contract_for_connection(conn, uid, now=now)
 
 
 async def evaluate_issuance(

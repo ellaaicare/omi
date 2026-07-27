@@ -1105,7 +1105,13 @@ async def get_voice_entitlement(
     authenticated_uid: str = Depends(auth.get_current_user_uid),
 ):
     """Return the stable frontend contract without exposing operator notes."""
-    return await voice_canary_db.get_entitlement_contract(authenticated_uid)
+    contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
+    correlation_id = str(uuid.uuid4())
+    return {
+        **contract,
+        "support_code": f"ENT-{correlation_id.replace('-', '')[:8].upper()}",
+        "correlation_id": correlation_id,
+    }
 
 
 @router.post("/canary/accept")

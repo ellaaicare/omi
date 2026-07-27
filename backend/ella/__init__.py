@@ -450,6 +450,16 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella onboarding not available: {e}", flush=True)
 
+    # Authenticated invitation redemption. This commits entitlement before the
+    # client invokes the existing onboarding ensure boundary.
+    try:
+        from ella.routers.invites import router as invite_router
+
+        app.include_router(invite_router, tags=["Ella Invites"])
+        print("  🌐 /v1/invite/redeem - Invitation redemption", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Invitation redemption not available: {e}", flush=True)
+
     # Voice session management (token issuance for Ella Voice)
     if ELLA_VOICE_V2_ENABLED:
         try:
