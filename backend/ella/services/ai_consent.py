@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import secrets
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Optional, Protocol
@@ -259,6 +260,11 @@ class ConsentRepository(Protocol):
 
     def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]: ...
 
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]: ...
+
     def record(
         self,
         uid: str,
@@ -336,6 +342,23 @@ def _record_firestore_receipt(
     return stored_receipt, state, True
 
 
+@transactional
+def _read_firestore_current_receipt(
+    transaction,
+    user_ref,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    user_snapshot = user_ref.get(transaction=transaction)
+    if not user_snapshot.exists:
+        return None, None
+    state = dict((user_snapshot.to_dict() or {}).get("ai_consent") or {}) or None
+    receipt_id = str((state or {}).get("receipt_id") or "")
+    if not receipt_id:
+        return state, None
+    receipt_snapshot = user_ref.collection("ai_consent_receipts").document(receipt_id).get(transaction=transaction)
+    receipt = receipt_snapshot.to_dict() if receipt_snapshot.exists else None
+    return state, receipt
+
+
 class FirestoreConsentRepository:
     @staticmethod
     def _configured_db():
@@ -354,6 +377,14 @@ class FirestoreConsentRepository:
         db = self._configured_db()
         snapshot = db.collection("users").document(uid).collection("ai_consent_receipts").document(receipt_id).get()
         return snapshot.to_dict() if snapshot.exists else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        db = self._configured_db()
+        user_ref = db.collection("users").document(uid)
+        return _read_firestore_current_receipt(db.transaction(), user_ref)
 
     def record(
         self,
@@ -380,14 +411,28 @@ class InMemoryConsentRepository:
     def __init__(self) -> None:
         self.states: dict[str, dict[str, Any]] = {}
         self.receipts: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lock = threading.RLock()
 
     def get_state(self, uid: str) -> Optional[dict[str, Any]]:
-        state = self.states.get(uid)
-        return dict(state) if state else None
+        with self._lock:
+            state = self.states.get(uid)
+            return dict(state) if state else None
 
     def get_receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:
-        receipt = self.receipts.get((uid, receipt_id))
-        return dict(receipt) if receipt else None
+        with self._lock:
+            receipt = self.receipts.get((uid, receipt_id))
+            return dict(receipt) if receipt else None
+
+    def get_current(
+        self,
+        uid: str,
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        with self._lock:
+            state = self.states.get(uid)
+            state_copy = dict(state) if state else None
+            receipt_id = str((state_copy or {}).get("receipt_id") or "")
+            receipt = self.receipts.get((uid, receipt_id)) if receipt_id else None
+            return state_copy, dict(receipt) if receipt else None
 
     def record(
         self,
@@ -396,34 +441,35 @@ class InMemoryConsentRepository:
         receipt: dict[str, Any],
         request_fingerprint: str,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-        key = (uid, receipt_id)
-        existing = self.receipts.get(key)
-        if existing:
-            if existing.get("request_fingerprint") != request_fingerprint:
-                raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
-            return dict(existing), dict(self.states.get(uid) or {}), False
+        with self._lock:
+            key = (uid, receipt_id)
+            existing = self.receipts.get(key)
+            if existing:
+                if existing.get("request_fingerprint") != request_fingerprint:
+                    raise ConsentIdempotencyConflict("request_id was already used with different consent metadata")
+                return dict(existing), dict(self.states.get(uid) or {}), False
 
-        stored = {**receipt, "request_fingerprint": request_fingerprint}
-        state = {
-            key: receipt.get(key)
-            for key in (
-                "receipt_id",
-                "decision",
-                "policy_version",
-                "processor_set_hash",
-                "processor_ids",
-                "profile_binding_id",
-                "scope_version",
-                "scope_hash",
-                "server_decided_at",
-                "app_version",
-                "build_number",
-                "locale",
-            )
-        }
-        self.receipts[(uid, receipt_id)] = stored
-        self.states[uid] = state
-        return dict(stored), dict(state), True
+            stored = {**receipt, "request_fingerprint": request_fingerprint}
+            state = {
+                key: receipt.get(key)
+                for key in (
+                    "receipt_id",
+                    "decision",
+                    "policy_version",
+                    "processor_set_hash",
+                    "processor_ids",
+                    "profile_binding_id",
+                    "scope_version",
+                    "scope_hash",
+                    "server_decided_at",
+                    "app_version",
+                    "build_number",
+                    "locale",
+                )
+            }
+            self.receipts[(uid, receipt_id)] = stored
+            self.states[uid] = state
+            return dict(stored), dict(state), True
 
 
 @dataclass(frozen=True)
@@ -462,9 +508,7 @@ class AiConsentService:
         }
 
     def status(self, uid: str) -> dict[str, Any]:
-        state = self.repository.get_state(uid)
-        receipt_id = str((state or {}).get("receipt_id") or "")
-        receipt = self.repository.get_receipt(uid, receipt_id) if receipt_id else None
+        state, receipt = self.repository.get_current(uid)
         return _status_payload(uid, state, receipt)
 
     def receipt(self, uid: str, receipt_id: str) -> Optional[dict[str, Any]]:

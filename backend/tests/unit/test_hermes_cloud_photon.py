@@ -132,6 +132,7 @@ class FakeRepository:
         self.claim_calls = []
         self.quota_calls = []
         self.failures = []
+        self.consent_quarantines = []
         self.ack_calls = []
         self.completed_runtime_receipts = set()
         self.crash_before_quota = False
@@ -288,6 +289,18 @@ class FakeRepository:
     def expire_active_lease(self):
         row = next(iter(self.messages.values()))
         row["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    async def quarantine_photon_delivery_for_consent(self, **kwargs):
+        self.consent_quarantines.append(dict(kwargs))
+        row = next(item for item in self.messages.values() if item["id"] == kwargs["receipt_id"])
+        if row["status"] != "awaiting_delivery":
+            raise RuntimePoolClaimError("photon_consent_quarantine_conflict")
+        row.update(
+            status="uncertain",
+            error_code=kwargs["error_code"],
+            reconciliation_status="manual_required",
+        )
+        return dict(row)
 
     async def get_photon_message_receipt(self, **kwargs):
         for item in self.messages.values():
@@ -504,6 +517,58 @@ def test_consent_revoked_after_model_turn_blocks_photon_outbound_handoff(monkeyp
     assert next(iter(repository.messages.values()))["status"] == "uncertain"
 
 
+def test_consent_revoked_after_receipt_completion_quarantines_delivery(monkeypatch):
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    checks = 0
+
+    def revoked_after_completion(_runtime):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(
+        hermes_cloud_photon,
+        "assert_runtime_managed_consent",
+        revoked_after_completion,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "managed_cloud_consent_required"
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert repository.consent_quarantines[-1]["receipt_id"] == receipt["id"]
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_replay_rechecks_consent_and_quarantines_before_returning_text(monkeypatch):
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    first = asyncio.run(adapter.handle_inbound(_message()))
+    assert first.outbound_text == "Synthetic answer."
+
+    def revoked(_runtime):
+        raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+
+    monkeypatch.setattr(
+        hermes_cloud_photon,
+        "assert_runtime_managed_consent",
+        revoked,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "managed_cloud_consent_required"
+    assert receipt["status"] == "uncertain"
+    assert len(runtime_service.provider_calls) == 1
+
+
 def _stable_persisted(repository):
     return json.dumps(
         {
@@ -659,8 +724,14 @@ def test_sidecar_disconnect_after_writeback_returns_no_delivery():
 
     assert error.value.code == "photon_sidecar_not_ready"
     receipt = next(iter(repository.messages.values()))
-    assert receipt["status"] == "uncertain"
+    assert receipt["status"] == "awaiting_delivery"
     assert receipt["canonical_outbound_event_id"] == "canonical-outbound"
+
+    repository.binding["sidecar_connected_at"] = datetime.now(timezone.utc)
+    recovered = asyncio.run(adapter.handle_inbound(_message()))
+    assert recovered.status == "awaiting_delivery"
+    assert recovered.duplicate is True
+    assert len(runtime_service.provider_calls) == 1
 
 
 def test_stale_claimed_receipt_is_reclaimed_before_quota_or_provider_work():

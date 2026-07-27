@@ -30,6 +30,13 @@ PHOTON_ALLOWED_TOOLS = ("honcho_context", "honcho_reasoning", "honcho_search")
 GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
+MANAGED_CLOUD_CONSENT_ERROR_CODES = {
+    "managed_cloud_real_data_disabled",
+    "managed_cloud_consent_required",
+    "managed_cloud_consent_stale",
+    "managed_cloud_consent_scope_drift",
+    "hermes_cloud_consent_policy_not_deployed",
+}
 
 
 def _utcnow() -> datetime:
@@ -389,6 +396,30 @@ class HermesCloudPhotonAdapter:
             canonical_outbound_event_id=canonical_outbound_event_id,
         )
 
+    async def _replay_with_consent(
+        self,
+        *,
+        runtime: IsolatedRuntime,
+        receipt: dict[str, Any],
+    ) -> PhotonAdapterResult:
+        if str(receipt.get("status") or "") == "awaiting_delivery":
+            try:
+                assert_runtime_managed_consent(runtime)
+            except ProvisioningError as exc:
+                if exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+                    try:
+                        await self.repository.quarantine_photon_delivery_for_consent(
+                            receipt_id=str(receipt["id"]),
+                            error_code=exc.code,
+                        )
+                    except RuntimePoolClaimError as conflict:
+                        raise ProvisioningError(
+                            conflict.code,
+                            retryable=False,
+                        ) from conflict
+                raise
+        return await self._replay(receipt)
+
     async def handle_inbound(
         self,
         request: PhotonInboundEnvelope,
@@ -438,14 +469,17 @@ class HermesCloudPhotonAdapter:
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(exc.code, retryable=False) from exc
         if not receipt.get("acquired"):
-            assert_runtime_managed_consent(runtime)
-            return await self._replay(receipt)
+            return await self._replay_with_consent(
+                runtime=runtime,
+                receipt=receipt,
+            )
 
         receipt_id = str(receipt["id"])
         lease_token = str(receipt.get("lease_token") or "")
         if not lease_token:
             raise ProvisioningError("photon_message_claim_conflict", retryable=True)
         provider_started = bool(receipt.get("provider_started"))
+        completed_for_delivery = False
         try:
             await self.repository.reserve_photon_quota(
                 receipt_id=receipt_id,
@@ -507,6 +541,7 @@ class HermesCloudPhotonAdapter:
                 preflight_receipt=preflight_receipt,
                 writeback_receipt=writeback_receipt,
             )
+            completed_for_delivery = True
             refreshed_binding = await self._binding(
                 line_identity=request.line_identity,
                 contact_identity=request.contact_identity,
@@ -537,13 +572,19 @@ class HermesCloudPhotonAdapter:
             )
             raise ProvisioningError(exc.code, retryable=not provider_started) from exc
         except ProvisioningError as exc:
-            await self.repository.fail_photon_message(
-                receipt_id=receipt_id,
-                lease_token=lease_token,
-                error_code=exc.code,
-                uncertain=provider_started,
-                provider_started=provider_started,
-            )
+            if completed_for_delivery and exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+                await self.repository.quarantine_photon_delivery_for_consent(
+                    receipt_id=receipt_id,
+                    error_code=exc.code,
+                )
+            else:
+                await self.repository.fail_photon_message(
+                    receipt_id=receipt_id,
+                    lease_token=lease_token,
+                    error_code=exc.code,
+                    uncertain=provider_started,
+                    provider_started=provider_started,
+                )
             raise
         except Exception as exc:
             await self.repository.fail_photon_message(

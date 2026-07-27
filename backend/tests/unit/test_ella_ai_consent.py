@@ -218,6 +218,62 @@ def test_firestore_transaction_replay_does_not_rewrite_current_state():
     assert state == current_state
 
 
+def test_firestore_current_pointer_and_receipt_are_read_in_one_transaction():
+    class Snapshot:
+        def __init__(self, data):
+            self.exists = data is not None
+            self._data = data or {}
+
+        def to_dict(self):
+            return dict(self._data)
+
+    class ReceiptRef:
+        def __init__(self, snapshot):
+            self.snapshot = snapshot
+
+        def get(self, transaction):
+            assert transaction is transaction_instance
+            return self.snapshot
+
+    class ReceiptCollection:
+        def document(self, receipt_id):
+            assert receipt_id == "aicr_revoked"
+            return ReceiptRef(
+                Snapshot(
+                    {
+                        "receipt_id": "aicr_revoked",
+                        "decision": "revoked",
+                    }
+                )
+            )
+
+    class UserRef:
+        def get(self, transaction):
+            assert transaction is transaction_instance
+            return Snapshot(
+                {
+                    "ai_consent": {
+                        "receipt_id": "aicr_revoked",
+                        "decision": "revoked",
+                    }
+                }
+            )
+
+        def collection(self, name):
+            assert name == "ai_consent_receipts"
+            return ReceiptCollection()
+
+    transaction_instance = object()
+    state, receipt = consent._read_firestore_current_receipt.to_wrap(
+        transaction_instance,
+        UserRef(),
+    )
+
+    assert state["receipt_id"] == "aicr_revoked"
+    assert receipt["receipt_id"] == "aicr_revoked"
+    assert receipt["decision"] == "revoked"
+
+
 def test_stale_grant_is_rejected_but_stale_decline_is_recorded():
     service = _service()
 
@@ -296,6 +352,46 @@ def test_exact_v6_account_profile_and_scope_authorize_managed_cloud(monkeypatch)
         account_uid="user-a",
         profile_uid="user-a",
     )
+
+
+def test_revocation_cannot_interleave_between_current_pointer_and_receipt_reads(
+    monkeypatch,
+):
+    class RevocationAtReadRepository(consent.InMemoryConsentRepository):
+        def __init__(self):
+            super().__init__()
+            self.service = None
+            self.revoked = False
+            self.legacy_state_reads = 0
+
+        def get_state(self, uid):
+            self.legacy_state_reads += 1
+            return super().get_state(uid)
+
+        def get_current(self, uid):
+            if not self.revoked:
+                self.revoked = True
+                self.service.submit(
+                    uid,
+                    _submission(
+                        decision="revoked",
+                        request_id="request-race-revoke",
+                    ),
+                )
+            return super().get_current(uid)
+
+    repository = RevocationAtReadRepository()
+    service = _service(repository)
+    repository.service = service
+    service.submit("user-a", _submission())
+    monkeypatch.setattr(consent, "_repository", repository)
+    _enable_managed_cloud(monkeypatch)
+
+    with pytest.raises(consent.ManagedCloudConsentError) as error:
+        _assert_exact_managed_cloud_consent()
+
+    assert error.value.code == "managed_cloud_consent_required"
+    assert repository.legacy_state_reads == 0
 
 
 @pytest.mark.parametrize(

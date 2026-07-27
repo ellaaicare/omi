@@ -1749,6 +1749,30 @@ class EllaProvisioningRepository:
             uuid.UUID(str(lease_token)),
         )
 
+    async def quarantine_photon_delivery_for_consent(
+        self,
+        *,
+        receipt_id: str,
+        error_code: str,
+    ) -> dict[str, Any]:
+        row = await self.pool.fetchrow(
+            """
+            UPDATE ella_photon_message_receipts
+            SET status = 'uncertain',
+                error_code = $2,
+                reconciliation_status = 'manual_required',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'awaiting_delivery'
+            RETURNING *
+            """,
+            uuid.UUID(str(receipt_id)),
+            error_code[:120],
+        )
+        if not row:
+            raise RuntimePoolClaimError("photon_consent_quarantine_conflict")
+        return dict(row)
+
     async def acknowledge_photon_delivery(
         self,
         *,
