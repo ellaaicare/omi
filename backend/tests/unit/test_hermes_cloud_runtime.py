@@ -255,6 +255,70 @@ def test_photon_turn_uses_photon_entitlement_mode():
     assert policy.accepted[0]["mode"] == "hermes-cloud-photon"
 
 
+def test_enrichment_turn_uses_distinct_mode_and_disables_user_scan():
+    repository = FakeRepository()
+    event_store = InMemoryCanonicalEventStore()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=event_store,
+        cloud_client=FakeCloudClient(),
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    request = HermesCloudTurnRequest(
+        **{
+            **_request().__dict__,
+            "channel": "omi_enrichment",
+            "user_scan_policy": "none",
+        }
+    )
+
+    result = asyncio.run(service.run_turn(_runtime(), request))
+    source_identity = "hermes_cloud:omi_enrichment:interaction:" + result.canonical_user_event_id.split(":")[1]
+    user_event = asyncio.run(
+        event_store.get_event(
+            uid=request.uid,
+            event_id=result.canonical_user_event_id,
+            source_identity=source_identity,
+        )
+    )
+
+    assert policy.accepted[0]["mode"] == "hermes-cloud-enrichment"
+    assert user_event["scan_policy"] == "none"
+
+
+def test_turn_rejects_invalid_user_scan_policy_before_ingest():
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=FakeCloudClient(),
+        voice_policy=FakePolicy(),
+    )
+    request = HermesCloudTurnRequest(**{**_request().__dict__, "user_scan_policy": "guardian"})
+
+    with pytest.raises(ProvisioningError, match="hermes_cloud_scan_policy_invalid"):
+        asyncio.run(service.run_turn(_runtime(), request))
+
+
+def test_idempotency_hash_binds_instructions():
+    repository = FakeRepository()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=FakeCloudClient(),
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    asyncio.run(service.run_turn(_runtime(), _request()))
+    changed = HermesCloudTurnRequest(**{**_request().__dict__, "instructions": "Different policy."})
+
+    with pytest.raises(ProvisioningError, match="runtime_interaction_payload_conflict"):
+        asyncio.run(service.run_turn(_runtime(), changed))
+
+
 def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
     monkeypatch,
 ):

@@ -29,7 +29,9 @@ from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
 HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
+HERMES_CLOUD_ENRICHMENT_MODE = "hermes-cloud-enrichment"
 HERMES_CLOUD_PHOTON_MODE = "hermes-cloud-photon"
+HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
@@ -156,6 +158,7 @@ class HermesCloudTurnRequest:
     started_at: datetime
     client_metadata: dict[str, Any]
     consent_grant_epoch: Optional[str] = None
+    user_scan_policy: str = "immediate"
 
 
 @dataclass(frozen=True)
@@ -176,7 +179,9 @@ def _request_hash(request: HermesCloudTurnRequest) -> str:
             request.channel,
             request.client_interaction_id,
             request.user_input,
+            request.instructions,
             request.consent_grant_epoch or "",
+            request.user_scan_policy,
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -218,7 +223,7 @@ def _event(
         started_at=started_at,
         ended_at=now if role == "assistant" else None,
         privacy_scope="user_private",
-        scan_policy="immediate" if role == "user" else "none",
+        scan_policy=request.user_scan_policy if role == "user" else "none",
         source_ref={
             "source_identity": source_identity,
             "client_interaction_id": request.client_interaction_id,
@@ -275,6 +280,11 @@ class HermesCloudRuntimeService:
             raise ProvisioningError("hermes_cloud_shadow_not_routable", retryable=False)
         if not request.client_interaction_id.strip():
             raise ProvisioningError("client_interaction_id_required", retryable=False)
+        if request.user_scan_policy not in {"immediate", "none"}:
+            raise ProvisioningError(
+                "hermes_cloud_scan_policy_invalid",
+                retryable=False,
+            )
         source_identity, user_event_id, assistant_event_id = _event_identity(request)
         request_hash = _request_hash(request)
         scope = await self.repository.get_or_create_runtime_scope(
@@ -388,6 +398,12 @@ class HermesCloudRuntimeService:
             entitlement = await self.voice_policy.get_entitlement(request.uid)
             if not entitlement:
                 raise ProvisioningError("no_entitlement", retryable=False)
+            if request.channel == "photon":
+                entitlement_mode = HERMES_CLOUD_PHOTON_MODE
+            elif request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL:
+                entitlement_mode = HERMES_CLOUD_ENRICHMENT_MODE
+            else:
+                entitlement_mode = HERMES_CLOUD_CHAT_MODE
             admission = await self.voice_policy.accept_session(
                 uid=request.uid,
                 session_id=str(claimed["hermes_session_id"]),
@@ -395,7 +411,7 @@ class HermesCloudRuntimeService:
                 entitlement_revision=int(entitlement["revision"]),
                 provider="hermes_cloud",
                 model=runtime.expected_model,
-                mode=(HERMES_CLOUD_PHOTON_MODE if request.channel == "photon" else HERMES_CLOUD_CHAT_MODE),
+                mode=entitlement_mode,
             )
             if not admission.allowed:
                 raise ProvisioningError(admission.code, retryable=False)
