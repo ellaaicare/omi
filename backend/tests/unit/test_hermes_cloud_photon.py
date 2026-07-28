@@ -143,6 +143,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         revision=7,
         policy_commit_sha=POLICY_SHA,
         approval_manifest_sha256=MANIFEST_SHA,
+        profile_class="synthetic",
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -160,7 +161,9 @@ class FakeRepository:
             "photon_role": "internal-owner",
             "photon_status": "enabled",
             "provider": "hermes_cloud",
+            "expected_model": "gpt-5.6-terra",
             "status": "internal_canary",
+            "profile_class": "synthetic",
             "active": True,
             "health_state": "healthy",
             "line_identity_key": line_key,
@@ -861,6 +864,20 @@ def test_synthetic_fixture_is_server_authorized_when_caller_omits_flag(
     assert result.status == "awaiting_delivery"
     assert repository.claim_calls
     assert runtime_service.calls[0][1].client_metadata["synthetic"] is True
+
+
+def test_allowlisted_real_profile_is_denied_before_photon_receipt_or_provider():
+    adapter, repository, runtime_service = _adapter()
+    repository.binding["profile_class"] = "real"
+    asyncio.run(adapter.preflight(_preflight()))
+
+    with pytest.raises(ProvisioningError) as blocked:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert blocked.value.code == "hermes_cloud_synthetic_profile_required"
+    assert repository.claim_calls == []
+    assert repository.quota_calls == []
+    assert runtime_service.calls == []
 
 
 def test_tool_drift_and_allow_all_fail_preflight():

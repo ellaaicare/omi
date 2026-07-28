@@ -31,7 +31,10 @@ from ella.services.hermes_cloud import (
     HonchoCloudProvisionClient,
     RuntimePoolAlertPublisher,
 )
-from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.hermes_cloud_policy import (
+    assert_cloud_identity_gate,
+    cloud_synthetic_only,
+)
 from ella.services.runtime_errors import ProvisioningError
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
@@ -574,10 +577,13 @@ class ProvisioningCoordinator:
                 )
                 return
             expected_model = str(pool_policy["model"])
+            required_profile_class = "synthetic" if cloud_synthetic_only() else "real"
 
-            def assert_current_cloud_consent() -> None:
+            async def assert_current_cloud_consent() -> None:
+                current_profile_class = await self.repository.get_cloud_profile_class(identity.uid)
                 assert_cloud_identity_gate(
                     identity.uid,
+                    profile_class=current_profile_class,
                     profile_uid=identity.uid,
                     runtime_provider=str(pool_policy["provider"]),
                     model_route=f"openai-codex/{expected_model}",
@@ -585,7 +591,7 @@ class ProvisioningCoordinator:
                     photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
                 )
 
-            assert_current_cloud_consent()
+            await assert_current_cloud_consent()
             admission = await runtime_admission(
                 uid=identity.uid,
                 provider=str(pool_policy["provider"]),
@@ -610,6 +616,7 @@ class ProvisioningCoordinator:
                 admitted_entitlement_revision=admitted_entitlement_revision,
                 provider=str(pool_policy["provider"]),
                 model=expected_model,
+                required_profile_class=required_profile_class,
             )
             pool_state = await self.repository.reconcile_cloud_pool_alert(threshold=cloud_pool_low_water_threshold())
             await self._publish_pool_alert(alert_publisher, pool_state)
@@ -662,12 +669,12 @@ class ProvisioningCoordinator:
                     },
                 )
 
-            assert_current_cloud_consent()
+            await assert_current_cloud_consent()
             honcho = await honcho_client.ensure_profile(
                 binding,
                 on_side_effect=record_side_effect,
             )
-            assert_current_cloud_consent()
+            await assert_current_cloud_consent()
             preflight = await cloud_client.preflight(binding)
             health_receipt = {
                 **preflight.receipt,

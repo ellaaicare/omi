@@ -20,6 +20,7 @@ from ella.services.ai_consent import (
 )
 from ella.services.hermes_cloud_policy import (
     assert_cloud_identity_gate,
+    assert_cloud_synthetic_identity_gate,
     cloud_synthetic_only,
 )
 from ella.services.hermes_cloud_runtime import (
@@ -454,6 +455,7 @@ class HermesCloudPhotonAdapter:
             )
         current_epoch = assert_cloud_identity_gate(
             self.config.internal_owner_uid,
+            profile_class=str(binding.get("profile_class") or ""),
             profile_uid=self.config.internal_owner_uid,
             runtime_provider=str(binding.get("provider") or ""),
             model_route=f"openai-codex/{expected_model}",
@@ -486,6 +488,10 @@ class HermesCloudPhotonAdapter:
         binding = await self._binding(
             line_identity=request.line_identity,
             contact_identity=request.contact_identity,
+        )
+        assert_cloud_synthetic_identity_gate(
+            self.config.internal_owner_uid,
+            profile_class=str(binding.get("profile_class") or ""),
         )
         preflight_receipt = self._assert_live_preflight(
             binding=binding,

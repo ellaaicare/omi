@@ -41,6 +41,7 @@ INVALID_OUTPUT_ERROR = "hermes_cloud_enrichment_output_invalid"
 def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
     return assert_cloud_identity_gate(
         runtime.uid,
+        profile_class=runtime.profile_class,
         profile_uid=runtime.uid,
         runtime_provider=runtime.provider,
         model_route=f"openai-codex/{runtime.expected_model}",
@@ -286,6 +287,9 @@ class HermesCloudRuntimeService:
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+        profile_class = await self.repository.get_cloud_profile_class(request.uid)
+        if profile_class != runtime.profile_class:
+            raise ProvisioningError("hermes_cloud_profile_class_changed", retryable=False)
         current_grant_epoch = assert_runtime_managed_consent(runtime)
         if request.consent_grant_epoch and not hmac.compare_digest(
             request.consent_grant_epoch,
@@ -514,6 +518,9 @@ class HermesCloudRuntimeService:
             # flight. Recheck at the last boundary before protected content is
             # sent to Hermes Cloud and its OpenAI model route.
             current_grant_epoch = assert_runtime_managed_consent(runtime)
+            profile_class = await self.repository.get_cloud_profile_class(request.uid)
+            if profile_class != runtime.profile_class:
+                raise ProvisioningError("hermes_cloud_profile_class_changed", retryable=False)
             if request.consent_grant_epoch and not hmac.compare_digest(
                 request.consent_grant_epoch,
                 current_grant_epoch,

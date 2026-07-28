@@ -44,6 +44,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         model_policy_version="models-v1",
         voice_policy_version="voice-v1",
         revision=2,
+        profile_class="synthetic",
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -69,6 +70,11 @@ class FakeRepository:
         self.failures = []
         self.previous_response_id = previous_response_id
         self.previous_response_usage = previous_response_usage or {}
+        self.profile_class = "synthetic"
+
+    async def get_cloud_profile_class(self, uid):
+        assert uid == "synthetic-user"
+        return self.profile_class
 
     async def get_or_create_runtime_scope(self, **kwargs):
         assert kwargs["allow_shadow"] is False
@@ -929,3 +935,33 @@ def test_shadow_binding_is_rejected_by_ordinary_runtime():
         asyncio.run(service.run_turn(runtime, _request()))
 
     assert error.value.code == "hermes_cloud_shadow_not_routable"
+
+
+def test_profile_reclassification_before_provider_fails_closed():
+    class ReclassifyingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.class_reads = 0
+
+        async def get_cloud_profile_class(self, uid):
+            self.class_reads += 1
+            return "synthetic" if self.class_reads == 1 else "real"
+
+    repository = ReclassifyingRepository()
+    cloud = FakeCloudClient()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), _request()))
+
+    assert error.value.code == "hermes_cloud_profile_class_changed"
+    assert cloud.calls == []
+    assert policy.reserved

@@ -94,6 +94,26 @@ async def _run_with_database(scenario):
             await conn.execute(BASE_PROVISIONING_SCHEMA)
             await conn.execute((MIGRATIONS / "008_create_voice_canary_controls.sql").read_text(encoding="utf-8"))
             await conn.execute((MIGRATIONS / "009_create_hermes_cloud_runtime_pool.sql").read_text(encoding="utf-8"))
+            await conn.execute((MIGRATIONS / "010_add_cloud_profile_class.sql").read_text(encoding="utf-8"))
+            assert await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'users'
+                      AND column_name = 'profile_class'
+                      AND is_nullable = 'NO'
+                      AND column_default = '''real''::text'
+                )
+                """)
+            assert await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE connamespace = current_schema()::regnamespace
+                      AND conname = 'users_profile_class_check'
+                )
+                """)
         await scenario(pool)
     finally:
         voice_canary._pool = previous_voice_pool
@@ -108,7 +128,7 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
         model = "gpt-5.6-terra"
         async with pool.acquire() as conn:
             user_id = await conn.fetchval(
-                "INSERT INTO users (omi_uid) VALUES ($1) RETURNING id",
+                "INSERT INTO users (omi_uid, profile_class) VALUES ($1, 'synthetic') RETURNING id",
                 uid,
             )
             job_id = await conn.fetchval(
@@ -171,6 +191,7 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
                 admitted_entitlement_revision=admitted_revision,
                 provider="hermes_cloud",
                 model=model,
+                required_profile_class="synthetic",
             )
 
         assert error.value.code == "runtime_admission_revoked"
@@ -196,12 +217,14 @@ async def _seed_claim(
     uid: str,
     runtime_instance_id: str,
     daily_limit_s: int = 2700,
+    profile_class: str = "synthetic",
 ):
     model = "gpt-5.6-terra"
     async with pool.acquire() as conn:
         user_id = await conn.fetchval(
-            "INSERT INTO users (omi_uid) VALUES ($1) RETURNING id",
+            "INSERT INTO users (omi_uid, profile_class) VALUES ($1, $2) RETURNING id",
             uid,
+            profile_class,
         )
         job_id = await conn.fetchval(
             """
@@ -269,6 +292,34 @@ async def _assert_pool_available(pool, runtime_instance_id: str):
     }
 
 
+def test_real_profile_cannot_consume_synthetic_pool_capacity():
+    async def scenario(pool):
+        uid = "allowlisted-real-profile"
+        instance = "synthetic-instance-profile-class"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+            profile_class="real",
+        )
+
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await repository.claim_cloud_pool_binding(
+                uid=uid,
+                job_id=job_id,
+                lease_seconds=120,
+                admitted_entitlement_revision=revision,
+                provider="hermes_cloud",
+                model=model,
+                required_profile_class="synthetic",
+            )
+
+        assert error.value.code == "hermes_cloud_synthetic_profile_required"
+        await _assert_pool_available(pool, instance)
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_provider_kill_switch_interleaving_consumes_no_pool_row():
     async def scenario(pool):
         uid = "synthetic-kill-switch-interleaving"
@@ -300,6 +351,7 @@ def test_provider_kill_switch_interleaving_consumes_no_pool_row():
                         admitted_entitlement_revision=revision,
                         provider="hermes_cloud",
                         model=model,
+                        required_profile_class="synthetic",
                     )
                 )
                 await asyncio.sleep(0.05)
@@ -375,6 +427,7 @@ def test_completed_usage_interleaving_consumes_no_pool_row():
                         admitted_entitlement_revision=revision,
                         provider="hermes_cloud",
                         model=model,
+                        required_profile_class="synthetic",
                     )
                 )
                 await asyncio.sleep(0.05)

@@ -114,10 +114,12 @@ class _CloudClaimConnection:
         reconnect=False,
         entitlement_revision=3,
         entitlement_status="invited",
+        profile_class="synthetic",
     ):
         self.reconnect = reconnect
         self.entitlement_revision = entitlement_revision
         self.entitlement_status = entitlement_status
+        self.profile_class = profile_class
         self.queries = []
         self.binding_id = uuid.uuid4()
         self.user_id = uuid.uuid4()
@@ -181,8 +183,8 @@ class _CloudClaimConnection:
                     "omi_uid": args[0],
                 }
             return None
-        if "SELECT id FROM users" in query:
-            return {"id": self.user_id}
+        if "SELECT id, profile_class FROM users" in query:
+            return {"id": self.user_id, "profile_class": self.profile_class}
         if "FOR UPDATE SKIP LOCKED" in query:
             return {"id": self.binding_id}
         if "UPDATE ella_runtime_bindings" in query and "status = 'claiming'" in query:
@@ -209,6 +211,7 @@ def test_cloud_pool_claim_uses_reconnect_receipt_skip_locked_and_cas():
             admitted_entitlement_revision=3,
             provider="hermes_cloud",
             model="model-a",
+            required_profile_class="synthetic",
         )
     )
 
@@ -229,6 +232,7 @@ def test_cloud_pool_claim_uses_reconnect_receipt_skip_locked_and_cas():
             admitted_entitlement_revision=3,
             provider="hermes_cloud",
             model="model-a",
+            required_profile_class="synthetic",
         )
     )
     assert reconnect_result["status"] == "claiming"
@@ -257,10 +261,32 @@ def test_cloud_pool_claim_revalidates_entitlement_before_selecting_candidate(
                 admitted_entitlement_revision=3,
                 provider="hermes_cloud",
                 model="model-a",
+                required_profile_class="synthetic",
             )
         )
 
     assert error.value.code == expected_code
+    assert not any("FOR UPDATE SKIP LOCKED" in query for query in connection.queries)
+
+
+def test_cloud_pool_claim_rejects_real_profile_even_when_selected():
+    connection = _CloudClaimConnection(profile_class="real")
+    repository = EllaProvisioningRepository(_Pool(connection))
+
+    with pytest.raises(RuntimePoolClaimError) as error:
+        asyncio.run(
+            repository.claim_cloud_pool_binding(
+                uid="allowlisted-real-user",
+                job_id=str(uuid.uuid4()),
+                lease_seconds=120,
+                admitted_entitlement_revision=3,
+                provider="hermes_cloud",
+                model="model-a",
+                required_profile_class="synthetic",
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_synthetic_profile_required"
     assert not any("FOR UPDATE SKIP LOCKED" in query for query in connection.queries)
 
 
@@ -470,6 +496,7 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
             binding_id=binding_id,
             expected_revision=2,
             target_status="internal_canary",
+            required_profile_class="synthetic",
         )
     )
 
@@ -479,9 +506,11 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
     assert "b.status = 'shadow'" in query
     assert "b.active = false" in query
     assert "b.revision = $3" in query
+    assert "u.profile_class = $5" in query
     assert args == (
         uuid.UUID(binding_id),
         "synthetic-user",
         2,
         "internal_canary",
+        "synthetic",
     )
