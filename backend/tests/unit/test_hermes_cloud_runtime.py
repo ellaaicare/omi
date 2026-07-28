@@ -76,11 +76,7 @@ class FakeRepository:
 
     async def get_or_create_runtime_interaction(self, **kwargs):
         if self.interaction:
-            compatible = kwargs.get("compatible_request_hashes", ())
-            if (
-                self.interaction["request_hash"] != kwargs["request_hash"]
-                and self.interaction["request_hash"] not in compatible
-            ):
+            if self.interaction["request_hash"] != kwargs["request_hash"]:
                 from database.ella_provisioning import RuntimePoolClaimError
 
                 raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
@@ -240,8 +236,7 @@ class RetryRepository(FakeRepository):
             }
             self.interactions[client_id] = interaction
         else:
-            compatible = kwargs.get("compatible_request_hashes", ())
-            if interaction["request_hash"] != kwargs["request_hash"] and interaction["request_hash"] not in compatible:
+            if interaction["request_hash"] != kwargs["request_hash"]:
                 from database.ella_provisioning import RuntimePoolClaimError
 
                 raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
@@ -396,33 +391,6 @@ def test_idempotency_hash_binds_instructions():
 
     with pytest.raises(ProvisioningError, match="runtime_interaction_payload_conflict"):
         asyncio.run(service.run_turn(_runtime(), changed))
-
-
-def test_prior_request_hash_replays_without_payload_conflict():
-    repository = FakeRepository()
-    event_store = InMemoryCanonicalEventStore()
-    service = HermesCloudRuntimeService(
-        repository=repository,
-        event_store=event_store,
-        cloud_client=FakeCloudClient(),
-        voice_policy=FakePolicy(),
-        cost_estimator=lambda usage: 0,
-        max_cost_estimator=lambda **kwargs: 1,
-    )
-    request = HermesCloudTurnRequest(
-        **{
-            **_request().__dict__,
-            "channel": "omi_enrichment",
-            "user_scan_policy": "none",
-        }
-    )
-    first = asyncio.run(service.run_turn(_runtime(), request))
-    repository.interaction["request_hash"] = hermes_cloud_runtime._legacy_request_hash(request)
-
-    replay = asyncio.run(service.run_turn(_runtime(), request))
-
-    assert first.duplicate is False
-    assert replay.duplicate is True
 
 
 def test_malformed_output_is_failed_before_completion_and_replays_fresh():

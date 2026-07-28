@@ -188,20 +188,6 @@ def _request_hash(request: HermesCloudTurnRequest) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _legacy_request_hash(request: HermesCloudTurnRequest) -> str:
-    """Hash used before instructions and scan policy became identity fields."""
-    material = "\x1f".join(
-        (
-            request.uid,
-            request.channel,
-            request.client_interaction_id,
-            request.user_input,
-            request.consent_grant_epoch or "",
-        )
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
 def _validate_provider_response(
     response_validator: Optional[Callable[[str], None]],
     text: str,
@@ -356,9 +342,6 @@ class HermesCloudRuntimeService:
                 scope_id=str(scope["id"]),
                 client_interaction_id=request.client_interaction_id,
                 request_hash=request_hash,
-                compatible_request_hashes=(
-                    (_legacy_request_hash(request),) if request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL else ()
-                ),
                 correlation_id=request.correlation_id,
                 canonical_user_event_id=user_event_id,
                 canonical_assistant_event_id=assistant_event_id,

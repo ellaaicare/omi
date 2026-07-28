@@ -276,11 +276,18 @@ The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Mi
 ### AI processing consent
 
 `/v1/users/ai-consent` is the server authority for the versioned AI/data-sharing
-policy. The current `ai-data-processors-v5` manifest includes Soniox and
-Speechmatics STT, Inworld TTS, and Ella's self-hosted Kokoro/Fish TTS in
-addition to the model, memory, infrastructure, and fallback recipients. The
-authenticated Firebase UID selects both the current state and the
-immutable receipt subcollection; callers cannot submit or select another UID.
+policy. The current `ai-data-processors-v7` manifest includes Soniox and
+Speechmatics STT, Inworld TTS, Ella's self-hosted Kokoro/Fish TTS, Hermes
+Cloud, Honcho Cloud, OpenAI Codex, and Photon in addition to the remaining
+model, memory, infrastructure, and fallback recipients. V7 requires renewed
+consent for revised legal/plain-language disclosure, including the
+`Honcho / Plastic Labs` label and revised Hermes/Honcho data descriptions.
+The canonical processor IDs/functions and managed-cloud scope did not change
+from v6, so their hashes intentionally remain stable. Authorization still
+requires the exact policy version, processor-set hash, scope version, and scope
+hash together; matching hashes from a v6 receipt do not authorize v7. The
+authenticated Firebase UID selects both the current state and the immutable
+receipt subcollection; callers cannot submit or select another UID.
 
 - `GET /v1/users/ai-consent/policy` returns the required legal-recipient
   manifest, policy version, processor-set hash, and managed-cloud scope

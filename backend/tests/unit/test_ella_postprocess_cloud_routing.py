@@ -39,7 +39,7 @@ def _configure_cloud(monkeypatch):
     )
 
 
-def test_cloud_selected_uid_queues_before_webhook_and_never_legacy_ready(
+def test_cloud_selected_uid_queues_and_skips_all_legacy_webhooks(
     monkeypatch,
 ):
     _configure_cloud(monkeypatch)
@@ -60,8 +60,7 @@ def test_cloud_selected_uid_queues_before_webhook_and_never_legacy_ready(
     postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
 
     assert queued == [("synthetic-user", "conversation-a")]
-    assert [url for url, _ in calls] == [postprocess.POSTPROCESS_WEBHOOK_URL]
-    assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in [url for url, _ in calls]
+    assert calls == []
 
 
 def test_cloud_selected_uid_queues_even_when_generic_postprocess_is_disabled(
@@ -113,9 +112,20 @@ def test_cloud_selected_uid_outbox_failure_never_falls_back(monkeypatch):
     assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls
 
 
-def test_cloud_selected_uid_never_posts_directly_to_cloud_or_mini(monkeypatch):
+def test_cloud_selected_uid_never_serializes_or_posts_legacy_payload(monkeypatch):
     _configure_cloud(monkeypatch)
     calls = []
+
+    class BoundaryConversation:
+        id = "conversation-a"
+
+        @property
+        def structured(self):
+            raise AssertionError("selected cloud path read legacy structured content")
+
+        @property
+        def transcript_segments(self):
+            raise AssertionError("selected cloud path read legacy transcript content")
 
     def fake_post(url, **kwargs):
         calls.append(url)
@@ -128,7 +138,41 @@ def test_cloud_selected_uid_never_posts_directly_to_cloud_or_mini(monkeypatch):
     )
     monkeypatch.setattr(postprocess.requests, "post", fake_post)
 
-    postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
+    postprocess.fire_postprocess_webhook("synthetic-user", BoundaryConversation())
 
-    assert calls == [postprocess.POSTPROCESS_WEBHOOK_URL]
-    assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls
+    assert calls == []
+
+
+def test_non_selected_uid_preserves_both_legacy_webhooks(monkeypatch):
+    monkeypatch.setattr(postprocess, "POSTPROCESS_ENABLED", True)
+    monkeypatch.setattr(
+        postprocess,
+        "HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS",
+        frozenset({"synthetic-user"}),
+    )
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs["json"]))
+        return FakeResponse()
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, daemon):
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(postprocess.requests, "post", fake_post)
+    monkeypatch.setattr(postprocess.threading, "Thread", ImmediateThread)
+
+    postprocess.fire_postprocess_webhook("legacy-user", _conversation())
+
+    assert [url for url, _ in calls] == [
+        postprocess.POSTPROCESS_WEBHOOK_URL,
+        postprocess.CONVERSATION_READY_WEBHOOK_URL,
+    ]
+    assert calls[0][1]["structured"]["overview"] == "Synthetic summary"
+    assert calls[1][1]["transcript"] == "User: Synthetic input"

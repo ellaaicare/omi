@@ -120,7 +120,7 @@ def deliver_enrichment_job(job: dict[str, Any]) -> DeliveryResult:
         return DeliveryResult(
             False,
             _error_code(response),
-            retryable=(response.status_code in {401, 408, 425, 429} or response.status_code >= 500),
+            retryable=(response.status_code in {408, 425, 429} or response.status_code >= 500),
         )
     try:
         body = response.json()

@@ -103,6 +103,9 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
             f"status={queued.get('status')}",
             flush=True,
         )
+        # The durable cloud outbox exclusively owns selected conversations.
+        # Return before deriving or sending any legacy n8n/Mini payload.
+        return
 
     if not POSTPROCESS_ENABLED:
         print(f"[FLOW:POSTPROCESS] DISABLED uid={uid} conv={conversation.id[:8]}...", flush=True)
@@ -183,11 +186,6 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
                 f"latency={_elapsed_completed}ms",
                 flush=True,
             )
-
-        if cloud_selected:
-            # Durable outbox delivery owns cloud enrichment. A selected profile
-            # never falls through to the legacy n8n/Mini conversation-ready path.
-            return
 
         # Notify the user's OpenClaw agent via conversation-ready webhook (fire-and-forget)
         ready_payload = {

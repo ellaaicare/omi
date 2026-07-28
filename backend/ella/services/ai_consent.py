@@ -19,6 +19,9 @@ from utils.other import endpoints as auth
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
+# V7 changes the legal/plain-language disclosure, not the processor topology or
+# managed-cloud scope. Authority therefore requires this exact version together
+# with the unchanged canonical processor and scope hashes below.
 CURRENT_POLICY_VERSION = "ai-data-processors-v7"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"

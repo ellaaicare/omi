@@ -130,6 +130,39 @@ def test_timeout_and_503_are_retryable(
     )
 
 
+def test_401_blocks_until_operator_repairs_loopback_token(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN",
+        "x" * 32,
+    )
+
+    class UnauthorizedResponse:
+        status_code = 401
+
+        @staticmethod
+        def json():
+            return {"detail": {"code": "hermes_cloud_enrichment_auth_failed"}}
+
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *args, **kwargs: UnauthorizedResponse(),
+    )
+    result = deliver_enrichment_job(_job())
+    repository = FakeOutbox()
+    worker = HermesCloudEnrichmentOutboxWorker(
+        repository,
+        deliver=lambda job: result,
+    )
+
+    asyncio.run(worker.run_once())
+
+    assert result.retryable is False
+    assert repository.job["status"] == "blocked"
+    assert repository.failures[0]["error_code"] == ("hermes_cloud_enrichment_auth_failed")
+
+
 def test_expired_lease_reclaims_after_process_interruption():
     repository = FakeOutbox()
     first_claim = repository.claim_next(lease_seconds=240)

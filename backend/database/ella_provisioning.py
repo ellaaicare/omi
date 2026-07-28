@@ -1099,7 +1099,6 @@ class EllaProvisioningRepository:
         scope_id: str,
         client_interaction_id: str,
         request_hash: str,
-        compatible_request_hashes: tuple[str, ...] = (),
         correlation_id: str,
         canonical_user_event_id: str,
         canonical_assistant_event_id: str,
@@ -1140,8 +1139,7 @@ class EllaProvisioningRepository:
             canonical_assistant_event_id,
         )
         result = dict(row)
-        stored_request_hash = str(result.get("request_hash") or "")
-        if stored_request_hash != request_hash and stored_request_hash not in compatible_request_hashes:
+        if str(result.get("request_hash") or "") != request_hash:
             raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
         return result
 
