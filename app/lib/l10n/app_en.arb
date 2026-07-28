@@ -10483,7 +10483,7 @@
   "aiConsentActiveAudioStopped": "Ella could not verify AI permission. Cloud sharing and voice chat have stopped.",
   "deleteAccountServerConfirmationFailed": "Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.",
   "deleteAccountLocalCleanupFailed": "Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.",
-  "aiConsentManagedCloudIntro": "Before Ella sends anything to these companies, please choose whether you agree. Ella uses only the company needed for the feature you choose:",
+  "aiConsentManagedCloudIntro": "Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:",
   "@aiConsentManagedCloudIntro": {
     "description": "Introduces the named managed-cloud processors before first use"
   },

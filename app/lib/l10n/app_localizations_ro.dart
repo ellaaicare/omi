@@ -8950,7 +8950,7 @@ class AppLocalizationsRo extends AppLocalizations {
 
   @override
   String get aiConsentManagedCloudIntro =>
-      'Before Ella sends anything to these companies, please choose whether you agree. Ella uses only the company needed for the feature you choose:';
+      'Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:';
 
   @override
   String get aiConsentHermesCloudTitle => 'Nous Research / Hermes Cloud';

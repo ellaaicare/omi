@@ -70,6 +70,13 @@ void main() {
 
     final disclosure =
         tester.widgetList<RichText>(find.byType(RichText)).map((widget) => widget.text.toPlainText()).join(' ');
+    expect(
+      disclosure,
+      contains(
+        'Please choose whether you agree to Ella sharing with these companies. '
+        'The companies involved depend on the feature you choose:',
+      ),
+    );
     expect(disclosure, contains('secure backend'));
     expect(disclosure, contains('Nous Research / Hermes Cloud'));
     expect(disclosure, contains('what you say or type'));

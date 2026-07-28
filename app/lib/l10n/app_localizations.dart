@@ -16608,7 +16608,7 @@ abstract class AppLocalizations {
   /// Introduces the named managed-cloud processors before first use
   ///
   /// In en, this message translates to:
-  /// **'Before Ella sends anything to these companies, please choose whether you agree. Ella uses only the company needed for the feature you choose:'**
+  /// **'Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:'**
   String get aiConsentManagedCloudIntro;
 
   /// Legal recipient and product name for the managed agent runtime
