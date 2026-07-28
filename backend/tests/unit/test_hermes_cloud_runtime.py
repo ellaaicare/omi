@@ -477,6 +477,7 @@ def test_malformed_output_is_failed_before_completion_and_replays_fresh():
     assert replay.duplicate is True
     assert len(cloud.calls) == 2
     assert repository.interactions["client-turn-1:format-retry:1"]["status"] == "completed"
+    assert len(repository.receipts) == 2
 
 
 def test_completed_malformed_output_is_invalidated_then_recovered():

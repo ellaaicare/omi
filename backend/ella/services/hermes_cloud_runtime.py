@@ -318,6 +318,7 @@ class HermesCloudRuntimeService:
                 "hermes_cloud_scan_policy_invalid",
                 retryable=False,
             )
+        stable_user_request = request
         scope = await self.repository.get_or_create_runtime_scope(
             uid=request.uid,
             binding_id=runtime.binding_id,
@@ -347,7 +348,8 @@ class HermesCloudRuntimeService:
                     request,
                     client_interaction_id=(f"{request.client_interaction_id}:format-retry:" f"{invalid_attempts}"),
                 )
-        source_identity, user_event_id, assistant_event_id = _event_identity(request)
+        user_source_identity, user_event_id, _ = _event_identity(stable_user_request)
+        assistant_source_identity, _, assistant_event_id = _event_identity(request)
         request_hash = _request_hash(request)
         try:
             interaction = await self.repository.get_or_create_runtime_interaction(
@@ -368,7 +370,7 @@ class HermesCloudRuntimeService:
             stored = await self.event_store.get_event(
                 uid=request.uid,
                 event_id=assistant_event_id,
-                source_identity=source_identity,
+                source_identity=assistant_source_identity,
             )
             if not stored:
                 raise ProvisioningError("hermes_cloud_completed_turn_missing_event", retryable=True)
@@ -399,7 +401,7 @@ class HermesCloudRuntimeService:
         recovered = await self.event_store.get_event(
             uid=request.uid,
             event_id=assistant_event_id,
-            source_identity=source_identity,
+            source_identity=assistant_source_identity,
         )
         if recovered:
             provider_response_id = str((recovered.get("source_ref") or {}).get("provider_response_id") or "")
@@ -451,7 +453,7 @@ class HermesCloudRuntimeService:
             user_event = _event(
                 request=request,
                 session_key=str(scope["session_key"]),
-                source_identity=source_identity,
+                source_identity=user_source_identity,
                 event_id=user_event_id,
                 role="user",
                 text=request.user_input,
@@ -460,7 +462,7 @@ class HermesCloudRuntimeService:
             user_receipt = await self.repository.claim_runtime_ingestion(
                 binding_id=runtime.binding_id,
                 canonical_event_id=user_event_id,
-                source_identity=source_identity,
+                source_identity=user_source_identity,
                 event_revision=1,
                 provenance="canonical_writeback",
             )
@@ -611,7 +613,7 @@ class HermesCloudRuntimeService:
             assistant_event = _event(
                 request=request,
                 session_key=str(scope["session_key"]),
-                source_identity=source_identity,
+                source_identity=assistant_source_identity,
                 event_id=assistant_event_id,
                 role="assistant",
                 text=turn.text,
@@ -621,7 +623,7 @@ class HermesCloudRuntimeService:
             assistant_receipt = await self.repository.claim_runtime_ingestion(
                 binding_id=runtime.binding_id,
                 canonical_event_id=assistant_event_id,
-                source_identity=source_identity,
+                source_identity=assistant_source_identity,
                 event_revision=1,
                 provenance="hermes_response",
             )
