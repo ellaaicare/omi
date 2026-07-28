@@ -19,7 +19,10 @@ from utils.other import endpoints as auth
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
-CURRENT_POLICY_VERSION = "ai-data-processors-v6"
+# V7 changes the legal/plain-language disclosure, not the processor topology or
+# managed-cloud scope. Authority therefore requires this exact version together
+# with the unchanged canonical processor and scope hashes below.
+CURRENT_POLICY_VERSION = "ai-data-processors-v7"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
@@ -102,18 +105,15 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "id": "nous-hermes-cloud",
         "legal_recipient": "Nous Research / Hermes Cloud",
         "function": "Managed agent runtime",
-        "data": (
-            "Prompt policy, messages, transcripts, selected first-party context, "
-            "session metadata, and model or tool usage"
-        ),
+        "data": ("What the person says or types, details they choose to share, " "and basic session information"),
         "provider_aliases": ["hermes-cloud", "hermes_cloud", "nous-hermes-cloud"],
         "third_party": True,
     },
     {
         "id": "honcho-cloud",
-        "legal_recipient": "Honcho Cloud",
+        "legal_recipient": "Honcho / Plastic Labs",
         "function": "Profile-bound derived memory and context",
-        "data": ("Consented derived memory, selected context, and memory relationships " "for the bound profile"),
+        "data": ("Details from conversations and information the person chooses " "to save for the bound profile"),
         "provider_aliases": ["honcho-cloud", "honcho_cloud", "honcho_cloud_profile_isolated"],
         "third_party": True,
     },

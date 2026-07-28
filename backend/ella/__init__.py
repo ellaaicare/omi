@@ -417,6 +417,32 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Hermes Cloud Photon adapter not available: {e}", flush=True)
 
+    # Loopback-only OMI enrichment handoff into the bound Hermes Cloud runtime.
+    try:
+        from ella.routers.hermes_cloud_enrichment import (
+            create_hermes_cloud_enrichment_router,
+        )
+        from ella.services.hermes_cloud_enrichment_dependencies import (
+            create_default_hermes_cloud_enrichment_service,
+        )
+        from ella.services.hermes_cloud_enrichment_outbox import (
+            start_worker as start_enrichment_worker,
+            stop_worker as stop_enrichment_worker,
+        )
+
+        app.include_router(
+            create_hermes_cloud_enrichment_router(create_default_hermes_cloud_enrichment_service),
+            tags=["Hermes Cloud Enrichment"],
+        )
+        app.add_event_handler("startup", start_enrichment_worker)
+        app.add_event_handler("shutdown", stop_enrichment_worker)
+        print(
+            "  🌐 /v1/ella/internal/hermes-cloud/enrichment/* - OMI enrichment adapter",
+            flush=True,
+        )
+    except ImportError as e:
+        print(f"  ⚠️ Hermes Cloud enrichment adapter not available: {e}", flush=True)
+
     # Authenticated, idempotent per-user Hermes onboarding
     try:
         app.include_router(onboarding_router, tags=["Ella Onboarding"])

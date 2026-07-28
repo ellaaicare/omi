@@ -4,15 +4,21 @@ on:
   pull_request:
     paths:
       - "backend/database/ella_provisioning.py"
+      - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/voice_canary.py"
+      - "backend/ella/__init__.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/hermes_cloud_enrichment.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
+      - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/hermes_cloud_photon.py"
@@ -22,28 +28,37 @@ on:
       - "backend/ella/services/runtime_resolver.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
+      - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/utils/ella/postprocess.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
+      - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
     paths:
       - "backend/database/ella_provisioning.py"
+      - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/voice_canary.py"
+      - "backend/ella/__init__.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/hermes_cloud_enrichment.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
+      - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/hermes_cloud_photon.py"
@@ -53,13 +68,16 @@ on:
       - "backend/ella/services/runtime_resolver.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
+      - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/utils/ella/postprocess.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
+      - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
@@ -116,10 +134,15 @@ jobs:
         run: >-
           python -m py_compile
           database/ella_provisioning.py
+          database/hermes_cloud_enrichment_outbox.py
           database/voice_canary.py
           ella/routers/ai_consent.py
+          ella/routers/hermes_cloud_enrichment.py
           ella/services/ai_consent.py
           ella/services/hermes_cloud.py
+          ella/services/hermes_cloud_enrichment.py
+          ella/services/hermes_cloud_enrichment_outbox.py
+          ella/services/hermes_cloud_enrichment_dependencies.py
           ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
           ella/services/hermes_cloud_runtime.py
@@ -128,7 +151,9 @@ jobs:
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
           scripts/hermes_cloud_pool_admin.py
+          scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_cloud_shadow.py
+          utils/ella/postprocess.py
 
       - name: Run Hermes Cloud and isolation failure-path tests
         run: >-
@@ -141,6 +166,10 @@ jobs:
           tests/unit/test_hermes_cloud_provider.py
           tests/unit/test_hermes_cloud_provisioning.py
           tests/unit/test_hermes_cloud_runtime.py
+          tests/unit/test_hermes_cloud_enrichment.py
+          tests/unit/test_hermes_cloud_enrichment_outbox.py
+          tests/unit/test_hermes_cloud_enrichment_router.py
+          tests/unit/test_ella_postprocess_cloud_routing.py
           tests/unit/test_ella_chat_temporal_context.py
           tests/unit/test_ella_provisioning_repository.py
           tests/unit/test_ella_runtime_route_isolation.py
