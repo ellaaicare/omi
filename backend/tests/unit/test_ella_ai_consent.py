@@ -39,10 +39,10 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v6_contract():
+def test_policy_matches_exact_managed_cloud_v7_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v6"
+    assert policy["version"] == "ai-data-processors-v7"
     assert policy["processor_set_hash"] == "sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296"
     assert policy["scope_version"] == "managed-cloud-internal-pilot-v1"
     assert policy["scope_hash"] == "sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30"
@@ -72,6 +72,144 @@ def test_policy_matches_exact_managed_cloud_v6_contract():
         == policy["canonical_processor_set"]
     )
     assert consent.CURRENT_SCOPE_HASH == f"sha256:{hashlib.sha256(policy['canonical_scope'].encode()).hexdigest()}"
+    processors = {processor["id"]: processor for processor in policy["processors"]}
+    assert processors["nous-hermes-cloud"] == {
+        "id": "nous-hermes-cloud",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Managed agent runtime",
+        "data": ("What the person says or types, details they choose to share, " "and basic session information"),
+        "provider_aliases": [
+            "hermes-cloud",
+            "hermes_cloud",
+            "nous-hermes-cloud",
+        ],
+        "third_party": True,
+    }
+    assert processors["honcho-cloud"] == {
+        "id": "honcho-cloud",
+        "legal_recipient": "Honcho / Plastic Labs",
+        "function": "Profile-bound derived memory and context",
+        "data": ("Details from conversations and information the person chooses " "to save for the bound profile"),
+        "provider_aliases": [
+            "honcho-cloud",
+            "honcho_cloud",
+            "honcho_cloud_profile_isolated",
+        ],
+        "third_party": True,
+    }
+    assert [
+        (
+            processor["id"],
+            processor["legal_recipient"],
+            processor["function"],
+            processor["data"],
+            processor["third_party"],
+        )
+        for processor in policy["processors"]
+    ] == [
+        ("deepgram", "Deepgram", "Speech transcription", "Live or stored microphone audio", True),
+        ("soniox", "Soniox", "Speech transcription", "Live or stored microphone audio", True),
+        (
+            "speechmatics",
+            "Speechmatics",
+            "Speech transcription",
+            "Live or stored microphone audio",
+            True,
+        ),
+        (
+            "firebase",
+            "Google Firebase",
+            "Authentication and service infrastructure",
+            "Account and service metadata",
+            True,
+        ),
+        (
+            "hermes-self-hosted",
+            "Ella self-hosted Hermes",
+            "Agent reasoning",
+            "Messages, transcripts, and selected memory context",
+            False,
+        ),
+        (
+            "honcho-self-hosted",
+            "Ella self-hosted Honcho",
+            "Memory context",
+            "Derived text and selected memory relationships",
+            False,
+        ),
+        (
+            "ella-self-hosted-tts",
+            "Ella self-hosted voice synthesis",
+            "Voice synthesis",
+            "Response text",
+            False,
+        ),
+        (
+            "nous-hermes-cloud",
+            "Nous Research / Hermes Cloud",
+            "Managed agent runtime",
+            "What the person says or types, details they choose to share, and basic session information",
+            True,
+        ),
+        (
+            "honcho-cloud",
+            "Honcho / Plastic Labs",
+            "Profile-bound derived memory and context",
+            "Details from conversations and information the person chooses to save for the bound profile",
+            True,
+        ),
+        (
+            "openai-codex",
+            "OpenAI",
+            "Managed agent model processing",
+            "Model input and output through the approved OpenAI Codex OAuth route",
+            True,
+        ),
+        (
+            "photon",
+            "Photon",
+            "Test/shared-line message delivery",
+            "Message content and messaging identifiers for one explicitly allowed test contact",
+            True,
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "Model routing",
+            "Messages, transcripts, and selected memory context",
+            True,
+        ),
+        (
+            "google-gemini",
+            "Google Gemini",
+            "Language processing and live voice",
+            "Text, selected context, or live microphone audio",
+            True,
+        ),
+        (
+            "openai",
+            "OpenAI",
+            "Language processing and live voice",
+            "Text, selected context, or live microphone audio",
+            True,
+        ),
+        ("groq", "Groq", "Language processing", "Text and selected context", True),
+        (
+            "xai-grok",
+            "xAI Grok",
+            "Language processing and live voice",
+            "Text, selected context, or live microphone audio",
+            True,
+        ),
+        ("inworld", "Inworld AI", "Voice synthesis", "Response text", True),
+        (
+            "elevenlabs",
+            "ElevenLabs",
+            "Fallback voice synthesis",
+            "Response text",
+            True,
+        ),
+    ]
 
 
 def test_missing_consent_is_fail_closed_when_enforcement_is_enabled(monkeypatch):
@@ -299,6 +437,31 @@ def test_stale_grant_is_rejected_but_stale_decline_is_recorded():
     assert declined["consent"]["decision"] == "declined"
 
 
+def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
+    monkeypatch,
+):
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    with pytest.raises(consent.ConsentPolicyMismatch):
+        service.submit(
+            "user-a",
+            _submission(policy_version="ai-data-processors-v6"),
+        )
+
+    current = service.submit("user-a", _submission())
+    receipt_id = current["receipt"]["receipt_id"]
+    repository.states["user-a"]["policy_version"] = "ai-data-processors-v6"
+    repository.receipts[("user-a", receipt_id)]["policy_version"] = "ai-data-processors-v6"
+    monkeypatch.setattr(consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_AI_CONSENT_ENFORCEMENT_UIDS", "user-a")
+
+    with pytest.raises(HTTPException) as error:
+        consent.assert_current_ai_consent("user-a")
+
+    assert error.value.status_code == 403
+    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v7")
+
+
 def test_revoke_supersedes_prior_grant():
     service = _service()
     service.submit("user-a", _submission())
@@ -328,7 +491,7 @@ def _assert_exact_managed_cloud_consent(uid="user-a", profile_uid="user-a"):
     )
 
 
-def test_managed_cloud_real_data_defaults_off_even_with_exact_v6_grant(monkeypatch):
+def test_managed_cloud_real_data_defaults_off_even_with_exact_v7_grant(monkeypatch):
     repository = consent.InMemoryConsentRepository()
     _service(repository).submit("user-a", _submission())
     monkeypatch.setattr(consent, "_repository", repository)
@@ -341,7 +504,7 @@ def test_managed_cloud_real_data_defaults_off_even_with_exact_v6_grant(monkeypat
     assert error.value.code == "managed_cloud_real_data_disabled"
 
 
-def test_exact_v6_account_profile_and_scope_authorize_managed_cloud(monkeypatch):
+def test_exact_v7_account_profile_and_scope_authorize_managed_cloud(monkeypatch):
     repository = consent.InMemoryConsentRepository()
     result = _service(repository).submit("user-a", _submission())
     monkeypatch.setattr(consent, "_repository", repository)
@@ -487,13 +650,13 @@ def test_missing_or_mutated_immutable_receipt_fails_closed(monkeypatch):
     assert mutated.value.code == "managed_cloud_consent_required"
 
 
-def test_v5_or_malformed_server_receipt_cannot_authorize_managed_cloud(monkeypatch):
+def test_v6_or_malformed_server_receipt_cannot_authorize_managed_cloud(monkeypatch):
     repository = consent.InMemoryConsentRepository()
     _service(repository).submit("user-a", _submission())
     monkeypatch.setattr(consent, "_repository", repository)
     _enable_managed_cloud(monkeypatch)
 
-    repository.states["user-a"]["policy_version"] = "ai-data-processors-v5"
+    repository.states["user-a"]["policy_version"] = "ai-data-processors-v6"
     with pytest.raises(consent.ManagedCloudConsentError):
         _assert_exact_managed_cloud_consent()
 
@@ -706,7 +869,7 @@ def test_policy_is_public_but_status_and_receipts_require_firebase_auth(monkeypa
     assert status_response.json()["subject_uid"] == "user-a"
 
 
-def test_authenticated_api_records_exact_v6_profile_bound_receipt(monkeypatch):
+def test_authenticated_api_records_exact_v7_profile_bound_receipt(monkeypatch):
     service = _service()
     monkeypatch.setattr(ai_consent, "get_ai_consent_service", lambda: service)
     app = FastAPI()
@@ -722,7 +885,7 @@ def test_authenticated_api_records_exact_v6_profile_bound_receipt(monkeypatch):
             "processor_set_hash": consent.CURRENT_PROCESSOR_SET_HASH,
             "scope_version": consent.CURRENT_SCOPE_VERSION,
             "scope_hash": consent.CURRENT_SCOPE_HASH,
-            "request_id": "request-api-v6",
+            "request_id": "request-api-v7",
             "app_version": "1.0.0",
             "build_number": "804",
             "locale": "en-US",
