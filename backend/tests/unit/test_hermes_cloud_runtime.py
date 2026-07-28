@@ -965,3 +965,51 @@ def test_profile_reclassification_before_provider_fails_closed():
     assert error.value.code == "hermes_cloud_profile_class_changed"
     assert cloud.calls == []
     assert policy.reserved
+
+
+def test_profile_reclassification_during_send_boundary_prevents_provider_egress():
+    class SendTrackingCloud(FakeCloudClient):
+        def __init__(self):
+            super().__init__()
+            self.provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            self.provider_posts += 1
+            return HermesCloudTurn(
+                response_id="response-a",
+                text="Synthetic acknowledgement.",
+                usage=self.usage,
+                model="model-a",
+                tool_calls=self.tool_calls,
+            )
+
+    repository = FakeRepository()
+    cloud = SendTrackingCloud()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    async def reclassify_after_awaited_bookkeeping():
+        repository.profile_class = "real"
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                before_provider_call=reclassify_after_awaited_bookkeeping,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_profile_class_changed"
+    assert cloud.provider_posts == 0
+    assert cloud.calls == []
+    assert policy.reserved
+    assert policy.released

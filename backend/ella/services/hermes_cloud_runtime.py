@@ -534,6 +534,12 @@ class HermesCloudRuntimeService:
                 nonlocal provider_started
                 if before_provider_call is not None:
                     await before_provider_call()
+                current_profile_class = await self.repository.get_cloud_profile_class(request.uid)
+                if current_profile_class != runtime.profile_class:
+                    raise ProvisioningError(
+                        "hermes_cloud_profile_class_changed",
+                        retryable=False,
+                    )
                 provider_started = True
 
             turn = await self.cloud_client.create_response(
