@@ -10469,21 +10469,21 @@
   "todayReadMore": "Read more",
   "voiceModalEndAction": "End",
   "ellaAuthDataDisclosure": "Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.",
-  "aiConsentCompactSummary": "Other enabled Ella features may use these already disclosed processors: Deepgram, Soniox, or Speechmatics for microphone transcription; Ella self-hosted Hermes, Honcho, Kokoro, or Fish; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok for text or live voice; Inworld AI or ElevenLabs for spoken replies; and Google Firebase for account and service infrastructure. Only the data needed for the chosen feature is sent through Ella’s secure backend.",
+  "aiConsentCompactSummary": "Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.",
   "aiConsentProcessorDetailsLink": "Full processor details in Privacy Policy",
-  "aiConsentNoSharingBeforeAllow": "Ella will not send audio, transcripts, messages, selected memory context, or Photon message content to these processors until you choose Allow. Not now keeps cloud listening, AI, memory, voice, and messaging features off. You can review or revoke this permission in Settings.",
+  "aiConsentNoSharingBeforeAllow": "Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.",
   "aiConsentRevokeAction": "Revoke AI permission",
   "aiConsentDeleteDataAction": "Delete my account and data",
   "aiConsentAllowedStatus": "Managed cloud AI allowed for this account and profile",
-  "aiConsentNotAllowedStatus": "Managed cloud AI sharing is off — v6 permission required",
+  "aiConsentNotAllowedStatus": "Cloud AI permission is off — v7 permission required",
   "aiConsentRevokeSyncFailed": "Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.",
   "aiConsentOffGateTitle": "AI sharing is off",
-  "aiConsentOffGateBody": "Ella will not provision AI features or send audio, transcripts, messages, or memory context while permission is off. You can review the disclosure whenever you are ready.",
+  "aiConsentOffGateBody": "Ella will not set up these cloud AI features or send what you say or type, messages, or details from your saved memories while permission is off. You can review this information whenever you are ready.",
   "aiConsentReviewAction": "Review AI permission",
-  "aiConsentActiveAudioStopped": "AI permission could not be verified. Recording and voice chat stopped.",
+  "aiConsentActiveAudioStopped": "Ella could not verify AI permission. Cloud sharing and voice chat have stopped.",
   "deleteAccountServerConfirmationFailed": "Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.",
   "deleteAccountLocalCleanupFailed": "Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.",
-  "aiConsentManagedCloudIntro": "For the managed cloud experience, Ella may send only the data needed for the feature you choose to these named partners:",
+  "aiConsentManagedCloudIntro": "Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:",
   "@aiConsentManagedCloudIntro": {
     "description": "Introduces the named managed-cloud processors before first use"
   },
@@ -10491,7 +10491,7 @@
   "@aiConsentHermesCloudTitle": {
     "description": "Legal recipient and product name for the managed agent runtime"
   },
-  "aiConsentHermesCloudBody": "Runs Ella’s managed agent. It may receive messages, voice or transcript text, selected first-party context, session metadata, prompt policy, and model or tool usage so Ella can answer and continue a session.",
+  "aiConsentHermesCloudBody": "Runs Ella’s cloud companion. It may receive what you say or type, details you choose to share, and basic information needed to keep your conversation going.",
   "@aiConsentHermesCloudBody": {
     "description": "Data categories and purpose for Hermes Cloud"
   },
@@ -10499,27 +10499,27 @@
   "@aiConsentOpenAiManagedTitle": {
     "description": "Legal recipient for the approved managed model route"
   },
-  "aiConsentOpenAiManagedBody": "Processes model input and output through Ella’s approved OpenAI Codex OAuth route so the managed agent can generate a response. Ella does not expose an OpenAI key to the app.",
+  "aiConsentOpenAiManagedBody": "Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.",
   "@aiConsentOpenAiManagedBody": {
     "description": "Data categories and purpose for the managed OpenAI route"
   },
-  "aiConsentHonchoCloudTitle": "Honcho Cloud",
+  "aiConsentHonchoCloudTitle": "Honcho / Plastic Labs",
   "@aiConsentHonchoCloudTitle": {
     "description": "Legal recipient and product name for managed derived memory"
   },
-  "aiConsentHonchoCloudBody": "Stores and retrieves consented derived memory and selected context for this server-bound profile so Ella can remember relevant details. It is not Ella’s canonical record.",
+  "aiConsentHonchoCloudBody": "Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.",
   "@aiConsentHonchoCloudBody": {
-    "description": "Data categories and purpose for Honcho Cloud"
+    "description": "Data categories and purpose for Honcho / Plastic Labs"
   },
   "aiConsentPhotonTitle": "Photon",
   "@aiConsentPhotonTitle": {
     "description": "Legal recipient for the narrow messaging channel"
   },
-  "aiConsentPhotonBody": "Delivers iMessage content and the messaging identifiers needed for one explicitly allowed test contact on a shared test line.",
+  "aiConsentPhotonBody": "Sends iMessage content and basic delivery details only to one person you choose for testing.",
   "@aiConsentPhotonBody": {
     "description": "Data categories and purpose for Photon"
   },
-  "aiConsentManagedCloudScope": "This permission is bound to the signed-in account and its server-selected profile. Photon remains test-contact-only: no allow-all recipients, caregiver delivery, or inbound attachments. A provider, model route, profile, or messaging-scope change requires permission again.",
+  "aiConsentManagedCloudScope": "This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.",
   "@aiConsentManagedCloudScope": {
     "description": "Explains the exact managed-cloud profile and messaging scope"
   }

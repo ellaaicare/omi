@@ -163,14 +163,13 @@ class AiConsentPolicy {
         id: 'nous-hermes-cloud',
         name: 'Nous Research / Hermes Cloud',
         function: 'Managed agent runtime',
-        data:
-            'Prompt policy, messages, transcripts, selected first-party context, session metadata, and model or tool usage',
+        data: 'What the person says or types, details they choose to share, and basic session information',
       ),
       AiConsentProcessor(
         id: 'honcho-cloud',
-        name: 'Honcho Cloud',
+        name: 'Honcho / Plastic Labs',
         function: 'Profile-bound derived memory and context',
-        data: 'Consented derived memory, selected context, and memory relationships for the bound profile',
+        data: 'Details from conversations and information the person chooses to save for the bound profile',
       ),
       AiConsentProcessor(
         id: 'openai-codex',

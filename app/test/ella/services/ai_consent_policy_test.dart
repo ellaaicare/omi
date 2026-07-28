@@ -7,9 +7,10 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 
 void main() {
-  test('v6 fallback manifest matches the accepted managed-cloud processor and scope contract', () {
+  test('v7 fallback manifest matches the managed-cloud processor and scope contract', () {
     const policy = AiConsentPolicy.bundled;
     expect(policy.version, SharedPreferencesUtil.currentAiConsentContractVersion);
+    expect(policy.version, 'ai-data-processors-v7');
     expect(policy.processorSetHash, SharedPreferencesUtil.currentAiConsentProcessorSetHash);
     expect(policy.processorSetHash, startsWith('sha256:'));
     expect(policy.processorSetHash, 'sha256:${sha256.convert(utf8.encode(policy.canonicalProcessorSet))}');
@@ -29,7 +30,7 @@ void main() {
         'Ella self-hosted Honcho',
         'Ella self-hosted voice synthesis',
         'Nous Research / Hermes Cloud',
-        'Honcho Cloud',
+        'Honcho / Plastic Labs',
         'Photon',
         'OpenRouter',
         'Google Gemini',
@@ -63,11 +64,14 @@ void main() {
     expect(policy.isBundledCurrent, isFalse);
   });
 
-  test('a v5 policy cannot authorize the managed-cloud v6 scope', () {
+  test('a v6 policy cannot authorize the managed-cloud v7 disclosure', () {
     final policy = AiConsentPolicy.fromJson({
-      'version': 'ai-data-processors-v5',
-      'processor_set_hash': 'sha256:9c2529babbd6241f20242cf0836baf7e1899d05bb3d945a0d38a357113d4cbc4',
+      'version': 'ai-data-processors-v6',
+      'processor_set_hash': SharedPreferencesUtil.currentAiConsentProcessorSetHash,
       'canonical_processor_set': AiConsentPolicy.bundled.canonicalProcessorSet,
+      'scope_version': AiConsentPolicy.bundled.scopeVersion,
+      'scope_hash': AiConsentPolicy.bundled.scopeHash,
+      'canonical_scope': AiConsentPolicy.bundled.canonicalScope,
       'processors': const [],
     });
 
