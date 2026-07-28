@@ -1099,6 +1099,7 @@ class EllaProvisioningRepository:
         scope_id: str,
         client_interaction_id: str,
         request_hash: str,
+        compatible_request_hashes: tuple[str, ...] = (),
         correlation_id: str,
         canonical_user_event_id: str,
         canonical_assistant_event_id: str,
@@ -1139,9 +1140,54 @@ class EllaProvisioningRepository:
             canonical_assistant_event_id,
         )
         result = dict(row)
-        if str(result.get("request_hash") or "") != request_hash:
+        stored_request_hash = str(result.get("request_hash") or "")
+        if stored_request_hash != request_hash and stored_request_hash not in compatible_request_hashes:
             raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
         return result
+
+    async def count_runtime_interaction_failures(
+        self,
+        *,
+        scope_id: str,
+        client_interaction_id: str,
+        error_code: str,
+    ) -> int:
+        value = await self.pool.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM ella_runtime_interactions
+            WHERE scope_id = $1
+              AND error_code = $3
+              AND (
+                  client_interaction_id = $2
+                  OR POSITION(($2 || ':format-retry:') IN client_interaction_id) = 1
+              )
+            """,
+            uuid.UUID(str(scope_id)),
+            client_interaction_id,
+            error_code,
+        )
+        return int(value or 0)
+
+    async def invalidate_completed_runtime_interaction(
+        self,
+        *,
+        interaction_id: str,
+        error_code: str,
+    ) -> None:
+        await self.pool.execute(
+            """
+            UPDATE ella_runtime_interactions
+            SET status = 'failed',
+                error_code = $2,
+                completed_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+              AND status = 'completed'
+            """,
+            uuid.UUID(str(interaction_id)),
+            error_code[:120],
+        )
 
     async def claim_runtime_interaction(self, interaction_id: str) -> Optional[dict[str, Any]]:
         interaction_uuid = uuid.UUID(str(interaction_id))

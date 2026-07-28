@@ -67,6 +67,15 @@ class HermesCloudEnrichmentResult:
     summary_sha256: str
     provider_response_present: bool
     duplicate: bool
+    client_interaction_id: str
+
+
+@dataclass(frozen=True)
+class HermesCloudEnrichmentIdentity:
+    job_id: str
+    client_interaction_id: str
+    trace_id: str
+    transcript_sha256: str
 
 
 def _structured_summary(conversation: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +197,33 @@ def _interaction_identity(
     return f"omi-enrichment:{digest}", f"omi-enrichment:{digest[:32]}"
 
 
+def build_enrichment_identity(
+    *,
+    uid: str,
+    conversation_id: str,
+    conversation: dict[str, Any],
+) -> HermesCloudEnrichmentIdentity:
+    _, transcript_sha256 = _transcript_source(conversation)
+    client_interaction_id, trace_id = _interaction_identity(
+        uid,
+        conversation_id,
+        transcript_sha256,
+    )
+    return HermesCloudEnrichmentIdentity(
+        job_id=("hce_" + hashlib.sha256(client_interaction_id.encode("utf-8")).hexdigest()),
+        client_interaction_id=client_interaction_id,
+        trace_id=trace_id,
+        transcript_sha256=transcript_sha256,
+    )
+
+
+def _validate_enrichment_output(content: str) -> None:
+    _normalize_summary(
+        _extract_json_object(content),
+        {},
+    )
+
+
 def _input_payload(
     conversation: dict[str, Any],
     transcript_sha256: str,
@@ -255,6 +291,8 @@ class HermesCloudEnrichmentService:
         uid: str,
         conversation_id: str,
         allow_shadow: bool = False,
+        expected_client_interaction_id: Optional[str] = None,
+        expected_transcript_sha256: Optional[str] = None,
     ) -> HermesCloudEnrichmentResult:
         if not uid or not conversation_id:
             raise ProvisioningError(
@@ -278,17 +316,27 @@ class HermesCloudEnrichmentService:
                 retryable=False,
             )
 
-        _, transcript_sha256 = _transcript_source(conversation)
-        active_summary_version_id = conversation.get("active_summary_version_id")
-        client_interaction_id, trace_id = _interaction_identity(
-            uid,
-            conversation_id,
-            transcript_sha256,
+        identity = build_enrichment_identity(
+            uid=uid,
+            conversation_id=conversation_id,
+            conversation=conversation,
         )
+        transcript_sha256 = identity.transcript_sha256
+        if expected_client_interaction_id and expected_client_interaction_id != identity.client_interaction_id:
+            raise ProvisioningError(
+                "hermes_cloud_enrichment_interaction_changed",
+                retryable=False,
+            )
+        if expected_transcript_sha256 and expected_transcript_sha256 != transcript_sha256:
+            raise ProvisioningError(
+                "hermes_cloud_enrichment_transcript_changed",
+                retryable=False,
+            )
+        active_summary_version_id = conversation.get("active_summary_version_id")
         request = HermesCloudTurnRequest(
             uid=uid,
-            client_interaction_id=client_interaction_id,
-            correlation_id=trace_id,
+            client_interaction_id=identity.client_interaction_id,
+            correlation_id=identity.trace_id,
             channel=HERMES_CLOUD_ENRICHMENT_CHANNEL,
             user_input=_input_payload(conversation, transcript_sha256),
             instructions=ENRICHMENT_INSTRUCTIONS,
@@ -302,7 +350,11 @@ class HermesCloudEnrichmentService:
             },
             user_scan_policy="none",
         )
-        turn = await self._runtime_service(allow_shadow).run_turn(runtime, request)
+        turn = await self._runtime_service(allow_shadow).run_turn(
+            runtime,
+            request,
+            response_validator=_validate_enrichment_output,
+        )
         summary = _normalize_summary(
             _extract_json_object(turn.text),
             _structured_summary(conversation),
@@ -326,7 +378,8 @@ class HermesCloudEnrichmentService:
             )
         current_enrichment = current.get("enrichment_state") or {}
         same_applied_trace = bool(
-            current_enrichment.get("trace_id") == trace_id and current_enrichment.get("status") == "writeback_applied"
+            current_enrichment.get("trace_id") == identity.trace_id
+            and current_enrichment.get("status") == "writeback_applied"
         )
         if not same_applied_trace and current.get("active_summary_version_id") != active_summary_version_id:
             raise ProvisioningError(
@@ -337,7 +390,7 @@ class HermesCloudEnrichmentService:
         apply_result = await self.summary_applier(
             uid=uid,
             conversation_id=conversation_id,
-            trace_id=trace_id,
+            trace_id=identity.trace_id,
             active_summary_version_id=current.get("active_summary_version_id"),
             summary=summary,
             summary_kind="hermes_enriched",
@@ -364,4 +417,5 @@ class HermesCloudEnrichmentService:
             summary_sha256=_summary_sha256(summary),
             provider_response_present=bool(turn.response_id),
             duplicate=turn.duplicate or same_applied_trace,
+            client_interaction_id=identity.client_interaction_id,
         )

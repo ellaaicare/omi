@@ -30,113 +30,105 @@ def _conversation():
     )
 
 
-def _configure_cloud(monkeypatch, *, enabled=True, url=None):
+def _configure_cloud(monkeypatch):
     monkeypatch.setattr(postprocess, "POSTPROCESS_ENABLED", True)
     monkeypatch.setattr(
         postprocess,
         "HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS",
         frozenset({"synthetic-user"}),
     )
-    monkeypatch.setattr(
-        postprocess,
-        "HERMES_CLOUD_ENRICHMENT_ENABLED",
-        enabled,
-    )
-    monkeypatch.setattr(
-        postprocess,
-        "HERMES_CLOUD_ENRICHMENT_TOKEN",
-        "x" * 32,
-    )
-    monkeypatch.setattr(
-        postprocess,
-        "HERMES_CLOUD_ENRICHMENT_URL",
-        url or "http://127.0.0.1:8000/v1/ella/internal/hermes-cloud/enrichment/run",
-    )
 
 
-def test_cloud_selected_uid_uses_loopback_and_never_legacy_ready(monkeypatch):
+def test_cloud_selected_uid_queues_before_webhook_and_never_legacy_ready(
+    monkeypatch,
+):
     _configure_cloud(monkeypatch)
     calls = []
+    queued = []
 
     def fake_post(url, **kwargs):
         calls.append((url, kwargs))
-        if url == postprocess.HERMES_CLOUD_ENRICHMENT_URL:
-            return FakeResponse(
-                body={
-                    "ok": True,
-                    "status": "applied",
-                    "content_free": True,
-                    "duplicate": False,
-                }
-            )
         return FakeResponse()
 
+    monkeypatch.setattr(
+        postprocess,
+        "enqueue_cloud_enrichment",
+        lambda uid, conversation: queued.append((uid, conversation.id)) or {"status": "pending"},
+    )
     monkeypatch.setattr(postprocess.requests, "post", fake_post)
 
     postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
 
-    assert [url for url, _ in calls] == [
-        postprocess.POSTPROCESS_WEBHOOK_URL,
-        postprocess.HERMES_CLOUD_ENRICHMENT_URL,
-    ]
+    assert queued == [("synthetic-user", "conversation-a")]
+    assert [url for url, _ in calls] == [postprocess.POSTPROCESS_WEBHOOK_URL]
     assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in [url for url, _ in calls]
-    cloud_headers = calls[1][1]["headers"]
-    assert cloud_headers["X-Ella-Hermes-Cloud-Enrichment-Token"] == "x" * 32
 
 
-def test_cloud_selected_uid_fails_closed_when_gate_is_disabled(monkeypatch):
-    _configure_cloud(monkeypatch, enabled=False)
-    calls = []
-
-    def fake_post(url, **kwargs):
-        calls.append(url)
-        return FakeResponse()
-
-    monkeypatch.setattr(postprocess.requests, "post", fake_post)
-
-    postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
-
-    assert calls == [postprocess.POSTPROCESS_WEBHOOK_URL]
-    assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls
-
-
-def test_cloud_selected_uid_rejects_non_loopback_adapter_without_fallback(
+def test_cloud_selected_uid_queues_even_when_generic_postprocess_is_disabled(
     monkeypatch,
 ):
-    _configure_cloud(
-        monkeypatch,
-        url="https://example.test/v1/ella/internal/hermes-cloud/enrichment/run",
-    )
+    _configure_cloud(monkeypatch)
+    monkeypatch.setattr(postprocess, "POSTPROCESS_ENABLED", False)
     calls = []
+    queued = []
 
     def fake_post(url, **kwargs):
         calls.append(url)
         return FakeResponse()
 
+    monkeypatch.setattr(
+        postprocess,
+        "enqueue_cloud_enrichment",
+        lambda uid, conversation: queued.append((uid, conversation.id)) or {"status": "pending"},
+    )
     monkeypatch.setattr(postprocess.requests, "post", fake_post)
 
     postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
 
-    assert calls == [postprocess.POSTPROCESS_WEBHOOK_URL]
-    assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls
+    assert queued == [("synthetic-user", "conversation-a")]
+    assert calls == []
 
 
-def test_cloud_selected_uid_provider_failure_never_falls_back(monkeypatch):
+def test_cloud_selected_uid_outbox_failure_never_falls_back(monkeypatch):
     _configure_cloud(monkeypatch)
     calls = []
 
     def fake_post(url, **kwargs):
         calls.append(url)
-        if url == postprocess.HERMES_CLOUD_ENRICHMENT_URL:
-            return FakeResponse(status_code=503)
         return FakeResponse()
 
+    def fail_enqueue(uid, conversation):
+        raise RuntimeError("synthetic persistence failure")
+
+    monkeypatch.setattr(
+        postprocess,
+        "enqueue_cloud_enrichment",
+        fail_enqueue,
+    )
     monkeypatch.setattr(postprocess.requests, "post", fake_post)
 
     postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
 
-    assert calls == [
-        postprocess.POSTPROCESS_WEBHOOK_URL,
-        postprocess.HERMES_CLOUD_ENRICHMENT_URL,
-    ]
+    assert calls == []
+    assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls
+
+
+def test_cloud_selected_uid_never_posts_directly_to_cloud_or_mini(monkeypatch):
+    _configure_cloud(monkeypatch)
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        postprocess,
+        "enqueue_cloud_enrichment",
+        lambda uid, conversation: {"status": "pending"},
+    )
+    monkeypatch.setattr(postprocess.requests, "post", fake_post)
+
+    postprocess.fire_postprocess_webhook("synthetic-user", _conversation())
+
+    assert calls == [postprocess.POSTPROCESS_WEBHOOK_URL]
     assert postprocess.CONVERSATION_READY_WEBHOOK_URL not in calls

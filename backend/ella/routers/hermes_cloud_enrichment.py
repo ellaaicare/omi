@@ -18,6 +18,24 @@ class HermesCloudEnrichmentIn(BaseModel):
 
     uid: str = Field(min_length=1, max_length=256)
     conversation_id: str = Field(min_length=1, max_length=256)
+    outbox_job_id: Optional[str] = Field(
+        default=None,
+        min_length=68,
+        max_length=68,
+        pattern=r"^hce_[0-9a-f]{64}$",
+    )
+    client_interaction_id: Optional[str] = Field(
+        default=None,
+        min_length=79,
+        max_length=79,
+        pattern=r"^omi-enrichment:[0-9a-f]{64}$",
+    )
+    transcript_sha256: Optional[str] = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
 
 
 def _require_service_token(presented: Optional[str]) -> None:
@@ -41,7 +59,11 @@ def _http_error(exc: ProvisioningError) -> HTTPException:
     )
 
 
-def _public_result(result: Any) -> dict[str, Any]:
+def _public_result(
+    result: Any,
+    *,
+    outbox_job_id: Optional[str],
+) -> dict[str, Any]:
     return {
         "ok": True,
         "status": "applied",
@@ -55,6 +77,8 @@ def _public_result(result: Any) -> dict[str, Any]:
         "summary_sha256": result.summary_sha256,
         "provider_response_present": result.provider_response_present,
         "duplicate": result.duplicate,
+        "outbox_job_id": outbox_job_id,
+        "client_interaction_id": result.client_interaction_id,
         "content_free": True,
     }
 
@@ -84,9 +108,14 @@ def create_hermes_cloud_enrichment_router(
                 uid=payload.uid,
                 conversation_id=payload.conversation_id,
                 allow_shadow=False,
+                expected_client_interaction_id=payload.client_interaction_id,
+                expected_transcript_sha256=payload.transcript_sha256,
             )
         except ProvisioningError as exc:
             raise _http_error(exc) from exc
-        return _public_result(result)
+        return _public_result(
+            result,
+            outbox_job_id=payload.outbox_job_id,
+        )
 
     return router

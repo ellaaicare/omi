@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - "backend/database/ella_provisioning.py"
+      - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/voice_canary.py"
+      - "backend/ella/__init__.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
@@ -15,6 +17,7 @@ on:
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
       - "backend/ella/services/hermes_cloud_enrichment.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
@@ -41,7 +44,9 @@ on:
     branches: [main]
     paths:
       - "backend/database/ella_provisioning.py"
+      - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/voice_canary.py"
+      - "backend/ella/__init__.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
@@ -52,6 +57,7 @@ on:
       - "backend/ella/routers/voice.py"
       - "backend/ella/services/hermes_cloud.py"
       - "backend/ella/services/hermes_cloud_enrichment.py"
+      - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
@@ -128,12 +134,14 @@ jobs:
         run: >-
           python -m py_compile
           database/ella_provisioning.py
+          database/hermes_cloud_enrichment_outbox.py
           database/voice_canary.py
           ella/routers/ai_consent.py
           ella/routers/hermes_cloud_enrichment.py
           ella/services/ai_consent.py
           ella/services/hermes_cloud.py
           ella/services/hermes_cloud_enrichment.py
+          ella/services/hermes_cloud_enrichment_outbox.py
           ella/services/hermes_cloud_enrichment_dependencies.py
           ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
@@ -159,6 +167,7 @@ jobs:
           tests/unit/test_hermes_cloud_provisioning.py
           tests/unit/test_hermes_cloud_runtime.py
           tests/unit/test_hermes_cloud_enrichment.py
+          tests/unit/test_hermes_cloud_enrichment_outbox.py
           tests/unit/test_hermes_cloud_enrichment_router.py
           tests/unit/test_ella_postprocess_cloud_routing.py
           tests/unit/test_ella_chat_temporal_context.py

@@ -8,7 +8,7 @@ import hmac
 import json
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -35,6 +35,7 @@ HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
 DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
+INVALID_OUTPUT_ERROR = "hermes_cloud_enrichment_output_invalid"
 
 
 def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
@@ -187,6 +188,37 @@ def _request_hash(request: HermesCloudTurnRequest) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _legacy_request_hash(request: HermesCloudTurnRequest) -> str:
+    """Hash used before instructions and scan policy became identity fields."""
+    material = "\x1f".join(
+        (
+            request.uid,
+            request.channel,
+            request.client_interaction_id,
+            request.user_input,
+            request.consent_grant_epoch or "",
+        )
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _validate_provider_response(
+    response_validator: Optional[Callable[[str], None]],
+    text: str,
+) -> None:
+    if response_validator is None:
+        return
+    try:
+        response_validator(text)
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError(
+            INVALID_OUTPUT_ERROR,
+            retryable=True,
+        ) from exc
+
+
 def _event_identity(request: HermesCloudTurnRequest) -> tuple[str, str, str]:
     digest = hashlib.sha256(
         f"{request.uid}|{request.channel}|{request.client_interaction_id}".encode("utf-8")
@@ -264,6 +296,7 @@ class HermesCloudRuntimeService:
         request: HermesCloudTurnRequest,
         *,
         before_provider_call: Optional[Callable[[], Awaitable[None]]] = None,
+        response_validator: Optional[Callable[[str], None]] = None,
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
@@ -285,8 +318,6 @@ class HermesCloudRuntimeService:
                 "hermes_cloud_scan_policy_invalid",
                 retryable=False,
             )
-        source_identity, user_event_id, assistant_event_id = _event_identity(request)
-        request_hash = _request_hash(request)
         scope = await self.repository.get_or_create_runtime_scope(
             uid=request.uid,
             binding_id=runtime.binding_id,
@@ -294,11 +325,38 @@ class HermesCloudRuntimeService:
             channel=request.channel,
             allow_shadow=self.allow_shadow,
         )
+        if response_validator is not None:
+            invalid_attempts = await self.repository.count_runtime_interaction_failures(
+                scope_id=str(scope["id"]),
+                client_interaction_id=request.client_interaction_id,
+                error_code=INVALID_OUTPUT_ERROR,
+            )
+            max_attempts = _bounded_env_int(
+                "ELLA_HERMES_CLOUD_ENRICHMENT_MAX_OUTPUT_ATTEMPTS",
+                3,
+                1,
+                10,
+            )
+            if invalid_attempts >= max_attempts:
+                raise ProvisioningError(
+                    "hermes_cloud_enrichment_output_exhausted",
+                    retryable=False,
+                )
+            if invalid_attempts:
+                request = replace(
+                    request,
+                    client_interaction_id=(f"{request.client_interaction_id}:format-retry:" f"{invalid_attempts}"),
+                )
+        source_identity, user_event_id, assistant_event_id = _event_identity(request)
+        request_hash = _request_hash(request)
         try:
             interaction = await self.repository.get_or_create_runtime_interaction(
                 scope_id=str(scope["id"]),
                 client_interaction_id=request.client_interaction_id,
                 request_hash=request_hash,
+                compatible_request_hashes=(
+                    (_legacy_request_hash(request),) if request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL else ()
+                ),
                 correlation_id=request.correlation_id,
                 canonical_user_event_id=user_event_id,
                 canonical_assistant_event_id=assistant_event_id,
@@ -314,6 +372,17 @@ class HermesCloudRuntimeService:
             )
             if not stored:
                 raise ProvisioningError("hermes_cloud_completed_turn_missing_event", retryable=True)
+            try:
+                _validate_provider_response(
+                    response_validator,
+                    str(stored.get("text") or ""),
+                )
+            except ProvisioningError:
+                await self.repository.invalidate_completed_runtime_interaction(
+                    interaction_id=str(interaction["id"]),
+                    error_code=INVALID_OUTPUT_ERROR,
+                )
+                raise
             return HermesCloudTurnResult(
                 text=str(stored.get("text") or ""),
                 response_id=str(interaction.get("provider_response_id") or ""),
@@ -339,6 +408,17 @@ class HermesCloudRuntimeService:
                     "hermes_cloud_recovered_turn_missing_provider_ref",
                     retryable=False,
                 )
+            try:
+                _validate_provider_response(
+                    response_validator,
+                    str(recovered.get("text") or ""),
+                )
+            except ProvisioningError:
+                await self.repository.fail_runtime_interaction(
+                    interaction_id=str(claimed["id"]),
+                    error_code=INVALID_OUTPUT_ERROR,
+                )
+                raise
             await self.repository.complete_runtime_interaction(
                 interaction_id=str(claimed["id"]),
                 provider_response_id=provider_response_id,
@@ -527,6 +607,7 @@ class HermesCloudRuntimeService:
             if not quota.allowed:
                 raise ProvisioningError(quota.code, retryable=False)
 
+            _validate_provider_response(response_validator, turn.text)
             assistant_event = _event(
                 request=request,
                 session_key=str(scope["session_key"]),

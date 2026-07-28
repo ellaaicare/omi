@@ -76,7 +76,11 @@ class FakeRepository:
 
     async def get_or_create_runtime_interaction(self, **kwargs):
         if self.interaction:
-            if self.interaction["request_hash"] != kwargs["request_hash"]:
+            compatible = kwargs.get("compatible_request_hashes", ())
+            if (
+                self.interaction["request_hash"] != kwargs["request_hash"]
+                and self.interaction["request_hash"] not in compatible
+            ):
                 from database.ella_provisioning import RuntimePoolClaimError
 
                 raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
@@ -94,6 +98,13 @@ class FakeRepository:
         }
         return dict(self.interaction)
 
+    async def count_runtime_interaction_failures(self, **kwargs):
+        return 0
+
+    async def invalidate_completed_runtime_interaction(self, **kwargs):
+        self.interaction["status"] = "failed"
+        self.interaction["error_code"] = kwargs["error_code"]
+
     async def claim_runtime_interaction(self, interaction_id):
         if self.interaction["status"] not in {"pending", "failed"}:
             return None
@@ -110,6 +121,7 @@ class FakeRepository:
 
     async def fail_runtime_interaction(self, **kwargs):
         self.interaction["status"] = "failed"
+        self.interaction["error_code"] = kwargs["error_code"]
         self.failures.append(kwargs["error_code"])
 
     async def record_runtime_provider_receipt(self, **kwargs):
@@ -202,6 +214,73 @@ class FakeCloudClient:
             usage=self.usage,
             model="model-a",
             tool_calls=self.tool_calls,
+        )
+
+
+class RetryRepository(FakeRepository):
+    def __init__(self):
+        super().__init__()
+        self.interactions = {}
+
+    async def get_or_create_runtime_interaction(self, **kwargs):
+        client_id = kwargs["client_interaction_id"]
+        interaction = self.interactions.get(client_id)
+        if interaction is None:
+            interaction = {
+                "id": f"interaction-{len(self.interactions) + 1}",
+                "status": "pending",
+                "request_hash": kwargs["request_hash"],
+                "client_interaction_id": client_id,
+                "hermes_session_id": f"session-{len(self.interactions) + 1}",
+                "idempotency_key": f"request-{len(self.interactions) + 1}",
+                "previous_response_id": None,
+                "previous_response_usage": {},
+                "provider_response_id": None,
+                "usage": {},
+            }
+            self.interactions[client_id] = interaction
+        else:
+            compatible = kwargs.get("compatible_request_hashes", ())
+            if interaction["request_hash"] != kwargs["request_hash"] and interaction["request_hash"] not in compatible:
+                from database.ella_provisioning import RuntimePoolClaimError
+
+                raise RuntimePoolClaimError("runtime_interaction_payload_conflict")
+        self.interaction = interaction
+        return dict(interaction)
+
+    async def count_runtime_interaction_failures(self, **kwargs):
+        base = kwargs["client_interaction_id"]
+        return sum(
+            1
+            for client_id, interaction in self.interactions.items()
+            if (client_id == base or client_id.startswith(base + ":format-retry:"))
+            and interaction.get("error_code") == kwargs["error_code"]
+        )
+
+    async def invalidate_completed_runtime_interaction(self, **kwargs):
+        interaction = next(value for value in self.interactions.values() if value["id"] == kwargs["interaction_id"])
+        interaction.update(
+            status="failed",
+            error_code=kwargs["error_code"],
+        )
+
+
+class SequencedCloudClient(FakeCloudClient):
+    def __init__(self, responses):
+        super().__init__()
+        self.responses = iter(responses)
+
+    async def create_response(self, binding, **kwargs):
+        self.calls.append((binding, kwargs))
+        before_provider_send = kwargs.get("before_provider_send")
+        if before_provider_send is not None:
+            await before_provider_send()
+        return HermesCloudTurn(
+            response_id=f"response-{len(self.calls)}",
+            text=next(self.responses),
+            usage=self.usage,
+            model="model-a",
+            tool_calls=0,
         )
 
 
@@ -317,6 +396,129 @@ def test_idempotency_hash_binds_instructions():
 
     with pytest.raises(ProvisioningError, match="runtime_interaction_payload_conflict"):
         asyncio.run(service.run_turn(_runtime(), changed))
+
+
+def test_prior_request_hash_replays_without_payload_conflict():
+    repository = FakeRepository()
+    event_store = InMemoryCanonicalEventStore()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=event_store,
+        cloud_client=FakeCloudClient(),
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    request = HermesCloudTurnRequest(
+        **{
+            **_request().__dict__,
+            "channel": "omi_enrichment",
+            "user_scan_policy": "none",
+        }
+    )
+    first = asyncio.run(service.run_turn(_runtime(), request))
+    repository.interaction["request_hash"] = hermes_cloud_runtime._legacy_request_hash(request)
+
+    replay = asyncio.run(service.run_turn(_runtime(), request))
+
+    assert first.duplicate is False
+    assert replay.duplicate is True
+
+
+def test_malformed_output_is_failed_before_completion_and_replays_fresh():
+    repository = RetryRepository()
+    cloud = SequencedCloudClient(
+        [
+            "not-json",
+            '{"overview":"Synthetic valid result"}',
+        ]
+    )
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    with pytest.raises(
+        ProvisioningError,
+        match="hermes_cloud_enrichment_output_invalid",
+    ):
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                response_validator=lambda text: __import__("json").loads(text),
+            )
+        )
+
+    first = repository.interactions["client-turn-1"]
+    assert first["status"] == "failed"
+    assert first["error_code"] == "hermes_cloud_enrichment_output_invalid"
+
+    valid = asyncio.run(
+        service.run_turn(
+            _runtime(),
+            _request(),
+            response_validator=lambda text: __import__("json").loads(text),
+        )
+    )
+    replay = asyncio.run(
+        service.run_turn(
+            _runtime(),
+            _request(),
+            response_validator=lambda text: __import__("json").loads(text),
+        )
+    )
+
+    assert valid.duplicate is False
+    assert replay.duplicate is True
+    assert len(cloud.calls) == 2
+    assert repository.interactions["client-turn-1:format-retry:1"]["status"] == "completed"
+
+
+def test_completed_malformed_output_is_invalidated_then_recovered():
+    repository = RetryRepository()
+    cloud = SequencedCloudClient(
+        [
+            "not-json",
+            '{"overview":"Synthetic valid result"}',
+        ]
+    )
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=FakePolicy(),
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+    asyncio.run(service.run_turn(_runtime(), _request()))
+
+    with pytest.raises(
+        ProvisioningError,
+        match="hermes_cloud_enrichment_output_invalid",
+    ):
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                response_validator=lambda text: __import__("json").loads(text),
+            )
+        )
+
+    recovered = asyncio.run(
+        service.run_turn(
+            _runtime(),
+            _request(),
+            response_validator=lambda text: __import__("json").loads(text),
+        )
+    )
+
+    assert recovered.duplicate is False
+    assert len(cloud.calls) == 2
 
 
 def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(

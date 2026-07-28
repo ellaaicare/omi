@@ -7,7 +7,6 @@
 import os
 import threading
 import time
-from urllib.parse import urlsplit
 
 import requests
 
@@ -24,104 +23,54 @@ CONVERSATION_READY_WEBHOOK_URL = os.getenv(
     'ELLA_CONVERSATION_READY_WEBHOOK', f'{ELLA_CONFIG.n8n_base_url}/webhook/conversation-ready'
 )
 
-HERMES_CLOUD_ENRICHMENT_ENABLED = os.getenv('ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED', 'false').lower() == 'true'
 HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS = frozenset(
     item.strip() for item in os.getenv('ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS', '').split(',') if item.strip()
 )
-HERMES_CLOUD_ENRICHMENT_URL = os.getenv(
-    'ELLA_HERMES_CLOUD_ENRICHMENT_URL',
-    'http://127.0.0.1:8000/v1/ella/internal/hermes-cloud/enrichment/run',
-)
-HERMES_CLOUD_ENRICHMENT_TIMEOUT = float(os.getenv('ELLA_HERMES_CLOUD_ENRICHMENT_TIMEOUT', '180'))
-HERMES_CLOUD_ENRICHMENT_TOKEN = os.getenv(
-    'ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN',
-    '',
-)
-HERMES_CLOUD_ENRICHMENT_PATH = '/v1/ella/internal/hermes-cloud/enrichment/run'
 
 
-def _is_safe_enrichment_url(url: str) -> bool:
-    parsed = urlsplit(url)
-    return bool(
-        parsed.scheme == 'http'
-        and parsed.hostname in {'127.0.0.1', '::1', 'localhost'}
-        and parsed.path == HERMES_CLOUD_ENRICHMENT_PATH
-        and not parsed.username
-        and not parsed.password
-        and not parsed.query
-        and not parsed.fragment
+def _conversation_payload(conversation) -> dict:
+    if hasattr(conversation, "model_dump"):
+        return conversation.model_dump(mode="json")
+    if hasattr(conversation, "dict"):
+        return conversation.dict()
+    segments = []
+    for segment in getattr(conversation, "transcript_segments", []) or []:
+        segments.append(
+            {
+                "is_user": bool(getattr(segment, "is_user", False)),
+                "speaker": getattr(segment, "speaker", None),
+                "text": getattr(segment, "text", ""),
+            }
+        )
+    return {
+        "id": getattr(conversation, "id", ""),
+        "transcript_segments": segments,
+    }
+
+
+def enqueue_cloud_enrichment(uid: str, conversation) -> dict:
+    from database.hermes_cloud_enrichment_outbox import (
+        FirestoreHermesCloudEnrichmentOutbox,
+    )
+    from ella.services.hermes_cloud_enrichment import (
+        HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+        build_enrichment_identity,
     )
 
-
-def _fire_cloud_enrichment(uid: str, conversation_id: str, conv_short: str) -> bool:
-    if not HERMES_CLOUD_ENRICHMENT_ENABLED:
-        print(
-            f"[FLOW:POSTPROCESS] BLOCKED hermes-cloud enrichment disabled " f"uid={uid} conv={conv_short}",
-            flush=True,
-        )
-        return False
-    if len(HERMES_CLOUD_ENRICHMENT_TOKEN) < 32:
-        print(
-            f"[FLOW:POSTPROCESS] BLOCKED hermes-cloud enrichment auth missing " f"uid={uid} conv={conv_short}",
-            flush=True,
-        )
-        return False
-    if not _is_safe_enrichment_url(HERMES_CLOUD_ENRICHMENT_URL):
-        print(
-            f"[FLOW:POSTPROCESS] BLOCKED hermes-cloud enrichment URL is not loopback " f"uid={uid} conv={conv_short}",
-            flush=True,
-        )
-        return False
-
-    started = time.time()
-    try:
-        response = requests.post(
-            HERMES_CLOUD_ENRICHMENT_URL,
-            json={'uid': uid, 'conversation_id': conversation_id},
-            headers={
-                'Content-Type': 'application/json',
-                'X-Ella-Hermes-Cloud-Enrichment-Token': HERMES_CLOUD_ENRICHMENT_TOKEN,
-            },
-            timeout=HERMES_CLOUD_ENRICHMENT_TIMEOUT,
-        )
-        elapsed_ms = int((time.time() - started) * 1000)
-        if response.status_code != 200:
-            print(
-                f"[FLOW:POSTPROCESS] ERROR hermes-cloud enrichment "
-                f"uid={uid} conv={conv_short} status={response.status_code} "
-                f"latency={elapsed_ms}ms",
-                flush=True,
-            )
-            return False
-        body = response.json()
-        if (
-            not isinstance(body, dict)
-            or body.get('ok') is not True
-            or body.get('status') != 'applied'
-            or body.get('content_free') is not True
-        ):
-            print(
-                f"[FLOW:POSTPROCESS] ERROR hermes-cloud enrichment invalid receipt "
-                f"uid={uid} conv={conv_short} latency={elapsed_ms}ms",
-                flush=True,
-            )
-            return False
-        print(
-            f"[FLOW:POSTPROCESS] OK hermes-cloud enrichment "
-            f"uid={uid} conv={conv_short} duplicate={bool(body.get('duplicate'))} "
-            f"latency={elapsed_ms}ms",
-            flush=True,
-        )
-        return True
-    except (requests.RequestException, ValueError) as exc:
-        elapsed_ms = int((time.time() - started) * 1000)
-        print(
-            f"[FLOW:POSTPROCESS] ERROR hermes-cloud enrichment "
-            f"uid={uid} conv={conv_short} error={type(exc).__name__} "
-            f"latency={elapsed_ms}ms",
-            flush=True,
-        )
-        return False
+    conversation_id = str(getattr(conversation, "id", "") or "")
+    identity = build_enrichment_identity(
+        uid=uid,
+        conversation_id=conversation_id,
+        conversation=_conversation_payload(conversation),
+    )
+    return FirestoreHermesCloudEnrichmentOutbox().enqueue(
+        job_id=identity.job_id,
+        uid=uid,
+        conversation_id=conversation_id,
+        client_interaction_id=identity.client_interaction_id,
+        transcript_sha256=identity.transcript_sha256,
+        policy_version=HERMES_CLOUD_ENRICHMENT_POLICY_VERSION,
+    )
 
 
 def fire_postprocess_webhook(uid: str, conversation) -> None:
@@ -136,6 +85,25 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
         uid: User ID
         conversation: Conversation object (already saved to Firestore)
     """
+    cloud_selected = uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS
+    if cloud_selected:
+        try:
+            queued = enqueue_cloud_enrichment(uid, conversation)
+        except Exception as exc:
+            print(
+                f"[FLOW:POSTPROCESS] BLOCKED hermes-cloud enrichment outbox "
+                f"uid={uid} conv={conversation.id[:8]} "
+                f"error={type(exc).__name__}",
+                flush=True,
+            )
+            return
+        print(
+            f"[FLOW:POSTPROCESS] QUEUED hermes-cloud enrichment "
+            f"uid={uid} conv={conversation.id[:8]} "
+            f"status={queued.get('status')}",
+            flush=True,
+        )
+
     if not POSTPROCESS_ENABLED:
         print(f"[FLOW:POSTPROCESS] DISABLED uid={uid} conv={conversation.id[:8]}...", flush=True)
         return
@@ -216,10 +184,9 @@ def fire_postprocess_webhook(uid: str, conversation) -> None:
                 flush=True,
             )
 
-        if uid in HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS:
-            _fire_cloud_enrichment(uid, conversation.id, conv_short)
-            # A cloud-selected profile must never fall through to the legacy
-            # n8n -> Mini/OpenClaw conversation-ready path.
+        if cloud_selected:
+            # Durable outbox delivery owns cloud enrichment. A selected profile
+            # never falls through to the legacy n8n/Mini conversation-ready path.
             return
 
         # Notify the user's OpenClaw agent via conversation-ready webhook (fire-and-forget)

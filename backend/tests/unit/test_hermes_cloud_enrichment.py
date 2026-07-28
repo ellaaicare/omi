@@ -59,26 +59,29 @@ class FakeRuntimeService:
     def __init__(self):
         self.calls = []
 
-    async def run_turn(self, runtime, request):
+    async def run_turn(self, runtime, request, *, response_validator=None):
         self.calls.append((runtime, request))
+        text = json.dumps(
+            {
+                "title": "Synthetic cafe order",
+                "overview": "[Ella] A synthetic cafe order was discussed.",
+                "emoji": "☕",
+                "category": "social",
+                "ella_tags": ["omi", "enriched"],
+                "ella_signal": {
+                    "salience": "low",
+                    "memory_promotion": "none",
+                    "noise_level": "none",
+                    "contains_media": False,
+                    "contains_user_speech": True,
+                    "guardian_relevant": False,
+                },
+            }
+        )
+        if response_validator:
+            response_validator(text)
         return SimpleNamespace(
-            text=json.dumps(
-                {
-                    "title": "Synthetic cafe order",
-                    "overview": "[Ella] A synthetic cafe order was discussed.",
-                    "emoji": "☕",
-                    "category": "social",
-                    "ella_tags": ["omi", "enriched"],
-                    "ella_signal": {
-                        "salience": "low",
-                        "memory_promotion": "none",
-                        "noise_level": "none",
-                        "contains_media": False,
-                        "contains_user_speech": True,
-                        "guardian_relevant": False,
-                    },
-                }
-            ),
+            text=text,
             response_id="response-a",
             canonical_user_event_id="event-user",
             canonical_assistant_event_id="event-assistant",
@@ -126,6 +129,7 @@ def test_enrichment_uses_exact_owned_transcript_and_confirmed_writeback():
     assert summary_applier.await_args.kwargs["summary_source"] == "hermes_cloud"
     assert result.active_summary_version_id == "version-enriched"
     assert result.provider_response_present is True
+    assert result.client_interaction_id == request.client_interaction_id
 
 
 def test_enrichment_rejects_transcript_change_before_writeback():

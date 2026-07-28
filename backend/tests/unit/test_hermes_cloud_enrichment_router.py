@@ -25,6 +25,7 @@ class FakeService:
             summary_sha256="b" * 64,
             provider_response_present=True,
             duplicate=False,
+            client_interaction_id=(kwargs.get("expected_client_interaction_id") or "omi-enrichment:" + ("c" * 64)),
         )
 
 
@@ -77,5 +78,33 @@ def test_enrichment_router_returns_content_free_receipt(monkeypatch):
             "uid": "synthetic-user",
             "conversation_id": "conversation-a",
             "allow_shadow": False,
+            "expected_client_interaction_id": None,
+            "expected_transcript_sha256": None,
         }
     ]
+
+
+def test_enrichment_router_binds_outbox_identity(monkeypatch):
+    token = "x" * 32
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN", token)
+    service = FakeService()
+    job_id = "hce_" + ("d" * 64)
+    client_id = "omi-enrichment:" + ("c" * 64)
+    transcript_sha256 = "a" * 64
+    response = _client(service).post(
+        "/v1/ella/internal/hermes-cloud/enrichment/run",
+        headers={"X-Ella-Hermes-Cloud-Enrichment-Token": token},
+        json={
+            "uid": "synthetic-user",
+            "conversation_id": "conversation-a",
+            "outbox_job_id": job_id,
+            "client_interaction_id": client_id,
+            "transcript_sha256": transcript_sha256,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["outbox_job_id"] == job_id
+    assert response.json()["client_interaction_id"] == client_id
+    assert service.calls[0]["expected_client_interaction_id"] == client_id
+    assert service.calls[0]["expected_transcript_sha256"] == transcript_sha256
