@@ -12,16 +12,21 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import asyncpg
 
 from database import voice_canary
+from ella.services import ai_consent
+from ella.services.hermes_cloud_policy import cloud_synthetic_only
 
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 INVITE_CODE_RE = re.compile(rf"^[{INVITE_ALPHABET}]{{8}}$")
 SAFE_POLICY_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SAFE_APP_BUILD_RE = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
+PILOT_RUNTIME_PROVIDER = "hermes_cloud"
+PILOT_MODEL = "gpt-5.6-terra"
+PILOT_MODE = "hermes-cloud-enrichment"
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,21 @@ class InvitationConfig:
 
 class InviteConfigurationError(RuntimeError):
     pass
+
+
+class InvitePilotGateDenied(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class InvitationPilotAdmission:
+    account_uid: str
+    profile_uid: str
+    consent_receipt_id: str
+    policy_version: str
+    processor_set_hash: str
+    scope_version: str
+    scope_hash: str
 
 
 class InviteRedemptionFailure(Exception):
@@ -123,6 +143,62 @@ def code_hmac(config: InvitationConfig, normalized_code: str) -> str:
     if not INVITE_CODE_RE.fullmatch(normalized_code):
         raise ValueError("normalized invite code required")
     return _hmac_ref(config, "code-v1", normalized_code)
+
+
+def invitation_target_refs(
+    config: InvitationConfig,
+    *,
+    account_uid: str,
+    profile_uid: str,
+) -> tuple[str, str]:
+    """Return privacy-safe server-owned issuance bindings."""
+    if not account_uid or not profile_uid:
+        raise ValueError("target account and profile are required")
+    return (
+        _hmac_ref(config, "target-account-v1", account_uid),
+        _hmac_ref(config, "target-profile-v1", profile_uid),
+    )
+
+
+def _exact_allowlist(name: str) -> set[str]:
+    return {value.strip() for value in os.getenv(name, "").split(",") if value.strip()}
+
+
+def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
+    """Authorize the exact synthetic profile before redemption can mutate SQL."""
+    if (
+        not cloud_synthetic_only()
+        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS")
+        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS")
+    ):
+        raise InvitePilotGateDenied("invite_pilot_identity_not_allowed")
+
+    status = ai_consent.get_ai_consent_service().status(uid)
+    consent = dict(status.get("consent") or {})
+    expected_profile_binding = ai_consent.derive_profile_binding_id(
+        account_uid=uid,
+        profile_uid=uid,
+    )
+    if (
+        status.get("authorized") is not True
+        or consent.get("decision") != "granted"
+        or consent.get("policy_version") != ai_consent.CURRENT_POLICY_VERSION
+        or consent.get("processor_set_hash") != ai_consent.CURRENT_PROCESSOR_SET_HASH
+        or consent.get("scope_version") != ai_consent.CURRENT_SCOPE_VERSION
+        or consent.get("scope_hash") != ai_consent.CURRENT_SCOPE_HASH
+        or consent.get("profile_binding_id") != expected_profile_binding
+        or not consent.get("receipt_id")
+    ):
+        raise InvitePilotGateDenied("invite_pilot_consent_required")
+    return InvitationPilotAdmission(
+        account_uid=uid,
+        profile_uid=uid,
+        consent_receipt_id=str(consent["receipt_id"]),
+        policy_version=str(consent["policy_version"]),
+        processor_set_hash=str(consent["processor_set_hash"]),
+        scope_version=str(consent["scope_version"]),
+        scope_hash=str(consent["scope_hash"]),
+    )
 
 
 def _support_code() -> str:
@@ -384,6 +460,7 @@ async def redeem_invitation(
     source_address: str,
     app_build: str = "",
     config: Optional[InvitationConfig] = None,
+    pilot_authorizer: Optional[Callable[[str], InvitationPilotAdmission]] = None,
 ) -> dict[str, Any]:
     settings = config or InvitationConfig.from_env()
     support_code = _support_code()
@@ -394,6 +471,14 @@ async def redeem_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
+    try:
+        pilot_admission = (pilot_authorizer or authorize_invitation_pilot)(uid)
+    except InvitePilotGateDenied:
+        raise _failure(
+            "invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        ) from None
 
     normalized_code = normalize_invite_code(code)
     uid_ref_hmac = _hmac_ref(settings, "uid-v1", uid)
@@ -492,6 +577,7 @@ async def redeem_invitation(
                         app_build=app_build,
                         now=now,
                         config=settings,
+                        pilot_admission=pilot_admission,
                     )
 
     if isinstance(result, InviteRedemptionFailure):
@@ -511,8 +597,81 @@ async def _redeem_locked_invitation(
     app_build: str,
     now: datetime,
     config: InvitationConfig,
+    pilot_admission: InvitationPilotAdmission,
 ) -> dict[str, Any] | InviteRedemptionFailure:
     invitation_id = invitation["id"]
+    target_account_ref, target_profile_ref = invitation_target_refs(
+        config,
+        account_uid=pilot_admission.account_uid,
+        profile_uid=pilot_admission.profile_uid,
+    )
+    target = await conn.fetchrow(
+        """
+        SELECT *
+        FROM ella_invitation_targets
+        WHERE invitation_id = $1
+          AND account_ref_hmac = $2
+          AND profile_ref_hmac = $3
+        FOR UPDATE
+        """,
+        invitation_id,
+        target_account_ref,
+        target_profile_ref,
+    )
+    user = await conn.fetchrow(
+        """
+        SELECT id, omi_uid, status, profile_class
+        FROM users
+        WHERE omi_uid = $1
+        FOR UPDATE
+        """,
+        pilot_admission.profile_uid,
+    )
+    contract_matches = bool(
+        target
+        and hmac.compare_digest(
+            str(target["account_ref_hmac"]),
+            target_account_ref,
+        )
+        and hmac.compare_digest(
+            str(target["profile_ref_hmac"]),
+            target_profile_ref,
+        )
+        and str(target["required_profile_class"]) == "synthetic"
+        and user
+        and str(user["status"]) == "ACTIVE"
+        and str(user["profile_class"]) == "synthetic"
+        and pilot_admission.account_uid == uid
+        and pilot_admission.profile_uid == uid
+        and invitation["required_consent_policy_version"]
+        == pilot_admission.policy_version
+        == ai_consent.CURRENT_POLICY_VERSION
+        and invitation["required_consent_processor_set_hash"]
+        == pilot_admission.processor_set_hash
+        == ai_consent.CURRENT_PROCESSOR_SET_HASH
+        and invitation["required_consent_scope_version"]
+        == pilot_admission.scope_version
+        == ai_consent.CURRENT_SCOPE_VERSION
+        and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash == ai_consent.CURRENT_SCOPE_HASH
+    )
+    if not contract_matches:
+        await _record_failure(
+            conn,
+            invitation_id=invitation_id,
+            uid_ref_hmac=uid_ref_hmac,
+            source_ref_hmac=source_ref_hmac,
+            failure_code="invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+            now=now,
+            config=config,
+        )
+        return _failure(
+            "invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+
     existing = await conn.fetchrow(
         """
         SELECT entitlement_revision
@@ -566,6 +725,21 @@ async def _redeem_locked_invitation(
             "support_code": support_code,
             "correlation_id": correlation_id,
         }
+    if target["consumed_at"] is not None:
+        await _record_audit(
+            conn,
+            invitation_id=invitation_id,
+            uid_ref_hmac=uid_ref_hmac,
+            source_ref_hmac=source_ref_hmac,
+            event_type="policy_invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+        return _failure(
+            "service_unavailable",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
 
     kind = str(invitation["kind"])
     kind_enabled = config.ordinary_enabled if kind == "ordinary" else config.app_review_enabled
@@ -676,6 +850,26 @@ async def _redeem_locked_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
+    if (
+        policy["provider_allowlist"] != [PILOT_RUNTIME_PROVIDER]
+        or policy["model_allowlist"] != [PILOT_MODEL]
+        or policy["mode_allowlist"] != [PILOT_MODE]
+        or policy["fallback_policy"] != {"enabled": False, "order": []}
+    ):
+        await _record_audit(
+            conn,
+            invitation_id=invitation_id,
+            uid_ref_hmac=uid_ref_hmac,
+            source_ref_hmac=source_ref_hmac,
+            event_type="policy_invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+        return _failure(
+            "service_unavailable",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
 
     existing_entitlement = await conn.fetchrow(
         "SELECT uid FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
@@ -770,16 +964,32 @@ async def _redeem_locked_invitation(
     await conn.execute(
         """
         INSERT INTO ella_invitation_redemptions (
-            invitation_id, uid_ref_hmac, entitlement_revision,
+            invitation_id, invitation_target_id, uid_ref_hmac,
+            consent_receipt_ref_hmac, entitlement_revision,
             support_code, correlation_id, app_build
-        ) VALUES ($1, $2, $3, $4, $5::uuid, $6)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8)
         """,
         invitation_id,
+        target["id"],
         uid_ref_hmac,
+        _hmac_ref(
+            config,
+            "consent-receipt-v1",
+            pilot_admission.consent_receipt_id,
+        ),
         entitlement_revision,
         support_code,
         correlation_id,
         app_build if SAFE_APP_BUILD_RE.fullmatch(app_build) else None,
+    )
+    await conn.execute(
+        """
+        UPDATE ella_invitation_targets
+        SET consumed_at = COALESCE(consumed_at, $2)
+        WHERE id = $1
+        """,
+        target["id"],
+        now,
     )
     await _record_audit(
         conn,

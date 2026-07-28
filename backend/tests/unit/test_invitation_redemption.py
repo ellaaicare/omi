@@ -19,6 +19,7 @@ sys.modules.setdefault("websockets", ModuleType("websockets"))
 from database import invitations
 from ella.routers import invites
 from ella.routers import voice
+from ella.services import ai_consent
 from utils.other import endpoints as auth
 
 
@@ -113,6 +114,55 @@ def test_policy_rejects_enabled_fallback_and_unbounded_values():
     policy["max_concurrent"] = 99
     with pytest.raises(invitations.InviteConfigurationError):
         invitations.normalize_entitlement_policy(policy)
+
+
+def test_target_refs_are_domain_separated_and_contain_no_identity():
+    config = invitations.InvitationConfig(hmac_pepper=b"unit-test-only")
+    account_ref, profile_ref = invitations.invitation_target_refs(
+        config,
+        account_uid="account-a",
+        profile_uid="account-a",
+    )
+
+    assert len(account_ref) == len(profile_ref) == 64
+    assert account_ref != profile_ref
+    assert "account-a" not in account_ref + profile_ref
+
+
+def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
+    monkeypatch,
+):
+    uid = "synthetic-pilot"
+    repository = ai_consent.InMemoryConsentRepository()
+    monkeypatch.setattr(ai_consent, "_repository", repository)
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+
+    with pytest.raises(invitations.InvitePilotGateDenied):
+        invitations.authorize_invitation_pilot(uid)
+
+    ai_consent.AiConsentService(repository).submit(
+        uid,
+        ai_consent.ConsentSubmission(
+            decision="granted",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="synthetic-pilot-consent",
+            app_version="synthetic",
+            build_number="1",
+            locale="en",
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
+    admission = invitations.authorize_invitation_pilot(uid)
+    assert admission.policy_version == "ai-data-processors-v7"
+    assert admission.account_uid == admission.profile_uid == uid
+
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "")
+    with pytest.raises(invitations.InvitePilotGateDenied):
+        invitations.authorize_invitation_pilot(uid)
 
 
 def test_source_address_trusts_forwarding_only_from_enumerated_proxy(monkeypatch):
@@ -277,7 +327,17 @@ def test_migration_has_privacy_capacity_and_app_review_guards():
         "uid_ref_hmac char(64)",
         "source_ref_hmac char(64)",
         "ella_invitation_capacity_reservations",
+        "ella_invitation_targets",
+        "account_ref_hmac char(64)",
+        "profile_ref_hmac char(64)",
+        "consent_receipt_ref_hmac char(64)",
+        "required_profile_class = 'synthetic'",
+        "required_consent_policy_version",
+        "required_consent_processor_set_hash",
+        "required_consent_scope_version",
+        "required_consent_scope_hash",
         "ella_invitation_redemptions_invite_uid_key",
+        "ella_invitation_redemptions_target_key",
         "max_redemptions <= 20",
         "reserved_setup_slots = 2",
         "exclude_from_product_analytics = true",

@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS ella_invitations (
     entitlement_policy_revision TEXT COLLATE "C" NOT NULL
         CHECK (entitlement_policy_revision ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
     entitlement_policy JSONB NOT NULL,
+    required_consent_policy_version TEXT COLLATE "C" NOT NULL,
+    required_consent_processor_set_hash TEXT COLLATE "C" NOT NULL
+        CHECK (required_consent_processor_set_hash ~ '^sha256:[0-9a-f]{64}$'),
+    required_consent_scope_version TEXT COLLATE "C" NOT NULL,
+    required_consent_scope_hash TEXT COLLATE "C" NOT NULL
+        CHECK (required_consent_scope_hash ~ '^sha256:[0-9a-f]{64}$'),
     cohort TEXT COLLATE "C" NOT NULL DEFAULT 'founding_family'
         CHECK (cohort ~ '^[a-z0-9][a-z0-9._-]{0,63}$'),
     exclude_from_product_analytics BOOLEAN NOT NULL DEFAULT FALSE,
@@ -110,11 +116,34 @@ CREATE INDEX IF NOT EXISTS voice_entitlements_invitation_idx
     ON voice_entitlements (invitation_id)
     WHERE invitation_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS ella_invitation_targets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invitation_id UUID NOT NULL
+        REFERENCES ella_invitations(id) ON DELETE RESTRICT,
+    account_ref_hmac CHAR(64) COLLATE "C" NOT NULL
+        CHECK (account_ref_hmac ~ '^[0-9a-f]{64}$'),
+    profile_ref_hmac CHAR(64) COLLATE "C" NOT NULL
+        CHECK (profile_ref_hmac ~ '^[0-9a-f]{64}$'),
+    required_profile_class TEXT NOT NULL DEFAULT 'synthetic'
+        CHECK (required_profile_class = 'synthetic'),
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ella_invitation_targets_exact_key
+    ON ella_invitation_targets (
+        invitation_id, account_ref_hmac, profile_ref_hmac
+    );
+
 CREATE TABLE IF NOT EXISTS ella_invitation_redemptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     invitation_id UUID NOT NULL REFERENCES ella_invitations(id) ON DELETE RESTRICT,
+    invitation_target_id UUID NOT NULL
+        REFERENCES ella_invitation_targets(id) ON DELETE RESTRICT,
     uid_ref_hmac CHAR(64) COLLATE "C" NOT NULL
         CHECK (uid_ref_hmac ~ '^[0-9a-f]{64}$'),
+    consent_receipt_ref_hmac CHAR(64) COLLATE "C" NOT NULL
+        CHECK (consent_receipt_ref_hmac ~ '^[0-9a-f]{64}$'),
     entitlement_revision INTEGER NOT NULL CHECK (entitlement_revision >= 1),
     support_code TEXT COLLATE "C" NOT NULL,
     correlation_id UUID NOT NULL,
@@ -125,6 +154,8 @@ CREATE TABLE IF NOT EXISTS ella_invitation_redemptions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS ella_invitation_redemptions_invite_uid_key
     ON ella_invitation_redemptions (invitation_id, uid_ref_hmac);
+CREATE UNIQUE INDEX IF NOT EXISTS ella_invitation_redemptions_target_key
+    ON ella_invitation_redemptions (invitation_target_id);
 CREATE INDEX IF NOT EXISTS ella_invitation_redemptions_invite_time_idx
     ON ella_invitation_redemptions (invitation_id, redeemed_at);
 
