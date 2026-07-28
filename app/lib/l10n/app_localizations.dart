@@ -16206,7 +16206,7 @@ abstract class AppLocalizations {
   /// Locked first-run listening consent title
   ///
   /// In en, this message translates to:
-  /// **'Ella listens to help remember.'**
+  /// **'Choose how Ella uses cloud AI'**
   String get aiConsentTitle;
 
   /// Locked consent body naming Ella routing and the data sent before the Deepgram processor name
@@ -16515,10 +16515,16 @@ abstract class AppLocalizations {
   /// **'End'**
   String get voiceModalEndAction;
 
+  /// No description provided for @ellaAuthDataDisclosure.
+  ///
+  /// In en, this message translates to:
+  /// **'Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.'**
+  String get ellaAuthDataDisclosure;
+
   /// No description provided for @aiConsentCompactSummary.
   ///
   /// In en, this message translates to:
-  /// **'When you enable listening or voice, live microphone audio from your iPhone or necklace goes through Ella\'s secure backend to Deepgram for speech-to-text. To create summaries or answers, transcript and derived text may go to OpenRouter, Google (Gemini), OpenAI, Groq, or xAI (Grok); OpenRouter may route text to the selected model provider. Live voice may send microphone audio to Google (Gemini), OpenAI, or xAI (Grok), while standard spoken replies send response text to ElevenLabs. Talk about this sends the selected stored memory, including related people, topics, and dates, through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor; Ella sends data only to the provider needed for the feature you choose, and summaries are shared only with family members you choose.'**
+  /// **'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.'**
   String get aiConsentCompactSummary;
 
   /// No description provided for @aiConsentProcessorDetailsLink.
@@ -16526,6 +16532,138 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Full processor details in Privacy Policy'**
   String get aiConsentProcessorDetailsLink;
+
+  /// No description provided for @aiConsentNoSharingBeforeAllow.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.'**
+  String get aiConsentNoSharingBeforeAllow;
+
+  /// No description provided for @aiConsentRevokeAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Revoke AI permission'**
+  String get aiConsentRevokeAction;
+
+  /// No description provided for @aiConsentDeleteDataAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete my account and data'**
+  String get aiConsentDeleteDataAction;
+
+  /// No description provided for @aiConsentAllowedStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Managed cloud AI allowed for this account and profile'**
+  String get aiConsentAllowedStatus;
+
+  /// No description provided for @aiConsentNotAllowedStatus.
+  ///
+  /// In en, this message translates to:
+  /// **'Cloud AI permission is off — v7 permission required'**
+  String get aiConsentNotAllowedStatus;
+
+  /// No description provided for @aiConsentRevokeSyncFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.'**
+  String get aiConsentRevokeSyncFailed;
+
+  /// No description provided for @aiConsentOffGateTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'AI sharing is off'**
+  String get aiConsentOffGateTitle;
+
+  /// No description provided for @aiConsentOffGateBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will not set up these cloud AI features or send what you say or type, messages, or details from your saved memories while permission is off. You can review this information whenever you are ready.'**
+  String get aiConsentOffGateBody;
+
+  /// No description provided for @aiConsentReviewAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Review AI permission'**
+  String get aiConsentReviewAction;
+
+  /// No description provided for @aiConsentActiveAudioStopped.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not verify AI permission. Cloud sharing and voice chat have stopped.'**
+  String get aiConsentActiveAudioStopped;
+
+  /// No description provided for @deleteAccountServerConfirmationFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.'**
+  String get deleteAccountServerConfirmationFailed;
+
+  /// No description provided for @deleteAccountLocalCleanupFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.'**
+  String get deleteAccountLocalCleanupFailed;
+
+  /// Introduces the named managed-cloud processors before first use
+  ///
+  /// In en, this message translates to:
+  /// **'Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:'**
+  String get aiConsentManagedCloudIntro;
+
+  /// Legal recipient and product name for the managed agent runtime
+  ///
+  /// In en, this message translates to:
+  /// **'Nous Research / Hermes Cloud'**
+  String get aiConsentHermesCloudTitle;
+
+  /// Data categories and purpose for Hermes Cloud
+  ///
+  /// In en, this message translates to:
+  /// **'Runs Ella’s cloud companion. It may receive what you say or type, details you choose to share, and basic information needed to keep your conversation going.'**
+  String get aiConsentHermesCloudBody;
+
+  /// Legal recipient for the approved managed model route
+  ///
+  /// In en, this message translates to:
+  /// **'OpenAI'**
+  String get aiConsentOpenAiManagedTitle;
+
+  /// Data categories and purpose for the managed OpenAI route
+  ///
+  /// In en, this message translates to:
+  /// **'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.'**
+  String get aiConsentOpenAiManagedBody;
+
+  /// Legal recipient and product name for managed derived memory
+  ///
+  /// In en, this message translates to:
+  /// **'Honcho / Plastic Labs'**
+  String get aiConsentHonchoCloudTitle;
+
+  /// Data categories and purpose for Honcho / Plastic Labs
+  ///
+  /// In en, this message translates to:
+  /// **'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.'**
+  String get aiConsentHonchoCloudBody;
+
+  /// Legal recipient for the narrow messaging channel
+  ///
+  /// In en, this message translates to:
+  /// **'Photon'**
+  String get aiConsentPhotonTitle;
+
+  /// Data categories and purpose for Photon
+  ///
+  /// In en, this message translates to:
+  /// **'Sends iMessage content and basic delivery details only to one person you choose for testing.'**
+  String get aiConsentPhotonBody;
+
+  /// Explains the exact managed-cloud profile and messaging scope
+  ///
+  /// In en, this message translates to:
+  /// **'This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.'**
+  String get aiConsentManagedCloudScope;
 
   /// No description provided for @ellaAccessCheckingTitle.
   ///

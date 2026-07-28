@@ -104,6 +104,7 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   String? appId,
   List<String>? filesId,
 }) async* {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/messages';
@@ -134,6 +135,7 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   String? clientMessageId,
   DateTime? clientSentAt,
 }) async* {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
   var uid = SharedPreferencesUtil().uid;
   var messageId = "1000";
@@ -184,6 +186,7 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
   List<File> files, {
   String? language,
 }) async* {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var messageId = "1000"; // Default new message
 
   await for (var line in makeMultipartStreamingApiCall(
@@ -205,6 +208,9 @@ Future<List<MessageFile>?> uploadFilesServer(
   List<File> files, {
   String? appId,
 }) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) {
+    throw StateError('AI consent is required before file upload');
+  }
   var url = '${Env.apiBaseUrl}v2/files?app_id=$appId';
   if (appId == null || appId.isEmpty || appId == 'null' || appId == 'no_selected') {
     url = '${Env.apiBaseUrl}v2/files';

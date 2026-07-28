@@ -2,16 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/material.dart';
-
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message_event.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
-import 'package:omi/services/notifications.dart';
 import 'package:omi/services/sockets/on_device_apple_provider.dart';
 import 'package:omi/services/sockets/on_device_whisper_provider.dart';
 import 'package:omi/services/sockets/pure_socket.dart';
@@ -64,6 +62,7 @@ enum SocketServiceState {
 class TranscriptSegmentSocketService implements IPureSocketListener {
   late IPureSocket _socket;
   final Map<Object, ITransctiptSegmentSocketServiceListener> _listeners = {};
+  AiConsentActiveSessionLease? _aiConsentLease;
 
   /// Access to the underlying socket (for composite service creation)
   IPureSocket get socket => _socket;
@@ -152,10 +151,25 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
         'codec': codec.toString(),
         'language': language,
       });
+      return;
     }
+    final uid = SharedPreferencesUtil().uid;
+    _aiConsentLease = AiConsentActiveSessionLease(
+      uid: uid,
+      onAuthorityLost: () async {
+        final listeners = _listeners.values.toList(growable: false);
+        for (final listener in listeners) {
+          listener.onError(const AiConsentAuthorityLostException());
+        }
+        await stop(reason: 'AI consent authority lost');
+      },
+    )..start();
   }
 
   Future stop({String? reason}) async {
+    final consentLease = _aiConsentLease;
+    _aiConsentLease = null;
+    consentLease?.stop();
     await _socket.stop();
     _listeners.clear();
 
@@ -179,6 +193,9 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
 
   @override
   void onClosed([int? closeCode]) {
+    final consentLease = _aiConsentLease;
+    _aiConsentLease = null;
+    consentLease?.stop();
     _listeners.forEach((k, v) {
       v.onClosed(closeCode);
     });
@@ -189,6 +206,9 @@ class TranscriptSegmentSocketService implements IPureSocketListener {
 
   @override
   void onError(Object err, StackTrace trace) {
+    final consentLease = _aiConsentLease;
+    _aiConsentLease = null;
+    consentLease?.stop();
     _listeners.forEach((k, v) {
       v.onError(err);
     });

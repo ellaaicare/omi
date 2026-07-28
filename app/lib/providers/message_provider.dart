@@ -20,6 +20,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/ai_consent_coordinator.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/main.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -66,6 +67,12 @@ class MessageProvider extends ChangeNotifier {
 
   void updateAppProvider(AppProvider p) {
     appProvider = p;
+  }
+
+  Future<bool> _ensureAiConsent() async {
+    if (SharedPreferencesUtil().aiConsentAccepted) return true;
+    final context = MyApp.navigatorKey.currentContext;
+    return context != null && await AiConsentCoordinator.ensure(context);
   }
 
   void reset() {
@@ -368,7 +375,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return null;
+    if (!await _ensureAiConsent()) return null;
     if (files.isNotEmpty) {
       setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
       var res = await uploadFilesServer(files, appId: appId);
@@ -536,7 +543,7 @@ class MessageProvider extends ChangeNotifier {
 
   Future sendVoiceMessageStreamToServer(List<List<int>> audioBytes,
       {Function? onFirstChunkRecived, BleAudioCodec? codec}) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    if (!await _ensureAiConsent()) return;
     var file = await FileUtils.saveAudioBytesToTempFile(
       audioBytes,
       DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
@@ -630,7 +637,7 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future sendMessageStreamToServer(String text) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted) return;
+    if (!await _ensureAiConsent()) return;
     if (SharedPreferencesUtil().demoMode) {
       messages = DemoFixtures.chatMessages();
       setSendingMessage(false);

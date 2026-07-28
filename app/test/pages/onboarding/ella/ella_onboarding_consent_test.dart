@@ -6,12 +6,31 @@ void main() {
   group('Ella onboarding voice consent policy', () {
     test('Hermes provisioning never starts directly while entitlement verification owns the gate', () {
       expect(
-        EllaOnboarding.shouldStartProvisioningDirectly(provisioningGateEnabled: true, entitlementGateEnabled: true),
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: true,
+          hasCurrentConsent: true,
+        ),
         isFalse,
       );
       expect(
-        EllaOnboarding.shouldStartProvisioningDirectly(provisioningGateEnabled: true, entitlementGateEnabled: false),
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: false,
+          hasCurrentConsent: true,
+        ),
         isTrue,
+      );
+    });
+
+    test('Hermes provisioning never starts without current account consent', () {
+      expect(
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: false,
+          hasCurrentConsent: false,
+        ),
+        isFalse,
       );
     });
 
@@ -37,14 +56,14 @@ void main() {
       );
     });
 
-    test('existing user with a stale contract waits for explicit voice use', () {
+    test('material processor change requests renewed consent during onboarding', () {
       expect(
         EllaOnboarding.shouldPresentVoiceConsent(
           hasCurrentConsent: false,
           hasPriorAccountConsent: true,
           deferredCurrentConsent: false,
         ),
-        isFalse,
+        isTrue,
       );
     });
 
@@ -57,6 +76,11 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('provisioning remains stopped until current consent exists', () {
+      expect(EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: false), isFalse);
+      expect(EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: true), isTrue);
     });
   });
 }

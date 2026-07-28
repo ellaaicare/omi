@@ -167,6 +167,7 @@ Future<ConversationProcessingRetryResult?> retryConversationProcessing(
   String requestId, {
   String? correctionText,
 }) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return null;
   final normalizedCorrection = correctionText?.trim();
   final response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/processing-retries',
@@ -186,6 +187,7 @@ Future<ConversationProcessingRetryResult?> retryConversationProcessing(
 }
 
 Future<ServerConversation?> reProcessConversationServer(String conversationId, {String? appId}) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return null;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/reprocess${appId != null ? '?app_id=$appId' : ''}',
     headers: {},
@@ -207,6 +209,7 @@ Future<bool> submitConversationCorrection({
   String? summaryOverview,
   String? appSummary,
 }) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/ella/conversations/$conversationId/corrections',
     headers: {},
@@ -664,6 +667,7 @@ Future<bool> deleteConversationActionItem(String conversationId, ActionItem item
 
 //this is expected to return complete memories
 Future<List<ServerConversation>> sendStorageToBackend(File file, String sdCardDateTimeString) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return [];
   try {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}sdcard_memory?date_time=$sdCardDateTimeString',
@@ -744,6 +748,7 @@ Future<(List<ServerConversation>, int, int)> searchConversationsServer(
 }
 
 Future<String> testConversationPrompt(String prompt, String conversationId) async {
+  if (!SharedPreferencesUtil().aiConsentAccepted) return '';
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/conversations/$conversationId/test-prompt',
     headers: {},

@@ -7,7 +7,9 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
 import 'package:omi/utils/l10n_extensions.dart';
@@ -30,6 +32,8 @@ class EllaProvisioningGatePage extends StatefulWidget {
 }
 
 class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> with WidgetsBindingObserver {
+  bool _consentDeferred = false;
+
   @override
   void initState() {
     super.initState();
@@ -39,9 +43,36 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
     }
   }
 
-  Future<void> _start() async {
+  Future<void> _start({bool forceConsentPrompt = false}) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null || !mounted) return;
+
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = user.uid;
+    await preferences.prepareEllaProvisioningAccount(user.uid);
+    if (!mounted) return;
+
+    final consentService = EllaAiConsentService();
+    var hasConsent = await consentService.refreshServerAuthority(uid: user.uid);
+    if (!mounted) return;
+    if (!hasConsent) {
+      if (preferences.isCurrentAiConsentDeferred && !forceConsentPrompt) {
+        setState(() => _consentDeferred = true);
+        return;
+      }
+      final accepted = await AiConsentSheet.show(
+        context,
+        onAccept: () async => (await consentService.grantCurrentConsent(uid: user.uid)) != null,
+        onDecline: () => consentService.declineCurrentConsent(uid: user.uid),
+      );
+      if (!mounted) return;
+      hasConsent = accepted == true && preferences.aiConsentAccepted;
+      if (!hasConsent) {
+        setState(() => _consentDeferred = true);
+        return;
+      }
+    }
+    setState(() => _consentDeferred = false);
 
     String timezone;
     try {
@@ -50,8 +81,6 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
       timezone = DateTime.now().timeZoneName;
     }
     if (!mounted) return;
-
-    final preferences = SharedPreferencesUtil();
 
     await context.read<EllaProvisioningProvider>().start(
           uid: user.uid,
@@ -87,6 +116,50 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
 
   @override
   Widget build(BuildContext context) {
+    if (_consentDeferred) {
+      return Scaffold(
+        backgroundColor: EllaColors.paper,
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(EllaSizes.screenPadding),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 480),
+                child: Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    color: EllaColors.card,
+                    borderRadius: BorderRadius.circular(EllaSizes.cardRadius),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.lock_outline_rounded, color: EllaColors.tealDeep, size: 44),
+                      const SizedBox(height: 20),
+                      Text(context.l10n.aiConsentOffGateTitle,
+                          style: EllaTextStyles.display, textAlign: TextAlign.center),
+                      const SizedBox(height: 12),
+                      Text(context.l10n.aiConsentOffGateBody,
+                          style: EllaTextStyles.secondary, textAlign: TextAlign.center),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () => _start(forceConsentPrompt: true),
+                          child: Text(context.l10n.aiConsentReviewAction),
+                        ),
+                      ),
+                      TextButton(onPressed: _signOut, child: Text(context.l10n.signOut)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Consumer<EllaProvisioningProvider>(
       builder: (context, provider, _) {
         if (provider.isOperational) {

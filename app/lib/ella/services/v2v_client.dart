@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/env/env.dart';
@@ -214,6 +215,7 @@ class V2VClient {
   AudioRecorder? _recorder;
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
+  AiConsentActiveSessionLease? _aiConsentLease;
   bool _isConnected = false;
   bool _connectionAnnounced = false;
   bool _isPlaying = false;
@@ -603,6 +605,13 @@ class V2VClient {
           ),
         );
       }
+      _aiConsentLease = AiConsentActiveSessionLease(
+        uid: uid,
+        onAuthorityLost: () async {
+          onEvent?.call(const V2VEvent(type: 'consent_authority_lost'));
+          await disconnect();
+        },
+      )..start();
       _connectionAnnounced = true;
       onConnectionChanged?.call(true);
 
@@ -633,6 +642,9 @@ class V2VClient {
 
   /// Disconnect and clean up all resources.
   Future<void> disconnect() async {
+    final consentLease = _aiConsentLease;
+    _aiConsentLease = null;
+    consentLease?.stop();
     final shouldAnnounceDisconnect = _connectionAnnounced;
     _isConnected = false;
     _connectionAnnounced = false;

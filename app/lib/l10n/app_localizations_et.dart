@@ -8690,7 +8690,7 @@ class AppLocalizationsEt extends AppLocalizations {
   String get necklaceResting => 'Ella\'s necklace is resting — tap to reconnect';
 
   @override
-  String get aiConsentTitle => 'Ella listens to help remember.';
+  String get aiConsentTitle => 'Choose how Ella uses cloud AI';
 
   @override
   String get aiConsentBodyIntro =>
@@ -8857,11 +8857,93 @@ class AppLocalizationsEt extends AppLocalizations {
   String get voiceModalEndAction => 'End';
 
   @override
+  String get ellaAuthDataDisclosure =>
+      'Google Firebase processes your account and basic service information for secure sign-in and app infrastructure. Apple or Google also processes the sign-in method you choose. Signing in does not turn on listening or AI sharing; Ella asks separately before sending audio, transcripts, messages, or memory context to AI processors.';
+
+  @override
   String get aiConsentCompactSummary =>
-      'When you enable listening or voice, live microphone audio from your iPhone or necklace goes through Ella\'s secure backend to Deepgram for speech-to-text. To create summaries or answers, transcript and derived text may go to OpenRouter, Google (Gemini), OpenAI, Groq, or xAI (Grok); OpenRouter may route text to the selected model provider. Live voice may send microphone audio to Google (Gemini), OpenAI, or xAI (Grok), while standard spoken replies send response text to ElevenLabs. Talk about this sends the selected stored memory, including related people, topics, and dates, through Ella\'s secure backend to the selected Google (Gemini) or xAI (Grok) voice processor; Ella sends data only to the provider needed for the feature you choose, and summaries are shared only with family members you choose.';
+      'Other Ella features may also use Deepgram, Soniox, or Speechmatics to turn speech into words; Ella’s own Hermes, Honcho, Kokoro, or Fish services; OpenRouter, Google Gemini, OpenAI, Groq, or xAI Grok to help answer or support live voice; Inworld AI or ElevenLabs to speak replies; and Google Firebase for sign-in and app services. Ella sends only what the feature needs through its secure backend.';
 
   @override
   String get aiConsentProcessorDetailsLink => 'Full processor details in Privacy Policy';
+
+  @override
+  String get aiConsentNoSharingBeforeAllow =>
+      'Ella will not send what you say or type, messages, details from your saved memories, or Photon messages to these companies until you choose Allow. Not now keeps these cloud AI, memory, voice, and messaging features off. You can review or remove this permission in Settings.';
+
+  @override
+  String get aiConsentRevokeAction => 'Revoke AI permission';
+
+  @override
+  String get aiConsentDeleteDataAction => 'Delete my account and data';
+
+  @override
+  String get aiConsentAllowedStatus => 'Managed cloud AI allowed for this account and profile';
+
+  @override
+  String get aiConsentNotAllowedStatus => 'Cloud AI permission is off — v7 permission required';
+
+  @override
+  String get aiConsentRevokeSyncFailed =>
+      'Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.';
+
+  @override
+  String get aiConsentOffGateTitle => 'AI sharing is off';
+
+  @override
+  String get aiConsentOffGateBody =>
+      'Ella will not set up these cloud AI features or send what you say or type, messages, or details from your saved memories while permission is off. You can review this information whenever you are ready.';
+
+  @override
+  String get aiConsentReviewAction => 'Review AI permission';
+
+  @override
+  String get aiConsentActiveAudioStopped =>
+      'Ella could not verify AI permission. Cloud sharing and voice chat have stopped.';
+
+  @override
+  String get deleteAccountServerConfirmationFailed =>
+      'Ella could not confirm account deletion. Your account and local data are unchanged. Please try again.';
+
+  @override
+  String get deleteAccountLocalCleanupFailed =>
+      'Your account was deleted, but this device could not finish local cleanup. Restart Ella and try signing out again.';
+
+  @override
+  String get aiConsentManagedCloudIntro =>
+      'Please choose whether you agree to Ella sharing with these companies. The companies involved depend on the feature you choose:';
+
+  @override
+  String get aiConsentHermesCloudTitle => 'Nous Research / Hermes Cloud';
+
+  @override
+  String get aiConsentHermesCloudBody =>
+      'Runs Ella’s cloud companion. It may receive what you say or type, details you choose to share, and basic information needed to keep your conversation going.';
+
+  @override
+  String get aiConsentOpenAiManagedTitle => 'OpenAI';
+
+  @override
+  String get aiConsentOpenAiManagedBody =>
+      'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.';
+
+  @override
+  String get aiConsentHonchoCloudTitle => 'Honcho / Plastic Labs';
+
+  @override
+  String get aiConsentHonchoCloudBody =>
+      'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.';
+
+  @override
+  String get aiConsentPhotonTitle => 'Photon';
+
+  @override
+  String get aiConsentPhotonBody =>
+      'Sends iMessage content and basic delivery details only to one person you choose for testing.';
+
+  @override
+  String get aiConsentManagedCloudScope =>
+      'This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.';
 
   @override
   String get ellaAccessCheckingTitle => 'Checking your Ella access';
@@ -8943,7 +9025,9 @@ class AppLocalizationsEt extends AppLocalizations {
   String get ellaInviteRateLimitedBody => 'Let’s pause for a moment before trying that code again.';
 
   @override
-  String ellaInviteRateLimitedWithRetryBody(int seconds) => 'Let’s pause for a moment. Try again in $seconds seconds.';
+  String ellaInviteRateLimitedWithRetryBody(int seconds) {
+    return 'Let’s pause for a moment. Try again in $seconds seconds.';
+  }
 
   @override
   String get ellaProvisioningTimeoutTitle => 'Ella needs another moment';

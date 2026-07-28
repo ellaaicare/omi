@@ -6,6 +6,11 @@ import 'package:omi/ella/services/ella_entitlement_service.dart';
 
 void main() {
   group('Ella entitlement contract', () {
+    test('pilot entitlement and stub gates are default-off', () {
+      expect(isEllaEntitlementGateEnabled, isFalse);
+      expect(isEllaEntitlementStubEnabled, isFalse);
+    });
+
     test('parses every typed entitlement status and quota field', () {
       for (final status in EllaEntitlementStatus.values) {
         final entitlement = EllaEntitlement.fromJson({
