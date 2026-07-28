@@ -49,6 +49,7 @@ def assert_cloud_operator_gate() -> None:
 def assert_cloud_identity_gate(
     uid: str,
     *,
+    profile_class: Optional[str] = None,
     profile_uid: Optional[str] = None,
     runtime_provider: Optional[str] = None,
     model_route: Optional[str] = None,
@@ -57,8 +58,7 @@ def assert_cloud_identity_gate(
 ) -> str:
     """Return the server-owned grant epoch for an allowed cloud identity."""
     if cloud_synthetic_only():
-        if uid not in _synthetic_uids():
-            raise ProvisioningError("hermes_cloud_synthetic_identity_required", retryable=False)
+        assert_cloud_synthetic_identity_gate(uid, profile_class=profile_class)
         return (
             "synthetic:" + hashlib.sha256(f"{ai_consent.CURRENT_POLICY_VERSION}\x1f{uid}".encode("utf-8")).hexdigest()
         )
@@ -74,6 +74,20 @@ def assert_cloud_identity_gate(
         )
     except ai_consent.ManagedCloudConsentError as exc:
         raise ProvisioningError(exc.code, retryable=False) from exc
+
+
+def assert_cloud_synthetic_identity_gate(
+    uid: str,
+    *,
+    profile_class: Optional[str],
+) -> None:
+    """Reject synthetic canary traffic unless both rollout and DB authority agree."""
+    if not cloud_synthetic_only():
+        return
+    if uid not in _synthetic_uids():
+        raise ProvisioningError("hermes_cloud_synthetic_identity_required", retryable=False)
+    if str(profile_class or "").strip().lower() != "synthetic":
+        raise ProvisioningError("hermes_cloud_synthetic_profile_required", retryable=False)
 
 
 def _assert_deployed_cloud_consent_policy() -> tuple[str, str, str, str]:

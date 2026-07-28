@@ -117,6 +117,21 @@ def test_preflight_rejects_unexpected_enabled_tool(cloud_env):
     assert error.value.code == "hermes_cloud_tool_drift"
 
 
+def test_preflight_rejects_builtin_memory_for_empty_canary_tool_surface(
+    cloud_env,
+):
+    fake = FakeClient(
+        _preflight_responses(
+            [{"enabled": True, "tools": ["memory"]}],
+        )
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_binding()))
+
+    assert error.value.code == "hermes_cloud_tool_drift"
+
+
 def test_preflight_rejects_missing_or_mismatched_prompt_artifacts(cloud_env):
     missing = _binding()
     missing.pop("prompt_artifact_receipt")
@@ -499,6 +514,7 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
         "omi_uid": "synthetic-user",
         "provider": "hermes_cloud",
         "status": "internal_canary",
+        "profile_class": "synthetic",
         "active": True,
         "health_state": "healthy",
         "profile_name": "synthetic-profile",
@@ -529,6 +545,12 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     with pytest.raises(ProvisioningError) as error:
         runtime_from_binding(binding, "synthetic-user")
     assert error.value.code == "cloud_binding_contains_local_runtime"
+
+    binding["workspace_root"] = None
+    binding["profile_class"] = "real"
+    with pytest.raises(ProvisioningError) as profile:
+        runtime_from_binding(binding, "synthetic-user")
+    assert profile.value.code == "hermes_cloud_synthetic_profile_required"
 
 
 def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_env, monkeypatch):
@@ -720,6 +742,43 @@ def test_responses_api_enforces_tool_allowlist_and_hard_count(cloud_env):
             )
         )
     assert error.value.code == "hermes_cloud_tool_budget_exceeded"
+
+
+def test_responses_api_rejects_memory_call_when_canary_allows_no_tools(
+    cloud_env,
+):
+    url = "https://cloud.example.test/v1/responses"
+    body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "output": [
+            {"type": "function_call", "name": "memory"},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            },
+        ],
+    }
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **kwargs: FakeClient({url: Response(200, body)})
+            ).create_response(
+                _binding(),
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+            )
+        )
+
+    assert error.value.code == "hermes_cloud_unapproved_tool_call"
 
 
 def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch):

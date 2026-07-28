@@ -75,10 +75,27 @@ def test_synthetic_gate_rejects_identity_outside_exact_allowlist(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-a")
 
-    assert_cloud_identity_gate("synthetic-a")
+    assert_cloud_identity_gate("synthetic-a", profile_class="synthetic")
     with pytest.raises(ProvisioningError) as error:
-        assert_cloud_identity_gate("real-user")
+        assert_cloud_identity_gate("real-user", profile_class="synthetic")
     assert error.value.code == "hermes_cloud_synthetic_identity_required"
+
+
+@pytest.mark.parametrize("profile_class", [None, "", "real", "synthetic,real"])
+def test_synthetic_gate_requires_exact_server_profile_class(
+    monkeypatch,
+    profile_class,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "allowlisted-user")
+
+    with pytest.raises(ProvisioningError) as error:
+        assert_cloud_identity_gate(
+            "allowlisted-user",
+            profile_class=profile_class,
+        )
+
+    assert error.value.code == "hermes_cloud_synthetic_profile_required"
 
 
 def test_managed_cloud_gate_requires_exact_policy_and_current_receipt(monkeypatch):

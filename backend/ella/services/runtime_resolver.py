@@ -66,6 +66,7 @@ class IsolatedRuntime:
     revision: int
     policy_commit_sha: str = ""
     approval_manifest_sha256: str = ""
+    profile_class: str = "real"
 
 
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
@@ -108,6 +109,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             raise ProvisioningError("cloud_runtime_receipt_incomplete", retryable=False)
         assert_cloud_identity_gate(
             uid,
+            profile_class=str(binding.get("profile_class") or ""),
             profile_uid=uid,
             runtime_provider=provider,
             model_route=f"openai-codex/{expected_model}",
@@ -171,6 +173,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         approval_manifest_sha256=(
             str(prompt_artifact_receipt.get("approval_manifest_sha256") or "") if provider == "hermes_cloud" else ""
         ),
+        profile_class=str(binding.get("profile_class") or "real").strip().lower(),
     )
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from database.ella_provisioning import EllaProvisioningRepository
 from ella.services.hermes_cloud import HermesCloudPoolManager
+from ella.services.hermes_cloud_policy import cloud_synthetic_only
 
 
 async def register(candidate_path: str) -> dict:
@@ -30,10 +31,7 @@ async def list_pool() -> dict:
         "provider": "hermes_cloud",
         "count": len(rows),
         "bindings": [
-            {
-                key: value.isoformat() if hasattr(value, "isoformat") else value
-                for key, value in row.items()
-            }
+            {key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()}
             for row in rows
         ],
         "content_free": True,
@@ -54,6 +52,7 @@ async def promote(
         binding_id=binding_id,
         expected_revision=expected_revision,
         target_status=target_status,
+        required_profile_class=("synthetic" if cloud_synthetic_only() else "real"),
     )
     return {
         "binding_id": str(row["id"]),

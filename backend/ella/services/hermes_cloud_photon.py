@@ -20,6 +20,7 @@ from ella.services.ai_consent import (
 )
 from ella.services.hermes_cloud_policy import (
     assert_cloud_identity_gate,
+    assert_cloud_synthetic_identity_gate,
     cloud_synthetic_only,
 )
 from ella.services.hermes_cloud_runtime import (
@@ -44,6 +45,10 @@ MANAGED_CLOUD_CONSENT_ERROR_CODES = {
     "managed_cloud_consent_scope_drift",
     "managed_cloud_consent_grant_changed",
     "hermes_cloud_consent_policy_not_deployed",
+}
+PHOTON_DELIVERY_QUARANTINE_ERROR_CODES = MANAGED_CLOUD_CONSENT_ERROR_CODES | {
+    "hermes_cloud_profile_class_changed",
+    "hermes_cloud_synthetic_profile_required",
 }
 
 
@@ -426,7 +431,7 @@ class HermesCloudPhotonAdapter:
             )
             return replay
         except ProvisioningError as exc:
-            if exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+            if exc.code in PHOTON_DELIVERY_QUARANTINE_ERROR_CODES:
                 try:
                     await self.repository.quarantine_photon_delivery_for_consent(
                         receipt_id=str(receipt["id"]),
@@ -454,6 +459,7 @@ class HermesCloudPhotonAdapter:
             )
         current_epoch = assert_cloud_identity_gate(
             self.config.internal_owner_uid,
+            profile_class=str(binding.get("profile_class") or ""),
             profile_uid=self.config.internal_owner_uid,
             runtime_provider=str(binding.get("provider") or ""),
             model_route=f"openai-codex/{expected_model}",
@@ -512,6 +518,28 @@ class HermesCloudPhotonAdapter:
             )
         except RuntimePoolClaimError as exc:
             raise ProvisioningError(exc.code, retryable=False) from exc
+        try:
+            assert_cloud_synthetic_identity_gate(
+                self.config.internal_owner_uid,
+                profile_class=str(binding.get("profile_class") or ""),
+            )
+        except ProvisioningError as exc:
+            if (
+                existing
+                and str(existing.get("status") or "") == "awaiting_delivery"
+                and exc.code in PHOTON_DELIVERY_QUARANTINE_ERROR_CODES
+            ):
+                try:
+                    await self.repository.quarantine_photon_delivery_for_consent(
+                        receipt_id=str(existing["id"]),
+                        error_code=exc.code,
+                    )
+                except RuntimePoolClaimError as conflict:
+                    raise ProvisioningError(
+                        conflict.code,
+                        retryable=False,
+                    ) from conflict
+            raise
         if existing and str(existing.get("status") or "") not in {"claimed", "running"}:
             return await self._replay_with_consent(
                 binding=binding,
@@ -653,7 +681,7 @@ class HermesCloudPhotonAdapter:
             )
             raise ProvisioningError(exc.code, retryable=not provider_started) from exc
         except ProvisioningError as exc:
-            if completed_for_delivery and exc.code in MANAGED_CLOUD_CONSENT_ERROR_CODES:
+            if completed_for_delivery and exc.code in PHOTON_DELIVERY_QUARANTINE_ERROR_CODES:
                 await self.repository.quarantine_photon_delivery_for_consent(
                     receipt_id=receipt_id,
                     error_code=exc.code,

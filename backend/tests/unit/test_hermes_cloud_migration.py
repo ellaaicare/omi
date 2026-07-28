@@ -55,3 +55,15 @@ def test_hermes_cloud_migration_contains_fail_closed_pool_invariants():
             assert fragment in repository
         else:
             assert fragment in migration
+
+
+def test_cloud_profile_classification_defaults_real_and_is_constrained():
+    migration = (
+        (Path(__file__).resolve().parents[2] / "migrations" / "010_add_cloud_profile_class.sql")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+
+    assert "profile_class text not null default 'real'" in migration
+    assert "check (profile_class in ('real', 'synthetic'))" in migration
+    assert "users_profile_class_idx" in migration

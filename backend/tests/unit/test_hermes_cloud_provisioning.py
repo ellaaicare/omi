@@ -29,6 +29,11 @@ class FakeRepository:
         self.rollbacks = []
         self.call_order = []
         self.claim_arguments = []
+        self.profile_class = "synthetic"
+
+    async def get_cloud_profile_class(self, uid):
+        assert uid == "synthetic-user"
+        return self.profile_class
 
     async def get_cloud_pool_admission_policy(self):
         self.call_order.append("admission_policy")
@@ -51,6 +56,7 @@ class FakeRepository:
             "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
             "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
             "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+            "profile_class": self.profile_class,
         }
 
     async def reconcile_cloud_pool_alert(self, **kwargs):
@@ -198,6 +204,7 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
             "admitted_entitlement_revision": 3,
             "provider": "hermes_cloud",
             "model": "model-a",
+            "required_profile_class": "synthetic",
         }
     ]
     assert len(cloud.calls) == 1
@@ -209,6 +216,32 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
     assert repository.jobs[-1]["state"] == "ready"
     assert alert.calls[0]["available"] == 1
     assert repository.delivered_alerts == ["alert-a"]
+
+
+def test_allowlisted_real_profile_is_denied_before_claim_or_vendor_side_effect(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository()
+    repository.profile_class = "real"
+    cloud = FakeCloud()
+    honcho = FakeHoncho()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=cloud,
+        honcho_client=honcho,
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert repository.claims == 0
+    assert cloud.calls == []
+    assert honcho.calls == []
+    assert repository.jobs[-1]["error_code"] == "hermes_cloud_synthetic_profile_required"
 
 
 def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypatch):

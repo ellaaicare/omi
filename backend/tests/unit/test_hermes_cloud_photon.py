@@ -143,6 +143,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         revision=7,
         policy_commit_sha=POLICY_SHA,
         approval_manifest_sha256=MANIFEST_SHA,
+        profile_class="synthetic",
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -160,7 +161,9 @@ class FakeRepository:
             "photon_role": "internal-owner",
             "photon_status": "enabled",
             "provider": "hermes_cloud",
+            "expected_model": "gpt-5.6-terra",
             "status": "internal_canary",
+            "profile_class": "synthetic",
             "active": True,
             "health_state": "healthy",
             "line_identity_key": line_key,
@@ -647,6 +650,62 @@ def test_consent_revoked_after_receipt_completion_quarantines_delivery(monkeypat
     assert len(runtime_service.provider_calls) == 1
 
 
+def test_profile_reclassification_after_completion_quarantines_delivery_permanently():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    original_complete = repository.complete_photon_message
+
+    async def complete_then_reclassify(**kwargs):
+        result = await original_complete(**kwargs)
+        repository.binding["profile_class"] = "real"
+        return result
+
+    repository.complete_photon_message = complete_then_reclassify
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "hermes_cloud_synthetic_profile_required"
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert repository.consent_quarantines[-1]["receipt_id"] == receipt["id"]
+    assert len(runtime_service.provider_calls) == 1
+
+    repository.binding["profile_class"] = "synthetic"
+    with pytest.raises(ProvisioningError) as replay_error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert replay_error.value.code == "photon_message_uncertain"
+    assert receipt["status"] == "uncertain"
+    assert len(runtime_service.provider_calls) == 1
+
+
+def test_profile_reclassification_before_replay_quarantines_stored_output():
+    adapter, repository, runtime_service = _adapter()
+    asyncio.run(adapter.preflight(_preflight()))
+    first = asyncio.run(adapter.handle_inbound(_message()))
+    assert first.status == "awaiting_delivery"
+
+    repository.binding["profile_class"] = "real"
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    receipt = next(iter(repository.messages.values()))
+    assert error.value.code == "hermes_cloud_synthetic_profile_required"
+    assert receipt["status"] == "uncertain"
+    assert receipt["reconciliation_status"] == "manual_required"
+    assert repository.consent_quarantines[-1]["receipt_id"] == receipt["id"]
+
+    repository.binding["profile_class"] = "synthetic"
+    with pytest.raises(ProvisioningError) as restored:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert restored.value.code == "photon_message_uncertain"
+    assert receipt["status"] == "uncertain"
+    assert len(runtime_service.provider_calls) == 1
+
+
 def test_replay_rechecks_consent_and_quarantines_before_returning_text(monkeypatch):
     consent_service, _ = _enable_real_managed_consent(monkeypatch)
     adapter, repository, runtime_service = _adapter()
@@ -861,6 +920,20 @@ def test_synthetic_fixture_is_server_authorized_when_caller_omits_flag(
     assert result.status == "awaiting_delivery"
     assert repository.claim_calls
     assert runtime_service.calls[0][1].client_metadata["synthetic"] is True
+
+
+def test_allowlisted_real_profile_is_denied_before_photon_receipt_or_provider():
+    adapter, repository, runtime_service = _adapter()
+    repository.binding["profile_class"] = "real"
+    asyncio.run(adapter.preflight(_preflight()))
+
+    with pytest.raises(ProvisioningError) as blocked:
+        asyncio.run(adapter.handle_inbound(_message()))
+
+    assert blocked.value.code == "hermes_cloud_synthetic_profile_required"
+    assert repository.claim_calls == []
+    assert repository.quota_calls == []
+    assert runtime_service.calls == []
 
 
 def test_tool_drift_and_allow_all_fail_preflight():

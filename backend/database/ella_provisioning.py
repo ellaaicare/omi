@@ -29,6 +29,7 @@ REQUIRED_PROVISIONING_INDEXES = (
     "ella_runtime_bindings_health_updated_idx",
 )
 REQUIRED_CLOUD_RUNTIME_INDEXES = (
+    "users_profile_class_idx",
     "ella_runtime_bindings_runtime_instance_key",
     "ella_runtime_bindings_claim_job_key",
     "ella_runtime_bindings_claim_token_key",
@@ -86,10 +87,12 @@ REQUIRED_CLOUD_PROVISIONING_JOB_COLUMNS = (
     "rollback_receipt",
     "manual_intervention_at",
 )
+REQUIRED_CLOUD_USER_COLUMNS = ("profile_class",)
 REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_claim_job_id_fkey",
     "ella_runtime_bindings_status_check",
     "ella_runtime_bindings_cloud_pool_shape_check",
+    "users_profile_class_check",
 )
 
 
@@ -242,6 +245,18 @@ class EllaProvisioningRepository:
                     )
                     ORDER BY required.constraint_name
                 ) AS missing_constraints,
+                ARRAY(
+                    SELECT required.column_name
+                    FROM unnest($6::text[]) AS required(column_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'users'
+                          AND column_name = required.column_name
+                    )
+                    ORDER BY required.column_name
+                ) AS missing_user_columns,
                 (
                     SELECT is_nullable
                     FROM information_schema.columns
@@ -255,6 +270,7 @@ class EllaProvisioningRepository:
             list(REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS),
             list(REQUIRED_CLOUD_RUNTIME_CONSTRAINTS),
             list(REQUIRED_CLOUD_PROVISIONING_JOB_COLUMNS),
+            list(REQUIRED_CLOUD_USER_COLUMNS),
         )
         missing: list[str] = []
         if row:
@@ -262,6 +278,7 @@ class EllaProvisioningRepository:
             missing.extend(f"index:{name}" for name in (row["missing_indexes"] or []))
             missing.extend(f"column:ella_runtime_bindings.{name}" for name in (row["missing_columns"] or []))
             missing.extend(f"column:ella_provisioning_jobs.{name}" for name in (row["missing_job_columns"] or []))
+            missing.extend(f"column:users.{name}" for name in (row["missing_user_columns"] or []))
             missing.extend(f"constraint:{name}" for name in (row["missing_constraints"] or []))
             if row["binding_user_nullable"] != "YES":
                 missing.append("column:ella_runtime_bindings.user_id_nullable")
@@ -520,6 +537,22 @@ class EllaProvisioningRepository:
         model, policy = next(iter(policies))
         return {"provider": "hermes_cloud", "model": model, "model_policy_version": policy}
 
+    async def get_cloud_profile_class(self, uid: str) -> str:
+        row = await self.pool.fetchrow(
+            """
+            SELECT profile_class
+            FROM users
+            WHERE omi_uid = $1
+            """,
+            uid,
+        )
+        if not row:
+            raise RuntimePoolClaimError("cloud_profile_class_missing")
+        profile_class = str(row["profile_class"] or "").strip().lower()
+        if profile_class not in {"real", "synthetic"}:
+            raise RuntimePoolClaimError("cloud_profile_class_invalid")
+        return profile_class
+
     async def register_cloud_pool_binding(
         self,
         *,
@@ -615,6 +648,7 @@ class EllaProvisioningRepository:
         admitted_entitlement_revision: int,
         provider: str,
         model: str,
+        required_profile_class: str,
     ) -> Optional[dict[str, Any]]:
         """Atomically reserve one healthy unbound Hermes Cloud instance.
 
@@ -622,6 +656,8 @@ class EllaProvisioningRepository:
         Claims are never recycled automatically after external side effects.
         """
         claim_token = uuid.uuid4()
+        if required_profile_class not in {"real", "synthetic"}:
+            raise RuntimePoolClaimError("cloud_profile_class_invalid")
         lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(30, lease_seconds))
         job_uuid = uuid.UUID(str(job_id))
         async with self.pool.acquire() as connection:
@@ -637,27 +673,31 @@ class EllaProvisioningRepository:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
                 existing = await connection.fetchrow(
                     """
-                    SELECT b.*, u.omi_uid
+                    SELECT b.*, u.omi_uid, u.profile_class
                     FROM ella_runtime_bindings b
                     JOIN users u ON u.id = b.user_id
                     WHERE u.omi_uid = $1
                       AND b.provider = 'hermes_cloud'
                       AND b.claim_job_id = $2
                       AND b.status IN ('claiming', 'shadow', 'internal_canary', 'active')
+                      AND u.profile_class = $3
                     FOR UPDATE
                     """,
                     uid,
                     job_uuid,
+                    required_profile_class,
                 )
                 if existing:
                     return dict(existing)
 
                 user_row = await connection.fetchrow(
-                    "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
+                    "SELECT id, profile_class FROM users WHERE omi_uid = $1 FOR UPDATE",
                     uid,
                 )
                 if not user_row:
                     raise LookupError("user_not_found")
+                if str(user_row["profile_class"] or "").strip().lower() != required_profile_class:
+                    raise RuntimePoolClaimError("hermes_cloud_synthetic_profile_required")
 
                 candidate = await connection.fetchrow("""
                     SELECT *
@@ -711,6 +751,7 @@ class EllaProvisioningRepository:
                     return None
                 result = dict(claimed)
                 result["omi_uid"] = uid
+                result["profile_class"] = required_profile_class
                 return result
 
     async def finalize_cloud_pool_claim(
@@ -1002,7 +1043,7 @@ class EllaProvisioningRepository:
     async def resolve_cloud_binding_state(self, uid: str, role: str = "user") -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
-            SELECT b.*, u.omi_uid, u.name, u.status AS user_status
+            SELECT b.*, u.omi_uid, u.name, u.status AS user_status, u.profile_class
             FROM ella_runtime_bindings b
             JOIN users u ON u.id = b.user_id
             WHERE u.omi_uid = $1
@@ -1023,10 +1064,13 @@ class EllaProvisioningRepository:
         binding_id: str,
         expected_revision: int,
         target_status: str,
+        required_profile_class: str,
     ) -> dict[str, Any]:
         """Promote a shadow binding through an explicit revision-checked CAS."""
         if target_status not in {"internal_canary", "active"}:
             raise ValueError("invalid_cloud_promotion_status")
+        if required_profile_class not in {"real", "synthetic"}:
+            raise ValueError("invalid_cloud_profile_class")
         row = await self.pool.fetchrow(
             """
             UPDATE ella_runtime_bindings b
@@ -1043,12 +1087,14 @@ class EllaProvisioningRepository:
               AND b.active = false
               AND b.revision = $3
               AND b.health_state = 'healthy'
+              AND u.profile_class = $5
             RETURNING b.*
             """,
             uuid.UUID(str(binding_id)),
             uid,
             int(expected_revision),
             target_status,
+            required_profile_class,
         )
         if not row:
             raise RuntimePoolClaimError("runtime_cloud_promotion_conflict")
@@ -1432,7 +1478,8 @@ class EllaProvisioningRepository:
                 p.sidecar_connected_at,
                 p.oauth_expires_at,
                 p.preflight_receipt AS photon_preflight_receipt,
-                u.omi_uid
+                u.omi_uid,
+                u.profile_class
             FROM ella_photon_channel_bindings p
             JOIN ella_runtime_bindings b ON b.id = p.runtime_binding_id
             JOIN users u ON u.id = p.user_id AND u.id = b.user_id
@@ -2134,7 +2181,7 @@ class EllaProvisioningRepository:
     ) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
-            SELECT b.*, u.omi_uid, u.name, u.status AS user_status
+            SELECT b.*, u.omi_uid, u.name, u.status AS user_status, u.profile_class
             FROM ella_runtime_bindings b
             JOIN users u ON u.id = b.user_id
             WHERE u.omi_uid = $1
