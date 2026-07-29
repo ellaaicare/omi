@@ -576,6 +576,98 @@ def test_pool_registration_rejects_candidate_policy_self_attestation():
     assert error.value.code == "hermes_cloud_candidate_policy_forbidden"
 
 
+def test_pool_registration_uses_exact_staged_attestation_without_direct_preflight():
+    class Repository:
+        async def get_user_identity(self, uid):
+            assert uid == "synthetic-canary"
+            return {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "status": "ACTIVE",
+                "profile_class": "synthetic",
+            }
+
+        async def register_cloud_pool_binding(self, **kwargs):
+            assert kwargs["health_receipt"]["preflight_source"] == "server_staged_attestation"
+            return {
+                "id": "binding-a",
+                "runtime_instance_id": "instance-a",
+                "status": "pool_available",
+                "health_state": "healthy",
+                "_registration_idempotent": False,
+            }
+
+    class Cloud:
+        async def preflight(self, candidate):
+            raise AssertionError("direct Nous preflight must not run for the staged canary")
+
+    class Verifier:
+        def preflight(self, binding, **kwargs):
+            assert kwargs["phase"] == "pool_registration"
+            assert kwargs["account_id"] == "11111111-1111-4111-8111-111111111111"
+            return {
+                "model": binding["expected_model"],
+                "tools": list(binding["allowed_tools"]),
+                "capabilities": list(binding["required_capabilities"]),
+                "prompt_artifacts": binding["prompt_artifact_receipt"],
+                "preflight_source": "server_staged_attestation",
+                "staged_attestation": {
+                    "attestation_id": "attestation-canary",
+                    "receipt_sha256": "d" * 64,
+                    "phase": "pool_registration",
+                },
+                "content_free": True,
+            }
+
+    artifact_hash = "a" * 64
+    manifest = ApprovedRuntimeManifest(
+        policy_commit_sha="b" * 40,
+        lane_s_review_url="https://github.com/ellaaicare/ella-ai/issues/1136",
+        prompt_pack_version="prompt-v1",
+        model_policy_version="models-v1",
+        expected_model="model-a",
+        model_context_window_tokens=16384,
+        allowed_tools=(),
+        required_capabilities=("responses_api", "session_key_header"),
+        artifact_sha256={"soul": artifact_hash, "agents": artifact_hash, "model_policy": artifact_hash},
+        manifest_sha256="c" * 64,
+    )
+
+    class ManifestStore:
+        def load(self):
+            return manifest
+
+    result = asyncio.run(
+        HermesCloudPoolManager(
+            repository=Repository(),
+            cloud_client=Cloud(),
+            manifest_store=ManifestStore(),
+            staged_attestation_verifier=Verifier(),
+        ).register(
+            {
+                "synthetic_uid": "synthetic-canary",
+                "account_id": "11111111-1111-4111-8111-111111111111",
+                "profile_id": "11111111-1111-4111-8111-111111111111",
+                "staged_attestation_ref": "/var/lib/ella/hermes-cloud-attestations/canary.json",
+                "runtime_instance_id": "instance-a",
+                "profile_name": "pool-instance-a",
+                "agent_id": "hermes-cloud",
+                "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+                "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+                "template_version": "hermes-cloud-user-v1",
+                "voice_policy_version": "voice-v1",
+                "observed_prompt_artifacts": {
+                    "soul_sha256": artifact_hash,
+                    "agents_sha256": artifact_hash,
+                    "model_policy_sha256": artifact_hash,
+                },
+            }
+        )
+    )
+
+    assert result["staged_attestation"]["attestation_id"] == "attestation-canary"
+    assert result["rollback"]["binding_id"] == "binding-a"
+
+
 def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud_env):
     binding = {
         **_binding(),

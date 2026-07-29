@@ -436,7 +436,7 @@ class EllaProvisioningRepository:
     async def get_user_identity(self, uid: str) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
-            SELECT id, omi_uid, email, name, timezone, status
+            SELECT id, omi_uid, email, name, timezone, status, profile_class
             FROM users
             WHERE omi_uid = $1
             """,
@@ -566,8 +566,7 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def get_cloud_pool_admission_policy(self) -> Optional[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT DISTINCT expected_model, model_policy_version
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
@@ -575,8 +574,7 @@ class EllaProvisioningRepository:
               AND health_state = 'healthy'
               AND active = false
               AND user_id IS NULL
-            """
-        )
+            """)
         if not rows:
             return None
         policies = {(str(row["expected_model"] or ""), str(row["model_policy_version"] or "")) for row in rows}
@@ -661,7 +659,9 @@ class EllaProvisioningRepository:
             json.dumps(health_receipt),
         )
         if row:
-            return dict(row)
+            result = dict(row)
+            result["_registration_idempotent"] = False
+            return result
         existing = await self.pool.fetchrow(
             """
             SELECT *
@@ -674,19 +674,44 @@ class EllaProvisioningRepository:
             raise RuntimePoolClaimError("runtime_pool_registration_lost")
         if existing["status"] != "pool_available" or existing["user_id"] is not None:
             raise RuntimePoolClaimError("runtime_instance_already_claimed")
-        return dict(existing)
+        result = dict(existing)
+        result["_registration_idempotent"] = True
+        return result
+
+    async def cleanup_cloud_pool_binding(
+        self,
+        *,
+        binding_id: str,
+        runtime_instance_id: str,
+    ) -> dict[str, Any]:
+        """Delete exactly one still-unclaimed pool row for operator rollback."""
+        row = await self.pool.fetchrow(
+            """
+            DELETE FROM ella_runtime_bindings
+            WHERE id = $1
+              AND runtime_instance_id = $2
+              AND provider = 'hermes_cloud'
+              AND status = 'pool_available'
+              AND user_id IS NULL
+              AND active = false
+            RETURNING id, runtime_instance_id
+            """,
+            uuid.UUID(str(binding_id)),
+            runtime_instance_id,
+        )
+        if not row:
+            raise RuntimePoolClaimError("runtime_pool_cleanup_refused")
+        return dict(row)
 
     async def list_cloud_pool_bindings(self) -> list[dict[str, Any]]:
-        rows = await self.pool.fetch(
-            """
+        rows = await self.pool.fetch("""
             SELECT id, runtime_instance_id, status, health_state, expected_model,
                    prompt_pack_version, revision, claimed_at, quarantined_at,
                    quarantine_reason, created_at, updated_at
             FROM ella_runtime_bindings
             WHERE provider = 'hermes_cloud'
             ORDER BY created_at ASC, id ASC
-            """
-        )
+            """)
         return [dict(row) for row in rows]
 
     async def claim_cloud_pool_binding(
@@ -780,10 +805,20 @@ class EllaProvisioningRepository:
                       AND expected_model IS NOT NULL
                       AND jsonb_typeof(allowed_tools) = 'array'
                       AND jsonb_typeof(required_capabilities) = 'array'
+                      AND (
+                            health_receipt->'staged_attestation' IS NULL
+                            OR (
+                                health_receipt #>> '{staged_attestation,uid}' = $1
+                                AND health_receipt #>> '{staged_attestation,account_id}' = $2
+                                AND health_receipt #>> '{staged_attestation,profile_id}' = $2
+                            )
+                      )
                     ORDER BY updated_at ASC, id ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
-                    """
+                    """,
+                    uid,
+                    str(user_row["id"]),
                 )
                 if not candidate:
                     return None
@@ -797,7 +832,14 @@ class EllaProvisioningRepository:
                         claim_lease_expires_at = $5,
                         status = 'claiming',
                         health_state = 'pending',
-                        health_receipt = '{}'::jsonb,
+                        health_receipt = CASE
+                            WHEN health_receipt->'staged_attestation' IS NOT NULL
+                            THEN jsonb_build_object(
+                                'staged_attestation',
+                                health_receipt->'staged_attestation'
+                            )
+                            ELSE '{}'::jsonb
+                        END,
                         quarantine_reason = NULL,
                         quarantined_at = NULL,
                         revision = revision + 1,

@@ -104,3 +104,54 @@ SELECT conname FROM pg_constraint WHERE conname IN (
 Rollback is source/config only while flags remain off. If a claim reaches
 `claiming`, rollback quarantines the candidate and records a content-free receipt;
 it does not attempt Honcho cleanup because Cloud memory is not Honcho-backed.
+
+## One-account staged-attestation exception
+
+Use this only for the isolated synthetic canary when Nous direct
+`/health/detailed` and `/v1/*` preflight are unavailable. Normal candidates
+continue through live direct preflight.
+
+The protected receipt reference must be an immediate child of
+`/var/lib/ella/hermes-cloud-attestations`, whose directory is root:root `0700`.
+The receipt must be a regular, single-link, root-owned `0400` or `0600` JSON
+file. It is content-free: no URL, credential, token, payload, or secret.
+Its exact `ella-hermes-cloud-staged-attestation-v1` fields pin:
+
+- attestation/issue/expiry metadata and
+  `stage=pool_registration_and_claim_finalization`;
+- exact synthetic UID plus canonical account/profile UUIDs;
+- runtime instance, template, voice policy, model, tools, capabilities, prompt
+  pack/model policy, and context window;
+- policy commit, approved-manifest SHA-256, and the three prompt artifact
+  SHA-256 values.
+
+Activation uses the existing root-run CLI with a protected candidate JSON. The
+candidate adds only `synthetic_uid`, `account_id`, `profile_id`, and
+`staged_attestation_ref`; secret values remain behind the existing `env:` refs:
+
+```bash
+python backend/scripts/hermes_cloud_pool_admin.py register \
+  --candidate /var/lib/ella/hermes-cloud-attestations/canary-candidate.json
+```
+
+`ELLA_HERMES_CLOUD_STAGED_ATTESTATION_ENABLED=true` and
+`ELLA_HERMES_CLOUD_SYNTHETIC_ONLY=true` are required. Every ordinary global
+rollout flag listed above remains false, and each of these selectors must equal
+the one UID: `ELLA_RUNTIME_BINDINGS_ENABLED_UIDS`,
+`ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS`,
+`ELLA_HERMES_CLOUD_SYNTHETIC_UIDS`, and
+`ELLA_AI_CONSENT_ENFORCEMENT_UIDS`.
+
+Registration emits only binding, attestation digest/id, and exact rollback IDs.
+Before claim finalization, OMI reopens the same protected receipt and rechecks
+all pins. Roll back an unclaimed registration without SQL:
+
+```bash
+python backend/scripts/hermes_cloud_pool_admin.py cleanup \
+  --binding-id <exact-binding-uuid> \
+  --runtime-instance-id <exact-runtime-instance-id>
+```
+
+After a claim starts, the existing fail-closed quarantine/rollback receipt owns
+recovery. General multi-user attestations, replay registries, and leases remain
+deferred to `ellaaicare/ella-ai#1157`.

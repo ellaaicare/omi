@@ -19,6 +19,7 @@ from ella.services.hermes_cloud_policy import (
     assert_cloud_operator_gate,
     observed_artifacts,
 )
+from ella.services.hermes_cloud_staged_attestation import StagedAttestationVerifier
 from ella.services.runtime_errors import ProvisioningError
 
 CLOUD_SECRET_REF_RE = re.compile(
@@ -716,10 +717,12 @@ class HermesCloudPoolManager:
         repository: Any,
         cloud_client: Optional[HermesCloudClient] = None,
         manifest_store: Optional[ApprovedRuntimeManifestStore] = None,
+        staged_attestation_verifier: Optional[StagedAttestationVerifier] = None,
     ):
         self.repository = repository
         self.cloud_client = cloud_client or HermesCloudClient()
         self.manifest_store = manifest_store or ApprovedRuntimeManifestStore()
+        self.staged_attestation_verifier = staged_attestation_verifier or StagedAttestationVerifier()
 
     async def register(self, candidate: dict[str, Any]) -> dict[str, Any]:
         assert_cloud_operator_gate()
@@ -750,7 +753,43 @@ class HermesCloudPoolManager:
             "required_capabilities": list(manifest.required_capabilities),
             "prompt_artifact_receipt": manifest.binding_receipt(observed),
         }
-        preflight = await self.cloud_client.preflight(effective_candidate)
+        staged_fields = {
+            "synthetic_uid",
+            "account_id",
+            "profile_id",
+            "staged_attestation_ref",
+        }
+        supplied_staged_fields = staged_fields.intersection(candidate)
+        if supplied_staged_fields and supplied_staged_fields != staged_fields:
+            raise ProvisioningError("hermes_cloud_staged_attestation_missing", retryable=False)
+        if supplied_staged_fields:
+            uid = str(candidate["synthetic_uid"])
+            identity = await self.repository.get_user_identity(uid)
+            if (
+                not identity
+                or str(identity.get("status") or "") != "ACTIVE"
+                or str(identity.get("profile_class") or "") != "synthetic"
+                or str(identity.get("id") or "") != str(candidate["account_id"])
+                or str(identity.get("id") or "") != str(candidate["profile_id"])
+            ):
+                raise ProvisioningError("hermes_cloud_staged_attestation_identity_mismatch", retryable=False)
+            staged_receipt = self.staged_attestation_verifier.preflight(
+                effective_candidate,
+                receipt_ref=str(candidate["staged_attestation_ref"]),
+                uid=uid,
+                account_id=str(candidate["account_id"]),
+                profile_id=str(candidate["profile_id"]),
+                profile_class=str(identity["profile_class"]),
+                phase="pool_registration",
+            )
+            preflight = HermesCloudPreflight(
+                model=str(staged_receipt["model"]),
+                tools=tuple(staged_receipt["tools"]),
+                capabilities=tuple(staged_receipt["capabilities"]),
+                receipt=staged_receipt,
+            )
+        else:
+            preflight = await self.cloud_client.preflight(effective_candidate)
         binding = await self.repository.register_cloud_pool_binding(
             runtime_instance_id=str(candidate["runtime_instance_id"]),
             profile_name=str(candidate["profile_name"]),
@@ -767,7 +806,9 @@ class HermesCloudPoolManager:
             required_capabilities=list(preflight.capabilities),
             health_receipt=preflight.receipt,
         )
-        return {
+        if supplied_staged_fields and binding.pop("_registration_idempotent", False):
+            raise ProvisioningError("hermes_cloud_staged_attestation_replay", retryable=False)
+        result = {
             "binding_id": str(binding["id"]),
             "runtime_instance_id": str(binding["runtime_instance_id"]),
             "status": str(binding["status"]),
@@ -778,3 +819,18 @@ class HermesCloudPoolManager:
             "capabilities": list(preflight.capabilities),
             "content_free": True,
         }
+        staged_marker = preflight.receipt.get("staged_attestation")
+        if isinstance(staged_marker, dict):
+            result["staged_attestation"] = {
+                "attestation_id": staged_marker["attestation_id"],
+                "receipt_sha256": staged_marker["receipt_sha256"],
+                "phase": staged_marker["phase"],
+                "content_free": True,
+            }
+            result["rollback"] = {
+                "action": "cleanup_pool_binding",
+                "binding_id": str(binding["id"]),
+                "runtime_instance_id": str(binding["runtime_instance_id"]),
+                "content_free": True,
+            }
+        return result
