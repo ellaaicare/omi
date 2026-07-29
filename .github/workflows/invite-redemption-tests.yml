@@ -3,6 +3,8 @@ name: Invite Redemption Tests
 on:
   pull_request:
     paths:
+      - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/database/authority_advisory_lock.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -25,6 +27,8 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/database/authority_advisory_lock.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -94,6 +98,7 @@ jobs:
       - name: Compile invite and entitlement modules
         run: >-
           python -m py_compile
+          database/authority_advisory_lock.py
           database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py
@@ -114,7 +119,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 42
+          test "$collected" -eq 44
           pytest \
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_voice_canary.py \

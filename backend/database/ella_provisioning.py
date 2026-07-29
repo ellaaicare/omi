@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import authority_advisory_lock
 from database import voice_canary as voice_canary_db
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
@@ -346,16 +347,24 @@ class EllaProvisioningRepository:
             raise IdentityConflictError("identity_missing_email")
 
         async with self.pool.acquire() as connection:
+            resolution = await authority_advisory_lock.resolve_identity_owner_unlocked(
+                connection,
+                uid=uid,
+                email=email,
+            )
             async with connection.transaction():
-                by_uid = await connection.fetchrow(
-                    """
-                    SELECT id, omi_uid, email, name, timezone
-                    FROM users
-                    WHERE omi_uid = $1
-                    FOR UPDATE
-                    """,
-                    uid,
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=resolution.owner,
                 )
+                identity_rows = await authority_advisory_lock.verify_identity_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    email=email,
+                    resolution=resolution,
+                    proof=owner_lock,
+                )
+                by_uid = next((row for row in identity_rows if row["omi_uid"] == uid), None)
                 if by_uid:
                     if str(by_uid["email"]).lower() != email.lower():
                         raise IdentityConflictError("uid_email_mismatch")
@@ -376,14 +385,9 @@ class EllaProvisioningRepository:
                     )
                     return dict(updated)
 
-                by_email = await connection.fetchrow(
-                    """
-                    SELECT id, omi_uid, email
-                    FROM users
-                    WHERE lower(email) = lower($1)
-                    FOR UPDATE
-                    """,
-                    email,
+                by_email = next(
+                    (row for row in identity_rows if str(row["email"] or "").lower() == email.lower()),
+                    None,
                 )
                 if by_email:
                     existing_uid = by_email["omi_uid"]
@@ -392,16 +396,15 @@ class EllaProvisioningRepository:
                     updated = await connection.fetchrow(
                         """
                         UPDATE users
-                        SET omi_uid = $2,
-                            name = $3,
-                            timezone = $4,
+                        SET omi_uid = $1,
+                            name = $2,
+                            timezone = $3,
                             identities = COALESCE(identities, '{}'::jsonb)
-                                || jsonb_build_object('omi_uid', $2::text, 'email', email),
+                                || jsonb_build_object('omi_uid', $1::text, 'email', email),
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = $5
+                        WHERE id = $4
                         RETURNING id, omi_uid, email, name, timezone, status
                         """,
-                        email,
                         uid,
                         name,
                         timezone_name,
@@ -409,7 +412,6 @@ class EllaProvisioningRepository:
                     )
                     return dict(updated)
 
-                user_id = uuid.uuid4()
                 inserted = await connection.fetchrow(
                     """
                     INSERT INTO users (
@@ -423,7 +425,7 @@ class EllaProvisioningRepository:
                     )
                     RETURNING id, omi_uid, email, name, timezone, status
                     """,
-                    user_id,
+                    resolution.owner.account_id,
                     email,
                     name,
                     timezone_name,
@@ -709,7 +711,15 @@ class EllaProvisioningRepository:
         lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(30, lease_seconds))
         job_uuid = uuid.UUID(str(job_id))
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -719,6 +729,12 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
                 existing = await connection.fetchrow(
                     """
                     SELECT b.*, u.omi_uid, u.profile_class
@@ -835,7 +851,15 @@ class EllaProvisioningRepository:
         job_uuid = uuid.UUID(str(job_id))
         token_uuid = uuid.UUID(str(claim_token))
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -847,6 +871,12 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
                 entitlement = admission.entitlement or {}
                 if (
                     str(entitlement.get("consent_policy_version") or "") != lineage.policy_version
@@ -1086,7 +1116,21 @@ class EllaProvisioningRepository:
         health_receipt: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
                 selected = await connection.fetchrow(
                     """
                     SELECT b.*
@@ -1272,7 +1316,15 @@ class EllaProvisioningRepository:
             raise ValueError("invalid_cloud_runtime_policy")
         lineage = authority_lineage.validate()
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -1284,6 +1336,12 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
                 entitlement = admission.entitlement or {}
                 if (
                     str(entitlement.get("consent_policy_version") or "") != lineage.policy_version
@@ -2305,63 +2363,79 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO ella_runtime_bindings (
-                id, user_id, role, provider, profile_name, agent_id, workspace_root,
-                internal_gateway_url, gateway_port, service_label, credential_ref,
-                honcho_workspace, observed_peer, observer_peer, template_version,
-                model_policy_version, voice_policy_version, health_state,
-                health_receipt, revision, active
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
             )
-            SELECT
-                $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
-            FROM users u
-            WHERE u.omi_uid = $2
-            ON CONFLICT (user_id, role, provider)
-            WHERE provider <> 'hermes_cloud'
-            DO UPDATE
-            SET profile_name = EXCLUDED.profile_name,
-                agent_id = EXCLUDED.agent_id,
-                workspace_root = EXCLUDED.workspace_root,
-                internal_gateway_url = EXCLUDED.internal_gateway_url,
-                gateway_port = EXCLUDED.gateway_port,
-                service_label = EXCLUDED.service_label,
-                credential_ref = EXCLUDED.credential_ref,
-                honcho_workspace = EXCLUDED.honcho_workspace,
-                observed_peer = EXCLUDED.observed_peer,
-                observer_peer = EXCLUDED.observer_peer,
-                template_version = EXCLUDED.template_version,
-                model_policy_version = EXCLUDED.model_policy_version,
-                voice_policy_version = EXCLUDED.voice_policy_version,
-                health_state = EXCLUDED.health_state,
-                health_receipt = EXCLUDED.health_receipt,
-                revision = ella_runtime_bindings.revision + 1,
-                active = ella_runtime_bindings.active,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING *
-            """,
-            uuid.uuid4(),
-            uid,
-            binding.get("role", "user"),
-            binding["provider"],
-            binding.get("profile_name"),
-            binding["agent_id"],
-            binding.get("workspace_root"),
-            binding.get("internal_gateway_url"),
-            binding.get("gateway_port"),
-            binding.get("service_label"),
-            binding.get("credential_ref"),
-            binding.get("honcho_workspace"),
-            binding.get("observed_peer"),
-            binding.get("observer_peer"),
-            binding["template_version"],
-            binding["model_policy_version"],
-            binding["voice_policy_version"],
-            binding.get("health_state", "pending"),
-            json.dumps(binding.get("health_receipt") or {}),
-        )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_runtime_bindings (
+                        id, user_id, role, provider, profile_name, agent_id, workspace_root,
+                        internal_gateway_url, gateway_port, service_label, credential_ref,
+                        honcho_workspace, observed_peer, observer_peer, template_version,
+                        model_policy_version, voice_policy_version, health_state,
+                        health_receipt, revision, active
+                    )
+                    SELECT
+                        $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
+                    FROM users u
+                    WHERE u.omi_uid = $2
+                    ON CONFLICT (user_id, role, provider)
+                    WHERE provider <> 'hermes_cloud'
+                    DO UPDATE
+                    SET profile_name = EXCLUDED.profile_name,
+                        agent_id = EXCLUDED.agent_id,
+                        workspace_root = EXCLUDED.workspace_root,
+                        internal_gateway_url = EXCLUDED.internal_gateway_url,
+                        gateway_port = EXCLUDED.gateway_port,
+                        service_label = EXCLUDED.service_label,
+                        credential_ref = EXCLUDED.credential_ref,
+                        honcho_workspace = EXCLUDED.honcho_workspace,
+                        observed_peer = EXCLUDED.observed_peer,
+                        observer_peer = EXCLUDED.observer_peer,
+                        template_version = EXCLUDED.template_version,
+                        model_policy_version = EXCLUDED.model_policy_version,
+                        voice_policy_version = EXCLUDED.voice_policy_version,
+                        health_state = EXCLUDED.health_state,
+                        health_receipt = EXCLUDED.health_receipt,
+                        revision = ella_runtime_bindings.revision + 1,
+                        active = ella_runtime_bindings.active,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    uuid.uuid4(),
+                    uid,
+                    binding.get("role", "user"),
+                    binding["provider"],
+                    binding.get("profile_name"),
+                    binding["agent_id"],
+                    binding.get("workspace_root"),
+                    binding.get("internal_gateway_url"),
+                    binding.get("gateway_port"),
+                    binding.get("service_label"),
+                    binding.get("credential_ref"),
+                    binding.get("honcho_workspace"),
+                    binding.get("observed_peer"),
+                    binding.get("observer_peer"),
+                    binding["template_version"],
+                    binding["model_policy_version"],
+                    binding["voice_policy_version"],
+                    binding.get("health_state", "pending"),
+                    json.dumps(binding.get("health_receipt") or {}),
+                )
         if not row:
             raise LookupError("user_not_found")
         return dict(row)
@@ -2374,7 +2448,21 @@ class EllaProvisioningRepository:
         role: str = "user",
     ) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
                 selected = await connection.fetchrow(
                     """
                     SELECT b.*
@@ -2423,14 +2511,30 @@ class EllaProvisioningRepository:
                 return dict(activated)
 
     async def activate_user(self, uid: str) -> None:
-        result = await self.pool.execute(
-            """
-            UPDATE users
-            SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
-            WHERE omi_uid = $1
-            """,
-            uid,
-        )
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                result = await connection.execute(
+                    """
+                    UPDATE users
+                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    WHERE omi_uid = $1
+                    """,
+                    uid,
+                )
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
 

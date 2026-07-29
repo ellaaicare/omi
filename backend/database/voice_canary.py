@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import authority_advisory_lock
+
 DEFAULT_DAILY_LIMIT_S = 45 * 60
 DEFAULT_MONTHLY_LIMIT_S = 12 * 60 * 60
 DEFAULT_MAX_SESSION_S = 20 * 60
@@ -475,6 +477,112 @@ async def get_entitlement(uid: str) -> Optional[dict[str, Any]]:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
         return _record_dict(row) or None
+
+
+async def upsert_entitlement(
+    *,
+    uid: str,
+    plan: str,
+    daily_limit_s: int,
+    monthly_limit_s: int,
+    max_session_s: int,
+    max_concurrent: int,
+    soft_limit_ratio: float,
+    provider_allowlist: list[str],
+    mode_allowlist: list[str],
+    fallback_policy: dict[str, Any],
+    operator_note: str,
+) -> dict[str, Any]:
+    """Create or reactivate an entitlement under the cross-service owner lock."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
+        async with conn.transaction():
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
+            await lock_runtime_authority_on_connection(conn, uid=uid)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO voice_entitlements (
+                    uid, status, plan, daily_limit_s, monthly_limit_s,
+                    max_session_s, max_concurrent, soft_limit_ratio,
+                    provider_allowlist, mode_allowlist, fallback_policy, operator_note
+                ) VALUES (
+                    $1, 'active', $2, $3, $4, $5, $6, $7, $8::text[], $9::text[],
+                    $10::jsonb, $11
+                )
+                ON CONFLICT (uid) DO UPDATE SET
+                    status = 'active',
+                    plan = EXCLUDED.plan,
+                    revision = voice_entitlements.revision + 1,
+                    daily_limit_s = EXCLUDED.daily_limit_s,
+                    monthly_limit_s = EXCLUDED.monthly_limit_s,
+                    max_session_s = EXCLUDED.max_session_s,
+                    max_concurrent = EXCLUDED.max_concurrent,
+                    soft_limit_ratio = EXCLUDED.soft_limit_ratio,
+                    provider_allowlist = EXCLUDED.provider_allowlist,
+                    mode_allowlist = EXCLUDED.mode_allowlist,
+                    fallback_policy = EXCLUDED.fallback_policy,
+                    operator_note = EXCLUDED.operator_note,
+                    updated_at = NOW()
+                RETURNING *
+                """,
+                uid,
+                plan,
+                daily_limit_s,
+                monthly_limit_s,
+                max_session_s,
+                max_concurrent,
+                soft_limit_ratio,
+                provider_allowlist,
+                mode_allowlist,
+                json.dumps(fallback_policy),
+                operator_note,
+            )
+            return _record_dict(row)
+
+
+async def update_entitlement_status(
+    *,
+    uid: str,
+    status: str,
+    operator_note: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Suspend, revoke, or expire an entitlement under the shared owner lock."""
+    if status not in {"suspended", "revoked", "expired"}:
+        raise ValueError("invalid_entitlement_status")
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
+        async with conn.transaction():
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
+            await lock_runtime_authority_on_connection(conn, uid=uid)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
+            row = await conn.fetchrow(
+                """
+                UPDATE voice_entitlements
+                SET status = $2,
+                    revision = revision + 1,
+                    operator_note = COALESCE($3, operator_note),
+                    updated_at = NOW()
+                WHERE uid = $1
+                RETURNING *
+                """,
+                uid,
+                status,
+                operator_note,
+            )
+            return _record_dict(row) or None
 
 
 async def _runtime_activation_decision(
@@ -1389,8 +1497,16 @@ async def delete_user_voice_data(uid: str) -> dict[str, int]:
     """Deletion exception to the append-only rule, used by the operator receipt."""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
         async with conn.transaction():
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
             counts = {
                 "active_sessions": _as_int(
                     await conn.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid)
