@@ -15,7 +15,6 @@ Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 import base64
 import binascii
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -38,6 +37,8 @@ from ella.services.ai_consent import assert_current_ai_consent
 from ella.services.hermes_cloud import HermesCloudClient
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import (
+    cloud_runtime_authority_identity,
+    revalidate_cloud_runtime_authority,
     resolve_isolated_runtime,
     runtime_authority_enabled,
 )
@@ -1179,6 +1180,7 @@ Rules:
     )
 
     if runtime is not None and runtime.provider == "hermes_cloud":
+        runtime_identity = cloud_runtime_authority_identity(runtime)
         digest = hashlib.sha256(
             json.dumps(
                 {
@@ -1194,38 +1196,9 @@ Rules:
         ).hexdigest()
         session_key = "guardian-" + hashlib.sha256(f"{uid}\x1f{runtime.binding_id}".encode("utf-8")).hexdigest()
 
-        async def revalidate_guardian_target() -> None:
-            current = await resolve_isolated_runtime(
-                uid,
-                target_mode=_GUARDIAN_CLOUD_TARGET_MODE,
-            )
-            if current is None or current.provider != "hermes_cloud":
-                raise ProvisioningError(
-                    "hermes_cloud_guardian_runtime_required",
-                    retryable=False,
-                )
-            stable_fields = (
-                "uid",
-                "binding_id",
-                "runtime_instance_id",
-                "gateway_url",
-                "expected_model",
-                "model_context_window_tokens",
-                "revision",
-                "profile_class",
-                "policy_commit_sha",
-                "approval_manifest_sha256",
-            )
-            if any(
-                getattr(current, field) != getattr(runtime, field) for field in stable_fields
-            ) or not hmac.compare_digest(
-                current.gateway_token,
-                runtime.gateway_token,
-            ):
-                raise ProvisioningError(
-                    "hermes_cloud_guardian_runtime_changed",
-                    retryable=False,
-                )
+        async def revalidate_guardian_target() -> tuple[str, str]:
+            current = await revalidate_cloud_runtime_authority(runtime_identity)
+            return current.gateway_url, current.gateway_token
 
         turn = await HermesCloudClient().create_response(
             {

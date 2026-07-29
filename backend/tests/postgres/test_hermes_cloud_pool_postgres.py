@@ -918,6 +918,11 @@ def test_resolution_rechecks_kill_switch_and_never_returns_retained_binding():
         )
         assert resolved["provider"] == "hermes_cloud"
         assert resolved["runtime_target_mode"] == "hermes-cloud-guardian"
+        assert resolved["runtime_target_id"]
+        assert resolved["runtime_target_updated_at"]
+        assert resolved["target_endpoint_ref"] == resolved["api_base_url_ref"]
+        assert resolved["target_credential_ref"] == resolved["api_key_ref"]
+        assert resolved["target_entitlement_revision"] == revision
 
         async with pool.acquire() as conn:
             await voice_canary.set_kill_switch_on_connection(

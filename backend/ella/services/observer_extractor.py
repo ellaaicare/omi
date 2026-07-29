@@ -311,6 +311,7 @@ async def hermes_candidate_extraction(
     gateway_url: str | None = None,
     token: str | None = None,
     model: str | None = None,
+    cloud_authority: runtime_resolver.CloudRuntimeAuthorityIdentity | None = None,
     timeout_seconds: float = 45.0,
     limit: int = MAX_EXTRACTOR_EVENTS,
 ) -> ExtractionResult:
@@ -324,10 +325,14 @@ async def hermes_candidate_extraction(
     if not selected:
         return ExtractionResult(metadata={"extractor": "hermes", "event_count": 0, "skipped": "no_signal_events"})
 
-    url = (gateway_url or _env("HERMES_GATEWAY_URL", "http://100.76.138.56:8642")).rstrip("/")
-    api_token = token if token is not None else _env("HERMES_API_SERVER_KEY", _env("API_SERVER_KEY", ""))
-    model_name = model or _env("HERMES_MODEL", "plato-eval")
-    if not api_token:
+    url = ""
+    api_token = ""
+    model_name = ""
+    if cloud_authority is None:
+        url = (gateway_url or _env("HERMES_GATEWAY_URL", "http://100.76.138.56:8642")).rstrip("/")
+        api_token = token if token is not None else _env("HERMES_API_SERVER_KEY", _env("API_SERVER_KEY", ""))
+        model_name = model or _env("HERMES_MODEL", "plato-eval")
+    if cloud_authority is None and not api_token:
         return ExtractionResult(
             metadata={"extractor": "hermes", "event_count": len(selected), "error": "missing_hermes_token"}
         )
@@ -351,6 +356,11 @@ async def hermes_candidate_extraction(
     started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            if cloud_authority is not None:
+                current_runtime = await runtime_resolver.revalidate_cloud_runtime_authority(cloud_authority)
+                url = current_runtime.gateway_url
+                api_token = current_runtime.gateway_token
+                model_name = current_runtime.agent_id
             response = await client.post(
                 f"{url}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_token}"},
@@ -420,7 +430,7 @@ async def build_extraction_result(
         return _heuristic_extraction_result(events)
 
     heuristic = _heuristic_extraction_result(events)
-    hermes_kwargs: dict[str, str] = {}
+    hermes_kwargs: dict[str, Any] = {}
     if uid:
         if runtime_resolver.runtime_authority_enabled(uid):
             runtime = await runtime_resolver.resolve_isolated_runtime(uid, target_mode="hermes-cloud-guardian")
@@ -433,11 +443,17 @@ async def build_extraction_result(
                         "hermes": {"error": "isolated_runtime_unavailable"},
                     },
                 )
-            hermes_kwargs = {
-                "gateway_url": runtime.gateway_url,
-                "token": runtime.gateway_token,
-                "model": runtime.agent_id,
-            }
+            if runtime.provider == "hermes_cloud":
+                hermes_kwargs = {
+                    "cloud_authority": runtime_resolver.cloud_runtime_authority_identity(runtime),
+                }
+                del runtime
+            else:
+                hermes_kwargs = {
+                    "gateway_url": runtime.gateway_url,
+                    "token": runtime.gateway_token,
+                    "model": runtime.agent_id,
+                }
     hermes = await hermes_candidate_extraction(
         events,
         timeout_seconds=timeout_seconds,

@@ -63,6 +63,8 @@ runtime_resolver_module = types.ModuleType("ella.services.runtime_resolver")
 runtime_resolver_module.runtime_bindings_enabled = lambda _uid: False
 runtime_resolver_module.runtime_authority_enabled = lambda _uid: False
 runtime_resolver_module.resolve_isolated_runtime = lambda *_args, **_kwargs: None
+runtime_resolver_module.cloud_runtime_authority_identity = lambda runtime: runtime
+runtime_resolver_module.revalidate_cloud_runtime_authority = lambda identity: identity
 sys.modules["ella.services.runtime_resolver"] = runtime_resolver_module
 
 sys.modules.setdefault("ella.routers", types.ModuleType("ella.routers"))
@@ -628,6 +630,11 @@ def _cloud_guardian_runtime(**updates):
 def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(monkeypatch):
     requested_modes = []
     runtime = _cloud_guardian_runtime()
+    authority = types.SimpleNamespace(
+        uid="auth-uid",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
 
     async def resolve(uid, *, target_mode):
         assert uid == "auth-uid"
@@ -642,12 +649,22 @@ def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(
             assert kwargs["base_url"] == runtime.gateway_url
             assert kwargs["token"] == runtime.gateway_token
             assert kwargs["max_tool_calls"] == 0
-            await kwargs["before_provider_send"]()
+            assert await kwargs["before_provider_send"]() == (
+                runtime.gateway_url,
+                runtime.gateway_token,
+            )
             type(self).provider_posts += 1
             return types.SimpleNamespace(text="One safe consolidated alert.")
 
     monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
     monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
+
+    async def revalidate(identity):
+        assert identity is authority
+        return await resolve(identity.uid, target_mode=identity.target_mode)
+
+    monkeypatch.setattr(guardian, "revalidate_cloud_runtime_authority", revalidate)
     monkeypatch.setattr(guardian, "HermesCloudClient", CloudClient)
     monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
     _FakeAsyncClient.posts.clear()
@@ -670,6 +687,11 @@ def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(
 def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypatch):
     checks = 0
     runtime = _cloud_guardian_runtime()
+    authority = types.SimpleNamespace(
+        uid="auth-uid",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
 
     async def resolve(uid, *, target_mode):
         nonlocal checks
@@ -690,6 +712,13 @@ def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypa
 
     monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
     monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
+
+    async def revalidate(identity):
+        assert identity is authority
+        return await resolve(identity.uid, target_mode=identity.target_mode)
+
+    monkeypatch.setattr(guardian, "revalidate_cloud_runtime_authority", revalidate)
     monkeypatch.setattr(guardian, "HermesCloudClient", CloudClient)
     monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
     _FakeAsyncClient.posts.clear()

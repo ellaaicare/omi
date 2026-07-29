@@ -29,6 +29,7 @@ on:
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/memory_reinterpretation.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -65,6 +66,7 @@ on:
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
@@ -96,6 +98,7 @@ on:
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/memory_reinterpretation.py"
       - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
@@ -132,6 +135,7 @@ on:
       - "backend/tests/unit/test_ella_listen_runtime_gate.py"
       - "backend/tests/unit/test_ella_observer.py"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
@@ -158,7 +162,7 @@ jobs:
       FIRESTORE_EMULATOR_HOST: localhost:9999
       GCLOUD_PROJECT: omi-ci
       GOOGLE_CLOUD_PROJECT: omi-ci
-      ENCRYPTION_SECRET: omi_ci_hermes_cloud_test_only
+      ENCRYPTION_SECRET: omi_ci_hermes_cloud_test_only_32_bytes
     defaults:
       run:
         working-directory: backend
@@ -213,6 +217,7 @@ jobs:
           ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
           ella/services/invitation_authority.py
+          ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
           ella/services/hermes_cloud_runtime.py
           ella/routers/photon.py
@@ -235,8 +240,10 @@ jobs:
           ella/routers/auto_provision.py ella/routers/callbacks.py
           ella/routers/chat.py ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
+          ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_runtime.py
-          ella/services/invitation_authority.py ella/services/observer_extractor.py
+          ella/services/invitation_authority.py ella/services/memory_reinterpretation.py
+          ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
           tests/unit/test_ella_callbacks_summary_update.py
@@ -246,8 +253,11 @@ jobs:
           tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
           tests/unit/test_ella_provisioning_service.py
           tests/unit/test_hermes_cloud_openapi.py
+          tests/unit/test_hermes_cloud_enrichment.py
           tests/unit/test_hermes_cloud_photon.py
+          tests/unit/test_hermes_cloud_provider.py
           tests/unit/test_hermes_cloud_runtime.py
+          tests/unit/test_memory_reinterpretation_outbox.py
           tests/unit/test_scanner_keyterms.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
@@ -282,7 +292,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 324
+          test "$collected" -eq 332
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
@@ -311,15 +321,17 @@ jobs:
         run: |
           test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 60
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64
           pytest tests/unit/test_ella_conversation_corrections.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 18
           pytest tests/unit/test_ella_guardian_delivery.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
           pytest tests/unit/test_ella_listen_runtime_gate.py -v
-          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 15
+          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 18
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 18
           pytest tests/unit/test_invitation_redemption.py -v
+          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
+          pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v

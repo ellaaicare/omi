@@ -358,6 +358,51 @@ def test_responses_api_post_failure_crosses_provider_boundary_first(cloud_env):
     assert [call[0] for call in fake.calls] == ["POST"]
 
 
+def test_responses_api_uses_credentials_returned_at_final_boundary(cloud_env):
+    response_body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            }
+        ],
+    }
+    fake = FakeClient(
+        {
+            "https://current.example.test/v1/responses": Response(
+                200,
+                response_body,
+            )
+        }
+    )
+
+    async def current_credentials():
+        return "https://current.example.test", "current-token"
+
+    asyncio.run(
+        HermesCloudClient(http_client_factory=lambda **_kwargs: fake).create_response(
+            _binding(),
+            session_key="scope",
+            hermes_session_id="interaction",
+            idempotency_key="request",
+            user_input="Synthetic",
+            instructions="Synthetic",
+            base_url="https://admitted.example.test",
+            token="admitted-token",
+            max_output_tokens=128,
+            max_tool_calls=0,
+            before_provider_send=current_credentials,
+        )
+    )
+
+    assert fake.calls[0][1] == "https://current.example.test/v1/responses"
+    assert fake.calls[0][2]["headers"]["Authorization"] == "Bearer current-token"
+
+
 def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
     responses = {}
     effects = []

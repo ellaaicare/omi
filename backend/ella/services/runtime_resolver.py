@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import posixpath
@@ -77,6 +79,72 @@ class IsolatedRuntime:
     policy_commit_sha: str = ""
     approval_manifest_sha256: str = ""
     profile_class: str = "real"
+    runtime_target_id: str = ""
+    runtime_target_mode: str = ""
+    runtime_target_updated_at: str = ""
+    target_endpoint_ref: str = ""
+    target_credential_ref: str = ""
+    target_entitlement_revision: int = 0
+
+
+@dataclass(frozen=True)
+class CloudRuntimeAuthorityIdentity:
+    """Secret-free identity retained across awaited work for one exact target."""
+
+    uid: str
+    target_mode: str
+    digest: str
+
+
+def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAuthorityIdentity:
+    if runtime.provider != CLOUD_RUNTIME_PROVIDER:
+        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+    if (
+        runtime.runtime_target_mode not in CLOUD_RUNTIME_TARGET_MODES
+        or not runtime.runtime_target_id
+        or not runtime.runtime_target_updated_at
+        or not runtime.target_endpoint_ref
+        or not runtime.target_credential_ref
+        or runtime.target_entitlement_revision < 1
+    ):
+        raise ProvisioningError("hermes_cloud_runtime_target_identity_missing", retryable=False)
+    material = {
+        "uid": runtime.uid,
+        "binding_id": runtime.binding_id,
+        "binding_revision": runtime.revision,
+        "runtime_instance_id": runtime.runtime_instance_id,
+        "runtime_target_id": runtime.runtime_target_id,
+        "runtime_target_mode": runtime.runtime_target_mode,
+        "runtime_target_updated_at": runtime.runtime_target_updated_at,
+        "target_endpoint_ref": runtime.target_endpoint_ref,
+        "target_credential_ref": runtime.target_credential_ref,
+        "target_entitlement_revision": runtime.target_entitlement_revision,
+        "endpoint_sha256": hashlib.sha256(runtime.gateway_url.encode("utf-8")).hexdigest(),
+        "credential_sha256": hashlib.sha256(runtime.gateway_token.encode("utf-8")).hexdigest(),
+        "profile_class": runtime.profile_class,
+        "profile_name": runtime.profile_name,
+        "agent_id": runtime.agent_id,
+        "expected_model": runtime.expected_model,
+        "prompt_pack_version": runtime.prompt_pack_version,
+        "model_policy_version": runtime.model_policy_version,
+        "voice_policy_version": runtime.voice_policy_version,
+        "policy_commit_sha": runtime.policy_commit_sha,
+        "approval_manifest_sha256": runtime.approval_manifest_sha256,
+        "allowed_tools": list(runtime.allowed_tools),
+        "required_capabilities": list(runtime.required_capabilities),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            material,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return CloudRuntimeAuthorityIdentity(
+        uid=runtime.uid,
+        target_mode=runtime.runtime_target_mode,
+        digest=digest,
+    )
 
 
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
@@ -227,6 +295,12 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             str(prompt_artifact_receipt.get("approval_manifest_sha256") or "") if provider == "hermes_cloud" else ""
         ),
         profile_class=str(binding.get("profile_class") or "real").strip().lower(),
+        runtime_target_id=str(binding.get("runtime_target_id") or ""),
+        runtime_target_mode=str(binding.get("runtime_target_mode") or ""),
+        runtime_target_updated_at=str(binding.get("runtime_target_updated_at") or ""),
+        target_endpoint_ref=str(binding.get("target_endpoint_ref") or ""),
+        target_credential_ref=str(binding.get("target_credential_ref") or ""),
+        target_entitlement_revision=int(binding.get("target_entitlement_revision") or 0),
     )
 
 
@@ -290,3 +364,21 @@ async def resolve_isolated_runtime(
     if retained_required:
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
     return None
+
+
+async def revalidate_cloud_runtime_authority(
+    identity: CloudRuntimeAuthorityIdentity,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> IsolatedRuntime:
+    """Resolve current SQL/consent authority and reject any target identity drift."""
+    current = await resolve_isolated_runtime(
+        identity.uid,
+        repository=repository,
+        target_mode=identity.target_mode,
+    )
+    if current is None or current.provider != CLOUD_RUNTIME_PROVIDER:
+        raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+    current_identity = cloud_runtime_authority_identity(current)
+    if not hmac.compare_digest(current_identity.digest, identity.digest):
+        raise ProvisioningError("hermes_cloud_runtime_authority_changed", retryable=False)
+    return current

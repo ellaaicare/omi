@@ -10,6 +10,15 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
 - A Cloud route is usable only when `ella_runtime_targets` has a ready row for
   the authenticated account/profile, target mode, endpoint ref, credential ref,
   and exact `ella_runtime_bindings.id`.
+- OMI transcript enrichment is admitted through the published
+  `hermes-cloud-transcript` target. There is no separate enrichment target and
+  no default-mode fallback.
+- Immediately before every protected Hermes Cloud POST, the sender must
+  re-resolve that exact target and revalidate current entitlement
+  status/revision/expiry, kill switches, binding health, consent lineage,
+  profile class, and endpoint/credential identity. Any drift after admission
+  produces zero provider sends. This invariant covers runtime turns, Guardian,
+  Observer, summary/correction, recovery, and reinterpretation paths.
 - Ready Cloud bindings must be profile-owned (`account_user_id = profile_user_id
   = user_id`), healthy, active, and in `internal_canary` or `active`.
 - Cloud memory is built-in Hermes profile-scoped memory. Do not provision,

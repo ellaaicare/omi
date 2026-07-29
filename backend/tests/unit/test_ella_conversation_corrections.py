@@ -1325,16 +1325,28 @@ def test_correction_session_key_matches_chat_memory_scope(monkeypatch):
 
 
 def test_isolated_summary_config_uses_uid_runtime_and_removes_legacy_key(monkeypatch):
+    authority = summary_recovery.CloudRuntimeAuthorityIdentity(
+        uid="user-a",
+        target_mode="hermes-cloud-transcript",
+        digest="a" * 64,
+    )
+
     async def fake_runtime(uid, *, target_mode=None):
         assert uid == "user-a"
         assert target_mode == "hermes-cloud-transcript"
         return SimpleNamespace(
+            provider="hermes_cloud",
             gateway_url="http://100.76.138.56:8701",
             gateway_token="isolated-secret",
             agent_id="omi-user-a",
         )
 
     monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(
+        summary_recovery,
+        "cloud_runtime_authority_identity",
+        lambda runtime: authority,
+    )
     base = summary_recovery.SummaryProviderConfig(
         provider="legacy",
         hermes_url="http://shared.test/v1/chat/completions",
@@ -1349,10 +1361,112 @@ def test_isolated_summary_config_uses_uid_runtime_and_removes_legacy_key(monkeyp
     selected = asyncio.run(summary_recovery.summary_provider_config_for_uid("user-a", base))
 
     assert selected.provider == "hermes-api"
-    assert selected.hermes_url == "http://100.76.138.56:8701/v1/chat/completions"
-    assert selected.hermes_model == "omi-user-a"
-    assert selected.hermes_api_key == "isolated-secret"
+    assert selected.hermes_url == ""
+    assert selected.hermes_model == ""
+    assert selected.hermes_api_key == ""
     assert selected.legacy_api_key == ""
+    assert selected.cloud_authority == authority
+
+
+def test_retained_summary_config_preserves_exact_existing_binding(monkeypatch):
+    async def fake_runtime(uid, *, target_mode=None):
+        assert uid == "retained-user"
+        assert target_mode == "hermes-cloud-transcript"
+        return SimpleNamespace(
+            provider="hermes",
+            gateway_url="http://retained-mini.test",
+            gateway_token="retained-token",
+            agent_id="realcryptoplato",
+        )
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", fake_runtime)
+    base = summary_recovery.SummaryProviderConfig(
+        provider="legacy",
+        hermes_url="http://shared.test/v1/chat/completions",
+        hermes_model="shared-plato",
+        hermes_api_key="shared-secret",
+        legacy_url="https://legacy.test/v1/chat/completions",
+        legacy_model="legacy-model",
+        legacy_api_key="legacy-secret",
+        timeout_seconds=45,
+    )
+
+    selected = asyncio.run(summary_recovery.summary_provider_config_for_uid("retained-user", base))
+
+    assert selected.provider == "hermes-api"
+    assert selected.hermes_url == "http://retained-mini.test/v1/chat/completions"
+    assert selected.hermes_model == "realcryptoplato"
+    assert selected.hermes_api_key == "retained-token"
+    assert selected.legacy_api_key == ""
+    assert selected.cloud_authority is None
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        "managed_cloud_consent_stale",
+        "hermes_cloud_quarantined",
+        "hermes_cloud_runtime_authority_changed",
+    ),
+)
+def test_cloud_summary_final_authority_change_sends_zero_transcripts(monkeypatch, error_code):
+    provider_posts = 0
+
+    class TrackingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal provider_posts
+            provider_posts += 1
+            raise AssertionError("provider post must not be reached")
+
+    async def deny_current_authority(identity):
+        raise ProvisioningError(error_code, retryable=False)
+
+    monkeypatch.setattr(
+        summary_recovery,
+        "revalidate_cloud_runtime_authority",
+        deny_current_authority,
+    )
+    config = summary_recovery.SummaryProviderConfig(
+        provider="hermes-api",
+        hermes_url="",
+        hermes_model="",
+        hermes_api_key="",
+        legacy_url="",
+        legacy_model="",
+        legacy_api_key="",
+        timeout_seconds=45,
+        cloud_authority=summary_recovery.CloudRuntimeAuthorityIdentity(
+            uid="user-a",
+            target_mode="hermes-cloud-transcript",
+            digest="a" * 64,
+        ),
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            summary_recovery.generate_summary_from_prompt(
+                prompt="Complete protected transcript.",
+                fallback={"overview": "Fallback"},
+                session_id="summary-session",
+                session_key="summary-key",
+                trace_id="summary-trace",
+                required_tags=("omi",),
+                config=config,
+                async_client_factory=TrackingClient,
+            )
+        )
+
+    assert error.value.code == error_code
+    assert provider_posts == 0
 
 
 def test_cloud_summary_resolution_failure_never_returns_legacy_config(monkeypatch):

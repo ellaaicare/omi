@@ -2483,12 +2483,16 @@ class EllaProvisioningRepository:
                         """
                         SELECT
                             b.*, u.omi_uid, u.name, u.status AS user_status,
-                            u.profile_class, t.mode AS resolved_target_mode,
+                            u.profile_class, t.id AS resolved_target_id,
+                            t.mode AS resolved_target_mode,
+                            t.endpoint_ref AS resolved_target_endpoint_ref,
+                            t.credential_ref AS resolved_target_credential_ref,
                             t.policy_version AS target_policy_version,
                             t.processor_set_hash AS target_processor_set_hash,
                             t.scope_version AS target_scope_version,
                             t.scope_hash AS target_scope_hash,
-                            t.entitlement_revision AS target_entitlement_revision
+                            t.entitlement_revision AS target_entitlement_revision,
+                            t.updated_at AS resolved_target_updated_at
                         FROM ella_runtime_bindings b
                         JOIN users u ON u.id = b.user_id
                         JOIN ella_runtime_targets t ON t.runtime_binding_id = b.id
@@ -2549,7 +2553,12 @@ class EllaProvisioningRepository:
                     ):
                         raise RuntimePoolClaimError("runtime_cloud_entitlement_lineage_stale")
                     result = dict(row)
+                    result["runtime_target_id"] = str(row["resolved_target_id"])
                     result["runtime_target_mode"] = str(row["resolved_target_mode"])
+                    result["target_endpoint_ref"] = str(row["resolved_target_endpoint_ref"])
+                    result["target_credential_ref"] = str(row["resolved_target_credential_ref"])
+                    result["target_entitlement_revision"] = int(row["target_entitlement_revision"])
+                    result["runtime_target_updated_at"] = str(row["resolved_target_updated_at"])
                     return result
         if required_provider not in {None, "hermes"}:
             raise ValueError("invalid_runtime_provider")
