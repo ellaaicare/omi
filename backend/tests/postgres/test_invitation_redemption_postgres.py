@@ -610,8 +610,12 @@ def test_revocation_started_after_revalidation_is_serialized_and_quarantines_gra
         resume_before_insert = asyncio.Event()
         original_lock = managed_cloud_consent.lock_or_bootstrap_grant_on_connection
 
-        async def pause_after_revalidation(conn, *, grant):
-            epoch = await original_lock(conn, grant=grant)
+        async def pause_after_revalidation(conn, *, grant, owner_lock):
+            epoch = await original_lock(
+                conn,
+                grant=grant,
+                owner_lock=owner_lock,
+            )
             authority_locked.set()
             await resume_before_insert.wait()
             return epoch

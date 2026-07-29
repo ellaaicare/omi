@@ -29,69 +29,31 @@ def _print(payload: Any) -> None:
 
 
 async def _grant(args: argparse.Namespace) -> None:
-    pool = await voice_canary.get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO voice_entitlements (
-                uid, status, plan, daily_limit_s, monthly_limit_s,
-                max_session_s, max_concurrent, soft_limit_ratio,
-                provider_allowlist, mode_allowlist, fallback_policy, operator_note
-            ) VALUES (
-                $1, 'active', $2, $3, $4, $5, $6, $7, $8::text[], $9::text[],
-                $10::jsonb, $11
-            )
-            ON CONFLICT (uid) DO UPDATE SET
-                status = 'active',
-                plan = EXCLUDED.plan,
-                revision = voice_entitlements.revision + 1,
-                daily_limit_s = EXCLUDED.daily_limit_s,
-                monthly_limit_s = EXCLUDED.monthly_limit_s,
-                max_session_s = EXCLUDED.max_session_s,
-                max_concurrent = EXCLUDED.max_concurrent,
-                soft_limit_ratio = EXCLUDED.soft_limit_ratio,
-                provider_allowlist = EXCLUDED.provider_allowlist,
-                mode_allowlist = EXCLUDED.mode_allowlist,
-                fallback_policy = EXCLUDED.fallback_policy,
-                operator_note = EXCLUDED.operator_note,
-                updated_at = NOW()
-            RETURNING *
-            """,
-            args.uid,
-            args.plan,
-            args.daily_minutes * 60,
-            args.monthly_hours * 60 * 60,
-            args.max_session_minutes * 60,
-            args.max_concurrent,
-            args.soft_warning_percent / 100,
-            args.provider,
-            args.mode,
-            json.dumps(DEFAULT_FALLBACK_POLICY),
-            args.note,
-        )
-    _print({"action": "grant", "entitlement": dict(row)})
+    row = await voice_canary.upsert_entitlement(
+        uid=args.uid,
+        plan=args.plan,
+        daily_limit_s=args.daily_minutes * 60,
+        monthly_limit_s=args.monthly_hours * 60 * 60,
+        max_session_s=args.max_session_minutes * 60,
+        max_concurrent=args.max_concurrent,
+        soft_limit_ratio=args.soft_warning_percent / 100,
+        provider_allowlist=args.provider,
+        mode_allowlist=args.mode,
+        fallback_policy=DEFAULT_FALLBACK_POLICY,
+        operator_note=args.note,
+    )
+    _print({"action": "grant", "entitlement": row})
 
 
 async def _status(args: argparse.Namespace) -> None:
-    pool = await voice_canary.get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE voice_entitlements
-            SET status = $2,
-                revision = revision + 1,
-                operator_note = COALESCE($3, operator_note),
-                updated_at = NOW()
-            WHERE uid = $1
-            RETURNING *
-            """,
-            args.uid,
-            args.status,
-            args.note,
-        )
+    row = await voice_canary.update_entitlement_status(
+        uid=args.uid,
+        status=args.status,
+        operator_note=args.note,
+    )
     if not row:
         raise SystemExit(f"No entitlement exists for {args.uid}")
-    _print({"action": args.status, "entitlement": dict(row)})
+    _print({"action": args.status, "entitlement": row})
 
 
 async def _kill(args: argparse.Namespace) -> None:

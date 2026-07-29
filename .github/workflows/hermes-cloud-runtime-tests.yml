@@ -3,6 +3,9 @@ name: Hermes Cloud Runtime Tests
 on:
   pull_request:
     paths:
+      - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/contracts/README.md"
+      - "backend/database/authority_advisory_lock.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -48,13 +51,17 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/unit/test_authority_advisory_lock.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/postgres/test_authority_advisory_lock_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
@@ -75,6 +82,9 @@ on:
   push:
     branches: [main]
     paths:
+      - "backend/contracts/authority_advisory_lock_v1.json"
+      - "backend/contracts/README.md"
+      - "backend/database/authority_advisory_lock.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -120,13 +130,17 @@ on:
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
+      - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
+      - "backend/tests/unit/test_authority_advisory_lock.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/postgres/test_authority_advisory_lock_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
@@ -201,6 +215,7 @@ jobs:
       - name: Compile Hermes Cloud runtime modules
         run: >-
           python -m py_compile
+          database/authority_advisory_lock.py
           database/ella_provisioning.py
           database/hermes_cloud_enrichment_outbox.py
           database/invitations.py
@@ -237,12 +252,14 @@ jobs:
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_cloud_shadow.py
+          scripts/voice_canary_admin.py
           utils/ella/postprocess.py
           utils/ella/scanner_keyterms.py
 
       - name: Validate formatting and OpenAPI contract
         run: >-
           black --check --line-length 120 --skip-string-normalization
+          database/authority_advisory_lock.py
           database/ella_provisioning.py database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
@@ -257,7 +274,10 @@ jobs:
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
+          scripts/voice_canary_admin.py
           tests/unit/test_ella_callbacks_summary_update.py
+          tests/unit/test_authority_advisory_lock.py
+          tests/unit/test_authority_writer_guard.py
           tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
@@ -272,6 +292,7 @@ jobs:
           tests/unit/test_memory_reinterpretation_outbox.py
           tests/unit/test_scanner_keyterms.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
+          tests/postgres/test_authority_advisory_lock_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
           tests/postgres/test_runtime_migration_atomicity_postgres.py
           &&
@@ -331,6 +352,18 @@ jobs:
 
       - name: Run exact reviewed boundary collections
         run: |
+          test "$(
+            pytest --collect-only -q \
+              tests/unit/test_authority_advisory_lock.py \
+              tests/unit/test_authority_writer_guard.py \
+              tests/postgres/test_authority_advisory_lock_postgres.py |
+              grep -c '::'
+          )" -eq 19
+          pytest \
+            tests/unit/test_authority_advisory_lock.py \
+            tests/unit/test_authority_writer_guard.py \
+            tests/postgres/test_authority_advisory_lock_postgres.py \
+            -v
           test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
           pytest tests/unit/test_ella_callbacks_summary_update.py -v
           test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 64

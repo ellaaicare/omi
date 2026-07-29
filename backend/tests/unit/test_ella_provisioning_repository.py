@@ -64,12 +64,25 @@ class _Pool:
 
 
 class _LookupPool:
-    def __init__(self, result):
+    def __init__(self, result, *, owner_id=None):
         self.result = result
+        self.owner_id = owner_id
         self.calls = []
 
     async def fetchrow(self, query, *args):
         self.calls.append((query, args))
+        if "SELECT id FROM users WHERE omi_uid" in query:
+            owner_id = self.owner_id
+            if owner_id is None and isinstance(self.result, dict):
+                owner_id = (
+                    self.result.get("account_user_id")
+                    or self.result.get("profile_user_id")
+                    or self.result.get("user_id")
+                    or self.result.get("id")
+                )
+            return {"id": owner_id}
+        if "SELECT id FROM users WHERE omi_uid" in query and "FOR UPDATE" in query:
+            return {"id": self.owner_id}
         return self.result
 
     async def execute(self, query, *args):
@@ -160,6 +173,8 @@ class _CloudClaimConnection:
 
     async def fetchrow(self, query, *args):
         self.queries.append(query)
+        if "SELECT id FROM users WHERE omi_uid" in query:
+            return {"id": self.user_id}
         if "FROM voice_entitlements" in query:
             return {
                 "uid": args[0],
@@ -355,14 +370,24 @@ def test_cloud_pool_registration_persists_prompt_artifact_receipt():
 
 
 class _ExpiredFinalizeConnection:
+    def __init__(self):
+        self.user_id = uuid.uuid4()
+
     def transaction(self):
         return _AsyncContext(self)
 
+    async def execute(self, query, *_args):
+        if "pg_advisory_xact_lock" in query:
+            return "SELECT 1"
+        raise AssertionError(query)
+
     async def fetchrow(self, query, *args):
+        if "SELECT id FROM users WHERE omi_uid" in query:
+            return {"id": self.user_id}
         if "b.claim_job_id = $2" in query:
             return {
                 "id": uuid.uuid4(),
-                "user_id": uuid.uuid4(),
+                "user_id": self.user_id,
                 "role": "user",
                 "status": "claiming",
                 "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
@@ -528,14 +553,15 @@ def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_c
 
 
 def test_shadow_promotion_is_explicit_owner_scoped_revision_cas(monkeypatch):
+    owner_id = uuid.uuid4()
     pool = _LookupPool(
         {
             "id": uuid.uuid4(),
             "status": "internal_canary",
             "active": True,
             "revision": 3,
-            "account_user_id": uuid.uuid4(),
-            "profile_user_id": uuid.uuid4(),
+            "account_user_id": owner_id,
+            "profile_user_id": owner_id,
             "role": "user",
             "runtime_target_mode": "hermes-cloud-chat",
             "runtime_instance_id": "instance-a",
@@ -549,7 +575,8 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas(monkeypatch):
                 "scope_hash": "sha256:" + ("2" * 64),
                 "admission_revision": 3,
             },
-        }
+        },
+        owner_id=owner_id,
     )
     binding_id = str(uuid.uuid4())
 
@@ -583,7 +610,7 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas(monkeypatch):
         )
     )
 
-    query, args = pool.calls[0]
+    query, args = next((query, args) for query, args in pool.calls if "UPDATE ella_runtime_bindings b" in query)
     assert result["status"] == "internal_canary"
     assert "u.omi_uid = $2" in query
     assert "b.status = 'shadow'" in query

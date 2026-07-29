@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import asyncpg
 
+from database import authority_advisory_lock
 from database import voice_canary as voice_canary_db
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
@@ -709,7 +710,15 @@ class EllaProvisioningRepository:
         lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(30, lease_seconds))
         job_uuid = uuid.UUID(str(job_id))
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -719,6 +728,11 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
                 existing = await connection.fetchrow(
                     """
                     SELECT b.*, u.omi_uid, u.profile_class
@@ -835,7 +849,15 @@ class EllaProvisioningRepository:
         job_uuid = uuid.UUID(str(job_id))
         token_uuid = uuid.UUID(str(claim_token))
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -847,6 +869,11 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
                 entitlement = admission.entitlement or {}
                 if (
                     str(entitlement.get("consent_policy_version") or "") != lineage.policy_version
@@ -1086,7 +1113,20 @@ class EllaProvisioningRepository:
         health_receipt: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
                 selected = await connection.fetchrow(
                     """
                     SELECT b.*
@@ -1272,7 +1312,15 @@ class EllaProvisioningRepository:
             raise ValueError("invalid_cloud_runtime_policy")
         lineage = authority_lineage.validate()
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
                 admission = await voice_canary_db.revalidate_runtime_activation_on_connection(
                     connection,
                     uid=uid,
@@ -1284,6 +1332,11 @@ class EllaProvisioningRepository:
                 )
                 if not admission.allowed:
                     raise RuntimePoolClaimError(f"runtime_admission_{admission.code}")
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
                 entitlement = admission.entitlement or {}
                 if (
                     str(entitlement.get("consent_policy_version") or "") != lineage.policy_version
@@ -2305,63 +2358,78 @@ class EllaProvisioningRepository:
         return dict(row)
 
     async def stage_runtime_binding(self, *, uid: str, binding: dict[str, Any]) -> dict[str, Any]:
-        row = await self.pool.fetchrow(
-            """
-            INSERT INTO ella_runtime_bindings (
-                id, user_id, role, provider, profile_name, agent_id, workspace_root,
-                internal_gateway_url, gateway_port, service_label, credential_ref,
-                honcho_workspace, observed_peer, observer_peer, template_version,
-                model_policy_version, voice_policy_version, health_state,
-                health_receipt, revision, active
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
             )
-            SELECT
-                $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
-            FROM users u
-            WHERE u.omi_uid = $2
-            ON CONFLICT (user_id, role, provider)
-            WHERE provider <> 'hermes_cloud'
-            DO UPDATE
-            SET profile_name = EXCLUDED.profile_name,
-                agent_id = EXCLUDED.agent_id,
-                workspace_root = EXCLUDED.workspace_root,
-                internal_gateway_url = EXCLUDED.internal_gateway_url,
-                gateway_port = EXCLUDED.gateway_port,
-                service_label = EXCLUDED.service_label,
-                credential_ref = EXCLUDED.credential_ref,
-                honcho_workspace = EXCLUDED.honcho_workspace,
-                observed_peer = EXCLUDED.observed_peer,
-                observer_peer = EXCLUDED.observer_peer,
-                template_version = EXCLUDED.template_version,
-                model_policy_version = EXCLUDED.model_policy_version,
-                voice_policy_version = EXCLUDED.voice_policy_version,
-                health_state = EXCLUDED.health_state,
-                health_receipt = EXCLUDED.health_receipt,
-                revision = ella_runtime_bindings.revision + 1,
-                active = ella_runtime_bindings.active,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING *
-            """,
-            uuid.uuid4(),
-            uid,
-            binding.get("role", "user"),
-            binding["provider"],
-            binding.get("profile_name"),
-            binding["agent_id"],
-            binding.get("workspace_root"),
-            binding.get("internal_gateway_url"),
-            binding.get("gateway_port"),
-            binding.get("service_label"),
-            binding.get("credential_ref"),
-            binding.get("honcho_workspace"),
-            binding.get("observed_peer"),
-            binding.get("observer_peer"),
-            binding["template_version"],
-            binding["model_policy_version"],
-            binding["voice_policy_version"],
-            binding.get("health_state", "pending"),
-            json.dumps(binding.get("health_receipt") or {}),
-        )
+            async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
+                row = await connection.fetchrow(
+                    """
+                    INSERT INTO ella_runtime_bindings (
+                        id, user_id, role, provider, profile_name, agent_id, workspace_root,
+                        internal_gateway_url, gateway_port, service_label, credential_ref,
+                        honcho_workspace, observed_peer, observer_peer, template_version,
+                        model_policy_version, voice_policy_version, health_state,
+                        health_receipt, revision, active
+                    )
+                    SELECT
+                        $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
+                    FROM users u
+                    WHERE u.omi_uid = $2
+                    ON CONFLICT (user_id, role, provider)
+                    WHERE provider <> 'hermes_cloud'
+                    DO UPDATE
+                    SET profile_name = EXCLUDED.profile_name,
+                        agent_id = EXCLUDED.agent_id,
+                        workspace_root = EXCLUDED.workspace_root,
+                        internal_gateway_url = EXCLUDED.internal_gateway_url,
+                        gateway_port = EXCLUDED.gateway_port,
+                        service_label = EXCLUDED.service_label,
+                        credential_ref = EXCLUDED.credential_ref,
+                        honcho_workspace = EXCLUDED.honcho_workspace,
+                        observed_peer = EXCLUDED.observed_peer,
+                        observer_peer = EXCLUDED.observer_peer,
+                        template_version = EXCLUDED.template_version,
+                        model_policy_version = EXCLUDED.model_policy_version,
+                        voice_policy_version = EXCLUDED.voice_policy_version,
+                        health_state = EXCLUDED.health_state,
+                        health_receipt = EXCLUDED.health_receipt,
+                        revision = ella_runtime_bindings.revision + 1,
+                        active = ella_runtime_bindings.active,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    uuid.uuid4(),
+                    uid,
+                    binding.get("role", "user"),
+                    binding["provider"],
+                    binding.get("profile_name"),
+                    binding["agent_id"],
+                    binding.get("workspace_root"),
+                    binding.get("internal_gateway_url"),
+                    binding.get("gateway_port"),
+                    binding.get("service_label"),
+                    binding.get("credential_ref"),
+                    binding.get("honcho_workspace"),
+                    binding.get("observed_peer"),
+                    binding.get("observer_peer"),
+                    binding["template_version"],
+                    binding["model_policy_version"],
+                    binding["voice_policy_version"],
+                    binding.get("health_state", "pending"),
+                    json.dumps(binding.get("health_receipt") or {}),
+                )
         if not row:
             raise LookupError("user_not_found")
         return dict(row)
@@ -2374,7 +2442,20 @@ class EllaProvisioningRepository:
         role: str = "user",
     ) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
             async with connection.transaction():
+                await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                )
                 selected = await connection.fetchrow(
                     """
                     SELECT b.*

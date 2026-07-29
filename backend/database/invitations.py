@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import asyncpg
 
-from database import managed_cloud_consent, voice_canary
+from database import authority_advisory_lock, managed_cloud_consent, voice_canary
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
@@ -462,7 +462,15 @@ async def redeem_invitation(
 
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
+        owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+            conn,
+            uid=uid,
+        )
         async with conn.transaction():
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                conn,
+                owner=owner,
+            )
             await voice_canary.lock_runtime_authority_on_connection(
                 conn,
                 uid=uid,
@@ -552,6 +560,7 @@ async def redeem_invitation(
                         config=settings,
                         pilot_admission=pilot_admission,
                         pilot_admission_revalidator=pilot_admission_revalidator,
+                        owner_lock=owner_lock,
                     )
 
     if isinstance(result, InviteRedemptionFailure):
@@ -573,6 +582,7 @@ async def _redeem_locked_invitation(
     config: InvitationConfig,
     pilot_admission: InvitationPilotAdmission,
     pilot_admission_revalidator: PilotAdmissionRevalidator,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> dict[str, Any] | InviteRedemptionFailure:
     invitation_id = invitation["id"]
     target_account_ref, target_profile_ref = invitation_target_refs(
@@ -609,6 +619,7 @@ async def _redeem_locked_invitation(
     try:
         consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
             conn,
+            owner_lock=owner_lock,
             grant=managed_cloud_consent.ManagedCloudGrant(
                 account_uid=pilot_admission.account_uid,
                 profile_uid=pilot_admission.profile_uid,

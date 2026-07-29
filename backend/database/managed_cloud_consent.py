@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import asyncpg
 
-from database import voice_canary
+from database import authority_advisory_lock, voice_canary
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
 
@@ -114,7 +114,12 @@ async def _quarantine_on_connection(
     uid: str,
     user_id: uuid.UUID,
     reason: str,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> None:
+    authority_advisory_lock.require_self_owner_lock(
+        owner_lock,
+        user_id=user_id,
+    )
     await conn.execute(
         """
         UPDATE voice_entitlements
@@ -174,15 +179,19 @@ async def lock_or_bootstrap_grant_on_connection(
     conn: asyncpg.Connection,
     *,
     grant: ManagedCloudGrant,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> uuid.UUID:
-    """Lock the exact grant epoch for the remainder of the caller transaction."""
+    """Lock the exact grant epoch after the caller acquires the v1 owner lock."""
     grant.validate()
-    user_id = await conn.fetchval(
-        "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
-        grant.account_uid,
+    user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+        conn,
+        uid=grant.account_uid,
+        owner=owner_lock.owner,
     )
-    if not user_id:
-        raise ManagedCloudAuthorityDenied("managed_cloud_authority_user_missing")
+    authority_advisory_lock.require_self_owner_lock(
+        owner_lock,
+        user_id=user_id,
+    )
     row = await conn.fetchrow(
         """
         SELECT *
@@ -223,17 +232,24 @@ async def synchronize_grant(
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                conn,
+                uid=grant.account_uid,
+            )
             async with conn.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    conn,
+                    owner=owner,
+                )
                 await voice_canary.lock_runtime_authority_on_connection(
                     conn,
                     uid=grant.account_uid,
                 )
-                user_id = await conn.fetchval(
-                    "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
-                    grant.account_uid,
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    conn,
+                    uid=grant.account_uid,
+                    owner=owner,
                 )
-                if not user_id:
-                    raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_user_missing")
                 row = await conn.fetchrow(
                     """
                     SELECT *
@@ -299,6 +315,7 @@ async def synchronize_grant(
                         uid=grant.account_uid,
                         user_id=user_id,
                         reason="managed_cloud_consent_grant_changed",
+                        owner_lock=owner_lock,
                     )
                 if row is None or not _grant_matches(row, grant):
                     raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_failed")
@@ -318,17 +335,24 @@ async def synchronize_denial(
     try:
         pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                conn,
+                uid=uid,
+            )
             async with conn.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    conn,
+                    owner=owner,
+                )
                 await voice_canary.lock_runtime_authority_on_connection(
                     conn,
                     uid=uid,
                 )
-                user_id = await conn.fetchval(
-                    "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
-                    uid,
+                user_id = await authority_advisory_lock.verify_self_owner_after_lock(
+                    conn,
+                    uid=uid,
+                    owner=owner,
                 )
-                if not user_id:
-                    raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_user_missing")
                 row = await conn.fetchrow(
                     """
                     SELECT *
@@ -374,6 +398,7 @@ async def synchronize_denial(
                     uid=uid,
                     user_id=user_id,
                     reason=f"managed_cloud_consent_{decision}",
+                    owner_lock=owner_lock,
                 )
                 if row is None or row["decision"] != decision:
                     raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_denial_failed")
