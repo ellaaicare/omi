@@ -14,9 +14,9 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
   profile binding and must match one target before entitlement or capacity
   changes.
 - Redemption requires an exact current `ai-data-processors-v8` grant, presence
-  in both exact Hermes Cloud provisioning and synthetic UID allowlists, and a
-  persisted `users.profile_class = 'synthetic'`. Global rollout flags do not
-  satisfy this pilot-only gate.
+  in the runtime-binding, Hermes Cloud provisioning, Hermes Cloud synthetic,
+  and AI-consent exact UID allowlists, and a persisted
+  `users.profile_class = 'synthetic'`. Global rollout flags must remain false.
 - The transaction locks the invitation and capacity reservation, creates the
   `invited` voice entitlement, records redemption/audit receipts, consumes
   ordinary capacity, and marks an ordinary invitation redeemed.
@@ -35,8 +35,13 @@ ELLA_INVITE_REDEMPTION_ENABLED=false
 ELLA_INVITE_ORDINARY_SELF_SERVICE_ENABLED=false
 ELLA_INVITE_APP_REVIEW_ENABLED=false
 ELLA_HERMES_CLOUD_SYNTHETIC_ONLY=true
+ELLA_RUNTIME_BINDINGS_ENABLED=false
+ELLA_RUNTIME_BINDINGS_ENABLED_UIDS=
+ELLA_HERMES_CLOUD_PROVISIONING_ENABLED=false
 ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS=
 ELLA_HERMES_CLOUD_SYNTHETIC_UIDS=
+ELLA_AI_CONSENT_ENFORCEMENT_ENABLED=false
+ELLA_AI_CONSENT_ENFORCEMENT_UIDS=
 ```
 
 `ELLA_INVITE_HMAC_PEPPER` is required when the endpoint is enabled. Store it in
@@ -47,10 +52,11 @@ receipt, migration, issue, workflow JSON, or log.
 local reverse-proxy addresses. Forwarded source headers are ignored unless the
 direct peer is on this list.
 
-Phase 1 keeps ordinary self-service off. Enabling the global route alone does
-not permit ordinary or App Review redemption. The exact UID must be present in
-both cloud allowlists, have a current v8 consent receipt bound to the same
-account/profile, and have a synthetic database profile classification.
+Phase 1 keeps ordinary self-service off. Enabling the redemption route alone
+does not permit ordinary or App Review redemption. The exact UID must be
+present in all four pilot allowlists, have a current v8 consent receipt bound to
+the same account/profile, and have a synthetic database profile
+classification.
 
 ## Migration
 
@@ -70,6 +76,8 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/012_create_account_profile_runtime_targets.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/013_create_managed_cloud_consent_authority.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/014_add_synthetic_invitation_operator_audit.sql
 ```
 
 The migration is forward-only and idempotent. It adds:
@@ -85,6 +93,7 @@ The migration is forward-only and idempotent. It adds:
   require exact ready Hermes Cloud binding/endpoint/credential/mode ownership.
 - a per-UID managed-cloud consent authority epoch that serializes consent
   mutation through invitation entitlement publication and revocation quarantine.
+- content-free audit event types for the root-only synthetic operator lifecycle.
 
 It does not seed codes, grants, or production users.
 
@@ -124,8 +133,9 @@ synthetic code must remain unconsumed and must not create an entitlement.
 3. Deploy the exact reviewed OMI backend and voice proxy revisions with all
    invitation flags off.
 4. Run authenticated synthetic/non-family reads and disabled-redemption checks.
-5. Keep global cloud and ordinary self-service flags off. Enable only the exact
-   synthetic test UID in both cloud allowlists and issue its HMAC-bound target.
+5. Keep global cloud and ordinary self-service flags off. Add only the exact
+   synthetic test UID to the four pilot allowlists and issue its HMAC-bound
+   target through the protected operator ceremony.
 6. Verify same-UID retry, two-UID exclusion, typed failures, rate limiting,
    canonical entitlement, `ellaaicare/ella-ai#1124` ensure idempotency, and authoritative quota
    frames.
@@ -150,3 +160,7 @@ authoritative emergency stop.
 No production invitation, entitlement, vendor workspace, or provisioning claim
 may be created until the AI consent gate in `ellaaicare/ella-ai#1123` and the independent release
 review are green.
+
+The protected one-profile synthetic issuance lifecycle is documented in
+`SYNTHETIC_INVITE_OPERATOR.md`. It keeps ordinary/App Review admission off and
+does not send codes or seed broker/runtime tables.

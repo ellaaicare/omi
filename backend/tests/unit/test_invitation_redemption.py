@@ -130,15 +130,17 @@ def test_target_refs_are_domain_separated_and_contain_no_identity():
     assert "account-a" not in account_ref + profile_ref
 
 
-def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
+def test_pilot_gate_requires_exact_v8_consent_and_all_uid_allowlists(
     monkeypatch,
 ):
     uid = "synthetic-pilot"
     repository = ai_consent.InMemoryConsentRepository()
     monkeypatch.setattr(ai_consent, "_repository", repository)
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
-    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
-    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+    for name in invitation_authority.PILOT_UID_ALLOWLISTS:
+        monkeypatch.setenv(name, uid)
+    for name in invitation_authority.PILOT_GLOBAL_FLAGS_REQUIRED_FALSE:
+        monkeypatch.setenv(name, "false")
 
     with pytest.raises(invitations.InvitePilotGateDenied):
         invitation_authority.authorize_invitation_pilot(uid)
@@ -161,7 +163,12 @@ def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
     assert admission.policy_version == "ai-data-processors-v8"
     assert admission.account_uid == admission.profile_uid == uid
 
-    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", "")
+    with pytest.raises(invitations.InvitePilotGateDenied):
+        invitation_authority.authorize_invitation_pilot(uid)
+
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", uid)
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "true")
     with pytest.raises(invitations.InvitePilotGateDenied):
         invitation_authority.authorize_invitation_pilot(uid)
 

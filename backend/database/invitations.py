@@ -30,6 +30,23 @@ SAFE_APP_BUILD_RE = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
 PILOT_RUNTIME_PROVIDER = CLOUD_RUNTIME_PROVIDER
 PILOT_MODEL = CLOUD_RUNTIME_MODEL
 PILOT_TARGET_MODES = CLOUD_RUNTIME_TARGET_MODES
+SYNTHETIC_OPERATOR_COHORT = "synthetic_operator"
+SYNTHETIC_OPERATOR_POLICY_REVISION = "synthetic-operator-v1"
+SYNTHETIC_OPERATOR_ENTITLEMENT_POLICY = {
+    "plan": "synthetic_canary",
+    "daily_limit_s": 2700,
+    "monthly_limit_s": 43200,
+    "max_session_s": 1200,
+    "max_concurrent": 1,
+    "max_audio_bytes_per_session": 120_000_000,
+    "max_audio_bytes_per_minute": 6_000_000,
+    "soft_limit_ratio": 0.8,
+    "hard_limit_ratio": 1.0,
+    "provider_allowlist": [PILOT_RUNTIME_PROVIDER],
+    "model_allowlist": [PILOT_MODEL],
+    "mode_allowlist": list(PILOT_TARGET_MODES),
+    "fallback_policy": {"enabled": False, "order": []},
+}
 
 
 @dataclass(frozen=True)
@@ -167,6 +184,46 @@ def invitation_target_refs(
     return (
         _hmac_ref(config, "target-account-v1", account_uid),
         _hmac_ref(config, "target-profile-v1", profile_uid),
+    )
+
+
+def invitation_audit_refs(
+    config: InvitationConfig,
+    *,
+    uid: str,
+    source: str,
+) -> tuple[str, str]:
+    """Return domain-separated references for content-free lifecycle receipts."""
+    if not uid or not source:
+        raise ValueError("audit uid and source are required")
+    return (
+        _hmac_ref(config, "uid-v1", uid),
+        _hmac_ref(config, "source-v1", source),
+    )
+
+
+def invitation_code_file_ref(config: InvitationConfig, absolute_path: str) -> str:
+    """Return a privacy-safe reference to the protected owner handoff path."""
+    if not absolute_path.startswith("/"):
+        raise ValueError("absolute code file path required")
+    return _hmac_ref(config, "code-file-v1", absolute_path)
+
+
+def is_synthetic_operator_invitation(invitation: dict[str, Any]) -> bool:
+    """Identify the root-issued single-profile prototype contract."""
+    try:
+        policy = normalize_entitlement_policy(invitation.get("entitlement_policy"))
+    except InviteConfigurationError:
+        return False
+    return bool(
+        str(invitation.get("kind") or "") == "ordinary"
+        and str(invitation.get("cohort") or "") == SYNTHETIC_OPERATOR_COHORT
+        and str(invitation.get("entitlement_policy_revision") or "") == SYNTHETIC_OPERATOR_POLICY_REVISION
+        and policy == SYNTHETIC_OPERATOR_ENTITLEMENT_POLICY
+        and bool(invitation.get("exclude_from_product_analytics"))
+        and str(invitation.get("usage_mode") or "") == "single_use"
+        and int(invitation.get("max_redemptions") or 0) == 1
+        and int(invitation.get("reserved_setup_slots") or 0) == 1
     )
 
 
@@ -760,7 +817,8 @@ async def _redeem_locked_invitation(
         )
 
     kind = str(invitation["kind"])
-    kind_enabled = config.ordinary_enabled if kind == "ordinary" else config.app_review_enabled
+    synthetic_operator = is_synthetic_operator_invitation(invitation)
+    kind_enabled = synthetic_operator or (config.ordinary_enabled if kind == "ordinary" else config.app_review_enabled)
     if not kind_enabled:
         await _record_audit(
             conn,
