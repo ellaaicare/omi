@@ -103,7 +103,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 35
+          test "$collected" -eq 36
           pytest \
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_voice_canary.py \

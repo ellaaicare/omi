@@ -12,7 +12,7 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import asyncpg
 
@@ -80,6 +80,12 @@ class InvitationPilotAdmission:
     processor_set_hash: str
     scope_version: str
     scope_hash: str
+
+
+PilotAdmissionRevalidator = Callable[
+    [InvitationPilotAdmission],
+    Awaitable[InvitationPilotAdmission],
+]
 
 
 class InviteRedemptionFailure(Exception):
@@ -421,6 +427,7 @@ async def redeem_invitation(
     code: str,
     source_address: str,
     pilot_admission: Optional[InvitationPilotAdmission] = None,
+    pilot_admission_revalidator: Optional[PilotAdmissionRevalidator] = None,
     app_build: str = "",
     config: Optional[InvitationConfig] = None,
 ) -> dict[str, Any]:
@@ -437,6 +444,7 @@ async def redeem_invitation(
         not isinstance(pilot_admission, InvitationPilotAdmission)
         or pilot_admission.account_uid != uid
         or pilot_admission.profile_uid != uid
+        or not callable(pilot_admission_revalidator)
     ):
         raise _failure(
             "invalid",
@@ -542,6 +550,7 @@ async def redeem_invitation(
                         now=now,
                         config=settings,
                         pilot_admission=pilot_admission,
+                        pilot_admission_revalidator=pilot_admission_revalidator,
                     )
 
     if isinstance(result, InviteRedemptionFailure):
@@ -562,6 +571,7 @@ async def _redeem_locked_invitation(
     now: datetime,
     config: InvitationConfig,
     pilot_admission: InvitationPilotAdmission,
+    pilot_admission_revalidator: PilotAdmissionRevalidator,
 ) -> dict[str, Any] | InviteRedemptionFailure:
     invitation_id = invitation["id"]
     target_account_ref, target_profile_ref = invitation_target_refs(
@@ -859,6 +869,11 @@ async def _redeem_locked_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
+
+    current_pilot_admission = await pilot_admission_revalidator(pilot_admission)
+    if not isinstance(current_pilot_admission, InvitationPilotAdmission) or current_pilot_admission != pilot_admission:
+        raise InvitePilotGateDenied("invite_pilot_authority_changed")
+    pilot_admission = current_pilot_admission
 
     entitlement_revision = int(
         await conn.fetchval(

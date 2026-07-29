@@ -214,6 +214,7 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
     assert response.json()["status"] == "invited"
     assert captured["uid"] == "firebase-subject"
     assert captured["app_build"] == "804"
+    assert captured["pilot_admission_revalidator"] is invites.revalidate_invitation_pilot
 
 
 @pytest.mark.parametrize(

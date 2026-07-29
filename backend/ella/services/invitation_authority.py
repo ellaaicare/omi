@@ -52,3 +52,15 @@ def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
         scope_version=authority.lineage.scope_version,
         scope_hash=authority.lineage.scope_hash,
     )
+
+
+async def revalidate_invitation_pilot(
+    pilot_admission: InvitationPilotAdmission,
+) -> InvitationPilotAdmission:
+    """Require the initial admission to remain the exact current authority."""
+    if not isinstance(pilot_admission, InvitationPilotAdmission):
+        raise InvitePilotGateDenied("invite_pilot_authority_changed")
+    current_admission = authorize_invitation_pilot(pilot_admission.account_uid)
+    if current_admission != pilot_admission:
+        raise InvitePilotGateDenied("invite_pilot_authority_changed")
+    return current_admission

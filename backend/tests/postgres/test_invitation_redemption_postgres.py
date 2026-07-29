@@ -299,6 +299,7 @@ async def _redeem(
     app_build: str = "synthetic-test",
     config: invitations.InvitationConfig = CONFIG,
     use_real_gate: bool = False,
+    pilot_admission_revalidator: invitations.PilotAdmissionRevalidator | None = None,
 ):
     try:
         admission = invitation_authority.authorize_invitation_pilot(uid) if use_real_gate else _admission(uid)
@@ -309,6 +310,12 @@ async def _redeem(
             support_code="INV-UNITTEST",
             correlation_id=str(uuid.uuid4()),
         ) from exc
+
+    async def accept_test_admission(
+        expected: invitations.InvitationPilotAdmission,
+    ) -> invitations.InvitationPilotAdmission:
+        return expected
+
     return await invitations.redeem_invitation(
         uid=uid,
         code=code,
@@ -316,6 +323,10 @@ async def _redeem(
         app_build=app_build,
         config=config,
         pilot_admission=admission,
+        pilot_admission_revalidator=(
+            pilot_admission_revalidator
+            or (invitation_authority.revalidate_invitation_pilot if use_real_gate else accept_test_admission)
+        ),
     )
 
 
@@ -479,9 +490,98 @@ async def _assert_unconsumed(
             "SELECT COUNT(*) FROM voice_entitlements WHERE uid = $1",
             uid,
         )
+        target_consumed_at = await conn.fetchval(
+            """
+            SELECT consumed_at
+            FROM ella_invitation_targets
+            WHERE invitation_id = $1::uuid
+            """,
+            invitation_id,
+        )
+        redemption_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM ella_invitation_redemptions
+            WHERE invitation_id = $1::uuid
+            """,
+            invitation_id,
+        )
     assert dict(invitation) == {"state": "sent", "redemption_count": 0}
     assert consumed_slots == 0
     assert entitlement_count == 0
+    assert target_consumed_at is None
+    assert redemption_count == 0
+
+
+def test_consent_revocation_at_insert_boundary_rolls_back_all_redemption_mutations(
+    monkeypatch,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-consent-race"
+        repository = ai_consent.InMemoryConsentRepository()
+        monkeypatch.setattr(ai_consent, "_repository", repository)
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+        _grant_v7(repository, uid)
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="CDEF-2345",
+            target_uids=[uid],
+        )
+        pilot_admission = invitation_authority.authorize_invitation_pilot(uid)
+        revalidation_started = asyncio.Event()
+        resume_revalidation = asyncio.Event()
+
+        async def pause_before_current_consent_check(
+            expected: invitations.InvitationPilotAdmission,
+        ) -> invitations.InvitationPilotAdmission:
+            assert expected == pilot_admission
+            revalidation_started.set()
+            await resume_revalidation.wait()
+            return await invitation_authority.revalidate_invitation_pilot(expected)
+
+        redemption = asyncio.create_task(
+            invitations.redeem_invitation(
+                uid=uid,
+                code="CDEF-2345",
+                source_address="192.0.2.30",
+                app_build="synthetic-race-test",
+                config=CONFIG,
+                pilot_admission=pilot_admission,
+                pilot_admission_revalidator=pause_before_current_consent_check,
+            )
+        )
+        await asyncio.wait_for(revalidation_started.wait(), timeout=5)
+        ai_consent.AiConsentService(repository).submit(
+            uid,
+            ai_consent.ConsentSubmission(
+                decision="revoked",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                request_id=f"request-revoke-{uid}",
+                app_version="synthetic",
+                build_number="1",
+                locale="en",
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+        )
+        resume_revalidation.set()
+
+        with pytest.raises(invitations.InvitePilotGateDenied):
+            await asyncio.wait_for(redemption, timeout=5)
+        await _assert_unconsumed(
+            pool,
+            invitation_id=invitation_id,
+            reservation_id=reservation_id,
+            uid=uid,
+        )
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_audit_receipts") == 0
+            assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_rate_limit_events") == 0
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def test_two_authorized_targets_still_yield_one_atomic_grant():
