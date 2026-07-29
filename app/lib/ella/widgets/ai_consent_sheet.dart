@@ -173,8 +173,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 10),
                     _processorDisclosure(
                       icon: Icons.psychology_alt_outlined,
-                      title: context.l10n.aiConsentHonchoCloudTitle,
-                      body: context.l10n.aiConsentHonchoCloudBody,
+                      title: context.l10n.aiConsentHermesProfileMemoryTitle,
+                      body: context.l10n.aiConsentHermesProfileMemoryBody,
                     ),
                     const SizedBox(height: 10),
                     _processorDisclosure(

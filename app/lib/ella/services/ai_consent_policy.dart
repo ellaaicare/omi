@@ -104,14 +104,14 @@ class AiConsentPolicy {
     processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
     canonicalProcessorSet: 'deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|'
         'hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|'
-        'nous-hermes-cloud:managed-agent-runtime|honcho-cloud:derived-memory-context|'
+        'nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|'
         'openai-codex:managed-agent-model|photon:messaging-delivery|'
         'openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|'
         'groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback',
     scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
     scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
     canonicalScope: 'profile_binding=server-profile-v1|runtime_provider=hermes_cloud|'
-        'model_route=openai-codex/gpt-5.6-terra|memory_provider=honcho_cloud_profile_isolated|'
+        'model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|'
         'photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false',
     processors: [
       AiConsentProcessor(
@@ -166,10 +166,11 @@ class AiConsentPolicy {
         data: 'What the person says or types, details they choose to share, and basic session information',
       ),
       AiConsentProcessor(
-        id: 'honcho-cloud',
-        name: 'Honcho / Plastic Labs',
-        function: 'Profile-bound derived memory and context',
-        data: 'Details from conversations and information the person chooses to save for the bound profile',
+        id: 'hermes-profile-memory',
+        name: 'Nous Research / Hermes Cloud',
+        function: 'Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime',
+        data:
+            'Profile-bound conversation text, saved facts, derived memory context, and session identifiers needed to retrieve memory for the same account/profile scope',
       ),
       AiConsentProcessor(
         id: 'openai-codex',

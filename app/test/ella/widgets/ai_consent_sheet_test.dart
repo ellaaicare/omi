@@ -81,8 +81,10 @@ void main() {
     expect(disclosure, contains('Nous Research / Hermes Cloud'));
     expect(disclosure, contains('what you say or type'));
     expect(disclosure, contains('OpenAI'));
-    expect(disclosure, contains('Honcho / Plastic Labs'));
-    expect(disclosure, contains('remember useful details'));
+    expect(disclosure, contains('Nous Research / Hermes Cloud profile memory'));
+    expect(disclosure, contains('selected Ella profile'));
+    expect(disclosure, contains('same account and profile'));
+    expect(disclosure, isNot(contains('Honcho / Plastic Labs')));
     expect(disclosure, contains('Photon'));
     expect(disclosure, contains('one person you choose for testing'));
     expect(disclosure, contains('cannot message everyone'));

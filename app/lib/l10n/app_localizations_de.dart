@@ -8948,7 +8948,7 @@ class AppLocalizationsDe extends AppLocalizations {
   String get aiConsentAllowedStatus => 'Managed cloud AI allowed for this account and profile';
 
   @override
-  String get aiConsentNotAllowedStatus => 'Cloud AI permission is off — v7 permission required';
+  String get aiConsentNotAllowedStatus => 'Cloud AI permission is off — review the updated choices to continue';
 
   @override
   String get aiConsentRevokeSyncFailed =>
@@ -8995,11 +8995,11 @@ class AppLocalizationsDe extends AppLocalizations {
       'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.';
 
   @override
-  String get aiConsentHonchoCloudTitle => 'Honcho / Plastic Labs';
+  String get aiConsentHermesProfileMemoryTitle => 'Nous Research / Hermes Cloud profile memory';
 
   @override
-  String get aiConsentHonchoCloudBody =>
-      'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.';
+  String get aiConsentHermesProfileMemoryBody =>
+      'Keeps helpful details inside your selected Ella profile so Ella can remember them for that same account and profile. It may receive what you say or type, details you choose to save, and basic information that connects them to that profile.';
 
   @override
   String get aiConsentPhotonTitle => 'Photon';

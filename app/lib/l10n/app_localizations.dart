@@ -16560,7 +16560,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentNotAllowedStatus.
   ///
   /// In en, this message translates to:
-  /// **'Cloud AI permission is off — v7 permission required'**
+  /// **'Cloud AI permission is off — review the updated choices to continue'**
   String get aiConsentNotAllowedStatus;
 
   /// No description provided for @aiConsentRevokeSyncFailed.
@@ -16635,17 +16635,17 @@ abstract class AppLocalizations {
   /// **'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.'**
   String get aiConsentOpenAiManagedBody;
 
-  /// Legal recipient and product name for managed derived memory
+  /// Legal recipient and product name for built-in managed profile memory
   ///
   /// In en, this message translates to:
-  /// **'Honcho / Plastic Labs'**
-  String get aiConsentHonchoCloudTitle;
+  /// **'Nous Research / Hermes Cloud profile memory'**
+  String get aiConsentHermesProfileMemoryTitle;
 
-  /// Data categories and purpose for Honcho / Plastic Labs
+  /// Data categories and purpose for built-in Hermes Cloud profile memory
   ///
   /// In en, this message translates to:
-  /// **'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.'**
-  String get aiConsentHonchoCloudBody;
+  /// **'Keeps helpful details inside your selected Ella profile so Ella can remember them for that same account and profile. It may receive what you say or type, details you choose to save, and basic information that connects them to that profile.'**
+  String get aiConsentHermesProfileMemoryBody;
 
   /// Legal recipient for the narrow messaging channel
   ///

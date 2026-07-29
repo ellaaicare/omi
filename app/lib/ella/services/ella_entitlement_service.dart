@@ -132,7 +132,7 @@ class EllaEntitlementHttpTransport implements EllaEntitlementTransport {
   @override
   Future<EllaEntitlement> fetch() async {
     final response = await makeApiCall(
-      url: '${Env.apiBaseUrl ?? ''}v1/entitlement',
+      url: buildEllaEntitlementUrl(Env.apiBaseUrl ?? ''),
       headers: _headers,
       body: '',
       method: 'GET',
@@ -148,7 +148,7 @@ class EllaEntitlementHttpTransport implements EllaEntitlementTransport {
   @override
   Future<EllaEntitlement> redeem(String code) async {
     final response = await makeApiCall(
-      url: '${Env.apiBaseUrl ?? ''}v1/invite/redeem',
+      url: buildEllaInviteRedemptionUrl(Env.apiBaseUrl ?? ''),
       headers: {..._headers, 'Content-Type': 'application/json'},
       body: jsonEncode({'code': code}),
       method: 'POST',
@@ -173,6 +173,13 @@ class EllaEntitlementHttpTransport implements EllaEntitlementTransport {
     throw const FormatException('Unknown invite redemption response');
   }
 }
+
+@visibleForTesting
+String buildEllaEntitlementUrl(String baseUrl) => '${baseUrl.endsWith('/') ? baseUrl : '$baseUrl/'}v1/entitlement';
+
+@visibleForTesting
+String buildEllaInviteRedemptionUrl(String baseUrl) =>
+    '${baseUrl.endsWith('/') ? baseUrl : '$baseUrl/'}v1/invite/redeem';
 
 EllaEntitlement _decodeEntitlement(String body) {
   final decoded = jsonDecode(body);

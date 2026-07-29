@@ -44,6 +44,10 @@ void main() {
     });
     expect(payload.containsKey('uid'), isFalse);
     expect(payload.containsKey('email'), isFalse);
+    expect(payload.containsKey('profile_id'), isFalse);
+    expect(payload.containsKey('runtime_provider'), isFalse);
+    expect(payload.containsKey('runtime_mode'), isFalse);
+    expect(payload.containsKey('endpoint'), isFalse);
     expect(payload.toString(), isNot(contains('token')));
   });
 
@@ -394,7 +398,7 @@ void main() {
     provider.dispose();
   });
 
-  test('AI consent becomes authority only after an exact server v6 managed-cloud grant', () async {
+  test('AI consent becomes authority only after an exact server v8 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, submitResponse: _consentStatus());
     final service = EllaAiConsentService(
@@ -451,7 +455,7 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
   });
 
-  test('decline submits only v6 consent metadata and grants no data authority', () async {
+  test('decline submits only v8 consent metadata and grants no data authority', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(
       policy: AiConsentPolicy.bundled,
@@ -654,7 +658,7 @@ void main() {
     expect(preferences.aiConsentReceiptId, isEmpty);
   });
 
-  test('missing server decision timestamp never becomes v6 authority', () async {
+  test('missing server decision timestamp never becomes v8 authority', () async {
     final transport = _FakeConsentTransport(
       policy: AiConsentPolicy.bundled,
       submitResponse: _consentStatus(includeServerDecidedAt: false),
@@ -671,7 +675,7 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
 
-  test('malformed v6 server status parses safely and cannot become authority', () {
+  test('malformed v8 server status parses safely and cannot become authority', () {
     final status = AiConsentStatus.fromJson({
       'subject_uid': 42,
       'authorized': 'true',

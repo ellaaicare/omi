@@ -11,6 +11,18 @@ void main() {
       expect(isEllaEntitlementStubEnabled, isFalse);
     });
 
+    test('uses the authenticated entitlement and invite paths without client-selected runtime routing', () {
+      final entitlementUri = Uri.parse(buildEllaEntitlementUrl('https://api.example.test'));
+      final redemptionUri = Uri.parse(buildEllaInviteRedemptionUrl('https://api.example.test/'));
+
+      expect(entitlementUri.path, '/v1/entitlement');
+      expect(redemptionUri.path, '/v1/invite/redeem');
+      expect(entitlementUri.queryParameters, isEmpty);
+      expect(redemptionUri.queryParameters, isEmpty);
+      expect(entitlementUri.toString(), isNot(contains('provider')));
+      expect(redemptionUri.toString(), isNot(contains('profile')));
+    });
+
     test('parses every typed entitlement status and quota field', () {
       for (final status in EllaEntitlementStatus.values) {
         final entitlement = EllaEntitlement.fromJson({

@@ -307,7 +307,7 @@ void main() {
       await client.disconnect();
     });
 
-    test('accepted server-verified v6 consent passes the mic gate before identity validation', () async {
+    test('accepted server-verified v8 consent passes the mic gate before identity validation', () async {
       final preferences = SharedPreferencesUtil();
       preferences.uid = 'uid-a';
       preferences.acceptAiConsent(

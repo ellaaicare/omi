@@ -85,13 +85,18 @@ void main() {
     expect(preferences.hasAccountBoundAiConsent('uid-a'), isTrue);
   });
 
-  test('existing v6 account requires v7 before any managed-cloud AI action', () async {
+  test('existing v7 account requires v8 before any managed-cloud AI action', () async {
     SharedPreferences.setMockInitialValues({
       'aiConsentAccepted': true,
       'aiConsentAcceptedAt': '2026-01-01T00:00:00Z',
-      'aiConsentContractVersion': 'ai-data-processors-v6',
-      'aiConsentReceiptId': 'aicr_v6-receipt-a',
+      'aiConsentContractVersion': 'ai-data-processors-v7',
+      'aiConsentProcessorSetHash': 'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296',
+      'aiConsentReceiptId': 'aicr_v7-receipt-a',
       'aiConsentReceiptUid': 'uid-a',
+      'aiConsentProfileBindingId': 'profile-binding-a',
+      'aiConsentScopeVersion': 'managed-cloud-internal-pilot-v1',
+      'aiConsentScopeHash': 'sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30',
+      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
     });
     await SharedPreferencesUtil.init();
 
@@ -101,7 +106,7 @@ void main() {
     expect(preferences.hasPriorAccountBoundAiConsent('uid-b'), isFalse);
   });
 
-  test('deferred v7 remains inactive until a server-verified account and profile grant', () {
+  test('deferred v8 remains inactive until a server-verified account and profile grant', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
 
@@ -119,7 +124,7 @@ void main() {
     _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
     expect(preferences.aiConsentAccepted, isTrue);
     expect(preferences.isCurrentAiConsentDeferred, isFalse);
-    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v7');
+    expect(preferences.aiConsentContractVersion, 'ai-data-processors-v8');
   });
 
   test('receipt-less acceptance clears stale authority and remains fail closed', () async {

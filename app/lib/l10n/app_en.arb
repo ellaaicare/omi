@@ -10475,7 +10475,7 @@
   "aiConsentRevokeAction": "Revoke AI permission",
   "aiConsentDeleteDataAction": "Delete my account and data",
   "aiConsentAllowedStatus": "Managed cloud AI allowed for this account and profile",
-  "aiConsentNotAllowedStatus": "Cloud AI permission is off — v7 permission required",
+  "aiConsentNotAllowedStatus": "Cloud AI permission is off — review the updated choices to continue",
   "aiConsentRevokeSyncFailed": "Sharing is stopped on this device. Ella could not confirm the server update; try again before using another device.",
   "aiConsentOffGateTitle": "AI sharing is off",
   "aiConsentOffGateBody": "Ella will not set up these cloud AI features or send what you say or type, messages, or details from your saved memories while permission is off. You can review this information whenever you are ready.",
@@ -10503,13 +10503,13 @@
   "@aiConsentOpenAiManagedBody": {
     "description": "Data categories and purpose for the managed OpenAI route"
   },
-  "aiConsentHonchoCloudTitle": "Honcho / Plastic Labs",
-  "@aiConsentHonchoCloudTitle": {
-    "description": "Legal recipient and product name for managed derived memory"
+  "aiConsentHermesProfileMemoryTitle": "Nous Research / Hermes Cloud profile memory",
+  "@aiConsentHermesProfileMemoryTitle": {
+    "description": "Legal recipient and product name for built-in managed profile memory"
   },
-  "aiConsentHonchoCloudBody": "Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.",
-  "@aiConsentHonchoCloudBody": {
-    "description": "Data categories and purpose for Honcho / Plastic Labs"
+  "aiConsentHermesProfileMemoryBody": "Keeps helpful details inside your selected Ella profile so Ella can remember them for that same account and profile. It may receive what you say or type, details you choose to save, and basic information that connects them to that profile.",
+  "@aiConsentHermesProfileMemoryBody": {
+    "description": "Data categories and purpose for built-in Hermes Cloud profile memory"
   },
   "aiConsentPhotonTitle": "Photon",
   "@aiConsentPhotonTitle": {

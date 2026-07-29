@@ -24,6 +24,10 @@ jobs:
     timeout-minutes: 60
     env:
       ELLA_CI_FLUTTER_VERSION: 3.41.1
+      ELLA_CI_NETWORK_SANDBOX: >-
+        (version 1) (allow default) (deny network*)
+        (allow network-inbound (local ip "localhost:*"))
+        (allow network-outbound (remote ip "localhost:*"))
     defaults:
       run:
         shell: bash
@@ -31,9 +35,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify credential-free source CI scope
         working-directory: .
@@ -62,6 +67,15 @@ jobs:
 
           git diff --check "${base_ref}...HEAD"
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
+          while IFS= read -r -d '' changed_path; do
+            case "$changed_path" in
+              app/*|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              *)
+                echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only -z "${base_ref}...HEAD")
 
           forbidden_artifact_paths='(^|/)(AuthKey_[^/]*\.p8|[^/]*\.(p8|p12|cer|mobileprovision|provisionprofile|xcarchive|ipa))$'
           if grep -EIn "$forbidden_artifact_paths" /tmp/ella-ios-source-ci-changed-files.txt; then
@@ -88,13 +102,11 @@ jobs:
           fi
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.ELLA_CI_FLUTTER_VERSION }}
           channel: stable
-          cache: true
-          cache-key: flutter-${{ runner.os }}-${{ env.ELLA_CI_FLUTTER_VERSION }}-${{ hashFiles('app/pubspec.lock') }}
-          pub-cache-key: pub-${{ runner.os }}-${{ env.ELLA_CI_FLUTTER_VERSION }}-${{ hashFiles('app/pubspec.lock') }}
+          cache: false
 
       - name: Verify pinned Flutter version
         run: |
@@ -113,8 +125,18 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Verify protected test network sandbox
+        run: |
+          set -euo pipefail
+
+          if /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            /usr/bin/curl --fail --silent --show-error --max-time 5 https://api.github.com >/dev/null 2>&1; then
+            echo "Network sandbox did not block outbound traffic." >&2
+            exit 1
+          fi
+
       - name: Run app/test.sh setup and smoke tests
-        run: ./test.sh
+        run: ELLA_TEST_NO_PUB=true /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" ./test.sh
 
       - name: Enforce focused test collection counts
         run: |
@@ -136,24 +158,25 @@ jobs:
             exit 1
           fi
 
-      - name: Analyze focused Ella iOS source
+      - name: Analyze changed Ella iOS source with fatal warnings
         run: |
-          flutter analyze --no-fatal-infos --no-fatal-warnings \
-            lib/backend/http/shared.dart \
-            lib/core/app_shell.dart \
-            lib/ella \
-            lib/mobile/mobile_app.dart \
-            lib/pages/home/page.dart \
-            lib/pages/home/today_page.dart \
-            lib/pages/onboarding/ella \
-            lib/providers/auth_provider.dart \
-            lib/providers/ella_entitlement_provider.dart \
-            lib/services/auth_service.dart \
-            lib/utils/auth_utils.dart \
-            lib/utils/log_redaction.dart \
-            test/backend \
-            test/ella \
-            test/pages/onboarding/ella
+          set -euo pipefail
+
+          changed_dart_files=()
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              app/lib/l10n/app_localizations*.dart) continue ;;
+              app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
+            esac
+          done < /tmp/ella-ios-source-ci-changed-files.txt
+
+          if [[ "${#changed_dart_files[@]}" -eq 0 ]]; then
+            echo "No changed Dart files require analysis."
+            exit 0
+          fi
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" \
+            flutter analyze --no-pub --fatal-warnings --no-fatal-infos "${changed_dart_files[@]}"
 
       - name: Run focused invite, entitlement, quota, consent, and routing tests
         run: |
@@ -191,7 +214,7 @@ jobs:
             [[ -f "$test_file" ]] || { echo "Missing focused test: $test_file" >&2; exit 1; }
           done
 
-          flutter test "${focused_tests[@]}"
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub "${focused_tests[@]}"
 
       - name: Run full Flutter tests
-        run: flutter test
+        run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub
