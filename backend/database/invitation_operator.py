@@ -801,6 +801,7 @@ async def _with_exact_receipt(
             if operation == "cleanup":
                 return await _cleanup_locked(
                     conn,
+                    owner_lock=proof,
                     row=row,
                     user=user,
                     identity=identity,
@@ -916,6 +917,7 @@ async def _revoke_locked(
 async def _cleanup_locked(
     conn: asyncpg.Connection,
     *,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
     row: dict[str, Any],
     user: dict[str, Any],
     identity: SyntheticInvitationIdentity,
@@ -943,6 +945,11 @@ async def _cleanup_locked(
     )
     artifacts["voice_entitlement"] = False
     _assert_pristine_artifacts(artifacts)
+    await authority_advisory_lock.require_self_owner_lock(
+        conn,
+        owner_lock,
+        user_id=user["id"],
+    )
     updated = dict(
         await conn.fetchrow(
             """

@@ -1659,13 +1659,56 @@ async def _current_database(pool: asyncpg.Pool) -> str:
         return str(await conn.fetchval("SELECT current_database()"))
 
 
+async def _wait_for_operator_authority_waiter(
+    pool: asyncpg.Pool,
+    owner: authority_advisory_lock.AuthorityOwner,
+) -> None:
+    key = authority_advisory_lock.authority_lock_key(
+        str(owner.account_id),
+        str(owner.profile_id),
+    )
+    class_id, object_id = authority_advisory_lock._advisory_lock_parts(key)
+    for _attempt in range(100):
+        async with pool.acquire() as observer:
+            waiting = await observer.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_locks
+                    WHERE locktype = 'advisory'
+                      AND classid::bigint = $1
+                      AND objid::bigint = $2
+                      AND objsubid = 1
+                      AND mode = 'ExclusiveLock'
+                      AND NOT granted
+                )
+                """,
+                class_id,
+                object_id,
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail("operator cleanup never waited on the shared v1 authority lock")
+
+
 def test_operator_revoke_cleanup_is_exact_and_real_user_safe():
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "synthetic-operator-cleanup"
         other_uid = "synthetic-operator-other"
+        contention_uid = "synthetic-operator-cleanup-contention"
+        owner_drift_uid = "synthetic-operator-cleanup-owner-drift"
         expiry = datetime.now(timezone.utc) + timedelta(hours=1)
         async with pool.acquire() as conn:
-            await _ensure_users(conn, [uid, other_uid])
+            await _ensure_users(
+                conn,
+                [
+                    uid,
+                    other_uid,
+                    contention_uid,
+                    owner_drift_uid,
+                ],
+            )
         issued = await _issue_operator_invitation(
             pool,
             uid=uid,
@@ -1776,6 +1819,191 @@ def test_operator_revoke_cleanup_is_exact_and_real_user_safe():
                 code="JKMN-2345",
                 expires_at=expiry,
             )
+
+        contention_issue = await _issue_operator_invitation(
+            pool,
+            uid=contention_uid,
+            code="MNPR-2345",
+            expires_at=expiry,
+        )
+        await invitation_operator.revoke_synthetic_invitation(
+            receipt_id=contention_issue["receipt_id"],
+            expected_version=1,
+            identity=invitation_operator.SyntheticInvitationIdentity(
+                contention_uid,
+                contention_uid,
+                contention_uid,
+            ),
+            context=context,
+            config=OPERATOR_CONFIG,
+        )
+        async with pool.acquire() as conn:
+            contention_user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                contention_uid,
+            )
+        contention_owner = authority_advisory_lock.AuthorityOwner.from_values(
+            contention_user_id,
+            contention_user_id,
+        )
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker,
+                owner=contention_owner,
+            )
+            cleanup_task = asyncio.create_task(
+                invitation_operator.cleanup_synthetic_invitation(
+                    receipt_id=contention_issue["receipt_id"],
+                    expected_version=2,
+                    identity=invitation_operator.SyntheticInvitationIdentity(
+                        contention_uid,
+                        contention_uid,
+                        contention_uid,
+                    ),
+                    context=context,
+                    config=OPERATOR_CONFIG,
+                )
+            )
+            await _wait_for_operator_authority_waiter(
+                pool,
+                contention_owner,
+            )
+            assert not cleanup_task.done()
+            async with pool.acquire() as observer:
+                blocked_state = dict(
+                    await observer.fetchrow(
+                        """
+                        SELECT u.profile_class, i.state, i.version
+                        FROM users u
+                        JOIN ella_invitation_targets t
+                          ON t.account_ref_hmac = $2
+                        JOIN ella_invitations i ON i.id = t.invitation_id
+                        WHERE u.id = $1 AND i.id = $3::uuid
+                        """,
+                        contention_user_id,
+                        invitations.invitation_target_refs(
+                            OPERATOR_CONFIG,
+                            account_uid=contention_uid,
+                            profile_uid=contention_uid,
+                        )[0],
+                        contention_issue["receipt_id"],
+                    )
+                )
+            assert blocked_state == {
+                "profile_class": "synthetic",
+                "state": "revoked",
+                "version": 2,
+            }
+            await transaction.commit()
+        contention_cleaned = await asyncio.wait_for(cleanup_task, timeout=5)
+        assert contention_cleaned["current_profile_class"] == "real"
+
+        owner_drift_issue = await _issue_operator_invitation(
+            pool,
+            uid=owner_drift_uid,
+            code="QRST-2345",
+            expires_at=expiry,
+        )
+        await invitation_operator.revoke_synthetic_invitation(
+            receipt_id=owner_drift_issue["receipt_id"],
+            expected_version=1,
+            identity=invitation_operator.SyntheticInvitationIdentity(
+                owner_drift_uid,
+                owner_drift_uid,
+                owner_drift_uid,
+            ),
+            context=context,
+            config=OPERATOR_CONFIG,
+        )
+        async with pool.acquire() as conn:
+            owner_drift_user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                owner_drift_uid,
+            )
+        owner_drift_owner = authority_advisory_lock.AuthorityOwner.from_values(
+            owner_drift_user_id,
+            owner_drift_user_id,
+        )
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker,
+                owner=owner_drift_owner,
+            )
+            owner_drift_cleanup = asyncio.create_task(
+                invitation_operator.cleanup_synthetic_invitation(
+                    receipt_id=owner_drift_issue["receipt_id"],
+                    expected_version=2,
+                    identity=invitation_operator.SyntheticInvitationIdentity(
+                        owner_drift_uid,
+                        owner_drift_uid,
+                        owner_drift_uid,
+                    ),
+                    context=context,
+                    config=OPERATOR_CONFIG,
+                )
+            )
+            await _wait_for_operator_authority_waiter(
+                pool,
+                owner_drift_owner,
+            )
+            async with pool.acquire() as drift:
+                async with drift.transaction():
+                    await drift.execute(
+                        "UPDATE users SET omi_uid = $2 WHERE id = $1",
+                        owner_drift_user_id,
+                        f"{owner_drift_uid}-moved",
+                    )
+                    replacement_id = await drift.fetchval(
+                        """
+                        INSERT INTO users (omi_uid, profile_class)
+                        VALUES ($1, 'synthetic')
+                        RETURNING id
+                        """,
+                        owner_drift_uid,
+                    )
+            await transaction.commit()
+
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_identity_drift",
+        ):
+            await asyncio.wait_for(owner_drift_cleanup, timeout=5)
+        async with pool.acquire() as observer:
+            owner_drift_state = dict(
+                await observer.fetchrow(
+                    """
+                    SELECT
+                        (SELECT profile_class FROM users WHERE id = $1)
+                            AS original_profile_class,
+                        (SELECT profile_class FROM users WHERE id = $2)
+                            AS replacement_profile_class,
+                        i.state,
+                        i.version,
+                        (
+                            SELECT COUNT(*)::integer
+                            FROM ella_invitation_audit_receipts a
+                            WHERE a.invitation_id = i.id
+                              AND a.event_type = 'operator_cleanup'
+                        ) AS cleanup_audits
+                    FROM ella_invitations i
+                    WHERE i.id = $3::uuid
+                    """,
+                    owner_drift_user_id,
+                    replacement_id,
+                    owner_drift_issue["receipt_id"],
+                )
+            )
+        assert owner_drift_state == {
+            "original_profile_class": "synthetic",
+            "replacement_profile_class": "synthetic",
+            "state": "revoked",
+            "version": 2,
+            "cleanup_audits": 0,
+        }
 
     asyncio.run(_run_with_database(scenario))
 

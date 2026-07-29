@@ -31,6 +31,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
+    ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
@@ -43,12 +44,14 @@ EXPECTED_WRITERS = {
 
 DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
+    ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
 }
 
 PROOF_GATED_HELPERS = {
+    ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
@@ -58,6 +61,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"),
+    ("database/invitation_operator.py", "_cleanup_locked"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
 NON_AUTHORITY_USER_WRITERS = {
@@ -99,6 +103,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/invitations.py", "_redeem_locked_invitation"): (
         "tests/postgres/test_invitation_redemption_postgres.py",
         "test_broker_lock_blocks_invitation_before_capacity_or_entitlement_mutation",
+    ),
+    ("database/invitation_operator.py", "_cleanup_locked"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_operator_revoke_cleanup_is_exact_and_real_user_safe",
     ),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
