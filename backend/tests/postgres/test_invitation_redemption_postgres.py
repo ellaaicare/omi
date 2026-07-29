@@ -167,7 +167,8 @@ async def _run_with_database(
                 "012_create_account_profile_runtime_targets.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            assert await conn.fetchval("""
+            assert await conn.fetchval(
+                """
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.columns
@@ -176,7 +177,8 @@ async def _run_with_database(
                       AND column_name = 'profile_class'
                       AND is_nullable = 'NO'
                 )
-                """)
+                """
+            )
             assert await conn.fetchval("SELECT to_regclass('ella_invitation_targets') IS NOT NULL")
         await scenario(pool)
     finally:
@@ -585,10 +587,15 @@ def test_rate_limit_uses_hmac_refs_and_emits_authoritative_retry():
         assert error.value.retry_after_s and error.value.retry_after_s <= 900
 
         async with pool.acquire() as conn:
-            stored = [dict(row) for row in await conn.fetch("""
+            stored = [
+                dict(row)
+                for row in await conn.fetch(
+                    """
                     SELECT uid_ref_hmac, source_ref_hmac
                     FROM ella_invitation_rate_limit_events
-                    """)]
+                    """
+                )
+            ]
         assert len(stored) == 5
         serialized = json.dumps(stored)
         assert uid not in serialized
@@ -997,11 +1004,15 @@ def test_kill_switch_after_invite_blocks_claim_and_preserves_pool(monkeypatch):
             )
         assert error.value.code == "runtime_admission_provider_disabled"
         async with pool.acquire() as conn:
-            binding = dict(await conn.fetchrow("""
+            binding = dict(
+                await conn.fetchrow(
+                    """
                     SELECT status, user_id, claim_job_id, claim_token
                     FROM ella_runtime_bindings
                     WHERE runtime_instance_id = 'kill-switch-a'
-                    """))
+                    """
+                )
+            )
         assert binding == {
             "status": "pool_available",
             "user_id": None,
