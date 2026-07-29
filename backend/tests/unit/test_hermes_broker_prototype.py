@@ -140,6 +140,7 @@ def _completed_result(**overrides):
         "correlation_id": "hwb:corr1",
         "account_id": ACCOUNT_UUID,
         "profile_id": PROFILE_UUID,
+        "lane": "chat_turn",
         "outcome": "success",
         "result": {
             "answer": "proto answer",
@@ -497,7 +498,75 @@ def test_answer_only_projection_rejected(monkeypatch):
         "hermes_broker_prototype_account_omitted",
         "hermes_broker_prototype_profile_omitted",
         "hermes_broker_prototype_correlation_omitted",
+        "hermes_broker_prototype_lane_omitted",
     }
+
+
+def test_omitted_lane_on_terminal_fails_closed(monkeypatch):
+    """Terminal projection without lane must fail (review 4812248201)."""
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        body = _completed_result()
+        del body["lane"]
+        return FakeResponse(200, body)
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_lane_omitted"
+
+
+def test_cross_lane_result_fails_closed(monkeypatch):
+    """Chat turn must reject terminal projection for the enrichment lane."""
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        return FakeResponse(
+            200,
+            _completed_result(lane="transcript_summary_enrichment"),
+        )
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_cross_lane_result"
 
 
 def test_timeout_fails_closed(monkeypatch):

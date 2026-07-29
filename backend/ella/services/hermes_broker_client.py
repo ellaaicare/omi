@@ -141,12 +141,19 @@ class HermesBrokerClient:
         request_id: str,
         account_id: str,
         profile_id: str,
+        lane: str,
         correlation_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Poll the companion GET contract until terminal, error, or timeout."""
         if not request_id or "/" in request_id or ".." in request_id:
             raise ProvisioningError(
                 "hermes_broker_prototype_request_id_invalid",
+                retryable=False,
+            )
+        expected_lane = str(lane or "").strip()
+        if not expected_lane:
+            raise ProvisioningError(
+                "hermes_broker_prototype_lane_required",
                 retryable=False,
             )
         url = f"{self.config.base_url}{RESULT_PATH_PREFIX}{request_id}"
@@ -199,6 +206,7 @@ class HermesBrokerClient:
                 account_id=account_id,
                 profile_id=profile_id,
                 correlation_id=correlation_id,
+                lane=expected_lane,
                 require_terminal_identity=False,
             )
             status = str(last.get("status") or "").strip()
@@ -213,13 +221,14 @@ class HermesBrokerClient:
                 "writeback_completed",
                 "success",
             }:
-                # Terminal success must carry full owner/request/correlation pins.
+                # Terminal success must carry full owner/request/correlation/lane pins.
                 self._assert_terminal_envelope(
                     last,
                     request_id=request_id,
                     account_id=account_id,
                     profile_id=profile_id,
                     correlation_id=correlation_id,
+                    lane=expected_lane,
                     require_terminal_identity=True,
                 )
                 return last
@@ -236,6 +245,7 @@ class HermesBrokerClient:
                     account_id=account_id,
                     profile_id=profile_id,
                     correlation_id=correlation_id,
+                    lane=expected_lane,
                     require_terminal_identity=True,
                 )
                 raise ProvisioningError(
@@ -300,6 +310,7 @@ class HermesBrokerClient:
             account_id=account_id,
             profile_id=profile_id,
             correlation_id=correlation_id,
+            lane="chat_turn",
         )
         return self._map_chat_result(
             terminal,
@@ -351,6 +362,7 @@ class HermesBrokerClient:
             account_id=account_id,
             profile_id=profile_id,
             correlation_id=correlation_id,
+            lane="transcript_summary_enrichment",
         )
         return self._map_summary_result(
             terminal,
@@ -514,9 +526,10 @@ class HermesBrokerClient:
         account_id: str,
         profile_id: str,
         correlation_id: Optional[str],
+        lane: str,
         require_terminal_identity: bool,
     ) -> None:
-        """Owner/request pins are mandatory; omissions fail closed."""
+        """Owner/request/lane pins are mandatory on terminal; omissions fail closed."""
         if require_terminal_identity:
             cls._require_exact_field(
                 body,
@@ -551,8 +564,15 @@ class HermesBrokerClient:
                 omitted_code="hermes_broker_prototype_correlation_omitted",
                 mismatch_code="hermes_broker_prototype_correlation_mismatch",
             )
+            cls._require_exact_field(
+                body,
+                "lane",
+                lane,
+                omitted_code="hermes_broker_prototype_lane_omitted",
+                mismatch_code="hermes_broker_prototype_cross_lane_result",
+            )
             return
-        # Non-terminal polls still reject cross-owner / wrong-request when present.
+        # Non-terminal polls still reject cross-owner / wrong-request / wrong-lane when present.
         if "request_id" in body and body.get("request_id") is not None:
             if str(body.get("request_id")).strip() and str(body.get("request_id")) != str(request_id):
                 raise ProvisioningError(
@@ -575,6 +595,12 @@ class HermesBrokerClient:
             if str(body.get("correlation_id")).strip() and str(body.get("correlation_id")) != str(correlation_id):
                 raise ProvisioningError(
                     "hermes_broker_prototype_correlation_mismatch",
+                    retryable=False,
+                )
+        if "lane" in body and body.get("lane") is not None:
+            if str(body.get("lane")).strip() and str(body.get("lane")) != str(lane):
+                raise ProvisioningError(
+                    "hermes_broker_prototype_cross_lane_result",
                     retryable=False,
                 )
 
