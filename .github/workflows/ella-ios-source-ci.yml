@@ -22,6 +22,8 @@ jobs:
     name: Flutter source, guards, and tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ELLA_CI_FLUTTER_VERSION: 3.41.1
     defaults:
       run:
         shell: bash
@@ -88,19 +90,20 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.24.1
+          flutter-version: ${{ env.ELLA_CI_FLUTTER_VERSION }}
           channel: stable
           cache: true
-          cache-dependency-path: app/pubspec.lock
+          cache-key: flutter-${{ runner.os }}-${{ env.ELLA_CI_FLUTTER_VERSION }}-${{ hashFiles('app/pubspec.lock') }}
+          pub-cache-key: pub-${{ runner.os }}-${{ env.ELLA_CI_FLUTTER_VERSION }}-${{ hashFiles('app/pubspec.lock') }}
 
       - name: Verify pinned Flutter version
         run: |
           set -euo pipefail
 
-          expected_flutter_version="3.24.1"
-          actual_flutter_version="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path(".fvmrc").read_text())["flutter"])')"
+          expected_flutter_version="$ELLA_CI_FLUTTER_VERSION"
+          actual_flutter_version="$(flutter --version | sed -n 's/^Flutter \([^ ]*\).*/\1/p')"
           if [[ "$actual_flutter_version" != "$expected_flutter_version" ]]; then
-            echo "app/.fvmrc must pin Flutter $expected_flutter_version, found $actual_flutter_version." >&2
+            echo "Ella source CI must pin Flutter $expected_flutter_version, found $actual_flutter_version." >&2
             exit 1
           fi
 
