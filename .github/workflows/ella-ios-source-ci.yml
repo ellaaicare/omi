@@ -120,19 +120,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t issue_tests < <(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort)
           expected_issue_test_count=31
-          if [[ "${#issue_tests[@]}" -ne "$expected_issue_test_count" ]]; then
-            printf '%s\n' "${issue_tests[@]}"
-            echo "Expected $expected_issue_test_count Ella/backend/onboarding source tests, found ${#issue_tests[@]}." >&2
+          issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
+          if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
+            cat /tmp/ella-issue-tests.txt
+            echo "Expected $expected_issue_test_count Ella/backend/onboarding source tests, found $issue_test_count." >&2
             exit 1
           fi
 
-          mapfile -t all_app_tests < <(find test -type f -name '*_test.dart' | sort)
           expected_app_test_count=52
-          if [[ "${#all_app_tests[@]}" -ne "$expected_app_test_count" ]]; then
-            printf '%s\n' "${all_app_tests[@]}"
-            echo "Expected $expected_app_test_count Flutter test files, found ${#all_app_tests[@]}." >&2
+          all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
+          if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
+            cat /tmp/ella-all-app-tests.txt
+            echo "Expected $expected_app_test_count Flutter test files, found $all_app_test_count." >&2
             exit 1
           fi
 
