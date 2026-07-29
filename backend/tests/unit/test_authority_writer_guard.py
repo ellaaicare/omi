@@ -84,15 +84,18 @@ def test_every_owner_bound_writer_has_direct_lock_or_lock_proof():
     for key in DIRECT_LOCKED_WRITERS:
         source = writers[key]["source"]
         assert "acquire_authority_lock(" in source, key
+        assert "verify_self_owner_after_lock(" in source, key
         assert re.search(
             r"async with [^\n]+\.transaction\(\):\n"
             r"\s+(?:owner_lock = )?await authority_advisory_lock"
             r"\.acquire_authority_lock\(",
             source,
         ), key
-        assert source.index("acquire_authority_lock(") < min(
+        first_mutation = min(
             index for token in ("INSERT INTO", "UPDATE ", "DELETE FROM") if (index := source.find(token)) >= 0
-        ), key
+        )
+        assert source.index("acquire_authority_lock(") < source.index("verify_self_owner_after_lock("), key
+        assert source.index("verify_self_owner_after_lock(") < first_mutation, key
     for key in PROOF_GATED_HELPERS:
         source = writers[key]["source"]
         assert "owner_lock" in source, key

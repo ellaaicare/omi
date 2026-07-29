@@ -14,6 +14,11 @@ the candidate account/profile outside the mutation transaction, take the v1
 transaction lock as the first statement, then lock and verify ownership before
 any protected row lock or mutation.
 
+The cross-repo derivation helpers accept canonical UUID text only. OMI validates
+that asyncpg ownership values are `uuid.UUID` instances at the database boundary,
+then explicitly converts those trusted values to text before deriving the key.
+Implicit stringification is rejected.
+
 The sole authority-neutral writer is warm-pool registration. It may only insert
 an unowned, inactive `pool_available` row and may never update or claim an
 owner-bound row. The writer-inventory guard fails if that SQL shape changes or a

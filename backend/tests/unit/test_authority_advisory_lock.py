@@ -23,6 +23,11 @@ from database.authority_advisory_lock import (
 )
 
 
+class UUIDStringifiable:
+    def __str__(self):
+        return "00000000-0000-4000-8000-000000000000"
+
+
 def test_vendored_contract_artifact_has_exact_reviewed_bytes():
     artifact_path = contract_artifact_path()
     assert artifact_path == Path(__file__).resolve().parents[2] / "contracts" / "authority_advisory_lock_v1.json"
@@ -49,6 +54,10 @@ def test_all_six_cross_repo_vectors_match_exact_bytes_digest_and_signed_key():
         (None, "authority_lock_owner_missing"),
         ("", "authority_lock_owner_missing"),
         (b"00000000-0000-4000-8000-000000000000", "authority_lock_owner_not_text"),
+        (uuid.UUID("00000000-0000-4000-8000-000000000000"), "authority_lock_owner_not_text"),
+        (UUIDStringifiable(), "authority_lock_owner_not_text"),
+        (123, "authority_lock_owner_not_text"),
+        (["00000000-0000-4000-8000-000000000000"], "authority_lock_owner_not_text"),
         ("{00000000-0000-4000-8000-000000000000}", "authority_lock_owner_not_canonical_uuid"),
         ("urn:uuid:00000000-0000-4000-8000-000000000000", "authority_lock_owner_not_canonical_uuid"),
         ("00000000000040008000000000000000", "authority_lock_owner_not_canonical_uuid"),
@@ -63,6 +72,38 @@ def test_noncanonical_owner_forms_fail_closed_without_echoing_value(value, code)
         assert str(value) not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        uuid.UUID("00000000-0000-4000-8000-000000000000"),
+        UUIDStringifiable(),
+        123,
+        ["00000000-0000-4000-8000-000000000000"],
+        b"00000000-0000-4000-8000-000000000000",
+    ),
+)
+def test_key_contract_rejects_non_text_owners(value):
+    canonical = "11111111-1111-4111-8111-111111111111"
+    with pytest.raises(AuthorityLockError, match="authority_lock_owner_not_text"):
+        authority_lock_key(value, canonical)
+    with pytest.raises(AuthorityLockError, match="authority_lock_owner_not_text"):
+        authority_lock_key(canonical, value)
+
+
+def test_authority_owner_accepts_only_trusted_database_uuid_values():
+    account_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    profile_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+
+    assert AuthorityOwner.from_values(account_id, profile_id) == AuthorityOwner(
+        account_id=account_id,
+        profile_id=profile_id,
+    )
+    with pytest.raises(AuthorityLockError, match="authority_lock_owner_not_database_uuid"):
+        AuthorityOwner.from_values(str(account_id), profile_id)
+    with pytest.raises(AuthorityLockError, match="authority_lock_owner_not_database_uuid"):
+        AuthorityOwner.from_values(account_id, UUIDStringifiable())
+
+
 def test_account_profile_order_is_part_of_key():
     account_id = "11111111-1111-4111-8111-111111111111"
     profile_id = "22222222-2222-4222-8222-222222222222"
@@ -75,7 +116,7 @@ def test_self_owner_proof_rejects_missing_and_cross_owner_values():
     owner = AuthorityOwner.from_values(owner_id, owner_id)
     proof = AuthorityLockProof(
         owner=owner,
-        key=authority_lock_key(owner_id, owner_id),
+        key=authority_lock_key(str(owner_id), str(owner_id)),
     )
 
     require_self_owner_lock(proof, user_id=owner_id)
@@ -97,8 +138,8 @@ def test_acquisition_uses_one_signed_bigint_and_returns_owner_proof():
             self.calls.append((query, args))
             return "SELECT 1"
 
-    account_id = "11111111-1111-4111-8111-111111111111"
-    profile_id = "22222222-2222-4222-8222-222222222222"
+    account_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    profile_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
     owner = AuthorityOwner.from_values(account_id, profile_id)
     connection = Connection()
 
@@ -106,7 +147,7 @@ def test_acquisition_uses_one_signed_bigint_and_returns_owner_proof():
 
     assert proof == AuthorityLockProof(
         owner=owner,
-        key=authority_lock_key(account_id, profile_id),
+        key=authority_lock_key(str(account_id), str(profile_id)),
     )
     assert connection.calls == [
         (

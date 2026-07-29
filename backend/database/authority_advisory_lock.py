@@ -43,11 +43,16 @@ class AuthorityOwner:
     account_id: uuid.UUID
     profile_id: uuid.UUID
 
+    def __post_init__(self) -> None:
+        _validated_database_uuid(self.account_id, field="account_id")
+        _validated_database_uuid(self.profile_id, field="profile_id")
+
     @classmethod
     def from_values(cls, account_id: Any, profile_id: Any) -> "AuthorityOwner":
-        canonical_uuid_bytes(account_id, field="account_id")
-        canonical_uuid_bytes(profile_id, field="profile_id")
-        return cls(account_id=uuid.UUID(str(account_id)), profile_id=uuid.UUID(str(profile_id)))
+        return cls(
+            account_id=_validated_database_uuid(account_id, field="account_id"),
+            profile_id=_validated_database_uuid(profile_id, field="profile_id"),
+        )
 
 
 @dataclass(frozen=True)
@@ -84,17 +89,23 @@ def load_verified_contract_artifact() -> Mapping[str, Any]:
     return artifact
 
 
+def _validated_database_uuid(value: Any, *, field: str) -> uuid.UUID:
+    if not isinstance(value, uuid.UUID):
+        raise AuthorityLockError("authority_lock_owner_not_database_uuid", field)
+    canonical_uuid_bytes(str(value), field=field)
+    return value
+
+
 def canonical_uuid_bytes(value: Any, *, field: str) -> bytes:
     if value is None:
         raise AuthorityLockError("authority_lock_owner_missing", field)
-    if isinstance(value, bytes):
+    if not isinstance(value, str):
         raise AuthorityLockError("authority_lock_owner_not_text", field)
-    text = str(value)
-    if not text:
+    if not value:
         raise AuthorityLockError("authority_lock_owner_missing", field)
-    if not _CANONICAL_UUID_RE.match(text):
+    if not _CANONICAL_UUID_RE.match(value):
         raise AuthorityLockError("authority_lock_owner_not_canonical_uuid", field)
-    return bytes.fromhex(text.replace("-", "").lower())
+    return bytes.fromhex(value.replace("-", "").lower())
 
 
 def authority_lock_preimage(account_id: Any, profile_id: Any) -> bytes:
@@ -128,7 +139,11 @@ async def acquire_authority_lock(
     owner: AuthorityOwner,
 ) -> AuthorityLockProof:
     """Take the v1 lock. This must be the first statement in the transaction."""
-    key = authority_lock_key(owner.account_id, owner.profile_id)
+    if not isinstance(owner, AuthorityOwner):
+        raise AuthorityLockError("authority_lock_owner_invalid")
+    account_id = str(_validated_database_uuid(owner.account_id, field="account_id"))
+    profile_id = str(_validated_database_uuid(owner.profile_id, field="profile_id"))
+    key = authority_lock_key(account_id, profile_id)
     await connection.execute("SELECT pg_advisory_xact_lock($1::bigint)", key)
     return AuthorityLockProof(owner=owner, key=key)
 
@@ -141,7 +156,7 @@ def require_self_owner_lock(
     """Fail closed unless a helper received the exact self-profile lock proof."""
     if not isinstance(proof, AuthorityLockProof):
         raise AuthorityLockError("authority_lock_proof_missing")
-    current = uuid.UUID(str(user_id))
+    current = _validated_database_uuid(user_id, field="user_id")
     if proof.owner.account_id != current or proof.owner.profile_id != current:
         raise AuthorityLockError("authority_lock_proof_owner_mismatch")
 
@@ -174,7 +189,7 @@ async def verify_self_owner_after_lock(
     )
     if not row:
         raise AuthorityLockError("authority_lock_owner_missing")
-    current = uuid.UUID(str(row["id"]))
+    current = _validated_database_uuid(row["id"], field="user_id")
     if current != owner.account_id or current != owner.profile_id:
         raise AuthorityLockError("authority_lock_owner_drift")
     return current

@@ -195,8 +195,8 @@ def test_omi_revoke_lock_blocks_broker_and_releases_without_deadlock():
         uid = "synthetic-revoke-blocks-broker"
         owner = await _seed_grant(pool, uid)
         key = authority_advisory_lock.authority_lock_key(
-            owner.account_id,
-            owner.profile_id,
+            str(owner.account_id),
+            str(owner.profile_id),
         )
         async with pool.acquire() as conn:
             await conn.execute(
@@ -288,42 +288,69 @@ def test_account_profile_lock_isolation_allows_unrelated_writer():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_owner_drift_after_unlocked_lookup_fails_closed_before_mutation():
+def test_synchronize_denial_owner_drift_after_unlocked_lookup_fails_closed_before_mutation(monkeypatch):
     async def scenario(pool):
         uid = "synthetic-owner-drift"
         original_owner = await _seed_grant(pool, uid)
-        async with pool.acquire() as conn:
-            candidate = await authority_advisory_lock.resolve_self_owner_unlocked(
-                conn,
-                uid=uid,
+        candidate_resolved = asyncio.Event()
+        original_resolver = authority_advisory_lock.resolve_self_owner_unlocked
+
+        async def resolve_and_signal(connection, *, uid):
+            owner = await original_resolver(connection, uid=uid)
+            candidate_resolved.set()
+            return owner
+
+        monkeypatch.setattr(
+            authority_advisory_lock,
+            "resolve_self_owner_unlocked",
+            resolve_and_signal,
+        )
+
+        async with pool.acquire() as broker_conn:
+            broker_transaction = broker_conn.transaction()
+            await broker_transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker_conn,
+                owner=original_owner,
             )
-            await conn.execute(
-                "UPDATE users SET omi_uid = $2 WHERE id = $1",
-                original_owner.account_id,
-                f"{uid}-moved",
-            )
-            replacement_id = await conn.fetchval(
-                """
-                INSERT INTO users (omi_uid, profile_class)
-                VALUES ($1, 'synthetic')
-                RETURNING id
-                """,
-                uid,
-            )
-            async with conn.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
-                    conn,
-                    owner=candidate,
+            denial = asyncio.create_task(
+                managed_cloud_consent.synchronize_denial(
+                    uid=uid,
+                    decision="revoked",
                 )
-                with pytest.raises(
-                    authority_advisory_lock.AuthorityLockError,
-                    match="authority_lock_owner_drift",
-                ):
-                    await authority_advisory_lock.verify_self_owner_after_lock(
-                        conn,
-                        uid=uid,
-                        owner=candidate,
+            )
+            await asyncio.wait_for(candidate_resolved.wait(), timeout=2)
+            await asyncio.sleep(0.05)
+            assert not denial.done()
+
+            async with pool.acquire() as owner_writer:
+                async with owner_writer.transaction():
+                    await owner_writer.execute(
+                        "UPDATE users SET omi_uid = $2 WHERE id = $1",
+                        original_owner.account_id,
+                        f"{uid}-moved",
                     )
+                    replacement_id = await owner_writer.fetchval(
+                        """
+                        INSERT INTO users (omi_uid, profile_class)
+                        VALUES ($1, 'synthetic')
+                        RETURNING id
+                        """,
+                        uid,
+                    )
+
+            await broker_transaction.commit()
+            with pytest.raises(
+                managed_cloud_consent.ManagedCloudAuthorityUnavailable,
+                match="managed_cloud_authority_unavailable",
+            ) as raised:
+                await asyncio.wait_for(denial, timeout=3)
+            assert isinstance(
+                raised.value.__cause__,
+                authority_advisory_lock.AuthorityLockError,
+            )
+            assert raised.value.__cause__.code == "authority_lock_owner_drift"
+
         async with pool.acquire() as observer:
             assert (
                 await observer.fetchval(
@@ -346,6 +373,13 @@ def test_owner_drift_after_unlocked_lookup_fails_closed_before_mutation():
                     original_owner.account_id,
                 )
                 == "granted"
+            )
+            assert (
+                await observer.fetchval(
+                    "SELECT status FROM voice_entitlements WHERE uid = $1",
+                    uid,
+                )
+                == "active"
             )
 
     asyncio.run(_run_with_database(scenario))
