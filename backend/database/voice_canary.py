@@ -498,9 +498,14 @@ async def upsert_entitlement(
     async with pool.acquire() as conn:
         owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
         async with conn.transaction():
-            await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
-            await authority_advisory_lock.verify_self_owner_after_lock(conn, uid=uid, owner=owner)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO voice_entitlements (
@@ -555,9 +560,14 @@ async def update_entitlement_status(
     async with pool.acquire() as conn:
         owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
         async with conn.transaction():
-            await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
-            await authority_advisory_lock.verify_self_owner_after_lock(conn, uid=uid, owner=owner)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
             row = await conn.fetchrow(
                 """
                 UPDATE voice_entitlements
@@ -1489,9 +1499,14 @@ async def delete_user_voice_data(uid: str) -> dict[str, int]:
     async with pool.acquire() as conn:
         owner = await authority_advisory_lock.resolve_self_owner_unlocked(conn, uid=uid)
         async with conn.transaction():
-            await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
+            owner_lock = await authority_advisory_lock.acquire_authority_lock(conn, owner=owner)
             await lock_runtime_authority_on_connection(conn, uid=uid)
-            await authority_advisory_lock.verify_self_owner_after_lock(conn, uid=uid, owner=owner)
+            await authority_advisory_lock.verify_self_owner_after_lock(
+                conn,
+                uid=uid,
+                owner=owner,
+                proof=owner_lock,
+            )
             counts = {
                 "active_sessions": _as_int(
                     await conn.fetchval("SELECT COUNT(*) FROM voice_active_sessions WHERE uid = $1", uid)

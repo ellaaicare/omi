@@ -347,16 +347,24 @@ class EllaProvisioningRepository:
             raise IdentityConflictError("identity_missing_email")
 
         async with self.pool.acquire() as connection:
+            resolution = await authority_advisory_lock.resolve_identity_owner_unlocked(
+                connection,
+                uid=uid,
+                email=email,
+            )
             async with connection.transaction():
-                by_uid = await connection.fetchrow(
-                    """
-                    SELECT id, omi_uid, email, name, timezone
-                    FROM users
-                    WHERE omi_uid = $1
-                    FOR UPDATE
-                    """,
-                    uid,
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=resolution.owner,
                 )
+                identity_rows = await authority_advisory_lock.verify_identity_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    email=email,
+                    resolution=resolution,
+                    proof=owner_lock,
+                )
+                by_uid = next((row for row in identity_rows if row["omi_uid"] == uid), None)
                 if by_uid:
                     if str(by_uid["email"]).lower() != email.lower():
                         raise IdentityConflictError("uid_email_mismatch")
@@ -377,14 +385,9 @@ class EllaProvisioningRepository:
                     )
                     return dict(updated)
 
-                by_email = await connection.fetchrow(
-                    """
-                    SELECT id, omi_uid, email
-                    FROM users
-                    WHERE lower(email) = lower($1)
-                    FOR UPDATE
-                    """,
-                    email,
+                by_email = next(
+                    (row for row in identity_rows if str(row["email"] or "").lower() == email.lower()),
+                    None,
                 )
                 if by_email:
                     existing_uid = by_email["omi_uid"]
@@ -410,7 +413,6 @@ class EllaProvisioningRepository:
                     )
                     return dict(updated)
 
-                user_id = uuid.uuid4()
                 inserted = await connection.fetchrow(
                     """
                     INSERT INTO users (
@@ -424,7 +426,7 @@ class EllaProvisioningRepository:
                     )
                     RETURNING id, omi_uid, email, name, timezone, status
                     """,
-                    user_id,
+                    resolution.owner.account_id,
                     email,
                     name,
                     timezone_name,
@@ -715,7 +717,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -732,6 +734,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 existing = await connection.fetchrow(
                     """
@@ -854,7 +857,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -873,6 +876,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 entitlement = admission.entitlement or {}
                 if (
@@ -1118,7 +1122,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -1126,6 +1130,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 selected = await connection.fetchrow(
                     """
@@ -1317,7 +1322,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -1336,6 +1341,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 entitlement = admission.entitlement or {}
                 if (
@@ -2364,7 +2370,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -2372,6 +2378,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 row = await connection.fetchrow(
                     """
@@ -2447,7 +2454,7 @@ class EllaProvisioningRepository:
                 uid=uid,
             )
             async with connection.transaction():
-                await authority_advisory_lock.acquire_authority_lock(
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
                     connection,
                     owner=owner,
                 )
@@ -2455,6 +2462,7 @@ class EllaProvisioningRepository:
                     connection,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 selected = await connection.fetchrow(
                     """
@@ -2504,14 +2512,30 @@ class EllaProvisioningRepository:
                 return dict(activated)
 
     async def activate_user(self, uid: str) -> None:
-        result = await self.pool.execute(
-            """
-            UPDATE users
-            SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
-            WHERE omi_uid = $1
-            """,
-            uid,
-        )
+        async with self.pool.acquire() as connection:
+            owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+                connection,
+                uid=uid,
+            )
+            async with connection.transaction():
+                owner_lock = await authority_advisory_lock.acquire_authority_lock(
+                    connection,
+                    owner=owner,
+                )
+                await authority_advisory_lock.verify_self_owner_after_lock(
+                    connection,
+                    uid=uid,
+                    owner=owner,
+                    proof=owner_lock,
+                )
+                result = await connection.execute(
+                    """
+                    UPDATE users
+                    SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP
+                    WHERE omi_uid = $1
+                    """,
+                    uid,
+                )
         if result == "UPDATE 0":
             raise LookupError("user_not_found")
 

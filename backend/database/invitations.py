@@ -560,6 +560,7 @@ async def redeem_invitation(
                         config=settings,
                         pilot_admission=pilot_admission,
                         pilot_admission_revalidator=pilot_admission_revalidator,
+                        owner=owner,
                         owner_lock=owner_lock,
                     )
 
@@ -582,6 +583,7 @@ async def _redeem_locked_invitation(
     config: InvitationConfig,
     pilot_admission: InvitationPilotAdmission,
     pilot_admission_revalidator: PilotAdmissionRevalidator,
+    owner: authority_advisory_lock.AuthorityOwner,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> dict[str, Any] | InviteRedemptionFailure:
     invitation_id = invitation["id"]
@@ -619,6 +621,7 @@ async def _redeem_locked_invitation(
     try:
         consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
             conn,
+            owner=owner,
             owner_lock=owner_lock,
             grant=managed_cloud_consent.ManagedCloudGrant(
                 account_uid=pilot_admission.account_uid,

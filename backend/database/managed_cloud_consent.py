@@ -116,7 +116,8 @@ async def _quarantine_on_connection(
     reason: str,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> None:
-    authority_advisory_lock.require_self_owner_lock(
+    await authority_advisory_lock.require_self_owner_lock(
+        conn,
         owner_lock,
         user_id=user_id,
     )
@@ -179,6 +180,7 @@ async def lock_or_bootstrap_grant_on_connection(
     conn: asyncpg.Connection,
     *,
     grant: ManagedCloudGrant,
+    owner: authority_advisory_lock.AuthorityOwner,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> uuid.UUID:
     """Lock the exact grant epoch after the caller acquires the v1 owner lock."""
@@ -186,9 +188,11 @@ async def lock_or_bootstrap_grant_on_connection(
     user_id = await authority_advisory_lock.verify_self_owner_after_lock(
         conn,
         uid=grant.account_uid,
-        owner=owner_lock.owner,
+        owner=owner,
+        proof=owner_lock,
     )
-    authority_advisory_lock.require_self_owner_lock(
+    await authority_advisory_lock.require_self_owner_lock(
+        conn,
         owner_lock,
         user_id=user_id,
     )
@@ -249,6 +253,7 @@ async def synchronize_grant(
                     conn,
                     uid=grant.account_uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 row = await conn.fetchrow(
                     """
@@ -352,6 +357,7 @@ async def synchronize_denial(
                     conn,
                     uid=uid,
                     owner=owner,
+                    proof=owner_lock,
                 )
                 row = await conn.fetchrow(
                     """

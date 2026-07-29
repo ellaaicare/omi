@@ -9,7 +9,12 @@ from typing import Awaitable, Callable, Iterable
 import asyncpg
 import pytest
 
-from database import invitations, managed_cloud_consent, voice_canary
+from database import (
+    authority_advisory_lock,
+    invitations,
+    managed_cloud_consent,
+    voice_canary,
+)
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
@@ -435,6 +440,211 @@ def test_same_uid_retry_is_idempotent_and_privacy_safe():
     asyncio.run(_run_with_database(scenario))
 
 
+def test_broker_lock_blocks_invitation_before_capacity_or_entitlement_mutation():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-broker-blocks-invite"
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="EFGH-2345",
+            target_uids=[uid],
+        )
+        async with pool.acquire() as conn:
+            user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            user_id,
+            user_id,
+        )
+        key = authority_advisory_lock.authority_lock_key(
+            str(owner.account_id),
+            str(owner.profile_id),
+        )
+        class_id, object_id = authority_advisory_lock._advisory_lock_parts(key)
+
+        async def snapshot():
+            async with pool.acquire() as observer:
+                row = await observer.fetchrow(
+                    """
+                    SELECT i.state, i.redemption_count, r.consumed_slots,
+                           (
+                               SELECT COUNT(*)::integer
+                               FROM voice_entitlements e
+                               WHERE e.uid = $3
+                           ) AS entitlement_count
+                    FROM ella_invitations i
+                    JOIN ella_invitation_capacity_reservations r
+                      ON r.id = i.capacity_reservation_id
+                    WHERE i.id = $1::uuid
+                      AND r.id = $2::uuid
+                    """,
+                    invitation_id,
+                    reservation_id,
+                    uid,
+                )
+                return tuple(row.values())
+
+        assert await snapshot() == ("sent", 0, 0, 0)
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker,
+                owner=owner,
+            )
+            redemption = asyncio.create_task(_redeem(uid, "EFGH-2345"))
+            for _attempt in range(100):
+                async with pool.acquire() as probe:
+                    waiting = await probe.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM pg_locks
+                            WHERE locktype = 'advisory'
+                              AND classid::bigint = $1
+                              AND objid::bigint = $2
+                              AND objsubid = 1
+                              AND mode = 'ExclusiveLock'
+                              AND NOT granted
+                        )
+                        """,
+                        class_id,
+                        object_id,
+                    )
+                if waiting:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("invitation writer never waited on the shared v1 lock")
+            assert not redemption.done()
+            assert await snapshot() == ("sent", 0, 0, 0)
+            await transaction.commit()
+
+        result = await asyncio.wait_for(redemption, timeout=5)
+        assert result["status"] == "invited"
+        assert await snapshot() == ("redeemed", 1, 1, 1)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_invitation_reproves_owner_and_rolls_back_on_concurrent_drift():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-invite-owner-drift"
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="KMNP-2345",
+            target_uids=[uid],
+        )
+        async with pool.acquire() as conn:
+            user_id = await conn.fetchval(
+                "SELECT id FROM users WHERE omi_uid = $1",
+                uid,
+            )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            user_id,
+            user_id,
+        )
+        key = authority_advisory_lock.authority_lock_key(
+            str(owner.account_id),
+            str(owner.profile_id),
+        )
+        class_id, object_id = authority_advisory_lock._advisory_lock_parts(key)
+
+        async def snapshot():
+            async with pool.acquire() as observer:
+                row = await observer.fetchrow(
+                    """
+                    SELECT i.state, i.redemption_count, r.consumed_slots,
+                           (
+                               SELECT COUNT(*)::integer
+                               FROM voice_entitlements e
+                               WHERE e.uid = $3
+                           ) AS entitlement_count
+                    FROM ella_invitations i
+                    JOIN ella_invitation_capacity_reservations r
+                      ON r.id = i.capacity_reservation_id
+                    WHERE i.id = $1::uuid
+                      AND r.id = $2::uuid
+                    """,
+                    invitation_id,
+                    reservation_id,
+                    uid,
+                )
+                return tuple(row.values())
+
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker,
+                owner=owner,
+            )
+            redemption = asyncio.create_task(_redeem(uid, "KMNP-2345"))
+            for _attempt in range(100):
+                async with pool.acquire() as probe:
+                    waiting = await probe.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM pg_locks
+                            WHERE locktype = 'advisory'
+                              AND classid::bigint = $1
+                              AND objid::bigint = $2
+                              AND objsubid = 1
+                              AND mode = 'ExclusiveLock'
+                              AND NOT granted
+                        )
+                        """,
+                        class_id,
+                        object_id,
+                    )
+                if waiting:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("invitation writer never waited on the shared v1 lock")
+
+            async with pool.acquire() as drift:
+                async with drift.transaction():
+                    await drift.execute(
+                        "UPDATE users SET omi_uid = $2 WHERE id = $1",
+                        user_id,
+                        f"{uid}-moved",
+                    )
+                    replacement_id = await drift.fetchval(
+                        """
+                        INSERT INTO users (omi_uid, profile_class)
+                        VALUES ($1, 'synthetic')
+                        RETURNING id
+                        """,
+                        uid,
+                    )
+            await transaction.commit()
+
+        with pytest.raises(
+            authority_advisory_lock.AuthorityLockError,
+            match="authority_lock_owner_drift",
+        ):
+            await asyncio.wait_for(redemption, timeout=5)
+        assert await snapshot() == ("sent", 0, 0, 0)
+        async with pool.acquire() as observer:
+            assert (
+                await observer.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM ella_managed_cloud_consent_authority
+                    WHERE user_id IN ($1, $2)
+                    """,
+                    user_id,
+                    replacement_id,
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
 def test_forwarded_or_cross_profile_code_cannot_mutate_capacity_or_entitlement():
     async def scenario(pool: asyncpg.Pool) -> None:
         owner = "synthetic-target-owner"
@@ -610,10 +820,11 @@ def test_revocation_started_after_revalidation_is_serialized_and_quarantines_gra
         resume_before_insert = asyncio.Event()
         original_lock = managed_cloud_consent.lock_or_bootstrap_grant_on_connection
 
-        async def pause_after_revalidation(conn, *, grant, owner_lock):
+        async def pause_after_revalidation(conn, *, grant, owner, owner_lock):
             epoch = await original_lock(
                 conn,
                 grant=grant,
+                owner=owner,
                 owner_lock=owner_lock,
             )
             authority_locked.set()

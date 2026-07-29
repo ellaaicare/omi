@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import uuid
@@ -110,34 +111,51 @@ def test_account_profile_order_is_part_of_key():
     assert authority_lock_key(account_id, profile_id) != authority_lock_key(profile_id, account_id)
 
 
-def test_self_owner_proof_rejects_missing_and_cross_owner_values():
+class Connection:
+    def __init__(self, *, backend_pid=1234, transaction_id=5678, lock_held=True):
+        self.backend_pid = backend_pid
+        self.transaction_id = transaction_id
+        self.lock_held = lock_held
+        self.calls = []
+
+    async def execute(self, query, *args):
+        self.calls.append(("execute", query, args))
+        return "SELECT 1"
+
+    async def fetchrow(self, query, *args):
+        self.calls.append(("fetchrow", query, args))
+        return {
+            "backend_pid": self.backend_pid,
+            "transaction_id": self.transaction_id,
+            "lock_held": self.lock_held,
+        }
+
+
+def test_self_owner_proof_rejects_missing_cross_owner_forged_and_copied_values():
     owner_id = uuid.uuid4()
     other_id = uuid.uuid4()
     owner = AuthorityOwner.from_values(owner_id, owner_id)
-    proof = AuthorityLockProof(
-        owner=owner,
-        key=authority_lock_key(str(owner_id), str(owner_id)),
-    )
+    connection = Connection()
+    proof = asyncio.run(acquire_authority_lock(connection, owner=owner))
 
-    require_self_owner_lock(proof, user_id=owner_id)
+    asyncio.run(require_self_owner_lock(connection, proof, user_id=owner_id))
     with pytest.raises(AuthorityLockError, match="authority_lock_proof_missing"):
-        require_self_owner_lock(None, user_id=owner_id)
+        asyncio.run(require_self_owner_lock(connection, None, user_id=owner_id))
     with pytest.raises(
         AuthorityLockError,
         match="authority_lock_proof_owner_mismatch",
     ):
-        require_self_owner_lock(proof, user_id=other_id)
+        asyncio.run(require_self_owner_lock(connection, proof, user_id=other_id))
+    with pytest.raises(AuthorityLockError, match="authority_lock_proof_construction_forbidden"):
+        AuthorityLockProof()
+    forged = object.__new__(AuthorityLockProof)
+    with pytest.raises(AuthorityLockError, match="authority_lock_proof_forged"):
+        asyncio.run(require_self_owner_lock(connection, forged, user_id=owner_id))
+    with pytest.raises(AuthorityLockError, match="authority_lock_proof_copy_forbidden"):
+        copy.copy(proof)
 
 
 def test_acquisition_uses_one_signed_bigint_and_returns_owner_proof():
-    class Connection:
-        def __init__(self):
-            self.calls = []
-
-        async def execute(self, query, *args):
-            self.calls.append((query, args))
-            return "SELECT 1"
-
     account_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     profile_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
     owner = AuthorityOwner.from_values(account_id, profile_id)
@@ -145,13 +163,29 @@ def test_acquisition_uses_one_signed_bigint_and_returns_owner_proof():
 
     proof = asyncio.run(acquire_authority_lock(connection, owner=owner))
 
-    assert proof == AuthorityLockProof(
-        owner=owner,
-        key=authority_lock_key(str(account_id), str(profile_id)),
+    expected_key = authority_lock_key(str(account_id), str(profile_id))
+    assert type(proof) is AuthorityLockProof
+    assert repr(proof) == "AuthorityLockProof(<opaque>)"
+    assert connection.calls[0] == (
+        "execute",
+        "SELECT pg_advisory_xact_lock($1::bigint)",
+        (expected_key,),
     )
-    assert connection.calls == [
-        (
-            "SELECT pg_advisory_xact_lock($1::bigint)",
-            (proof.key,),
+    assert connection.calls[1][0] == "fetchrow"
+    assert connection.calls[1][2] == (
+        (expected_key & ((1 << 64) - 1)) >> 32,
+        expected_key & 0xFFFFFFFF,
+    )
+
+
+def test_acquisition_fails_when_transaction_lock_is_not_observable():
+    owner_id = uuid.uuid4()
+    owner = AuthorityOwner.from_values(owner_id, owner_id)
+    connection = Connection(lock_held=False)
+    with pytest.raises(AuthorityLockError, match="authority_lock_not_held"):
+        asyncio.run(
+            acquire_authority_lock(
+                connection,
+                owner=owner,
+            )
         )
-    ]

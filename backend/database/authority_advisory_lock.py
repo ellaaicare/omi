@@ -13,6 +13,7 @@ import json
 import re
 import struct
 import uuid
+import weakref
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -26,8 +27,10 @@ CONTRACT_ARTIFACT_SHA256 = "1a92c0d335742560fff71b4630b95e1424bccdafb15c6245c8a5
 AUTHORITY_LOCK_DOMAIN = b"ella-managed-cloud-authority-lock-v1"
 AUTHORITY_LOCK_FIELD_COUNT = 2
 UUID_BYTE_LENGTH = 16
+IDENTITY_OWNER_NAMESPACE = uuid.UUID("d9b4e06b-3553-5f97-b04d-6e88f730b94f")
 
 _CANONICAL_UUID_RE = re.compile(r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
+_PROOF_ISSUER = object()
 
 
 class AuthorityLockError(RuntimeError):
@@ -56,11 +59,45 @@ class AuthorityOwner:
 
 
 @dataclass(frozen=True)
-class AuthorityLockProof:
-    """In-process proof that the caller acquired the v1 transaction lock."""
+class IdentityOwnerResolution:
+    owner: AuthorityOwner
+    allow_create: bool
 
+
+class AuthorityLockProof:
+    """Opaque handle verified against PostgreSQL before every helper mutation."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls, issuer: object = None) -> "AuthorityLockProof":
+        if issuer is not _PROOF_ISSUER:
+            raise AuthorityLockError("authority_lock_proof_construction_forbidden")
+        return super().__new__(cls)
+
+    def __copy__(self) -> "AuthorityLockProof":
+        raise AuthorityLockError("authority_lock_proof_copy_forbidden")
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "AuthorityLockProof":
+        del memo
+        raise AuthorityLockError("authority_lock_proof_copy_forbidden")
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        raise AuthorityLockError("authority_lock_proof_serialization_forbidden")
+
+    def __repr__(self) -> str:
+        return "AuthorityLockProof(<opaque>)"
+
+
+@dataclass(frozen=True)
+class _AuthorityLockProofState:
     owner: AuthorityOwner
     key: int
+    connection: asyncpg.Connection
+    backend_pid: int
+    transaction_id: int
+
+
+_PROOF_STATES: weakref.WeakKeyDictionary[AuthorityLockProof, _AuthorityLockProofState] = weakref.WeakKeyDictionary()
 
 
 def contract_artifact_path() -> Path:
@@ -133,6 +170,42 @@ def authority_lock_key(account_id: Any, profile_id: Any) -> int:
     return int.from_bytes(authority_lock_digest(account_id, profile_id)[:8], byteorder="big", signed=True)
 
 
+def _advisory_lock_parts(key: int) -> tuple[int, int]:
+    unsigned_key = key & ((1 << 64) - 1)
+    return (unsigned_key >> 32) & 0xFFFFFFFF, unsigned_key & 0xFFFFFFFF
+
+
+async def _read_transaction_lock_state(
+    connection: asyncpg.Connection,
+    *,
+    key: int,
+) -> tuple[int, int, bool]:
+    class_id, object_id = _advisory_lock_parts(key)
+    row = await connection.fetchrow(
+        """
+        SELECT
+            pg_backend_pid() AS backend_pid,
+            txid_current() AS transaction_id,
+            EXISTS (
+                SELECT 1
+                FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND pid = pg_backend_pid()
+                  AND classid::bigint = $1
+                  AND objid::bigint = $2
+                  AND objsubid = 1
+                  AND mode = 'ExclusiveLock'
+                  AND granted
+            ) AS lock_held
+        """,
+        class_id,
+        object_id,
+    )
+    if not row:
+        raise AuthorityLockError("authority_lock_proof_state_unavailable")
+    return int(row["backend_pid"]), int(row["transaction_id"]), bool(row["lock_held"])
+
+
 async def acquire_authority_lock(
     connection: asyncpg.Connection,
     *,
@@ -145,20 +218,64 @@ async def acquire_authority_lock(
     profile_id = str(_validated_database_uuid(owner.profile_id, field="profile_id"))
     key = authority_lock_key(account_id, profile_id)
     await connection.execute("SELECT pg_advisory_xact_lock($1::bigint)", key)
-    return AuthorityLockProof(owner=owner, key=key)
+    backend_pid, transaction_id, lock_held = await _read_transaction_lock_state(
+        connection,
+        key=key,
+    )
+    if not lock_held:
+        raise AuthorityLockError("authority_lock_not_held")
+    proof = AuthorityLockProof(_PROOF_ISSUER)
+    _PROOF_STATES[proof] = _AuthorityLockProofState(
+        owner=owner,
+        key=key,
+        connection=connection,
+        backend_pid=backend_pid,
+        transaction_id=transaction_id,
+    )
+    return proof
 
 
-def require_self_owner_lock(
+async def require_authority_lock(
+    connection: asyncpg.Connection,
+    proof: AuthorityLockProof,
+    *,
+    owner: AuthorityOwner,
+) -> None:
+    """Verify an opaque proof against this connection's current transaction."""
+    if type(proof) is not AuthorityLockProof:
+        raise AuthorityLockError("authority_lock_proof_missing")
+    state = _PROOF_STATES.get(proof)
+    if state is None:
+        raise AuthorityLockError("authority_lock_proof_forged")
+    if connection is not state.connection:
+        raise AuthorityLockError("authority_lock_proof_connection_mismatch")
+    if owner != state.owner:
+        raise AuthorityLockError("authority_lock_proof_owner_mismatch")
+    backend_pid, transaction_id, lock_held = await _read_transaction_lock_state(
+        connection,
+        key=state.key,
+    )
+    if backend_pid != state.backend_pid:
+        raise AuthorityLockError("authority_lock_proof_connection_mismatch")
+    if transaction_id != state.transaction_id:
+        raise AuthorityLockError("authority_lock_proof_transaction_stale")
+    if not lock_held:
+        raise AuthorityLockError("authority_lock_proof_lock_missing")
+
+
+async def require_self_owner_lock(
+    connection: asyncpg.Connection,
     proof: AuthorityLockProof,
     *,
     user_id: Any,
 ) -> None:
-    """Fail closed unless a helper received the exact self-profile lock proof."""
-    if not isinstance(proof, AuthorityLockProof):
-        raise AuthorityLockError("authority_lock_proof_missing")
+    """Fail closed unless this transaction holds the exact self-profile lock."""
     current = _validated_database_uuid(user_id, field="user_id")
-    if proof.owner.account_id != current or proof.owner.profile_id != current:
-        raise AuthorityLockError("authority_lock_proof_owner_mismatch")
+    await require_authority_lock(
+        connection,
+        proof,
+        owner=AuthorityOwner.from_values(current, current),
+    )
 
 
 async def resolve_self_owner_unlocked(
@@ -176,13 +293,93 @@ async def resolve_self_owner_unlocked(
     return AuthorityOwner.from_values(row["id"], row["id"])
 
 
+def provisional_identity_owner(uid: str) -> AuthorityOwner:
+    if not isinstance(uid, str) or not uid:
+        raise AuthorityLockError("authority_lock_identity_uid_missing")
+    owner_id = uuid.uuid5(IDENTITY_OWNER_NAMESPACE, uid)
+    return AuthorityOwner.from_values(owner_id, owner_id)
+
+
+async def resolve_identity_owner_unlocked(
+    connection: asyncpg.Connection,
+    *,
+    uid: str,
+    email: str,
+) -> IdentityOwnerResolution:
+    """Resolve one existing owner or a deterministic not-yet-created owner."""
+    rows = await connection.fetch(
+        """
+        SELECT id
+        FROM users
+        WHERE omi_uid = $1 OR lower(email) = lower($2)
+        ORDER BY id
+        """,
+        uid,
+        email,
+    )
+    owner_ids = {_validated_database_uuid(row["id"], field="user_id") for row in rows}
+    if len(owner_ids) > 1:
+        raise AuthorityLockError("authority_lock_identity_conflict")
+    if owner_ids:
+        owner_id = next(iter(owner_ids))
+        return IdentityOwnerResolution(
+            owner=AuthorityOwner.from_values(owner_id, owner_id),
+            allow_create=False,
+        )
+    return IdentityOwnerResolution(
+        owner=provisional_identity_owner(uid),
+        allow_create=True,
+    )
+
+
+async def verify_identity_owner_after_lock(
+    connection: asyncpg.Connection,
+    *,
+    uid: str,
+    email: str,
+    resolution: IdentityOwnerResolution,
+    proof: AuthorityLockProof,
+) -> tuple[Mapping[str, Any], ...]:
+    """Re-read and lock identity ownership; unexpected ownership fails closed."""
+    await require_authority_lock(
+        connection,
+        proof,
+        owner=resolution.owner,
+    )
+    rows = await connection.fetch(
+        """
+        SELECT id, omi_uid, email, name, timezone, status
+        FROM users
+        WHERE omi_uid = $1 OR lower(email) = lower($2)
+        ORDER BY id
+        FOR UPDATE
+        """,
+        uid,
+        email,
+    )
+    owner_ids = {_validated_database_uuid(row["id"], field="user_id") for row in rows}
+    if len(owner_ids) > 1 or (owner_ids and owner_ids != {resolution.owner.account_id}):
+        raise AuthorityLockError("authority_lock_owner_drift")
+    if not owner_ids:
+        if not resolution.allow_create or resolution.owner != provisional_identity_owner(uid):
+            raise AuthorityLockError("authority_lock_owner_drift")
+        return ()
+    return tuple(rows)
+
+
 async def verify_self_owner_after_lock(
     connection: asyncpg.Connection,
     *,
     uid: str,
     owner: AuthorityOwner,
+    proof: AuthorityLockProof,
 ) -> uuid.UUID:
     """Lock and re-read ownership after the v1 advisory lock; drift fails closed."""
+    await require_authority_lock(
+        connection,
+        proof,
+        owner=owner,
+    )
     row = await connection.fetchrow(
         "SELECT id FROM users WHERE omi_uid = $1 FOR UPDATE",
         uid,
