@@ -1,0 +1,129 @@
+openapi: 3.1.0
+info:
+  title: Ella Hermes Cloud Runtime Targets
+  version: 0.1.0
+  description: >
+    Backend-owned contract for account/profile Cloud runtime target resolution
+    and AI processor consent. This fragment documents the Ella-specific surfaces;
+    the generated public OMI OpenAPI file is not used for these internal routes.
+servers:
+  - url: https://api.ella-ai-care.com
+security:
+  - bearerAuth: []
+paths:
+  /v1/users/ai-consent/policy:
+    get:
+      tags: [AI Consent]
+      security: []
+      summary: Return the current AI/data processor disclosure contract.
+      responses:
+        "200":
+          description: Current immutable policy metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiConsentPolicy"
+  /v1/users/ai-consent:
+    post:
+      tags: [AI Consent]
+      summary: Record grant, decline, or revoke for the current policy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiConsentSubmission"
+      responses:
+        "200":
+          description: Current receipt state.
+        "409":
+          description: Stale policy, processor set, scope, or idempotency mismatch.
+    get:
+      tags: [AI Consent]
+      summary: Return the authenticated user's current consent status.
+      responses:
+        "200":
+          description: Current consent status.
+  /v1/ella/resolve:
+    get:
+      tags: [Runtime Resolution]
+      summary: Resolve retained or Cloud runtime routing for the authenticated UID.
+      parameters:
+        - name: uid
+          in: query
+          schema:
+            type: string
+          description: Must match the Firebase bearer subject.
+      responses:
+        "200":
+          description: Redacted route. Cloud returns only first-party backend URLs.
+        "403":
+          description: UID does not match the bearer subject.
+        "409":
+          description: Cloud target exists but is inconsistent, stale, revoked, or unready.
+        "503":
+          description: Runtime authority is enabled but the exact target is missing or retryable.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    AiConsentPolicy:
+      type: object
+      required:
+        - version
+        - processor_set_hash
+        - scope_version
+        - scope_hash
+        - processors
+      properties:
+        version:
+          const: ai-data-processors-v8
+        processor_set_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        scope_version:
+          const: managed-cloud-internal-pilot-v2
+        scope_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        processors:
+          type: array
+          items:
+            type: object
+      description: >
+        v8 names Hermes Cloud, OpenAI Codex, Photon, and built-in Hermes
+        profile-scoped memory for the Cloud route. Honcho Cloud is not part of
+        the Cloud route processor set; retained Plato/Honcho remains separate.
+    AiConsentSubmission:
+      type: object
+      required:
+        - decision
+        - policy_version
+        - processor_set_hash
+        - request_id
+        - app_version
+        - build_number
+        - locale
+        - scope_version
+        - scope_hash
+      properties:
+        decision:
+          enum: [granted, declined, revoked]
+        policy_version:
+          const: ai-data-processors-v8
+        processor_set_hash:
+          type: string
+        scope_version:
+          const: managed-cloud-internal-pilot-v2
+        scope_hash:
+          type: string
+        request_id:
+          type: string
+        app_version:
+          type: string
+        build_number:
+          type: string
+        locale:
+          type: string

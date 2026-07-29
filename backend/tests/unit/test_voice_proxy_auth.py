@@ -470,7 +470,7 @@ def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeyp
     queries = []
     requests = []
 
-    async def resolve(uid):
+    async def resolve(uid, **kwargs):
         assert uid == "uid-a"
         return runtime
 
@@ -573,7 +573,7 @@ def test_cloud_context_never_calls_mini_workspace_api(monkeypatch):
         observed_peer="user-a",
     )
 
-    async def resolve(uid):
+    async def resolve(uid, **kwargs):
         assert uid == "synthetic-user"
         return runtime
 
@@ -627,11 +627,12 @@ def test_cloud_context_never_calls_mini_workspace_api(monkeypatch):
     assert result["runtime"]["provider"] == "hermes_cloud"
     assert (
         result["runtime"]["workspace_residency"]
-        == "canonical_postgres+honcho_cloud+hermes_cloud_policy"
+        == "canonical_postgres+hermes_cloud_profile_memory+hermes_cloud_policy"
     )
     assert result["soul"] == ""
     assert result["user_profile"] == ""
-    assert result["honcho_context"] == "Cloud memory context."
+    assert result["honcho_context"] == ""
+    assert result["honcho_status"]["reason"] == "hermes_cloud_profile_memory_builtin"
 
 
 def test_retained_context_loads_uid_mapped_honcho_without_runtime_receipt(monkeypatch):
@@ -797,7 +798,7 @@ def test_isolated_search_forces_receipt_agent_and_owner_header(monkeypatch):
     runtime = SimpleNamespace(agent_id="ella-uid-a", revision=8)
     calls = []
 
-    async def resolve(uid):
+    async def resolve(uid, **kwargs):
         return runtime
 
     async def workspace(uid, agent_id, query, limit, **kwargs):
@@ -844,7 +845,7 @@ def test_isolated_search_includes_receipt_bound_honcho_source(monkeypatch):
     )
     calls = []
 
-    async def resolve(uid):
+    async def resolve(uid, **kwargs):
         return runtime
 
     async def honcho_search(target, query, limit):
@@ -1139,7 +1140,7 @@ def test_isolated_tool_calls_exact_runtime_without_returning_credentials(monkeyp
     runtime = SimpleNamespace(agent_id="ella-uid-a", revision=9)
     requests = []
 
-    async def resolve(uid):
+    async def resolve(uid, **kwargs):
         return runtime
 
     class Response:

@@ -90,7 +90,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     if not row:
         return None
 
-    runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool))
+    runtime = await resolve_isolated_runtime(uid, EllaProvisioningRepository(pool), target_mode="hermes-cloud-chat")
     if runtime:
         cloud = runtime.provider == "hermes_cloud"
         routing = {
@@ -326,6 +326,7 @@ async def proxy_chat_history(
     runtime = await resolve_isolated_runtime(
         authenticated_uid,
         EllaProvisioningRepository(await _get_pool()),
+        target_mode="hermes-cloud-chat",
     )
     if runtime:
         raise HTTPException(status_code=410, detail={"code": "legacy_history_disabled"})

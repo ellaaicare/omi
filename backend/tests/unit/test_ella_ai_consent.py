@@ -39,13 +39,13 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v7_contract():
+def test_policy_matches_exact_managed_cloud_v8_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v7"
-    assert policy["processor_set_hash"] == "sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296"
-    assert policy["scope_version"] == "managed-cloud-internal-pilot-v1"
-    assert policy["scope_hash"] == "sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30"
+    assert policy["version"] == "ai-data-processors-v8"
+    assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert policy["scope_version"] == "managed-cloud-internal-pilot-v2"
+    assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
         "|".join(
             [
@@ -57,7 +57,7 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
                 "honcho-self-hosted:memory-context",
                 "ella-self-hosted-tts:tts",
                 "nous-hermes-cloud:managed-agent-runtime",
-                "honcho-cloud:derived-memory-context",
+                "hermes-profile-memory:profile-scoped-memory",
                 "openai-codex:managed-agent-model",
                 "photon:messaging-delivery",
                 "openrouter:model-routing",
@@ -85,15 +85,18 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
         ],
         "third_party": True,
     }
-    assert processors["honcho-cloud"] == {
-        "id": "honcho-cloud",
-        "legal_recipient": "Honcho / Plastic Labs",
-        "function": "Profile-bound derived memory and context",
-        "data": ("Details from conversations and information the person chooses " "to save for the bound profile"),
+    assert "honcho-cloud" not in processors
+    assert processors["hermes-profile-memory"] == {
+        "id": "hermes-profile-memory",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+        "data": (
+            "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+            "needed to retrieve memory for the same account/profile scope"
+        ),
         "provider_aliases": [
-            "honcho-cloud",
-            "honcho_cloud",
-            "honcho_cloud_profile_isolated",
+            "hermes-profile-memory",
+            "hermes_profile_scoped_memory",
         ],
         "third_party": True,
     }
@@ -152,10 +155,13 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
             True,
         ),
         (
-            "honcho-cloud",
-            "Honcho / Plastic Labs",
-            "Profile-bound derived memory and context",
-            "Details from conversations and information the person chooses to save for the bound profile",
+            "hermes-profile-memory",
+            "Nous Research / Hermes Cloud",
+            "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+            (
+                "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+                "needed to retrieve memory for the same account/profile scope"
+            ),
             True,
         ),
         (
@@ -459,7 +465,7 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v7")
+    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v8")
 
 
 def test_revoke_supersedes_prior_grant():

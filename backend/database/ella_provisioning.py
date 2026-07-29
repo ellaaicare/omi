@@ -53,6 +53,10 @@ REQUIRED_CLOUD_RUNTIME_INDEXES = (
     "ella_photon_message_receipts_outbound_key",
     "ella_photon_message_receipts_delivery_key",
     "ella_photon_message_receipts_status_idx",
+    "ella_runtime_bindings_account_profile_idx",
+    "ella_runtime_targets_active_cloud_mode_key",
+    "ella_runtime_targets_active_retained_key",
+    "ella_runtime_targets_binding_idx",
 )
 CLOUD_RUNTIME_TABLES = (
     "ella_runtime_session_scopes",
@@ -62,6 +66,7 @@ CLOUD_RUNTIME_TABLES = (
     "ella_photon_channel_bindings",
     "ella_photon_message_receipts",
     "ella_photon_quota_buckets",
+    "ella_runtime_targets",
 )
 REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS = (
     "status",
@@ -81,6 +86,11 @@ REQUIRED_CLOUD_RUNTIME_BINDING_COLUMNS = (
     "disabled_at",
     "quarantined_at",
     "quarantine_reason",
+    "account_user_id",
+    "profile_user_id",
+    "runtime_target_mode",
+    "target_endpoint_ref",
+    "target_credential_ref",
 )
 REQUIRED_CLOUD_PROVISIONING_JOB_COLUMNS = (
     "external_side_effects",
@@ -92,6 +102,9 @@ REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_claim_job_id_fkey",
     "ella_runtime_bindings_status_check",
     "ella_runtime_bindings_cloud_pool_shape_check",
+    "ella_runtime_bindings_account_user_id_fkey",
+    "ella_runtime_bindings_profile_user_id_fkey",
+    "ella_runtime_bindings_cloud_target_shape_check",
     "users_profile_class_check",
 )
 
@@ -561,7 +574,6 @@ class EllaProvisioningRepository:
         agent_id: str,
         api_base_url_ref: str,
         api_key_ref: str,
-        honcho_api_key_ref: str,
         template_version: str,
         prompt_pack_version: str,
         prompt_artifact_receipt: dict[str, Any],
@@ -571,6 +583,7 @@ class EllaProvisioningRepository:
         allowed_tools: list[str],
         required_capabilities: list[str],
         health_receipt: dict[str, Any],
+        honcho_api_key_ref: Optional[str] = None,
     ) -> dict[str, Any]:
         """Publish a preflighted instance into the unbound warm pool."""
         row = await self.pool.fetchrow(
@@ -601,7 +614,7 @@ class EllaProvisioningRepository:
             agent_id,
             api_base_url_ref,
             api_key_ref,
-            honcho_api_key_ref,
+            None,
             template_version,
             prompt_pack_version,
             json.dumps(prompt_artifact_receipt),
@@ -710,7 +723,7 @@ class EllaProvisioningRepository:
                       AND runtime_instance_id IS NOT NULL
                       AND api_base_url_ref IS NOT NULL
                       AND api_key_ref IS NOT NULL
-                      AND honcho_api_key_ref IS NOT NULL
+                      AND honcho_api_key_ref IS NULL
                       AND prompt_artifact_receipt <> '{}'::jsonb
                       AND expected_model IS NOT NULL
                       AND jsonb_typeof(allowed_tools) = 'array'
@@ -760,21 +773,29 @@ class EllaProvisioningRepository:
         uid: str,
         job_id: str,
         claim_token: str,
-        honcho_workspace: str,
-        observed_peer: str,
-        observer_peer: str,
         health_receipt: dict[str, Any],
         status: str = "internal_canary",
+        honcho_workspace: Optional[str] = None,
+        observed_peer: Optional[str] = None,
+        observer_peer: Optional[str] = None,
+        mode: str = "hermes-cloud-chat",
     ) -> dict[str, Any]:
         if status not in {"shadow", "internal_canary", "active"}:
             raise ValueError("invalid_cloud_binding_status")
+        if mode not in {
+            "hermes-cloud-chat",
+            "hermes-cloud-voice",
+            "hermes-cloud-transcript",
+            "hermes-cloud-guardian",
+        }:
+            raise ValueError("invalid_cloud_target_mode")
         job_uuid = uuid.UUID(str(job_id))
         token_uuid = uuid.UUID(str(claim_token))
         async with self.pool.acquire() as connection:
             async with connection.transaction():
                 selected = await connection.fetchrow(
                     """
-                    SELECT b.*, u.omi_uid
+                    SELECT b.*, u.omi_uid, u.profile_class
                     FROM ella_runtime_bindings b
                     JOIN users u ON u.id = b.user_id
                     WHERE u.omi_uid = $1
@@ -793,6 +814,10 @@ class EllaProvisioningRepository:
                     return dict(selected)
                 if selected["status"] != "claiming":
                     raise RuntimePoolClaimError("runtime_pool_claim_not_finalizable")
+                if selected["api_base_url_ref"] is None or selected["api_key_ref"] is None:
+                    raise RuntimePoolClaimError("runtime_pool_claim_endpoint_incomplete")
+                if selected["honcho_api_key_ref"] is not None:
+                    raise RuntimePoolClaimError("runtime_pool_claim_legacy_honcho_candidate")
                 if not selected["claim_lease_expires_at"] or selected["claim_lease_expires_at"] <= datetime.now(
                     timezone.utc
                 ):
@@ -817,6 +842,11 @@ class EllaProvisioningRepository:
                     SET honcho_workspace = $2,
                         observed_peer = $3,
                         observer_peer = $4,
+                        account_user_id = user_id,
+                        profile_user_id = user_id,
+                        runtime_target_mode = $7,
+                        target_endpoint_ref = api_base_url_ref,
+                        target_credential_ref = api_key_ref,
                         status = $5,
                         health_state = 'healthy',
                         health_receipt = $6::jsonb,
@@ -834,7 +864,57 @@ class EllaProvisioningRepository:
                     observer_peer,
                     status,
                     json.dumps(health_receipt),
+                    mode,
                 )
+                if activated["status"] != "shadow":
+                    await connection.execute(
+                        """
+                        INSERT INTO ella_runtime_targets (
+                            account_user_id, profile_user_id, role, mode, provider,
+                            runtime_binding_id, candidate_runtime_instance_id,
+                            endpoint_ref, credential_ref, status,
+                            policy_version, processor_set_hash, scope_version,
+                            scope_hash, entitlement_revision, metadata
+                        )
+                        SELECT
+                            $1, $1, $2, target_modes.mode, 'hermes_cloud',
+                            $4, $5, $6, $7, 'ready',
+                            $8, $9, $10, $11, $12, $13::jsonb
+                        FROM unnest($3::text[]) AS target_modes(mode)
+                        ON CONFLICT (account_user_id, profile_user_id, role, mode)
+                        WHERE provider = 'hermes_cloud' AND status = 'ready'
+                        DO UPDATE SET
+                            runtime_binding_id = EXCLUDED.runtime_binding_id,
+                            candidate_runtime_instance_id = EXCLUDED.candidate_runtime_instance_id,
+                            endpoint_ref = EXCLUDED.endpoint_ref,
+                            credential_ref = EXCLUDED.credential_ref,
+                            policy_version = EXCLUDED.policy_version,
+                            processor_set_hash = EXCLUDED.processor_set_hash,
+                            scope_version = EXCLUDED.scope_version,
+                            scope_hash = EXCLUDED.scope_hash,
+                            entitlement_revision = EXCLUDED.entitlement_revision,
+                            metadata = EXCLUDED.metadata,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        selected["user_id"],
+                        selected["role"],
+                        [
+                            "hermes-cloud-chat",
+                            "hermes-cloud-voice",
+                            "hermes-cloud-transcript",
+                            "hermes-cloud-guardian",
+                        ],
+                        selected["id"],
+                        selected["runtime_instance_id"],
+                        selected["api_base_url_ref"],
+                        selected["api_key_ref"],
+                        str(health_receipt.get("policy_version") or ""),
+                        str(health_receipt.get("processor_set_hash") or ""),
+                        str(health_receipt.get("scope_version") or ""),
+                        str(health_receipt.get("scope_hash") or ""),
+                        int(health_receipt.get("admission_revision") or 0),
+                        json.dumps({"content_free": True, "profile_class": str(selected["profile_class"] or "")}),
+                    )
                 await connection.execute(
                     """
                     UPDATE users
@@ -1071,34 +1151,100 @@ class EllaProvisioningRepository:
             raise ValueError("invalid_cloud_promotion_status")
         if required_profile_class not in {"real", "synthetic"}:
             raise ValueError("invalid_cloud_profile_class")
-        row = await self.pool.fetchrow(
-            """
-            UPDATE ella_runtime_bindings b
-            SET status = $4,
-                active = true,
-                revision = revision + 1,
-                updated_at = CURRENT_TIMESTAMP
-            FROM users u
-            WHERE b.id = $1
-              AND b.user_id = u.id
-              AND u.omi_uid = $2
-              AND b.provider = 'hermes_cloud'
-              AND b.status = 'shadow'
-              AND b.active = false
-              AND b.revision = $3
-              AND b.health_state = 'healthy'
-              AND u.profile_class = $5
-            RETURNING b.*
-            """,
-            uuid.UUID(str(binding_id)),
-            uid,
-            int(expected_revision),
-            target_status,
-            required_profile_class,
-        )
-        if not row:
-            raise RuntimePoolClaimError("runtime_cloud_promotion_conflict")
-        return dict(row)
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE ella_runtime_bindings b
+                    SET status = $4,
+                        active = true,
+                        revision = revision + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM users u
+                    WHERE b.id = $1
+                      AND b.user_id = u.id
+                      AND u.omi_uid = $2
+                      AND b.provider = 'hermes_cloud'
+                      AND b.status = 'shadow'
+                      AND b.active = false
+                      AND b.revision = $3
+                      AND b.health_state = 'healthy'
+                      AND u.profile_class = $5
+                      AND b.account_user_id = u.id
+                      AND b.profile_user_id = u.id
+                      AND b.runtime_target_mode IS NOT NULL
+                      AND b.target_endpoint_ref = b.api_base_url_ref
+                      AND b.target_credential_ref = b.api_key_ref
+                    RETURNING b.*
+                    """,
+                    uuid.UUID(str(binding_id)),
+                    uid,
+                    int(expected_revision),
+                    target_status,
+                    required_profile_class,
+                )
+                if not row:
+                    raise RuntimePoolClaimError("runtime_cloud_promotion_conflict")
+                result = dict(row)
+                health_receipt = _json_object(result.get("health_receipt") or {})
+                required = {
+                    "policy_version": str(health_receipt.get("policy_version") or ""),
+                    "processor_set_hash": str(health_receipt.get("processor_set_hash") or ""),
+                    "scope_version": str(health_receipt.get("scope_version") or ""),
+                    "scope_hash": str(health_receipt.get("scope_hash") or ""),
+                }
+                if not all(required.values()):
+                    raise RuntimePoolClaimError("runtime_cloud_target_policy_missing")
+                await connection.execute(
+                    """
+                    INSERT INTO ella_runtime_targets (
+                        account_user_id, profile_user_id, role, mode, provider,
+                        runtime_binding_id, candidate_runtime_instance_id,
+                        endpoint_ref, credential_ref, status,
+                        policy_version, processor_set_hash, scope_version,
+                        scope_hash, entitlement_revision, metadata
+                    )
+                    SELECT
+                        $1, $2, $3, target_modes.mode, 'hermes_cloud',
+                        $5, $6, $7, $8, 'ready',
+                        $9, $10, $11, $12, $13, $14::jsonb
+                    FROM unnest($4::text[]) AS target_modes(mode)
+                    ON CONFLICT (account_user_id, profile_user_id, role, mode)
+                    WHERE provider = 'hermes_cloud' AND status = 'ready'
+                    DO UPDATE SET
+                        runtime_binding_id = EXCLUDED.runtime_binding_id,
+                        candidate_runtime_instance_id = EXCLUDED.candidate_runtime_instance_id,
+                        endpoint_ref = EXCLUDED.endpoint_ref,
+                        credential_ref = EXCLUDED.credential_ref,
+                        policy_version = EXCLUDED.policy_version,
+                        processor_set_hash = EXCLUDED.processor_set_hash,
+                        scope_version = EXCLUDED.scope_version,
+                        scope_hash = EXCLUDED.scope_hash,
+                        entitlement_revision = EXCLUDED.entitlement_revision,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    result["account_user_id"],
+                    result["profile_user_id"],
+                    result["role"],
+                    [
+                        "hermes-cloud-chat",
+                        "hermes-cloud-voice",
+                        "hermes-cloud-transcript",
+                        "hermes-cloud-guardian",
+                    ],
+                    result["id"],
+                    result["runtime_instance_id"],
+                    result["target_endpoint_ref"],
+                    result["target_credential_ref"],
+                    required["policy_version"],
+                    required["processor_set_hash"],
+                    required["scope_version"],
+                    required["scope_hash"],
+                    int(health_receipt.get("admission_revision") or 0),
+                    json.dumps({"content_free": True, "profile_class": required_profile_class}),
+                )
+                return result
 
     async def get_or_create_runtime_scope(
         self,
@@ -2178,6 +2324,7 @@ class EllaProvisioningRepository:
         uid: str,
         role: str = "user",
         template_version: Optional[str] = None,
+        target_mode: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         row = await self.pool.fetchrow(
             """
@@ -2187,11 +2334,31 @@ class EllaProvisioningRepository:
             WHERE u.omi_uid = $1
               AND b.role = $2
               AND b.active = true
-              AND (b.provider <> 'hermes_cloud' OR b.status IN ('internal_canary', 'active'))
+              AND (
+                    b.provider <> 'hermes_cloud'
+                    OR (
+                        b.status IN ('internal_canary', 'active')
+                        AND b.health_state = 'healthy'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM ella_runtime_targets t
+                            WHERE t.runtime_binding_id = b.id
+                              AND t.account_user_id = u.id
+                              AND t.profile_user_id = u.id
+                              AND t.provider = 'hermes_cloud'
+                              AND t.status = 'ready'
+                              AND ($4::text IS NULL OR t.mode = $4)
+                              AND t.candidate_runtime_instance_id = b.runtime_instance_id
+                              AND t.endpoint_ref = b.api_base_url_ref
+                              AND t.credential_ref = b.api_key_ref
+                        )
+                    )
+                  )
               AND ($3::text IS NULL OR b.template_version = $3)
             """,
             uid,
             role,
             template_version,
+            target_mode,
         )
         return _row_dict(row)

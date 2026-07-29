@@ -731,6 +731,8 @@ class HermesCloudPoolManager:
         }
         if protected_fields.intersection(candidate):
             raise ProvisioningError("hermes_cloud_candidate_policy_forbidden", retryable=False)
+        if candidate.get("honcho_api_key_ref"):
+            raise ProvisioningError("hermes_cloud_candidate_legacy_honcho_forbidden", retryable=False)
         manifest = self.manifest_store.load()
         observed = observed_artifacts(candidate, manifest)
         effective_candidate = {
@@ -750,7 +752,6 @@ class HermesCloudPoolManager:
             agent_id=str(candidate["agent_id"]),
             api_base_url_ref=str(candidate["api_base_url_ref"]),
             api_key_ref=str(candidate["api_key_ref"]),
-            honcho_api_key_ref=str(candidate["honcho_api_key_ref"]),
             template_version=str(candidate["template_version"]),
             prompt_pack_version=manifest.prompt_pack_version,
             prompt_artifact_receipt=dict(preflight.receipt["prompt_artifacts"]),

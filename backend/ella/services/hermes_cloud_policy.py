@@ -21,7 +21,7 @@ GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
 MANAGED_CLOUD_PROCESSORS = {
     "nous-hermes-cloud",
-    "honcho-cloud",
+    "hermes-profile-memory",
     "openai-codex",
     "photon",
 }

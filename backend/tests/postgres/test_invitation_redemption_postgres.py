@@ -44,6 +44,26 @@ POLICY = {
     "fallback_policy": {"enabled": False, "order": []},
 }
 
+
+def _prompt_receipt(*, model: str = invitations.PILOT_MODEL) -> dict:
+    return {
+        "schema_version": "ella-hermes-cloud-approval-v1",
+        "prompt_pack_version": "ella-hermes-cloud-v1c-canary",
+        "model_policy_version": "model-policy-v1",
+        "expected_model": model,
+        "model_context_window_tokens": 16384,
+        "policy_commit_sha": "a" * 40,
+        "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/pull/1124",
+        "approval_manifest_sha256": "b" * 64,
+        "content_free": True,
+        "soul_sha256": "c" * 64,
+        "observed_soul_sha256": "c" * 64,
+        "agents_sha256": "d" * 64,
+        "observed_agents_sha256": "d" * 64,
+        "model_policy_sha256": "e" * 64,
+        "observed_model_policy_sha256": "e" * 64,
+    }
+
 pytestmark = pytest.mark.skipif(
     not TEST_DSN,
     reason="ELLA_TEST_POSTGRES_DSN is required for invitation PostgreSQL tests",
@@ -142,6 +162,7 @@ async def _run_with_database(
                 "009_create_hermes_cloud_runtime_pool.sql",
                 "010_add_cloud_profile_class.sql",
                 "011_create_invitation_redemption.sql",
+                "012_create_account_profile_runtime_targets.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval("""
@@ -721,7 +742,7 @@ async def _register_pool(
         honcho_api_key_ref="env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
         template_version="hermes-cloud-user-v1",
         prompt_pack_version="ella-hermes-cloud-v1c-canary",
-        prompt_artifact_receipt={"status": "approved", "content_free": True},
+        prompt_artifact_receipt=_prompt_receipt(),
         model_policy_version="model-policy-v1",
         voice_policy_version="voice-policy-v1",
         expected_model=invitations.PILOT_MODEL,

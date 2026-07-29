@@ -174,7 +174,7 @@ async def summary_provider_config_for_uid(
 ) -> SummaryProviderConfig:
     """Bind Hermes summary work to the active isolated runtime when selected."""
     selected = config or default_summary_provider_config()
-    runtime = await resolve_isolated_runtime(uid)
+    runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
     if runtime is None:
         return selected
     return replace(

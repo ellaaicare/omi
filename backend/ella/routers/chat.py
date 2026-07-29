@@ -1022,7 +1022,7 @@ async def ella_chat_stream(
 
     runtime = None
     try:
-        runtime = await resolve_isolated_runtime(uid)
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
@@ -1194,7 +1194,7 @@ async def ella_chat_history(
     runtime_bound = runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
-            await resolve_isolated_runtime(authenticated_uid)
+            await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 

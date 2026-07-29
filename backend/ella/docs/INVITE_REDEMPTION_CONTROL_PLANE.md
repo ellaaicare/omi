@@ -13,7 +13,7 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
   rows. Redemption derives both identities from the authenticated first-party
   profile binding and must match one target before entitlement or capacity
   changes.
-- Redemption requires an exact current `ai-data-processors-v7` grant, presence
+- Redemption requires an exact current `ai-data-processors-v8` grant, presence
   in both exact Hermes Cloud provisioning and synthetic UID allowlists, and a
   persisted `users.profile_class = 'synthetic'`. Global rollout flags do not
   satisfy this pilot-only gate.
@@ -48,7 +48,7 @@ direct peer is on this list.
 
 Phase 1 keeps ordinary self-service off. Enabling the global route alone does
 not permit ordinary or App Review redemption. The exact UID must be present in
-both cloud allowlists, have a current v7 consent receipt bound to the same
+both cloud allowlists, have a current v8 consent receipt bound to the same
 account/profile, and have a synthetic database profile classification.
 
 ## Migration
@@ -64,6 +64,8 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/010_add_cloud_profile_class.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/011_create_invitation_redemption.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/012_create_account_profile_runtime_targets.sql
 ```
 
 The migration is forward-only and idempotent. It adds:
@@ -75,6 +77,8 @@ The migration is forward-only and idempotent. It adds:
 - append-only successful redemption and audit receipts;
 - bounded HMAC-only rate events;
 - deduplicated anomaly alerts.
+- account/profile-owned runtime targets that keep retained Mini routing NULL and
+  require exact ready Hermes Cloud binding/endpoint/credential/mode ownership.
 
 It does not seed codes, grants, or production users.
 
@@ -109,7 +113,7 @@ synthetic code must remain unconsumed and must not create an entitlement.
 ## Promotion order
 
 1. Independently review and merge the backend source.
-2. Back up schema metadata and apply/verify migrations 008, 009, 010, and 011 in
+2. Back up schema metadata and apply/verify migrations 008, 009, 010, 011, and 012 in
    release order.
 3. Deploy the exact reviewed OMI backend and voice proxy revisions with all
    invitation flags off.

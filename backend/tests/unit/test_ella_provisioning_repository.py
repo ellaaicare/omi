@@ -63,6 +63,16 @@ class _LookupPool:
         self.calls.append((query, args))
         return self.result
 
+    async def execute(self, query, *args):
+        self.calls.append((query, args))
+        return "INSERT 0 1"
+
+    def acquire(self):
+        return _AsyncContext(self)
+
+    def transaction(self):
+        return _AsyncContext(self)
+
 
 def test_fresh_identity_insert_casts_jsonb_parameters():
     connection = _Connection()
@@ -346,6 +356,9 @@ class _ExpiredFinalizeConnection:
                 "user_id": uuid.uuid4(),
                 "role": "user",
                 "status": "claiming",
+                "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+                "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+                "honcho_api_key_ref": None,
                 "claim_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
                 "omi_uid": args[0],
             }
@@ -487,6 +500,20 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
             "status": "internal_canary",
             "active": True,
             "revision": 3,
+            "account_user_id": uuid.uuid4(),
+            "profile_user_id": uuid.uuid4(),
+            "role": "user",
+            "runtime_target_mode": "hermes-cloud-chat",
+            "runtime_instance_id": "instance-a",
+            "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+            "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+            "health_receipt": {
+                "policy_version": "ai-data-processors-v8",
+                "processor_set_hash": "sha256:" + ("1" * 64),
+                "scope_version": "managed-cloud-internal-pilot-v2",
+                "scope_hash": "sha256:" + ("2" * 64),
+                "admission_revision": 3,
+            },
         }
     )
     binding_id = str(uuid.uuid4())

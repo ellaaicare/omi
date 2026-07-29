@@ -176,7 +176,7 @@ def _job():
     return {"id": "00000000-0000-0000-0000-000000000005", "target_schema_version": "hermes-cloud-user-v1"}
 
 
-def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypatch):
+def test_cloud_claim_preflights_vendor_without_honcho_before_atomic_publish(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -208,10 +208,11 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
         }
     ]
     assert len(cloud.calls) == 1
-    assert len(honcho.calls) == 1
+    assert len(honcho.calls) == 0
     assert len(repository.finalized) == 1
     assert repository.finalized[0]["status"] == "shadow"
     assert repository.finalized[0]["health_receipt"]["admission_revision"] == 3
+    assert repository.finalized[0]["health_receipt"]["memory"]["provider"] == "hermes_profile_scoped_memory"
     assert repository.quarantined == []
     assert repository.jobs[-1]["state"] == "ready"
     assert alert.calls[0]["available"] == 1
@@ -262,7 +263,7 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     assert repository.finalized == []
     assert repository.quarantined[0]["reason"] == "hermes_cloud_tool_drift"
     assert repository.jobs[-1]["state"] == "blocked"
-    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "cleaned"
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "not_required"
 
 
 def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkeypatch):
@@ -424,7 +425,7 @@ def test_authority_change_after_claim_blocks_honcho_and_quarantines_claim(
     assert repository.quarantined[0]["reason"] == "runtime_admission_provider_disabled"
 
 
-def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkeypatch):
+def test_cloud_preflight_retryable_failure_has_no_honcho_side_effects_and_quarantines(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -440,13 +441,13 @@ def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkey
 
     asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
 
-    assert len(repository.side_effects) == 2
-    assert len(honcho.cleanup_calls) == 1
+    assert repository.side_effects == []
+    assert honcho.cleanup_calls == []
     assert len(repository.quarantined) == 1
     assert repository.rollbacks[-1]["state"] == "retryable"
 
 
-def test_cleanup_failure_requires_manual_intervention(monkeypatch):
+def test_honcho_cleanup_failure_is_irrelevant_without_cloud_honcho_side_effects(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -461,6 +462,6 @@ def test_cleanup_failure_requires_manual_intervention(monkeypatch):
 
     asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
 
-    assert repository.rollbacks[-1]["state"] == "manual_intervention"
-    assert repository.rollbacks[-1]["retryable"] is False
-    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "manual_intervention"
+    assert repository.rollbacks[-1]["state"] == "retryable"
+    assert repository.rollbacks[-1]["retryable"] is True
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "not_required"

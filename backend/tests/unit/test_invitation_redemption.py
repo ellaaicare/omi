@@ -157,7 +157,7 @@ def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
         ),
     )
     admission = invitations.authorize_invitation_pilot(uid)
-    assert admission.policy_version == "ai-data-processors-v7"
+    assert admission.policy_version == "ai-data-processors-v8"
     assert admission.account_uid == admission.profile_uid == uid
 
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "")

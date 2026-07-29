@@ -141,7 +141,7 @@ async def ensure_firestore_user_document(uid: str, firestore_db=None) -> bool:
 async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> dict:
     """Fail closed before listen; never provision OpenClaw in isolated mode."""
     try:
-        runtime = await runtime_resolver.resolve_isolated_runtime(uid)
+        runtime = await runtime_resolver.resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
         if runtime is None:
             return {"success": False, "error": "runtime_bindings_disabled"}
         if omi_user_exists is None:

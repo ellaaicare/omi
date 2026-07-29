@@ -26,14 +26,18 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
+      - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
@@ -67,14 +71,18 @@ on:
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
+      - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
+      - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
@@ -152,6 +160,7 @@ jobs:
           ella/services/provisioning.py
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
+          ella/services/voice_honcho.py
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_cloud_shadow.py
@@ -177,4 +186,5 @@ jobs:
           tests/unit/test_ella_runtime_route_isolation.py
           tests/unit/test_voice_proxy_auth.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
+          tests/postgres/test_invitation_redemption_postgres.py
           -v

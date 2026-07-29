@@ -269,23 +269,22 @@ New-user Hermes provisioning is disabled by default and has two separate rollout
 Apply the shared Prisma migration from `ellaaicare/ella-ai` first:
 `packages/database/prisma/migrations/20260721000000_add_ella_provisioning_runtime/migration.sql` (merged in ella-ai PR #1066). OMI intentionally does not duplicate this schema. Both onboarding endpoints preflight the two tables and every required isolation index; an incomplete deployment returns retryable `503 provisioning_schema_not_ready` before any identity write.
 
-Enable provisioning first for two synthetic Firebase users; enable runtime dispatch only after distinct profile, workspace, gateway, Honcho, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
+Enable provisioning first for two synthetic Firebase users; enable runtime dispatch only after distinct profile, gateway, account/profile runtime target, Hermes profile-memory, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
 
 The ensure job also creates or repairs the UID-scoped OMI Firestore identity. Missing cloud-sync and raw-recording permissions are initialized to `false`; iOS must enable the appropriate setting only after the account-bound consent flow completes.
 
 ### AI processing consent
 
 `/v1/users/ai-consent` is the server authority for the versioned AI/data-sharing
-policy. The current `ai-data-processors-v7` manifest includes Soniox and
+policy. The current `ai-data-processors-v8` manifest includes Soniox and
 Speechmatics STT, Inworld TTS, Ella's self-hosted Kokoro/Fish TTS, Hermes
-Cloud, Honcho Cloud, OpenAI Codex, and Photon in addition to the remaining
-model, memory, infrastructure, and fallback recipients. V7 requires renewed
-consent for revised legal/plain-language disclosure, including the
-`Honcho / Plastic Labs` label and revised Hermes/Honcho data descriptions.
-The canonical processor IDs/functions and managed-cloud scope did not change
-from v6, so their hashes intentionally remain stable. Authorization still
+Cloud, built-in Hermes profile-scoped memory, OpenAI Codex, and Photon in
+addition to the remaining model, memory, infrastructure, and fallback
+recipients. V8 requires renewed consent because the Cloud route no longer names
+or uses Honcho Cloud; retained Plato/Honcho memory remains a separate legacy
+processor path. Authorization still
 requires the exact policy version, processor-set hash, scope version, and scope
-hash together; matching hashes from a v6 receipt do not authorize v7. The
+hash together; matching hashes from a v7 receipt do not authorize v8. The
 authenticated Firebase UID selects both the current state and the immutable
 receipt subcollection; callers cannot submit or select another UID.
 
@@ -339,10 +338,10 @@ fallback provider.
 
 Managed Hermes Cloud real-data egress has a second default-off gate:
 `ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED=false` plus an optional exact UID canary
-list. Real egress also requires exact deployed v6 policy and scope env values.
+list. Real egress also requires exact deployed v8 policy and scope env values.
 The backend rechecks the current account/profile-bound receipt immediately
-before Honcho Cloud profile creation, Hermes Cloud/OpenAI model calls, and
-Photon outbound handoff. A v5, missing, declined, revoked, deleted, malformed,
+before Hermes Cloud/OpenAI model calls and Photon outbound handoff. A v7,
+missing, declined, revoked, deleted, malformed,
 or route/profile-drifted receipt fails closed. Synthetic/content-free preflight
 continues under `ELLA_HERMES_CLOUD_SYNTHETIC_ONLY=true`.
 

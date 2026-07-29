@@ -97,9 +97,27 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     if provider == "hermes_cloud":
         if any(
             binding.get(field)
-            for field in ("workspace_root", "internal_gateway_url", "gateway_port", "service_label", "credential_ref")
+            for field in (
+                "workspace_root",
+                "internal_gateway_url",
+                "gateway_port",
+                "service_label",
+                "credential_ref",
+                "honcho_api_key_ref",
+            )
         ):
             raise ProvisioningError("cloud_binding_contains_local_runtime", retryable=False)
+        if str(binding.get("target_endpoint_ref") or "") != str(binding.get("api_base_url_ref") or ""):
+            raise ProvisioningError("cloud_runtime_target_endpoint_mismatch", retryable=False)
+        if str(binding.get("target_credential_ref") or "") != str(binding.get("api_key_ref") or ""):
+            raise ProvisioningError("cloud_runtime_target_credential_mismatch", retryable=False)
+        if str(binding.get("runtime_target_mode") or "") not in {
+            "hermes-cloud-chat",
+            "hermes-cloud-voice",
+            "hermes-cloud-transcript",
+            "hermes-cloud-guardian",
+        }:
+            raise ProvisioningError("cloud_runtime_target_mode_missing", retryable=False)
         prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
         workspace_root = ""
         runtime_instance_id = str(binding.get("runtime_instance_id") or "")
@@ -139,7 +157,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     honcho_workspace = str(binding.get("honcho_workspace") or "")
     observed_peer = str(binding.get("observed_peer") or "")
     observer_peer = str(binding.get("observer_peer") or "")
-    if not all([honcho_workspace, observed_peer, observer_peer]):
+    if provider != "hermes_cloud" and not all([honcho_workspace, observed_peer, observer_peer]):
         raise ProvisioningError("honcho_receipt_incomplete", retryable=False)
     revision = int(binding.get("revision") or 0)
     if revision < 1:
@@ -180,11 +198,17 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
 async def resolve_isolated_runtime(
     uid: str,
     repository: Optional[EllaProvisioningRepository] = None,
+    target_mode: Optional[str] = None,
 ) -> Optional[IsolatedRuntime]:
     """Resolve persisted cloud authority first; retained bindings stay flag-gated."""
     repository = repository or await EllaProvisioningRepository.create()
     try:
-        binding = await repository.resolve_active_runtime(uid)
+        try:
+            binding = await repository.resolve_active_runtime(uid, target_mode=target_mode)
+        except TypeError as exc:
+            if "target_mode" not in str(exc):
+                raise
+            binding = await repository.resolve_active_runtime(uid)
     except Exception:
         if runtime_authority_enabled(uid):
             raise

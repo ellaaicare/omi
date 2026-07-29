@@ -23,12 +23,15 @@ from database.ella_provisioning import (
     RuntimePoolClaimError,
 )
 from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
 from ella.services.hermes_cloud import (
     HermesCloudClient,
-    HonchoCloudProvisionClient,
     RuntimePoolAlertPublisher,
 )
 from ella.services.hermes_cloud_policy import (
@@ -552,7 +555,7 @@ class ProvisioningCoordinator:
         identity: VerifiedIdentity,
     ) -> None:
         cloud_client = self.cloud_client or HermesCloudClient()
-        honcho_client = self.honcho_client or HonchoCloudProvisionClient()
+        honcho_client = self.honcho_client
         alert_publisher = self.alert_publisher or RuntimePoolAlertPublisher()
         runtime_admission = self.runtime_admission or voice_canary_db.evaluate_runtime_activation
         binding: Optional[dict[str, Any]] = None
@@ -657,41 +660,27 @@ class ProvisioningCoordinator:
                     retryable=False,
                 )
 
-            async def record_side_effect(effect: dict[str, str]) -> None:
-                await self.repository.record_cloud_side_effect(
-                    uid=identity.uid,
-                    job_id=str(job["id"]),
-                    claim_token=claim_token,
-                    effect={
-                        **effect,
-                        "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
-                        "content_free": True,
-                    },
-                )
-
-            await assert_current_cloud_consent()
-            honcho = await honcho_client.ensure_profile(
-                binding,
-                on_side_effect=record_side_effect,
-            )
             await assert_current_cloud_consent()
             preflight = await cloud_client.preflight(binding)
             health_receipt = {
                 **preflight.receipt,
-                "honcho": {
-                    "workspace_sha256": hashlib.sha256(honcho["workspace"].encode("utf-8")).hexdigest(),
-                    "observed_peer_sha256": hashlib.sha256(honcho["observed_peer"].encode("utf-8")).hexdigest(),
-                    "observer_peer_sha256": hashlib.sha256(honcho["observer_peer"].encode("utf-8")).hexdigest(),
+                "memory": {
+                    "provider": MANAGED_CLOUD_MEMORY_PROVIDER,
+                    "scope": "profile",
+                    "owner": "hermes_cloud",
+                    "account_profile_bound": True,
+                    "content_free": True,
                 },
+                "policy_version": CURRENT_POLICY_VERSION,
+                "processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
+                "scope_version": CURRENT_SCOPE_VERSION,
+                "scope_hash": CURRENT_SCOPE_HASH,
                 "admission_revision": admitted_entitlement_revision,
             }
             activated = await self.repository.finalize_cloud_pool_claim(
                 uid=identity.uid,
                 job_id=str(job["id"]),
                 claim_token=claim_token,
-                honcho_workspace=honcho["workspace"],
-                observed_peer=honcho["observed_peer"],
-                observer_peer=honcho["observer_peer"],
                 health_receipt=health_receipt,
                 status=os.getenv("ELLA_HERMES_CLOUD_INITIAL_STATUS", "shadow").strip().lower(),
             )
@@ -788,11 +777,12 @@ class ProvisioningCoordinator:
         cleanup_receipt: dict[str, Any] = {
             "status": "not_required",
             "runtime_credentials": "no_claim_credentials_issued",
+            "memory_provider": MANAGED_CLOUD_MEMORY_PROVIDER,
             "content_free": True,
         }
         cleanup_error = ""
         try:
-            if side_effects:
+            if side_effects and honcho_client is not None:
                 cleanup_receipt = await honcho_client.cleanup_profile(binding, side_effects)
         except Exception as exc:
             logger.exception("Cloud claim cleanup failed for uid=%s", identity.uid)

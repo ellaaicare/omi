@@ -272,7 +272,7 @@ async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
 
 async def _resolve_workspace_target_for_uid(uid: str) -> Optional[tuple[str, str, str]]:
     if runtime_bindings_enabled(uid):
-        runtime = await resolve_isolated_runtime(uid)
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
         if runtime is None:
             return None
         return (

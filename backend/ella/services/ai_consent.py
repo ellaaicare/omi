@@ -19,29 +19,30 @@ from utils.other import endpoints as auth
 
 ConsentDecision = Literal["granted", "declined", "revoked"]
 
-# V7 changes the legal/plain-language disclosure, not the processor topology or
-# managed-cloud scope. Authority therefore requires this exact version together
-# with the unchanged canonical processor and scope hashes below.
-CURRENT_POLICY_VERSION = "ai-data-processors-v7"
+# V7 is immutable historical consent. Cloud memory changed from a Honcho Cloud
+# processor to Hermes Cloud built-in profile-scoped memory, so v8 is a
+# forward-only consent version and cannot accept stale v7 receipts.
+LEGACY_POLICY_VERSION_V7 = "ai-data-processors-v7"
+CURRENT_POLICY_VERSION = "ai-data-processors-v8"
 CANONICAL_PROCESSOR_SET = (
     "deepgram:stt|soniox:stt|speechmatics:stt|firebase:auth-infrastructure|"
     "hermes-self-hosted:agent-runtime|honcho-self-hosted:memory-context|ella-self-hosted-tts:tts|"
-    "nous-hermes-cloud:managed-agent-runtime|honcho-cloud:derived-memory-context|"
+    "nous-hermes-cloud:managed-agent-runtime|hermes-profile-memory:profile-scoped-memory|"
     "openai-codex:managed-agent-model|photon:messaging-delivery|"
     "openrouter:model-routing|google-gemini:language-live-voice|openai:language-live-voice|"
     "groq:language|xai-grok:language-live-voice|inworld:tts|elevenlabs:tts-fallback"
 )
 CURRENT_PROCESSOR_SET_HASH = f"sha256:{hashlib.sha256(CANONICAL_PROCESSOR_SET.encode()).hexdigest()}"
-CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v1"
+CURRENT_SCOPE_VERSION = "managed-cloud-internal-pilot-v2"
 CANONICAL_SCOPE = (
     "profile_binding=server-profile-v1|runtime_provider=hermes_cloud|"
-    "model_route=openai-codex/gpt-5.6-terra|memory_provider=honcho_cloud_profile_isolated|"
+    "model_route=openai-codex/gpt-5.6-terra|memory_provider=hermes_profile_scoped_memory|"
     "photon_scope=shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
 )
 CURRENT_SCOPE_HASH = f"sha256:{hashlib.sha256(CANONICAL_SCOPE.encode()).hexdigest()}"
 MANAGED_CLOUD_RUNTIME_PROVIDER = "hermes_cloud"
 MANAGED_CLOUD_MODEL_ROUTE = "openai-codex/gpt-5.6-terra"
-MANAGED_CLOUD_MEMORY_PROVIDER = "honcho_cloud_profile_isolated"
+MANAGED_CLOUD_MEMORY_PROVIDER = "hermes_profile_scoped_memory"
 MANAGED_CLOUD_PHOTON_SCOPE = "shared_test_line_explicit_contact_v1;allow_all=false;caregiver=false;attachments=false"
 
 PROCESSORS: tuple[dict[str, Any], ...] = (
@@ -110,11 +111,14 @@ PROCESSORS: tuple[dict[str, Any], ...] = (
         "third_party": True,
     },
     {
-        "id": "honcho-cloud",
-        "legal_recipient": "Honcho / Plastic Labs",
-        "function": "Profile-bound derived memory and context",
-        "data": ("Details from conversations and information the person chooses " "to save for the bound profile"),
-        "provider_aliases": ["honcho-cloud", "honcho_cloud", "honcho_cloud_profile_isolated"],
+        "id": "hermes-profile-memory",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+        "data": (
+            "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+            "needed to retrieve memory for the same account/profile scope"
+        ),
+        "provider_aliases": ["hermes-profile-memory", "hermes_profile_scoped_memory"],
         "third_party": True,
     },
     {
