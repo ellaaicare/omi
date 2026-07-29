@@ -43,8 +43,28 @@ ai_consent_module = types.ModuleType("ella.services.ai_consent")
 ai_consent_module.assert_current_ai_consent = lambda uid: uid
 sys.modules["ella.services.ai_consent"] = ai_consent_module
 
+hermes_cloud_module = types.ModuleType("ella.services.hermes_cloud")
+hermes_cloud_module.HermesCloudClient = object
+sys.modules["ella.services.hermes_cloud"] = hermes_cloud_module
+
+
+class _ProvisioningError(Exception):
+    def __init__(self, code, *, retryable):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
+runtime_errors_module = types.ModuleType("ella.services.runtime_errors")
+runtime_errors_module.ProvisioningError = _ProvisioningError
+sys.modules["ella.services.runtime_errors"] = runtime_errors_module
+
 runtime_resolver_module = types.ModuleType("ella.services.runtime_resolver")
 runtime_resolver_module.runtime_bindings_enabled = lambda _uid: False
+runtime_resolver_module.runtime_authority_enabled = lambda _uid: False
+runtime_resolver_module.resolve_isolated_runtime = lambda *_args, **_kwargs: None
+runtime_resolver_module.cloud_runtime_authority_identity = lambda runtime: runtime
+runtime_resolver_module.revalidate_cloud_runtime_authority = lambda identity: identity
 sys.modules["ella.services.runtime_resolver"] = runtime_resolver_module
 
 sys.modules.setdefault("ella.routers", types.ModuleType("ella.routers"))
@@ -585,4 +605,134 @@ def test_guardian_consolidation_stops_before_provider_after_revoke(monkeypatch):
         )
 
     assert error.value.detail["decision"] == "revoked"
+    assert _FakeAsyncClient.posts == []
+
+
+def _cloud_guardian_runtime(**updates):
+    values = {
+        "uid": "auth-uid",
+        "binding_id": "binding-a",
+        "provider": "hermes_cloud",
+        "runtime_instance_id": "instance-a",
+        "gateway_url": "https://cloud.example.test",
+        "gateway_token": "server-secret",
+        "expected_model": "model-a",
+        "model_context_window_tokens": 16384,
+        "revision": 7,
+        "profile_class": "synthetic",
+        "policy_commit_sha": "a" * 40,
+        "approval_manifest_sha256": "b" * 64,
+    }
+    values.update(updates)
+    return types.SimpleNamespace(**values)
+
+
+def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(monkeypatch):
+    requested_modes = []
+    runtime = _cloud_guardian_runtime()
+    authority = types.SimpleNamespace(
+        uid="auth-uid",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
+
+    async def resolve(uid, *, target_mode):
+        assert uid == "auth-uid"
+        requested_modes.append(target_mode)
+        return runtime
+
+    class CloudClient:
+        provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            assert binding["expected_model"] == "model-a"
+            assert kwargs["base_url"] == runtime.gateway_url
+            assert kwargs["token"] == runtime.gateway_token
+            assert kwargs["max_tool_calls"] == 0
+            assert await kwargs["before_provider_send"]() == (
+                runtime.gateway_url,
+                runtime.gateway_token,
+            )
+            type(self).provider_posts += 1
+            return types.SimpleNamespace(text="One safe consolidated alert.")
+
+    monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
+    monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
+
+    async def revalidate(identity):
+        assert identity is authority
+        return await resolve(identity.uid, target_mode=identity.target_mode)
+
+    monkeypatch.setattr(guardian, "revalidate_cloud_runtime_authority", revalidate)
+    monkeypatch.setattr(guardian, "HermesCloudClient", CloudClient)
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.posts.clear()
+
+    result = asyncio.run(
+        guardian._consolidate_queue(
+            uid="auth-uid",
+            pending=[{"id": "one", "trigger_type": "guardian", "message": "Alert one"}],
+            recently_consumed=[],
+            chat_turns=[{"role": "user", "content": "Private context"}],
+        )
+    )
+
+    assert result == "One safe consolidated alert."
+    assert requested_modes == ["hermes-cloud-guardian", "hermes-cloud-guardian"]
+    assert CloudClient.provider_posts == 1
+    assert _FakeAsyncClient.posts == []
+
+
+def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypatch):
+    checks = 0
+    runtime = _cloud_guardian_runtime()
+    authority = types.SimpleNamespace(
+        uid="auth-uid",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
+
+    async def resolve(uid, *, target_mode):
+        nonlocal checks
+        assert uid == "auth-uid"
+        assert target_mode == "hermes-cloud-guardian"
+        checks += 1
+        if checks == 2:
+            raise _ProvisioningError("runtime_admission_revoked", retryable=False)
+        return runtime
+
+    class CloudClient:
+        provider_posts = 0
+
+        async def create_response(self, _binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            type(self).provider_posts += 1
+            return types.SimpleNamespace(text="must not send")
+
+    monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
+    monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
+    monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
+
+    async def revalidate(identity):
+        assert identity is authority
+        return await resolve(identity.uid, target_mode=identity.target_mode)
+
+    monkeypatch.setattr(guardian, "revalidate_cloud_runtime_authority", revalidate)
+    monkeypatch.setattr(guardian, "HermesCloudClient", CloudClient)
+    monkeypatch.setattr(guardian.httpx, "AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.posts.clear()
+
+    with pytest.raises(_ProvisioningError) as error:
+        asyncio.run(
+            guardian._consolidate_queue(
+                uid="auth-uid",
+                pending=[{"id": "one", "trigger_type": "guardian", "message": "Private alert"}],
+                recently_consumed=[],
+                chat_turns=[{"role": "user", "content": "Private context"}],
+            )
+        )
+
+    assert error.value.code == "runtime_admission_revoked"
+    assert CloudClient.provider_posts == 0
     assert _FakeAsyncClient.posts == []

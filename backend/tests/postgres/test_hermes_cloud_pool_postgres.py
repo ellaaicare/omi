@@ -12,9 +12,16 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
+from database.runtime_targets import RuntimeTargetLineage
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
+)
 
 pytestmark = pytest.mark.skipif(
     not TEST_DSN,
@@ -24,7 +31,10 @@ pytestmark = pytest.mark.skipif(
 BASE_PROVISIONING_SCHEMA = """
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    omi_uid TEXT NOT NULL UNIQUE
+    omi_uid TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL DEFAULT 'Synthetic User',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE ella_provisioning_jobs (
@@ -77,6 +87,26 @@ CREATE UNIQUE INDEX ella_runtime_bindings_user_role_provider_key
 """
 
 
+def _prompt_receipt(*, model: str = "gpt-5.6-terra") -> dict:
+    return {
+        "schema_version": "ella-hermes-cloud-approval-v1",
+        "prompt_pack_version": "prompt-v1",
+        "model_policy_version": "model-policy-v1",
+        "expected_model": model,
+        "model_context_window_tokens": 16384,
+        "policy_commit_sha": "a" * 40,
+        "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/pull/1124",
+        "approval_manifest_sha256": "b" * 64,
+        "content_free": True,
+        "soul_sha256": "c" * 64,
+        "observed_soul_sha256": "c" * 64,
+        "agents_sha256": "d" * 64,
+        "observed_agents_sha256": "d" * 64,
+        "model_policy_sha256": "e" * 64,
+        "observed_model_policy_sha256": "e" * 64,
+    }
+
+
 async def _run_with_database(scenario):
     schema = f"hermes_claim_{uuid.uuid4().hex}"
     admin = await asyncpg.connect(TEST_DSN)
@@ -92,10 +122,17 @@ async def _run_with_database(scenario):
     try:
         async with pool.acquire() as conn:
             await conn.execute(BASE_PROVISIONING_SCHEMA)
-            await conn.execute((MIGRATIONS / "008_create_voice_canary_controls.sql").read_text(encoding="utf-8"))
-            await conn.execute((MIGRATIONS / "009_create_hermes_cloud_runtime_pool.sql").read_text(encoding="utf-8"))
-            await conn.execute((MIGRATIONS / "010_add_cloud_profile_class.sql").read_text(encoding="utf-8"))
-            assert await conn.fetchval("""
+            for name in (
+                "008_create_voice_canary_controls.sql",
+                "009_create_hermes_cloud_runtime_pool.sql",
+                "010_add_cloud_profile_class.sql",
+                "011_create_invitation_redemption.sql",
+                "012_create_account_profile_runtime_targets.sql",
+                "013_create_managed_cloud_consent_authority.sql",
+            ):
+                await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
+            assert await conn.fetchval(
+                """
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.columns
@@ -105,15 +142,18 @@ async def _run_with_database(scenario):
                       AND is_nullable = 'NO'
                       AND column_default = '''real''::text'
                 )
-                """)
-            assert await conn.fetchval("""
+                """
+            )
+            assert await conn.fetchval(
+                """
                 SELECT EXISTS (
                     SELECT 1
                     FROM pg_constraint
                     WHERE connamespace = current_schema()::regnamespace
                       AND conname = 'users_profile_class_check'
                 )
-                """)
+                """
+            )
         await scenario(pool)
     finally:
         voice_canary._pool = previous_voice_pool
@@ -157,10 +197,10 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
             agent_id="hermes-cloud",
             api_base_url_ref="env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
             api_key_ref="env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
-            honcho_api_key_ref="env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+            honcho_api_key_ref=None,
             template_version="template-v1",
             prompt_pack_version="prompt-v1",
-            prompt_artifact_receipt={"status": "approved", "content_free": True},
+            prompt_artifact_receipt=_prompt_receipt(model=model),
             model_policy_version="model-policy-v1",
             voice_policy_version="voice-policy-v1",
             expected_model=model,
@@ -196,11 +236,15 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
 
         assert error.value.code == "runtime_admission_revoked"
         async with pool.acquire() as conn:
-            pool_row = dict(await conn.fetchrow("""
+            pool_row = dict(
+                await conn.fetchrow(
+                    """
                     SELECT status, user_id, claim_job_id, claim_token
                     FROM ella_runtime_bindings
                     WHERE runtime_instance_id = 'synthetic-instance-a'
-                    """))
+                    """
+                )
+            )
         assert pool_row == {
             "status": "pool_available",
             "user_id": None,
@@ -238,12 +282,27 @@ async def _seed_claim(
         await conn.execute(
             """
             INSERT INTO voice_entitlements (
-                uid, status, provider_allowlist, model_allowlist, daily_limit_s
-            ) VALUES ($1, 'active', ARRAY['hermes_cloud'], ARRAY[$2], $3)
+                uid, status, provider_allowlist, model_allowlist, mode_allowlist,
+                daily_limit_s, consent_policy_version,
+                consent_processor_set_hash, consent_scope_version,
+                consent_scope_hash
+            ) VALUES (
+                $1, 'active', ARRAY['hermes_cloud'], ARRAY[$2],
+                ARRAY[
+                    'hermes-cloud-chat', 'hermes-cloud-voice',
+                    'hermes-cloud-transcript', 'hermes-cloud-guardian',
+                    'hermes-cloud-photon'
+                ],
+                $3, $4, $5, $6, $7
+            )
             """,
             uid,
             model,
             daily_limit_s,
+            LINEAGE.policy_version,
+            LINEAGE.processor_set_hash,
+            LINEAGE.scope_version,
+            LINEAGE.scope_hash,
         )
     repository = EllaProvisioningRepository(pool)
     await repository.register_cloud_pool_binding(
@@ -252,10 +311,10 @@ async def _seed_claim(
         agent_id="hermes-cloud",
         api_base_url_ref="env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         api_key_ref="env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
-        honcho_api_key_ref="env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
+        honcho_api_key_ref=None,
         template_version="template-v1",
         prompt_pack_version="prompt-v1",
-        prompt_artifact_receipt={"status": "approved", "content_free": True},
+        prompt_artifact_receipt=_prompt_receipt(model=model),
         model_policy_version="model-policy-v1",
         voice_policy_version="voice-policy-v1",
         expected_model=model,
@@ -443,5 +502,460 @@ def test_completed_usage_interleaving_consumes_no_pool_row():
             await claim_task
         assert error.value.code == "runtime_admission_quota_daily"
         await _assert_pool_available(pool, instance)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets():
+    async def scenario(pool):
+        uid = "synthetic-target-owner"
+        instance = "synthetic-instance-target-owner"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+        )
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        finalized = await repository.finalize_cloud_pool_claim(
+            uid=uid,
+            job_id=job_id,
+            claim_token=str(claimed["claim_token"]),
+            admitted_entitlement_revision=revision,
+            authority_lineage=LINEAGE,
+            status="internal_canary",
+            health_receipt={
+                "status": "ok",
+                "content_free": True,
+                **LINEAGE.as_dict(),
+                "admission_revision": revision,
+            },
+        )
+
+        assert finalized["account_user_id"] == finalized["user_id"]
+        assert finalized["profile_user_id"] == finalized["user_id"]
+        async with pool.acquire() as conn:
+            targets = await conn.fetch(
+                """
+                SELECT mode, candidate_runtime_instance_id, endpoint_ref, credential_ref
+                FROM ella_runtime_targets
+                WHERE runtime_binding_id = $1
+                ORDER BY mode
+                """,
+                finalized["id"],
+            )
+        assert [row["mode"] for row in targets] == [
+            "hermes-cloud-chat",
+            "hermes-cloud-guardian",
+            "hermes-cloud-photon",
+            "hermes-cloud-transcript",
+            "hermes-cloud-voice",
+        ]
+        assert {row["candidate_runtime_instance_id"] for row in targets} == {instance}
+        assert {row["endpoint_ref"] for row in targets} == {"env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC"}
+        assert {row["credential_ref"] for row in targets} == {"env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC"}
+        photon = await repository.resolve_active_runtime(
+            uid,
+            target_mode="hermes-cloud-photon",
+            required_provider="hermes_cloud",
+            authority_lineage=LINEAGE,
+            model=model,
+        )
+        assert photon["runtime_target_mode"] == "hermes-cloud-photon"
+        assert photon["runtime_target_id"]
+        assert photon["runtime_instance_id"] == instance
+        assert photon["target_endpoint_ref"] == photon["api_base_url_ref"]
+        assert photon["target_credential_ref"] == photon["api_key_ref"]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_plato_retained_binding_never_claims_hermes_cloud_pool():
+    async def scenario(pool):
+        uid = "synthetic-plato-safe"
+        instance = "synthetic-instance-plato-safe"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+        )
+        async with pool.acquire() as conn:
+            user_id = await conn.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, role, provider, profile_name, agent_id,
+                    workspace_root, internal_gateway_url, gateway_port,
+                    service_label, credential_ref, honcho_workspace,
+                    observed_peer, observer_peer, template_version,
+                    model_policy_version, voice_policy_version, health_state,
+                    revision, active
+                ) VALUES (
+                    $1, 'user', 'hermes', 'plato-eval', 'plato',
+                    '/Users/ellaai/.hermes/profiles/plato-eval/workspace',
+                    'http://127.0.0.1:8701', 8701,
+                    'plato-eval', 'env:HERMES_API_SERVER_KEY', 'plato-workspace',
+                    'plato', 'ella', 'hermes-user-v1',
+                    'frontier-v1', 'ella-voice-v1', 'healthy',
+                    1, true
+                )
+                """,
+                user_id,
+            )
+
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+
+        assert claimed["provider"] == "hermes_cloud"
+        async with pool.acquire() as conn:
+            plato = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT provider, profile_name, active, workspace_root, internal_gateway_url,
+                           credential_ref, honcho_workspace, observed_peer, observer_peer
+                    FROM ella_runtime_bindings
+                    WHERE profile_name = 'plato-eval'
+                    """
+                )
+            )
+        assert plato == {
+            "provider": "hermes",
+            "profile_name": "plato-eval",
+            "active": True,
+            "workspace_root": "/Users/ellaai/.hermes/profiles/plato-eval/workspace",
+            "internal_gateway_url": "http://127.0.0.1:8701",
+            "credential_ref": "env:HERMES_API_SERVER_KEY",
+            "honcho_workspace": "plato-workspace",
+            "observed_peer": "plato",
+            "observer_peer": "ella",
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_finalize_rechecks_revocation_before_publishing_any_target():
+    async def scenario(pool):
+        uid = "synthetic-revoked-before-finalize"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id="synthetic-finalize-race",
+        )
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE voice_entitlements SET status = 'revoked' WHERE uid = $1",
+                uid,
+            )
+
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await repository.finalize_cloud_pool_claim(
+                uid=uid,
+                job_id=job_id,
+                claim_token=str(claimed["claim_token"]),
+                admitted_entitlement_revision=revision,
+                authority_lineage=LINEAGE,
+                status="internal_canary",
+                health_receipt={
+                    "status": "ok",
+                    "content_free": True,
+                    **LINEAGE.as_dict(),
+                    "admission_revision": revision,
+                },
+            )
+        assert error.value.code == "runtime_admission_revoked"
+
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ella_runtime_targets WHERE runtime_binding_id = $1",
+                    claimed["id"],
+                )
+                == 0
+            )
+            assert (
+                await conn.fetchval(
+                    "SELECT status FROM ella_runtime_bindings WHERE id = $1",
+                    claimed["id"],
+                )
+                == "claiming"
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("expiry", "runtime_admission_expired"),
+        ("kill_switch", "runtime_admission_provider_disabled"),
+        ("mode_lineage", "runtime_admission_mode_not_allowed"),
+        ("consent_lineage", "runtime_cloud_entitlement_lineage_stale"),
+    ],
+)
+def test_finalize_rechecks_every_current_authority_boundary(mutation, expected_code):
+    async def scenario(pool):
+        uid = f"synthetic-finalize-{mutation}"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=f"synthetic-finalize-{mutation}",
+        )
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        async with pool.acquire() as conn:
+            if mutation == "expiry":
+                await conn.execute(
+                    """
+                    UPDATE voice_entitlements
+                    SET trial_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                    WHERE uid = $1
+                    """,
+                    uid,
+                )
+            elif mutation == "kill_switch":
+                await voice_canary.set_kill_switch_on_connection(
+                    conn,
+                    scope_type="provider",
+                    scope_value="hermes_cloud",
+                    enabled=True,
+                    reason="synthetic finalize race",
+                    updated_by="pytest",
+                )
+            elif mutation == "mode_lineage":
+                await conn.execute(
+                    """
+                    UPDATE voice_entitlements
+                    SET mode_allowlist = ARRAY['hermes-cloud-chat']
+                    WHERE uid = $1
+                    """,
+                    uid,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE voice_entitlements
+                    SET consent_scope_hash = $2
+                    WHERE uid = $1
+                    """,
+                    uid,
+                    "sha256:" + ("9" * 64),
+                )
+
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await repository.finalize_cloud_pool_claim(
+                uid=uid,
+                job_id=job_id,
+                claim_token=str(claimed["claim_token"]),
+                admitted_entitlement_revision=revision,
+                authority_lineage=LINEAGE,
+                status="internal_canary",
+                health_receipt={
+                    "status": "ok",
+                    "content_free": True,
+                    **LINEAGE.as_dict(),
+                    "admission_revision": revision,
+                },
+            )
+        assert error.value.code == expected_code
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ella_runtime_targets WHERE runtime_binding_id = $1",
+                    claimed["id"],
+                )
+                == 0
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_post_publication_rollback_revokes_cloud_targets_and_preserves_retained_plato():
+    async def scenario(pool):
+        uid = "synthetic-post-publication-rollback"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id="synthetic-rollback-instance",
+        )
+        async with pool.acquire() as conn:
+            user_id = await conn.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_bindings (
+                    user_id, role, provider, status, profile_name, agent_id,
+                    workspace_root, internal_gateway_url, gateway_port,
+                    service_label, credential_ref, honcho_workspace,
+                    observed_peer, observer_peer, template_version,
+                    model_policy_version, voice_policy_version, health_state,
+                    health_receipt, revision, active
+                ) VALUES (
+                    $1, 'user', 'hermes', 'active', 'plato-retained-rollback',
+                    'plato', '/Users/ellaai/.hermes/profiles/plato-retained-rollback/workspace',
+                    'http://127.0.0.1:8765', 8765, 'plato-retained-rollback',
+                    'env:HERMES_API_SERVER_KEY', 'plato-retained-workspace',
+                    'plato', 'ella', 'hermes-user-v1', 'frontier-v1',
+                    'ella-voice-v1', 'healthy', '{"status":"ok"}'::jsonb, 1, true
+                )
+                """,
+                user_id,
+            )
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        finalized = await repository.finalize_cloud_pool_claim(
+            uid=uid,
+            job_id=job_id,
+            claim_token=str(claimed["claim_token"]),
+            admitted_entitlement_revision=revision,
+            authority_lineage=LINEAGE,
+            status="internal_canary",
+            health_receipt={
+                "status": "ok",
+                "content_free": True,
+                **LINEAGE.as_dict(),
+                "admission_revision": revision,
+            },
+        )
+        assert finalized["status"] == "internal_canary"
+
+        rolled_back = await repository.quarantine_cloud_pool_claim(
+            uid=uid,
+            job_id=job_id,
+            claim_token=str(claimed["claim_token"]),
+            reason="post_publication_receipt_failure",
+            health_receipt={"content_free": True},
+        )
+        assert rolled_back["status"] == "quarantined"
+
+        async with pool.acquire() as conn:
+            target_states = await conn.fetch(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM ella_runtime_targets
+                WHERE runtime_binding_id = $1
+                GROUP BY status
+                """,
+                claimed["id"],
+            )
+            retained = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT provider, status, active, profile_name
+                    FROM ella_runtime_bindings
+                    WHERE profile_name = 'plato-retained-rollback'
+                    """
+                )
+            )
+        assert [dict(row) for row in target_states] == [{"status": "revoked", "count": 5}]
+        assert retained == {
+            "provider": "hermes",
+            "status": "active",
+            "active": True,
+            "profile_name": "plato-retained-rollback",
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_resolution_rechecks_kill_switch_and_never_returns_retained_binding():
+    async def scenario(pool):
+        uid = "synthetic-resolution-kill-switch"
+        repository, job_id, model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id="synthetic-resolution-instance",
+        )
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        await repository.finalize_cloud_pool_claim(
+            uid=uid,
+            job_id=job_id,
+            claim_token=str(claimed["claim_token"]),
+            admitted_entitlement_revision=revision,
+            authority_lineage=LINEAGE,
+            status="internal_canary",
+            health_receipt={
+                "status": "ok",
+                "content_free": True,
+                **LINEAGE.as_dict(),
+                "admission_revision": revision,
+            },
+        )
+        resolved = await repository.resolve_active_runtime(
+            uid,
+            target_mode="hermes-cloud-guardian",
+            required_provider="hermes_cloud",
+            authority_lineage=LINEAGE,
+            model=model,
+        )
+        assert resolved["provider"] == "hermes_cloud"
+        assert resolved["runtime_target_mode"] == "hermes-cloud-guardian"
+        assert resolved["runtime_target_id"]
+        assert resolved["runtime_target_updated_at"]
+        assert resolved["target_endpoint_ref"] == resolved["api_base_url_ref"]
+        assert resolved["target_credential_ref"] == resolved["api_key_ref"]
+        assert resolved["target_entitlement_revision"] == revision
+
+        async with pool.acquire() as conn:
+            await voice_canary.set_kill_switch_on_connection(
+                conn,
+                scope_type="provider",
+                scope_value="hermes_cloud",
+                enabled=True,
+                reason="synthetic resolution race",
+                updated_by="pytest",
+            )
+        with pytest.raises(RuntimePoolClaimError) as error:
+            await repository.resolve_active_runtime(
+                uid,
+                target_mode="hermes-cloud-guardian",
+                required_provider="hermes_cloud",
+                authority_lineage=LINEAGE,
+                model=model,
+            )
+        assert error.value.code == "runtime_admission_provider_disabled"
 
     asyncio.run(_run_with_database(scenario))

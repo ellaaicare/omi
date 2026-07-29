@@ -1,0 +1,123 @@
+name: Invite Redemption Tests
+
+on:
+  pull_request:
+    paths:
+      - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
+      - "backend/database/runtime_targets.py"
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/ella/__init__.py"
+      - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
+      - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
+      - ".github/workflows/invite-redemption-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
+      - "backend/database/runtime_targets.py"
+      - "backend/database/voice_canary.py"
+      - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/routers/voice.py"
+      - "backend/ella/__init__.py"
+      - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
+      - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
+      - ".github/workflows/invite-redemption-tests.yml"
+
+jobs:
+  invite-redemption:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: invite_redemption_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d invite_redemption_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ELLA_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/invite_redemption_test
+      ENCRYPTION_SECRET: omi_ci_invite_redemption_only
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install
+          "asyncpg==0.31.0"
+          "fastapi==0.112.0"
+          "firebase-admin==6.5.0"
+          "httpx==0.28.0"
+          "PyJWT==2.9.0"
+          "pydantic==2.8.2"
+          "pytest==8.3.2"
+          "websockets==12.0"
+
+      - name: Compile invite and entitlement modules
+        run: >-
+          python -m py_compile
+          database/invitations.py
+          database/managed_cloud_consent.py
+          database/runtime_targets.py
+          database/voice_canary.py
+          ella/routers/invites.py
+          ella/routers/ai_consent.py
+          ella/services/consent_authority.py
+          ella/services/invitation_authority.py
+          ella/services/hermes_cloud_policy.py
+
+      - name: Run unit and PostgreSQL security tests
+        run: |
+          collected="$(
+            pytest --collect-only -q \
+              tests/unit/test_invitation_redemption.py \
+              tests/unit/test_voice_canary.py \
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
+              grep -c '::'
+          )"
+          test "$collected" -eq 42
+          pytest \
+            tests/unit/test_invitation_redemption.py \
+            tests/unit/test_voice_canary.py \
+            tests/postgres/test_invitation_redemption_postgres.py \
+            tests/postgres/test_runtime_migration_atomicity_postgres.py \
+            -v

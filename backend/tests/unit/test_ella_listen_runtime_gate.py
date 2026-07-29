@@ -6,7 +6,8 @@ from ella.services.provisioning import ProvisioningError
 
 
 def test_isolated_listen_accepts_owned_runtime_and_existing_omi_user(monkeypatch):
-    async def resolve(uid):
+    async def resolve(uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
         return SimpleNamespace(uid=uid)
 
     monkeypatch.setattr("ella.services.runtime_resolver.resolve_isolated_runtime", resolve)
@@ -16,7 +17,8 @@ def test_isolated_listen_accepts_owned_runtime_and_existing_omi_user(monkeypatch
 
 
 def test_isolated_listen_never_falls_back_when_binding_is_missing(monkeypatch):
-    async def resolve(_uid):
+    async def resolve(_uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
     monkeypatch.setattr("ella.services.runtime_resolver.resolve_isolated_runtime", resolve)
@@ -32,7 +34,8 @@ def test_isolated_listen_never_falls_back_when_binding_is_missing(monkeypatch):
 
 
 def test_isolated_listen_requires_omi_identity(monkeypatch):
-    async def resolve(uid):
+    async def resolve(uid, *, target_mode=None):
+        assert target_mode == "hermes-cloud-transcript"
         return SimpleNamespace(uid=uid)
 
     monkeypatch.setattr("ella.services.runtime_resolver.resolve_isolated_runtime", resolve)
@@ -70,6 +73,21 @@ def test_listen_runtime_gate_fails_closed_for_isolated_users(monkeypatch):
         "required": True,
         "success": False,
         "error": "hermes_not_provisioned",
+    }
+
+
+def test_cloud_authority_forbids_direct_mini_auto_provision(monkeypatch):
+    async def forbidden_pool():
+        raise AssertionError("Cloud authority must be rejected before any Mini provisioning lookup")
+
+    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_authority_enabled", lambda _uid: True)
+    monkeypatch.setattr(auto_provision, "_get_pool", forbidden_pool)
+
+    result = asyncio.run(auto_provision.auto_provision_user("cloud-user"))
+
+    assert result == {
+        "success": False,
+        "error": "isolated_runtime_auto_provision_forbidden",
     }
 
 

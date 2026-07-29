@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from database.runtime_targets import RuntimeTargetLineage
 from ella.services import ai_consent
 from ella.services.runtime_errors import ProvisioningError
 
@@ -21,10 +22,20 @@ GIT_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 TRUE_VALUES = {"1", "true", "yes", "on"}
 MANAGED_CLOUD_PROCESSORS = {
     "nous-hermes-cloud",
-    "honcho-cloud",
+    "hermes-profile-memory",
     "openai-codex",
     "photon",
 }
+
+
+@dataclass(frozen=True)
+class CurrentCloudAuthority:
+    """Current consent receipt and the exact lineage safe to persist in SQL."""
+
+    consent_receipt_id: str
+    profile_binding_id: str
+    lineage: RuntimeTargetLineage
+    grant_epoch: str = ""
 
 
 def _stable_json(value: Any) -> str:
@@ -74,6 +85,65 @@ def assert_cloud_identity_gate(
         )
     except ai_consent.ManagedCloudConsentError as exc:
         raise ProvisioningError(exc.code, retryable=False) from exc
+
+
+def current_cloud_authority(
+    uid: str,
+    *,
+    profile_class: Optional[str],
+    profile_uid: str,
+    runtime_provider: str,
+    model_route: str,
+    memory_provider: str,
+    photon_scope: str,
+) -> CurrentCloudAuthority:
+    """Recheck the exact current consent receipt for one Cloud account/profile."""
+    grant_epoch = assert_cloud_identity_gate(
+        uid,
+        profile_class=profile_class,
+        profile_uid=profile_uid,
+        runtime_provider=runtime_provider,
+        model_route=model_route,
+        memory_provider=memory_provider,
+        photon_scope=photon_scope,
+    )
+    if (
+        runtime_provider != ai_consent.MANAGED_CLOUD_RUNTIME_PROVIDER
+        or model_route != ai_consent.MANAGED_CLOUD_MODEL_ROUTE
+        or memory_provider != ai_consent.MANAGED_CLOUD_MEMORY_PROVIDER
+        or photon_scope != ai_consent.MANAGED_CLOUD_PHOTON_SCOPE
+    ):
+        raise ProvisioningError("managed_cloud_consent_scope_drift", retryable=False)
+
+    status = ai_consent.get_ai_consent_service().status(uid)
+    consent = dict(status.get("consent") or {})
+    expected_profile_binding = ai_consent.derive_profile_binding_id(
+        account_uid=uid,
+        profile_uid=profile_uid,
+    )
+    lineage = RuntimeTargetLineage(
+        policy_version=str(consent.get("policy_version") or ""),
+        processor_set_hash=str(consent.get("processor_set_hash") or ""),
+        scope_version=str(consent.get("scope_version") or ""),
+        scope_hash=str(consent.get("scope_hash") or ""),
+    )
+    if (
+        status.get("authorized") is not True
+        or consent.get("decision") != "granted"
+        or lineage.policy_version != ai_consent.CURRENT_POLICY_VERSION
+        or lineage.processor_set_hash != ai_consent.CURRENT_PROCESSOR_SET_HASH
+        or lineage.scope_version != ai_consent.CURRENT_SCOPE_VERSION
+        or lineage.scope_hash != ai_consent.CURRENT_SCOPE_HASH
+        or consent.get("profile_binding_id") != expected_profile_binding
+        or not consent.get("receipt_id")
+    ):
+        raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
+    return CurrentCloudAuthority(
+        consent_receipt_id=str(consent["receipt_id"]),
+        profile_binding_id=expected_profile_binding,
+        lineage=lineage.validate(),
+        grant_epoch=grant_epoch,
+    )
 
 
 def assert_cloud_synthetic_identity_gate(

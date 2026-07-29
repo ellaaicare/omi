@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
+from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
 from ella.routers.canonical_events import CanonicalEventStore
 from ella.services.hermes_cloud import HermesCloudClient
 from ella.services.ai_consent import (
@@ -24,6 +25,7 @@ from ella.services.hermes_cloud_policy import (
     cloud_synthetic_only,
 )
 from ella.services.hermes_cloud_runtime import (
+    HERMES_CLOUD_PHOTON_MODE,
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
     assert_runtime_managed_consent,
@@ -193,9 +195,7 @@ class HermesCloudPhotonAdapter:
         event_store: CanonicalEventStore,
         config: Optional[PhotonAdapterConfig] = None,
         cloud_client: Optional[HermesCloudClient] = None,
-        runtime_resolver: Optional[
-            Callable[[str, EllaProvisioningRepository], Awaitable[Optional[IsolatedRuntime]]]
-        ] = None,
+        runtime_resolver: Optional[Callable[..., Awaitable[Optional[IsolatedRuntime]]]] = None,
         runtime_service_factory: Optional[Callable[[], HermesCloudRuntimeService]] = None,
     ):
         self.repository = repository
@@ -261,12 +261,26 @@ class HermesCloudPhotonAdapter:
         self,
         binding: dict[str, Any],
     ) -> IsolatedRuntime:
-        runtime = await self.runtime_resolver(self.config.internal_owner_uid, self.repository)
+        runtime = await self.runtime_resolver(
+            self.config.internal_owner_uid,
+            self.repository,
+            target_mode=HERMES_CLOUD_PHOTON_MODE,
+        )
         if (
             runtime is None
-            or runtime.provider != "hermes_cloud"
+            or runtime.provider != CLOUD_RUNTIME_PROVIDER
             or runtime.status != "internal_canary"
+            or runtime.expected_model != CLOUD_RUNTIME_MODEL
+            or runtime.runtime_target_mode != HERMES_CLOUD_PHOTON_MODE
+            or not runtime.runtime_target_id
+            or not runtime.runtime_target_updated_at
+            or not runtime.target_endpoint_ref
+            or not runtime.target_credential_ref
+            or runtime.target_entitlement_revision < 1
             or runtime.binding_id != str(binding.get("id") or "")
+            or runtime.runtime_instance_id != str(binding.get("runtime_instance_id") or "")
+            or runtime.target_endpoint_ref != str(binding.get("api_base_url_ref") or "")
+            or runtime.target_credential_ref != str(binding.get("api_key_ref") or "")
             or runtime.policy_commit_sha != self.config.approved_policy_commit_sha
             or tuple(runtime.allowed_tools) != PHOTON_ALLOWED_TOOLS
         ):

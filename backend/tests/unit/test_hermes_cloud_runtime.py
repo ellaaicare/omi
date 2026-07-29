@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ella.services import hermes_cloud_runtime
+from ella.services import ai_consent, hermes_cloud_runtime, runtime_resolver
 from ella.routers.canonical_events import InMemoryCanonicalEventStore
 from ella.services.hermes_cloud import HermesCloudTurn
 from ella.services.hermes_cloud_runtime import (
@@ -18,7 +18,35 @@ from ella.services.runtime_resolver import IsolatedRuntime
 
 @pytest.fixture(autouse=True)
 def cloud_synthetic_identity(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = ai_consent.InMemoryConsentRepository()
+    ai_consent.AiConsentService(repository).submit(
+        "synthetic-user",
+        ai_consent.ConsentSubmission(
+            decision="granted",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="runtime-default-grant",
+            app_version="1.0.0",
+            build_number="804",
+            locale="en-US",
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", repository)
+
+    async def revalidate_runtime(_identity, runtime_repository):
+        if runtime_repository.profile_class != "synthetic":
+            raise ProvisioningError("hermes_cloud_profile_class_changed", retryable=False)
+        return _runtime()
+
+    monkeypatch.setattr(
+        hermes_cloud_runtime,
+        "revalidate_cloud_runtime_authority",
+        revalidate_runtime,
+    )
 
 
 def _runtime(**updates) -> IsolatedRuntime:
@@ -37,7 +65,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         observed_peer="user-a",
         observer_peer="companion-a",
         prompt_pack_version="prompt-v1",
-        expected_model="model-a",
+        expected_model="gpt-5.6-terra",
         model_context_window_tokens=16384,
         allowed_tools=(),
         required_capabilities=("responses_api", "session_key_header"),
@@ -45,6 +73,12 @@ def _runtime(**updates) -> IsolatedRuntime:
         voice_policy_version="voice-v1",
         revision=2,
         profile_class="synthetic",
+        runtime_target_id="00000000-0000-0000-0000-000000000004",
+        runtime_target_mode="hermes-cloud-chat",
+        runtime_target_updated_at="2026-07-29T03:00:00+00:00",
+        target_endpoint_ref="env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        target_credential_ref="env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        target_entitlement_revision=3,
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -214,7 +248,7 @@ class FakeCloudClient:
             response_id="response-a",
             text="Synthetic acknowledgement.",
             usage=self.usage,
-            model="model-a",
+            model="gpt-5.6-terra",
             tool_calls=self.tool_calls,
         )
 
@@ -280,7 +314,7 @@ class SequencedCloudClient(FakeCloudClient):
             response_id=f"response-{len(self.calls)}",
             text=next(self.responses),
             usage=self.usage,
-            model="model-a",
+            model="gpt-5.6-terra",
             tool_calls=0,
         )
 
@@ -309,7 +343,7 @@ def test_cloud_turn_writes_once_and_same_interaction_replays():
     assert len(repository.receipts) == 2
     assert all(receipt["status"] == "written" for receipt in repository.receipts.values())
     assert policy.accepted[0]["provider"] == "hermes_cloud"
-    assert policy.accepted[0]["model"] == "model-a"
+    assert policy.accepted[0]["model"] == "gpt-5.6-terra"
     assert policy.updated[0]["estimated_cost_microusd"] == 7
     assert policy.reserved[0]["reservation_microusd"] == 20
     assert policy.settled[0]["actual_cost_microusd"] == 7
@@ -335,7 +369,7 @@ def test_photon_turn_uses_photon_entitlement_mode():
     assert policy.accepted[0]["mode"] == "hermes-cloud-photon"
 
 
-def test_enrichment_turn_uses_distinct_mode_and_disables_user_scan():
+def test_enrichment_turn_uses_transcript_target_mode_and_disables_user_scan():
     repository = FakeRepository()
     event_store = InMemoryCanonicalEventStore()
     policy = FakePolicy()
@@ -355,7 +389,12 @@ def test_enrichment_turn_uses_distinct_mode_and_disables_user_scan():
         }
     )
 
-    result = asyncio.run(service.run_turn(_runtime(), request))
+    result = asyncio.run(
+        service.run_turn(
+            _runtime(runtime_target_mode="hermes-cloud-transcript"),
+            request,
+        )
+    )
     source_identity = "hermes_cloud:omi_enrichment:interaction:" + result.canonical_user_event_id.split(":")[1]
     user_event = asyncio.run(
         event_store.get_event(
@@ -365,8 +404,33 @@ def test_enrichment_turn_uses_distinct_mode_and_disables_user_scan():
         )
     )
 
-    assert policy.accepted[0]["mode"] == "hermes-cloud-enrichment"
+    assert policy.accepted[0]["mode"] == "hermes-cloud-transcript"
     assert user_event["scan_policy"] == "none"
+
+
+def test_enrichment_rejects_chat_target_before_admission_or_provider():
+    policy = FakePolicy()
+    cloud = FakeCloudClient()
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+    )
+    request = HermesCloudTurnRequest(
+        **{
+            **_request().__dict__,
+            "channel": "omi_enrichment",
+            "user_scan_policy": "none",
+        }
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(service.run_turn(_runtime(), request))
+
+    assert error.value.code == "hermes_cloud_enrichment_transcript_target_required"
+    assert policy.accepted == []
+    assert cloud.calls == []
 
 
 def test_turn_rejects_invalid_user_scan_policy_before_ingest():
@@ -539,7 +603,13 @@ def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
         )
     )
 
-    assert events == ["consent", "consent", "provider_started", "provider"]
+    assert events == [
+        "consent",
+        "consent",
+        "provider_started",
+        "consent",
+        "provider",
+    ]
 
 
 def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
@@ -583,6 +653,166 @@ def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
     assert checks == 2
     assert cloud.calls == []
     assert provider_marked is False
+    assert policy.reserved
+    assert policy.released
+
+
+def test_synthetic_consent_revoked_at_provider_boundary_hook_blocks_send(monkeypatch):
+    consent_repository = ai_consent.InMemoryConsentRepository()
+    consent_service = ai_consent.AiConsentService(consent_repository)
+    consent_service.submit(
+        "synthetic-user",
+        ai_consent.ConsentSubmission(
+            decision="granted",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="runtime-boundary-grant",
+            app_version="1.0.0",
+            build_number="804",
+            locale="en-US",
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", consent_repository)
+
+    class SendTrackingCloud(FakeCloudClient):
+        def __init__(self):
+            super().__init__()
+            self.provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            self.provider_posts += 1
+            return HermesCloudTurn(
+                response_id="response-a",
+                text="must not send",
+                usage=self.usage,
+                model="gpt-5.6-terra",
+                tool_calls=0,
+            )
+
+    repository = FakeRepository()
+    policy = FakePolicy()
+    cloud = SendTrackingCloud()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    async def revoke_after_earlier_checks():
+        consent_service.submit(
+            "synthetic-user",
+            ai_consent.ConsentSubmission(
+                decision="revoked",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                request_id="runtime-boundary-revoke",
+                app_version="1.0.0",
+                build_number="804",
+                locale="en-US",
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+        )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                before_provider_call=revoke_after_earlier_checks,
+            )
+        )
+
+    assert error.value.code == "managed_cloud_consent_stale"
+    assert cloud.provider_posts == 0
+    assert cloud.calls == []
+    assert policy.reserved
+    assert policy.released
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_code"),
+    (
+        ("quarantine", "hermes_cloud_quarantined"),
+        ("target", "hermes_cloud_runtime_authority_changed"),
+        ("endpoint", "hermes_cloud_runtime_authority_changed"),
+        ("credential", "hermes_cloud_runtime_authority_changed"),
+        ("entitlement_revision", "hermes_cloud_runtime_authority_changed"),
+    ),
+)
+def test_runtime_authority_change_at_provider_boundary_blocks_send(
+    monkeypatch,
+    change,
+    expected_code,
+):
+    class SendTrackingCloud(FakeCloudClient):
+        def __init__(self):
+            super().__init__()
+            self.provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            self.provider_posts += 1
+            return HermesCloudTurn(
+                response_id="response-a",
+                text="must not send",
+                usage=self.usage,
+                model="gpt-5.6-terra",
+                tool_calls=0,
+            )
+
+    admitted = _runtime()
+    current = admitted
+
+    async def resolve_current(uid, repository=None, target_mode=None):
+        assert uid == admitted.uid
+        assert target_mode == "hermes-cloud-chat"
+        if change == "quarantine":
+            raise ProvisioningError("hermes_cloud_quarantined", retryable=False)
+        return current
+
+    monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", resolve_current)
+    cloud = SendTrackingCloud()
+    policy = FakePolicy()
+    service = HermesCloudRuntimeService(
+        repository=FakeRepository(),
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+        runtime_revalidator=runtime_resolver.revalidate_cloud_runtime_authority,
+    )
+
+    async def mutate_after_admission():
+        nonlocal current
+        updates = {
+            "target": {"runtime_target_id": "00000000-0000-0000-0000-000000000099"},
+            "endpoint": {"gateway_url": "https://replacement.example.test"},
+            "credential": {"gateway_token": "replacement-secret"},
+            "entitlement_revision": {"target_entitlement_revision": 4},
+        }
+        if change in updates:
+            current = _runtime(**updates[change])
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service.run_turn(
+                admitted,
+                _request(),
+                before_provider_call=mutate_after_admission,
+            )
+        )
+
+    assert error.value.code == expected_code
+    assert cloud.provider_posts == 0
+    assert cloud.calls == []
     assert policy.reserved
     assert policy.released
 
@@ -980,7 +1210,7 @@ def test_profile_reclassification_during_send_boundary_prevents_provider_egress(
                 response_id="response-a",
                 text="Synthetic acknowledgement.",
                 usage=self.usage,
-                model="model-a",
+                model="gpt-5.6-terra",
                 tool_calls=self.tool_calls,
             )
 

@@ -1,0 +1,463 @@
+openapi: 3.1.0
+info:
+  title: Ella Hermes Cloud Runtime Targets
+  version: 0.2.0
+  description: >
+    Backend-owned contract for account/profile Cloud runtime target resolution
+    and AI processor consent. This fragment documents the Ella-specific surfaces;
+    the generated public OMI OpenAPI file is not used for these internal routes.
+servers:
+  - url: https://api.ella-ai-care.com
+security:
+  - bearerAuth: []
+paths:
+  /v1/users/ai-consent/policy:
+    get:
+      tags: [AI Consent]
+      security: []
+      summary: Return the current AI/data processor disclosure contract.
+      responses:
+        "200":
+          description: Current immutable policy metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiConsentPolicy"
+  /v1/users/ai-consent:
+    post:
+      tags: [AI Consent]
+      summary: Record grant, decline, or revoke for the current policy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiConsentSubmission"
+      responses:
+        "200":
+          description: Current receipt state.
+        "409":
+          description: Stale policy, processor set, scope, or idempotency mismatch.
+    get:
+      tags: [AI Consent]
+      summary: Return the authenticated user's current consent status.
+      responses:
+        "200":
+          description: Current consent status.
+  /v1/ella/resolve:
+    get:
+      tags: [Runtime Resolution]
+      summary: Resolve retained or Cloud runtime routing for the authenticated UID.
+      parameters:
+        - name: uid
+          in: query
+          schema:
+            type: string
+          description: Must match the Firebase bearer subject.
+      responses:
+        "200":
+          description: Redacted route. Cloud returns only first-party backend URLs.
+        "403":
+          description: UID does not match the bearer subject.
+        "409":
+          description: Cloud target exists but is inconsistent, stale, revoked, or unready.
+        "503":
+          description: Runtime authority is enabled but the exact target is missing or retryable.
+      x-ella-runtime-target:
+        mode: hermes-cloud-chat
+        fallback: none
+        sends-user-data: false
+  /v1/invite/redeem:
+    post:
+      tags: [Invitation Control Plane]
+      summary: Atomically redeem an exact account/profile invitation.
+      x-ella-runtime-target:
+        publishes-modes:
+          - hermes-cloud-chat
+          - hermes-cloud-voice
+          - hermes-cloud-transcript
+          - hermes-cloud-guardian
+          - hermes-cloud-photon
+        fallback: none
+        sends-user-data: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+                  maxLength: 32
+      responses:
+        "200":
+          description: Entitlement receipt bound to the authenticated UID.
+        "400":
+          description: Uniform invalid invitation or account/profile/consent mismatch.
+        "409":
+          description: Reserved capacity is unavailable.
+        "410":
+          description: Invitation expired.
+        "429":
+          description: Privacy-safe abuse limit reached.
+  /v1/ella/onboarding/ensure:
+    post:
+      tags: [Runtime Provisioning]
+      summary: Idempotently ensure the authenticated account/profile runtime.
+      x-ella-runtime-target:
+        mode: hermes-cloud-chat
+        fallback: none
+        sends-user-data: false
+      responses:
+        "200":
+          description: Existing active exact target.
+        "202":
+          description: Provisioning or rollback remains in progress.
+        "409":
+          description: Current authority or immutable claim is invalid.
+        "503":
+          description: Schema, capacity, or exact target is unavailable.
+  /v1/ella/onboarding/status:
+    get:
+      tags: [Runtime Provisioning]
+      summary: Return the authenticated account/profile provisioning receipt.
+      x-ella-runtime-target:
+        mode: hermes-cloud-chat
+        fallback: none
+        sends-user-data: false
+      responses:
+        "200":
+          description: Current redacted provisioning state.
+        "404":
+          description: Setup has not started.
+        "503":
+          description: Provisioning authority is unavailable.
+  /v1/ella/chat/stream:
+    post:
+      tags: [Chat]
+      summary: Stream chat through the exact account/profile Chat target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-chat
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        - nous-hermes-cloud
+        - hermes-profile-memory
+        - openai-codex
+      responses:
+        "200":
+          description: Server-sent event stream from the exact target.
+        "409":
+          description: Consent, entitlement, or stored target lineage is stale.
+        "503":
+          description: Exact Chat target is missing or unready.
+  /v1/ella/chat/history:
+    get:
+      tags: [Chat]
+      summary: Return canonical profile history without Cloud-to-Mini fallback.
+      x-ella-runtime-target:
+        mode: hermes-cloud-chat
+        fallback: none
+        sends-user-data: false
+      responses:
+        "200":
+          description: Canonical account/profile history, possibly empty.
+        "409":
+          description: Current Cloud authority is stale.
+        "503":
+          description: Exact Chat target is unavailable.
+  /v1/voice/session:
+    post:
+      tags: [Voice]
+      summary: Issue a voice session only after exact Voice-target admission.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        always:
+          - nous-hermes-cloud
+          - hermes-profile-memory
+          - openai-codex
+        selected-live-voice-provider-one-of:
+          - google-gemini
+          - openai
+          - xai-grok
+      responses:
+        "200":
+          description: Short-lived, entitlement-bound voice session.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target or disclosed processor is unavailable.
+  /v1/voice/context:
+    post:
+      tags: [Voice]
+      summary: Assemble voice context only after resolving the exact Voice target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Profile-scoped context for the admitted voice session.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
+  /v1/voice/tool:
+    post:
+      tags: [Voice]
+      summary: Gate voice tool execution on the exact Voice target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Retained-runtime tool result.
+        "409":
+          description: Cloud tools are disabled or exact runtime authority is stale.
+        "503":
+          description: Exact retained Voice target is unavailable.
+  /v1/voice/search-omi:
+    post:
+      tags: [Voice]
+      summary: Search profile-owned OMI conversations after exact Voice-target resolution.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Profile-scoped OMI conversation matches.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
+  /v1/voice/search:
+    post:
+      tags: [Voice]
+      summary: Search permitted profile sources after exact Voice-target resolution.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Role-filtered profile search results.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
+  /v1/entitlement:
+    get:
+      tags: [Voice]
+      summary: Return the authenticated entitlement and quota contract.
+      x-ella-runtime-target:
+        fallback: none
+        sends-user-data: false
+      responses:
+        "200":
+          description: Redacted entitlement and current quota state.
+  /v4/listen:
+    get:
+      tags: [Transcript]
+      summary: WebSocket listen surface gated by the exact Transcript target.
+      x-websocket: true
+      x-ella-runtime-target:
+        mode: hermes-cloud-transcript
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        always:
+          - nous-hermes-cloud
+          - hermes-profile-memory
+          - openai-codex
+        selected-stt-provider-one-of:
+          - deepgram
+          - soniox
+          - speechmatics
+      responses:
+        "101":
+          description: WebSocket upgrade after exact-target admission.
+        "409":
+          description: Consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Transcript target is missing or unready.
+  /v4/web/listen:
+    get:
+      tags: [Transcript]
+      summary: Browser WebSocket listen surface gated after first-message authentication.
+      x-websocket: true
+      x-ella-runtime-target:
+        mode: hermes-cloud-transcript
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        always:
+          - nous-hermes-cloud
+          - hermes-profile-memory
+          - openai-codex
+        selected-stt-provider-one-of:
+          - deepgram
+          - soniox
+          - speechmatics
+      responses:
+        "101":
+          description: WebSocket upgrade followed by exact-target admission.
+        "409":
+          description: Consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Transcript target is missing or unready.
+  /v1/ella/conversation/{conversation_id}/summary:
+    patch:
+      tags: [Callbacks and Summary]
+      security: []
+      summary: Internal summary callback with no Cloud-to-Mini assessment fallback.
+      x-internal-only: true
+      x-ella-runtime-target:
+        mode: hermes-cloud-transcript
+        fallback: none
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: uid
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Summary writeback receipt.
+        "400":
+          description: UID or summary payload is invalid.
+        "422":
+          description: Summary content failed sanitization.
+  /v1/conversations/{conversation_id}/processing-retries:
+    post:
+      tags: [Callbacks and Summary]
+      summary: Retry summary recovery through the exact Transcript target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-transcript
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        when-extractor-mode-is-hermes:
+          - nous-hermes-cloud
+          - hermes-profile-memory
+          - openai-codex
+        when-extractor-mode-is-structured-or-heuristic: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "202":
+          description: Recovery was atomically claimed or replayed.
+        "409":
+          description: Recovery is busy, stale, or not safely retryable.
+        "503":
+          description: Exact Transcript target is unavailable.
+  /v1/ella/observer/run:
+    post:
+      tags: [Observer and Guardian]
+      security:
+        - observerToken: []
+      summary: Run Observer extraction through the exact Guardian target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-guardian
+        fallback: none
+      x-ella-ai-data-processors-v8:
+        - nous-hermes-cloud
+        - hermes-profile-memory
+        - openai-codex
+      responses:
+        "200":
+          description: Proposal-only Observer run receipt.
+        "401":
+          description: Observer token is invalid.
+        "503":
+          description: Token configuration or exact Guardian target is unavailable.
+  /v1/ella/guardian/next-audio:
+    get:
+      tags: [Observer and Guardian]
+      summary: Consolidate and consume Guardian audio through the exact Guardian target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-guardian
+        fallback: none
+        sends-user-data: true
+      responses:
+        "200":
+          description: Next profile-scoped Guardian audio item, or an empty queue result.
+        "409":
+          description: Consent, entitlement, or stored Guardian target lineage is stale.
+        "503":
+          description: Exact Guardian target is missing or unready.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    observerToken:
+      type: apiKey
+      in: header
+      name: X-Ella-Observer-Token
+  parameters:
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    AiConsentPolicy:
+      type: object
+      required:
+        - version
+        - processor_set_hash
+        - scope_version
+        - scope_hash
+        - processors
+      properties:
+        version:
+          const: ai-data-processors-v8
+        processor_set_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        scope_version:
+          const: managed-cloud-internal-pilot-v2
+        scope_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        processors:
+          type: array
+          items:
+            type: object
+      description: >
+        v8 names Hermes Cloud, OpenAI Codex, Photon, and built-in Hermes
+        profile-scoped memory for the Cloud route. Honcho Cloud is not part of
+        the Cloud route processor set; retained Plato/Honcho remains separate.
+    AiConsentSubmission:
+      type: object
+      required:
+        - decision
+        - policy_version
+        - processor_set_hash
+        - request_id
+        - app_version
+        - build_number
+        - locale
+        - scope_version
+        - scope_hash
+      properties:
+        decision:
+          enum: [granted, declined, revoked]
+        policy_version:
+          const: ai-data-processors-v8
+        processor_set_hash:
+          type: string
+        scope_version:
+          const: managed-cloud-internal-pilot-v2
+        scope_hash:
+          type: string
+        request_id:
+          type: string
+        app_version:
+          type: string
+        build_number:
+          type: string
+        locale:
+          type: string

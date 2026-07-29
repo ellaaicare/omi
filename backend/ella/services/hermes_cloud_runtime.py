@@ -24,12 +24,17 @@ from ella.services.hermes_cloud import (
     estimate_max_turn_cost_microusd,
     estimate_turn_cost_microusd,
 )
-from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import IsolatedRuntime
+from ella.services.runtime_resolver import (
+    CloudRuntimeAuthorityIdentity,
+    IsolatedRuntime,
+    cloud_runtime_authority_identity,
+    revalidate_cloud_runtime_authority,
+)
 
 HERMES_CLOUD_CHAT_MODE = "hermes-cloud-chat"
-HERMES_CLOUD_ENRICHMENT_MODE = "hermes-cloud-enrichment"
+HERMES_CLOUD_ENRICHMENT_MODE = "hermes-cloud-transcript"
 HERMES_CLOUD_PHOTON_MODE = "hermes-cloud-photon"
 HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
 DEFAULT_MAX_INPUT_TOKENS = 8192
@@ -39,7 +44,7 @@ INVALID_OUTPUT_ERROR = "hermes_cloud_enrichment_output_invalid"
 
 
 def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
-    return assert_cloud_identity_gate(
+    authority = current_cloud_authority(
         runtime.uid,
         profile_class=runtime.profile_class,
         profile_uid=runtime.uid,
@@ -48,6 +53,9 @@ def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
         memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
         photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
     )
+    if not authority.grant_epoch:
+        raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
+    return authority.grant_epoch
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -268,6 +276,12 @@ class HermesCloudRuntimeService:
         cost_estimator: Any = estimate_turn_cost_microusd,
         max_cost_estimator: Any = estimate_max_turn_cost_microusd,
         allow_shadow: bool = False,
+        runtime_revalidator: Optional[
+            Callable[
+                [CloudRuntimeAuthorityIdentity, EllaProvisioningRepository],
+                Awaitable[IsolatedRuntime],
+            ]
+        ] = None,
     ):
         self.repository = repository
         self.event_store = event_store
@@ -276,6 +290,7 @@ class HermesCloudRuntimeService:
         self.cost_estimator = cost_estimator
         self.max_cost_estimator = max_cost_estimator
         self.allow_shadow = allow_shadow
+        self.runtime_revalidator = runtime_revalidator or revalidate_cloud_runtime_authority
 
     async def run_turn(
         self,
@@ -287,6 +302,15 @@ class HermesCloudRuntimeService:
     ) -> HermesCloudTurnResult:
         if runtime.provider != "hermes_cloud" or runtime.uid != request.uid:
             raise ProvisioningError("hermes_cloud_runtime_required", retryable=False)
+        runtime_identity = cloud_runtime_authority_identity(runtime)
+        if (
+            request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL
+            and runtime_identity.target_mode != HERMES_CLOUD_ENRICHMENT_MODE
+        ):
+            raise ProvisioningError(
+                "hermes_cloud_enrichment_transcript_target_required",
+                retryable=False,
+            )
         profile_class = await self.repository.get_cloud_profile_class(request.uid)
         if profile_class != runtime.profile_class:
             raise ProvisioningError("hermes_cloud_profile_class_changed", retryable=False)
@@ -530,17 +554,25 @@ class HermesCloudRuntimeService:
                     retryable=False,
                 )
 
-            async def mark_provider_send_boundary() -> None:
+            async def mark_provider_send_boundary() -> tuple[str, str]:
                 nonlocal provider_started
                 if before_provider_call is not None:
                     await before_provider_call()
-                current_profile_class = await self.repository.get_cloud_profile_class(request.uid)
-                if current_profile_class != runtime.profile_class:
+                current_runtime = await self.runtime_revalidator(
+                    runtime_identity,
+                    self.repository,
+                )
+                final_grant_epoch = assert_runtime_managed_consent(current_runtime)
+                if request.consent_grant_epoch and not hmac.compare_digest(
+                    request.consent_grant_epoch,
+                    final_grant_epoch,
+                ):
                     raise ProvisioningError(
-                        "hermes_cloud_profile_class_changed",
+                        "managed_cloud_consent_grant_changed",
                         retryable=False,
                     )
                 provider_started = True
+                return current_runtime.gateway_url, current_runtime.gateway_token
 
             turn = await self.cloud_client.create_response(
                 {

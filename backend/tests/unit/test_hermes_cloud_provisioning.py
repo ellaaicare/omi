@@ -1,14 +1,39 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from database.runtime_targets import RuntimeTargetLineage
 from ella.services import provisioning
 from ella.services.hermes_cloud import HermesCloudPreflight
+from ella.services.hermes_cloud_policy import CurrentCloudAuthority
 from ella.services.provisioning import (
     HermesProvisionClient,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
 )
+
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
+)
+
+
+@pytest.fixture(autouse=True)
+def current_cloud_lineage(monkeypatch):
+    def current_authority(uid, **kwargs):
+        if kwargs.get("profile_class") != "synthetic":
+            raise ProvisioningError("hermes_cloud_synthetic_profile_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
+
+    monkeypatch.setattr(provisioning, "current_cloud_authority", current_authority)
 
 
 class ForbiddenLocalClient(HermesProvisionClient):
@@ -17,9 +42,10 @@ class ForbiddenLocalClient(HermesProvisionClient):
 
 
 class FakeRepository:
-    def __init__(self, *, pool_empty=False, claim_error=None):
+    def __init__(self, *, pool_empty=False, claim_error=None, ready_receipt_error=None):
         self.pool_empty = pool_empty
         self.claim_error = claim_error
+        self.ready_receipt_error = ready_receipt_error
         self.quarantined = []
         self.finalized = []
         self.jobs = []
@@ -80,6 +106,8 @@ class FakeRepository:
         return {"status": "quarantined"}
 
     async def update_job(self, **kwargs):
+        if kwargs.get("state") == "ready" and self.ready_receipt_error:
+            raise self.ready_receipt_error
         self.jobs.append(kwargs)
         return kwargs
 
@@ -176,7 +204,7 @@ def _job():
     return {"id": "00000000-0000-0000-0000-000000000005", "target_schema_version": "hermes-cloud-user-v1"}
 
 
-def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypatch):
+def test_cloud_claim_preflights_vendor_without_honcho_before_atomic_publish(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -208,10 +236,11 @@ def test_cloud_claim_preflights_honcho_and_vendor_before_atomic_publish(monkeypa
         }
     ]
     assert len(cloud.calls) == 1
-    assert len(honcho.calls) == 1
+    assert len(honcho.calls) == 0
     assert len(repository.finalized) == 1
     assert repository.finalized[0]["status"] == "shadow"
     assert repository.finalized[0]["health_receipt"]["admission_revision"] == 3
+    assert repository.finalized[0]["health_receipt"]["memory"]["provider"] == "hermes_profile_scoped_memory"
     assert repository.quarantined == []
     assert repository.jobs[-1]["state"] == "ready"
     assert alert.calls[0]["available"] == 1
@@ -262,7 +291,28 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     assert repository.finalized == []
     assert repository.quarantined[0]["reason"] == "hermes_cloud_tool_drift"
     assert repository.jobs[-1]["state"] == "blocked"
-    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "cleaned"
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "not_required"
+
+
+def test_post_publication_ready_receipt_failure_still_quarantines_claim(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository(ready_receipt_error=RuntimeError("synthetic receipt failure"))
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(),
+        honcho_client=FakeHoncho(),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(repository.finalized) == 1
+    assert repository.quarantined[0]["reason"] == "cloud_provisioning_internal_error"
+    assert repository.rollbacks[-1]["state"] == "blocked"
+    assert repository.rollbacks[-1]["rollback_receipt"]["quarantined"] is True
 
 
 def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkeypatch):
@@ -272,13 +322,18 @@ def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkey
     honcho = FakeHoncho()
     checks = 0
 
-    def consent_gate(*_args, **_kwargs):
+    def consent_gate(uid, **_kwargs):
         nonlocal checks
         checks += 1
         if checks == 2:
             raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
 
-    monkeypatch.setattr(provisioning, "assert_cloud_identity_gate", consent_gate)
+    monkeypatch.setattr(provisioning, "current_cloud_authority", consent_gate)
     coordinator = ProvisioningCoordinator(
         repository,
         ForbiddenLocalClient(),
@@ -424,7 +479,7 @@ def test_authority_change_after_claim_blocks_honcho_and_quarantines_claim(
     assert repository.quarantined[0]["reason"] == "runtime_admission_provider_disabled"
 
 
-def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkeypatch):
+def test_cloud_preflight_retryable_failure_has_no_honcho_side_effects_and_quarantines(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -440,13 +495,13 @@ def test_partial_honcho_side_effects_are_cleaned_and_claim_is_quarantined(monkey
 
     asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
 
-    assert len(repository.side_effects) == 2
-    assert len(honcho.cleanup_calls) == 1
+    assert repository.side_effects == []
+    assert honcho.cleanup_calls == []
     assert len(repository.quarantined) == 1
     assert repository.rollbacks[-1]["state"] == "retryable"
 
 
-def test_cleanup_failure_requires_manual_intervention(monkeypatch):
+def test_honcho_cleanup_failure_is_irrelevant_without_cloud_honcho_side_effects(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -461,6 +516,6 @@ def test_cleanup_failure_requires_manual_intervention(monkeypatch):
 
     asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
 
-    assert repository.rollbacks[-1]["state"] == "manual_intervention"
-    assert repository.rollbacks[-1]["retryable"] is False
-    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "manual_intervention"
+    assert repository.rollbacks[-1]["state"] == "retryable"
+    assert repository.rollbacks[-1]["retryable"] is True
+    assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "not_required"

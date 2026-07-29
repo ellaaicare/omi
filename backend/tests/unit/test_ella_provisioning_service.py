@@ -94,7 +94,7 @@ class FakeRepository:
         self.omi_identity_calls.append(kwargs)
         return True
 
-    async def resolve_active_runtime(self, uid, template_version=None):
+    async def resolve_active_runtime(self, uid, template_version=None, **_kwargs):
         if self.binding and template_version and self.binding.get("template_version") != template_version:
             return None
         return self.binding

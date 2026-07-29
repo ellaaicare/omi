@@ -4,8 +4,11 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from ella.services.runtime_errors import ProvisioningError
 
 
 def _install_proposal_stubs():
@@ -15,7 +18,7 @@ def _install_proposal_stubs():
     proposals.list_proposals = MagicMock(return_value=[])
     proposals.save_proposal = MagicMock(side_effect=lambda proposal: proposal)
     proposals.update_proposal_status = MagicMock(return_value=None)
-    database = sys.modules.setdefault("database", types.ModuleType("database"))
+    database = importlib.import_module("database")
     setattr(database, "proposals", proposals)
     sys.modules["database.proposals"] = proposals
 
@@ -425,9 +428,11 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
     extractor_module = importlib.import_module("ella.services.observer_extractor")
     captured = {}
 
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-isolated"
+        assert target_mode == "hermes-cloud-guardian"
         return types.SimpleNamespace(
+            provider="hermes_cloud",
             gateway_url="http://isolated-hermes:8642",
             gateway_token="isolated-token",
             agent_id="omi-isolated",
@@ -439,10 +444,20 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
 
     monkeypatch.setattr(
         extractor_module.runtime_resolver,
-        "runtime_bindings_enabled",
+        "runtime_authority_enabled",
         lambda uid=None: uid == "uid-isolated",
     )
     monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
+    authority = extractor_module.runtime_resolver.CloudRuntimeAuthorityIdentity(
+        uid="uid-isolated",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
+    monkeypatch.setattr(
+        extractor_module.runtime_resolver,
+        "cloud_runtime_authority_identity",
+        lambda runtime: authority,
+    )
     monkeypatch.setattr(extractor_module, "hermes_candidate_extraction", fake_hermes)
 
     asyncio.run(
@@ -453,9 +468,65 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
         )
     )
 
-    assert captured["gateway_url"] == "http://isolated-hermes:8642"
-    assert captured["token"] == "isolated-token"
-    assert captured["model"] == "omi-isolated"
+    assert captured == {
+        "timeout_seconds": 45.0,
+        "limit": 60,
+        "cloud_authority": authority,
+    }
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        "managed_cloud_consent_stale",
+        "hermes_cloud_quarantined",
+        "hermes_cloud_runtime_authority_changed",
+    ),
+)
+def test_observer_final_authority_change_sends_zero_protected_events(monkeypatch, error_code):
+    sys.modules.pop("ella.services.observer_extractor", None)
+    extractor_module = importlib.import_module("ella.services.observer_extractor")
+    provider_posts = 0
+
+    class TrackingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal provider_posts
+            provider_posts += 1
+            raise AssertionError("provider post must not be reached")
+
+    async def deny_current_authority(identity):
+        raise ProvisioningError(error_code, retryable=False)
+
+    monkeypatch.setattr(extractor_module.httpx, "AsyncClient", TrackingClient)
+    monkeypatch.setattr(
+        extractor_module.runtime_resolver,
+        "revalidate_cloud_runtime_authority",
+        deny_current_authority,
+    )
+    authority = extractor_module.runtime_resolver.CloudRuntimeAuthorityIdentity(
+        uid="uid-isolated",
+        target_mode="hermes-cloud-guardian",
+        digest="a" * 64,
+    )
+
+    result = asyncio.run(
+        extractor_module.hermes_candidate_extraction(
+            [_event()],
+            cloud_authority=authority,
+        )
+    )
+
+    assert provider_posts == 0
+    assert result.metadata["error"] == "ProvisioningError"
 
 
 def test_model_extractor_rejects_assistant_only_evidence():

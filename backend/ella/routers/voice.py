@@ -286,7 +286,7 @@ async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     if not bindings_enabled:
         return None
     try:
-        runtime = await resolve_isolated_runtime(principal.uid)
+        runtime = await resolve_isolated_runtime(principal.uid, target_mode="hermes-cloud-voice")
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
     if not runtime:
@@ -967,7 +967,7 @@ async def create_voice_session(
     isolated_runtime = runtime_bound and voice_rollout_enabled
     if runtime_bound:
         try:
-            await resolve_isolated_runtime(uid)
+            await resolve_isolated_runtime(uid, target_mode="hermes-cloud-voice")
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
         if not isolated_runtime:
@@ -1105,7 +1105,13 @@ async def get_voice_entitlement(
     authenticated_uid: str = Depends(auth.get_current_user_uid),
 ):
     """Return the stable frontend contract without exposing operator notes."""
-    return await voice_canary_db.get_entitlement_contract(authenticated_uid)
+    contract = await voice_canary_db.get_entitlement_contract(authenticated_uid)
+    correlation_id = str(uuid.uuid4())
+    return {
+        **contract,
+        "support_code": f"ENT-{correlation_id.replace('-', '')[:8].upper()}",
+        "correlation_id": correlation_id,
+    }
 
 
 @router.post("/canary/accept")
@@ -1847,7 +1853,7 @@ async def get_voice_context(request: Request):
             "agent_id": agent_id,
             "binding_revision": runtime.revision if runtime else None,
             "workspace_residency": (
-                "canonical_postgres+honcho_cloud+hermes_cloud_policy"
+                "canonical_postgres+hermes_cloud_profile_memory+hermes_cloud_policy"
                 if runtime and getattr(runtime, "provider", "") == "hermes_cloud"
                 else "retained_workspace_api"
             ),

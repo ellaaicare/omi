@@ -427,7 +427,7 @@ class HermesCloudClient:
         token: Optional[str] = None,
         max_output_tokens: int,
         max_tool_calls: int,
-        before_provider_send: Optional[Callable[[], Awaitable[None]]] = None,
+        before_provider_send: Optional[Callable[[], Awaitable[Optional[tuple[str, str]]]]] = None,
     ) -> HermesCloudTurn:
         if base_url is None or token is None:
             base_url, token = self.credentials(binding)
@@ -441,12 +441,6 @@ class HermesCloudClient:
             raise ProvisioningError("cloud_model_policy_missing", retryable=False)
         if not 1 <= int(max_output_tokens) <= 32768 or not 0 <= int(max_tool_calls) <= 32:
             raise ProvisioningError("hermes_cloud_turn_budget_invalid", retryable=False)
-        headers = {
-            **_headers(token),
-            "X-Hermes-Session-Key": session_key,
-            "X-Hermes-Session-Id": hermes_session_id,
-            "Idempotency-Key": idempotency_key,
-        }
         payload: dict[str, Any] = {
             "model": expected_model,
             "input": user_input,
@@ -460,7 +454,18 @@ class HermesCloudClient:
         try:
             async with self.http_client_factory(timeout=HERMES_CLOUD_TIMEOUT_SECONDS) as client:
                 if before_provider_send is not None:
-                    await before_provider_send()
+                    current_credentials = await before_provider_send()
+                    if current_credentials is not None:
+                        base_url = validate_cloud_base_url(current_credentials[0])
+                        token = current_credentials[1]
+                        if not token:
+                            raise ProvisioningError("cloud_secret_unavailable", retryable=True)
+                headers = {
+                    **_headers(token),
+                    "X-Hermes-Session-Key": session_key,
+                    "X-Hermes-Session-Id": hermes_session_id,
+                    "Idempotency-Key": idempotency_key,
+                }
                 response = await client.post(
                     f"{base_url}/v1/responses",
                     headers=headers,
@@ -731,6 +736,8 @@ class HermesCloudPoolManager:
         }
         if protected_fields.intersection(candidate):
             raise ProvisioningError("hermes_cloud_candidate_policy_forbidden", retryable=False)
+        if candidate.get("honcho_api_key_ref"):
+            raise ProvisioningError("hermes_cloud_candidate_legacy_honcho_forbidden", retryable=False)
         manifest = self.manifest_store.load()
         observed = observed_artifacts(candidate, manifest)
         effective_candidate = {
@@ -750,7 +757,6 @@ class HermesCloudPoolManager:
             agent_id=str(candidate["agent_id"]),
             api_base_url_ref=str(candidate["api_base_url_ref"]),
             api_key_ref=str(candidate["api_key_ref"]),
-            honcho_api_key_ref=str(candidate["honcho_api_key_ref"]),
             template_version=str(candidate["template_version"]),
             prompt_pack_version=manifest.prompt_pack_version,
             prompt_artifact_receipt=dict(preflight.receipt["prompt_artifacts"]),

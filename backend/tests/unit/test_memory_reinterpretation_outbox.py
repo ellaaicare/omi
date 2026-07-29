@@ -5,6 +5,7 @@ import types
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -566,6 +567,77 @@ class _Hermes:
     async def propose(self, **kwargs):
         self.calls += 1
         return self.plan
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (
+        "managed_cloud_consent_stale",
+        "hermes_cloud_quarantined",
+        "hermes_cloud_runtime_authority_changed",
+    ),
+)
+def test_reinterpretation_final_authority_change_sends_zero_transcripts(monkeypatch, error_code):
+    provider_posts = 0
+    authority = SimpleNamespace(
+        uid=UID,
+        target_mode="hermes-cloud-transcript",
+        digest="a" * 64,
+    )
+    config = SimpleNamespace(
+        provider="hermes-api",
+        hermes_api_key="",
+        cloud_authority=authority,
+        timeout_seconds=45,
+    )
+
+    class TrackingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            nonlocal provider_posts
+            provider_posts += 1
+            raise AssertionError("provider post must not be reached")
+
+    async def config_for_uid(uid):
+        assert uid == UID
+        return config
+
+    async def deny_current_authority(selected):
+        assert selected is config
+        raise RuntimeError(error_code)
+
+    monkeypatch.setattr(
+        reinterpretation_service,
+        "summary_provider_config_for_uid",
+        config_for_uid,
+    )
+    monkeypatch.setattr(
+        reinterpretation_service,
+        "resolve_summary_provider_send",
+        deny_current_authority,
+    )
+    monkeypatch.setattr(reinterpretation_service.httpx, "AsyncClient", TrackingClient)
+
+    with pytest.raises(ReinterpretationWorkerError) as error:
+        asyncio.run(
+            reinterpretation_service.HermesReinterpretationClient().propose(
+                job={"uid": UID, "id": "reinterpretation-job"},
+                transcript="Complete protected transcript.",
+                current_summary={"overview": "Current summary."},
+                event_ids=["event-a"],
+            )
+        )
+
+    assert error.value.code == "hermes_invalid_response"
+    assert provider_posts == 0
 
 
 async def _loader(uid, conversation_id):

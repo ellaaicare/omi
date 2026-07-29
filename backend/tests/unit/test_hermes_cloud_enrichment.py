@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ella.services import hermes_cloud_enrichment
 from ella.services.hermes_cloud_enrichment import HermesCloudEnrichmentService
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
@@ -53,6 +54,34 @@ def _conversation(text: str = "Synthetic cafe order.") -> dict:
         "active_summary_version_id": "version-a",
         "enrichment_state": {},
     }
+
+
+def test_enrichment_resolves_exact_published_transcript_target(monkeypatch):
+    repository = SimpleNamespace()
+    requested = []
+
+    async def resolve(uid, *, repository=None, target_mode=None):
+        requested.append((uid, repository, target_mode))
+        return _runtime()
+
+    monkeypatch.setattr(hermes_cloud_enrichment, "resolve_isolated_runtime", resolve)
+    service = HermesCloudEnrichmentService(
+        repository=repository,
+        event_store=SimpleNamespace(),
+        conversation_reader=lambda uid, conversation_id: None,
+        summary_applier=AsyncMock(),
+    )
+
+    runtime = asyncio.run(service._runtime("synthetic-user", allow_shadow=False))
+
+    assert runtime.provider == "hermes_cloud"
+    assert requested == [
+        (
+            "synthetic-user",
+            repository,
+            "hermes-cloud-transcript",
+        )
+    ]
 
 
 class FakeRuntimeService:

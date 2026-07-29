@@ -484,12 +484,16 @@ async def _runtime_activation_decision(
     provider: str,
     model: str,
     admitted_entitlement_revision: Optional[int] = None,
+    mode: Optional[str] = None,
+    required_modes: tuple[str, ...] = (),
+    require_active: bool = False,
 ) -> VoicePolicyDecision:
     now = _utcnow()
     await lock_runtime_authority_on_connection(
         conn,
         uid=uid,
         provider=provider,
+        mode=mode,
     )
     row = await conn.fetchrow(
         "SELECT * FROM voice_entitlements WHERE uid = $1 FOR UPDATE",
@@ -504,16 +508,23 @@ async def _runtime_activation_decision(
     code: Optional[str] = None
     if admitted_entitlement_revision is not None and entitlement["revision"] != admitted_entitlement_revision:
         code = "entitlement_stale"
-    elif entitlement["status"] not in {"invited", "active"}:
+    elif require_active and entitlement["status"] != "active":
+        code = str(entitlement["status"])
+    elif not require_active and entitlement["status"] not in {"invited", "active"}:
         code = str(entitlement["status"])
     elif entitlement.get("trial_expires_at") and entitlement["trial_expires_at"] <= now:
         code = "expired"
     else:
-        code = await _kill_switch_code(conn, uid, provider)
+        code = await _kill_switch_code(conn, uid, provider, mode)
     if not code and provider not in set(entitlement.get("provider_allowlist") or []):
         code = "provider_not_allowed"
     if not code and entitlement.get("model_allowlist") and model not in set(entitlement["model_allowlist"]):
         code = "model_not_allowed"
+    allowed_modes = set(entitlement.get("mode_allowlist") or [])
+    if not code and mode and mode not in allowed_modes:
+        code = "mode_not_allowed"
+    if not code and required_modes and not set(required_modes).issubset(allowed_modes):
+        code = "mode_not_allowed"
     quota_code, soft_warning = quota_state(
         entitlement,
         daily_used_s=rollup["daily_used_s"],
@@ -542,6 +553,8 @@ async def revalidate_runtime_activation_on_connection(
     admitted_entitlement_revision: int,
     provider: str,
     model: str,
+    required_modes: tuple[str, ...] = (),
+    require_active: bool = False,
 ) -> VoicePolicyDecision:
     """Recheck admitted authority inside the caller's pool-claim transaction."""
     return await _runtime_activation_decision(
@@ -550,6 +563,29 @@ async def revalidate_runtime_activation_on_connection(
         provider=provider,
         model=model,
         admitted_entitlement_revision=admitted_entitlement_revision,
+        required_modes=required_modes,
+        require_active=require_active,
+    )
+
+
+async def revalidate_runtime_resolution_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    admitted_entitlement_revision: int,
+    provider: str,
+    model: str,
+    mode: str,
+) -> VoicePolicyDecision:
+    """Recheck active per-mode authority before returning a direct Cloud target."""
+    return await _runtime_activation_decision(
+        conn,
+        uid=uid,
+        provider=provider,
+        model=model,
+        admitted_entitlement_revision=admitted_entitlement_revision,
+        mode=mode,
+        require_active=True,
     )
 
 
@@ -559,7 +595,7 @@ async def evaluate_runtime_activation(
     provider: str,
     model: str,
 ) -> VoicePolicyDecision:
-    """Apply #1113 entitlement and kill switches before binding a runtime.
+    """Apply ellaaicare/ella-ai#1113 entitlement and kill switches before binding a runtime.
 
     An invited entitlement may provision in the background, but only an active
     entitlement may later open a voice/provider session.
@@ -588,37 +624,50 @@ async def evaluate_runtime_activation(
             return decision
 
 
+async def get_entitlement_contract_for_connection(
+    conn: asyncpg.Connection,
+    uid: str,
+    *,
+    now: Optional[datetime] = None,
+    expire_stale_sessions: bool = True,
+) -> dict[str, Any]:
+    """Build the public entitlement contract inside an existing transaction."""
+    current = now or _utcnow()
+    await lock_runtime_authority_on_connection(conn, uid=uid)
+    if expire_stale_sessions:
+        await _expire_stale_sessions(conn, current, uid=uid)
+    row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
+    if not row:
+        return {
+            "status": "none",
+            "quota": {
+                "daily_used_s": 0,
+                "daily_limit_s": 0,
+                "monthly_used_s": 0,
+                "monthly_limit_s": 0,
+                "max_session_s": 0,
+                "max_concurrent": 0,
+                "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
+                "resets_at": (_day_start(current) + timedelta(days=1)).isoformat(),
+                "monthly_resets_at": _next_month(current).isoformat(),
+            },
+        }
+    entitlement = _record_dict(row)
+    rollup = await _usage_rollup(conn, uid, current)
+    return {
+        "status": entitlement["status"],
+        "plan": entitlement["plan"],
+        "revision": entitlement["revision"],
+        "quota": _quota_payload(entitlement, rollup),
+    }
+
+
 async def get_entitlement_contract(uid: str) -> dict[str, Any]:
     now = _utcnow()
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await lock_runtime_authority_on_connection(conn, uid=uid)
-            await _expire_stale_sessions(conn, now, uid=uid)
-            row = await conn.fetchrow("SELECT * FROM voice_entitlements WHERE uid = $1", uid)
-            if not row:
-                return {
-                    "status": "none",
-                    "quota": {
-                        "daily_used_s": 0,
-                        "daily_limit_s": 0,
-                        "monthly_used_s": 0,
-                        "monthly_limit_s": 0,
-                        "max_session_s": 0,
-                        "max_concurrent": 0,
-                        "soft_limit_ratio": DEFAULT_SOFT_LIMIT_RATIO,
-                        "resets_at": (_day_start(now) + timedelta(days=1)).isoformat(),
-                        "monthly_resets_at": _next_month(now).isoformat(),
-                    },
-                }
-            entitlement = _record_dict(row)
-            rollup = await _usage_rollup(conn, uid, now)
-            return {
-                "status": entitlement["status"],
-                "plan": entitlement["plan"],
-                "revision": entitlement["revision"],
-                "quota": _quota_payload(entitlement, rollup),
-            }
+            return await get_entitlement_contract_for_connection(conn, uid, now=now)
 
 
 async def evaluate_issuance(

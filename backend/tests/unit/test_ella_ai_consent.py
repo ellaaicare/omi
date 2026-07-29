@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from datetime import datetime, timezone
 
@@ -7,7 +8,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from ella.routers import ai_consent
-from ella.services import ai_consent as consent
+from ella.services import ai_consent as consent, consent_authority
+from database import managed_cloud_consent
 
 
 def _submission(
@@ -39,13 +41,13 @@ def _service(repository=None):
     )
 
 
-def test_policy_matches_exact_managed_cloud_v7_contract():
+def test_policy_matches_exact_managed_cloud_v8_contract():
     policy = consent.AiConsentService.policy()
 
-    assert policy["version"] == "ai-data-processors-v7"
-    assert policy["processor_set_hash"] == "sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296"
-    assert policy["scope_version"] == "managed-cloud-internal-pilot-v1"
-    assert policy["scope_hash"] == "sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30"
+    assert policy["version"] == "ai-data-processors-v8"
+    assert policy["processor_set_hash"] == consent.CURRENT_PROCESSOR_SET_HASH
+    assert policy["scope_version"] == "managed-cloud-internal-pilot-v2"
+    assert policy["scope_hash"] == consent.CURRENT_SCOPE_HASH
     assert (
         "|".join(
             [
@@ -57,7 +59,7 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
                 "honcho-self-hosted:memory-context",
                 "ella-self-hosted-tts:tts",
                 "nous-hermes-cloud:managed-agent-runtime",
-                "honcho-cloud:derived-memory-context",
+                "hermes-profile-memory:profile-scoped-memory",
                 "openai-codex:managed-agent-model",
                 "photon:messaging-delivery",
                 "openrouter:model-routing",
@@ -85,15 +87,18 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
         ],
         "third_party": True,
     }
-    assert processors["honcho-cloud"] == {
-        "id": "honcho-cloud",
-        "legal_recipient": "Honcho / Plastic Labs",
-        "function": "Profile-bound derived memory and context",
-        "data": ("Details from conversations and information the person chooses " "to save for the bound profile"),
+    assert "honcho-cloud" not in processors
+    assert processors["hermes-profile-memory"] == {
+        "id": "hermes-profile-memory",
+        "legal_recipient": "Nous Research / Hermes Cloud",
+        "function": "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+        "data": (
+            "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+            "needed to retrieve memory for the same account/profile scope"
+        ),
         "provider_aliases": [
-            "honcho-cloud",
-            "honcho_cloud",
-            "honcho_cloud_profile_isolated",
+            "hermes-profile-memory",
+            "hermes_profile_scoped_memory",
         ],
         "third_party": True,
     }
@@ -152,10 +157,13 @@ def test_policy_matches_exact_managed_cloud_v7_contract():
             True,
         ),
         (
-            "honcho-cloud",
-            "Honcho / Plastic Labs",
-            "Profile-bound derived memory and context",
-            "Details from conversations and information the person chooses to save for the bound profile",
+            "hermes-profile-memory",
+            "Nous Research / Hermes Cloud",
+            "Built-in profile-scoped memory and context inside the managed Hermes Cloud runtime",
+            (
+                "Profile-bound conversation text, saved facts, derived memory context, and session identifiers "
+                "needed to retrieve memory for the same account/profile scope"
+            ),
             True,
         ),
         (
@@ -459,7 +467,7 @@ def test_v6_grant_is_rejected_and_cannot_pass_protected_route_gate(
         consent.assert_current_ai_consent("user-a")
 
     assert error.value.status_code == 403
-    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v7")
+    assert error.value.detail["required_policy_version"] == ("ai-data-processors-v8")
 
 
 def test_revoke_supersedes_prior_grant():
@@ -829,10 +837,142 @@ def test_router_returns_conflict_for_stale_grant(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as error:
-        ai_consent.submit_ai_consent(request, uid="user-a")
+        asyncio.run(ai_consent.submit_ai_consent(request, uid="user-a"))
 
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "ai_consent_policy_mismatch"
+
+
+def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    events = []
+    original_record = repository.record
+
+    def record(*args, **kwargs):
+        events.append(f"firestore:{args[2]['decision']}")
+        return original_record(*args, **kwargs)
+
+    async def deny(**kwargs):
+        events.append(f"postgres:{kwargs['decision']}")
+        return {"decision": kwargs["decision"]}
+
+    async def grant(**kwargs):
+        events.append("postgres:granted")
+        return {"decision": "granted"}
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(repository, "record", record)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_denial",
+        deny,
+    )
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_grant",
+        grant,
+    )
+
+    asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(request_id="request-grant-order"),
+            service=service,
+        )
+    )
+    asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(
+                decision="revoked",
+                request_id="request-revoke-order",
+            ),
+            service=service,
+        )
+    )
+
+    assert events == [
+        "firestore:granted",
+        "postgres:granted",
+        "postgres:revoked",
+        "firestore:revoked",
+    ]
+
+
+def test_managed_cloud_denial_authority_error_prevents_firestore_mutation(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    firestore_calls = 0
+    original_record = repository.record
+
+    def record(*args, **kwargs):
+        nonlocal firestore_calls
+        firestore_calls += 1
+        return original_record(*args, **kwargs)
+
+    async def unavailable(**_kwargs):
+        raise managed_cloud_consent.ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable")
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(repository, "record", record)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_denial",
+        unavailable,
+    )
+
+    with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(
+                    decision="revoked",
+                    request_id="request-revoke-unavailable",
+                ),
+                service=service,
+            )
+        )
+
+    assert firestore_calls == 0
+
+
+def test_managed_cloud_grant_authority_error_returns_failure_after_receipt(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+
+    async def unavailable(**_kwargs):
+        raise managed_cloud_consent.ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable")
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_grant",
+        unavailable,
+    )
+
+    with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(request_id="request-grant-unavailable"),
+                service=service,
+            )
+        )
+
+    # The immutable receipt may exist, but no successful authority publication
+    # was acknowledged. The caller receives 503 and redemption still requires
+    # an exact PostgreSQL authority row behind its transaction lock.
+    assert service.status(uid)["authorized"] is True
 
 
 def test_submission_rejects_device_identifiers_and_unknown_metadata():

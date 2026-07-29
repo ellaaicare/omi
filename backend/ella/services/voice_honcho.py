@@ -42,6 +42,8 @@ def resolve_voice_honcho_target(
         runtime_uid = str(getattr(runtime, "uid", "") or "").strip()
         if runtime_uid and runtime_uid != uid:
             return None, "runtime_honcho_owner_mismatch"
+        if str(getattr(runtime, "provider", "") or "").strip().lower() == "hermes_cloud":
+            return None, "hermes_cloud_profile_memory_builtin"
         workspace = str(getattr(runtime, "honcho_workspace", "") or "").strip()
         observer = str(getattr(runtime, "observer_peer", "") or "").strip()
         observed = str(getattr(runtime, "observed_peer", "") or "").strip()

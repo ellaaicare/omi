@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 
+from database.runtime_targets import RuntimeTargetLineage
 from ella.services import hermes_cloud
 from ella.services import runtime_resolver
 from ella.services.hermes_cloud import (
@@ -9,9 +10,30 @@ from ella.services.hermes_cloud import (
     HermesCloudPoolManager,
     estimate_turn_cost_microusd,
 )
-from ella.services.hermes_cloud_policy import ApprovedRuntimeManifest
+from ella.services.hermes_cloud_policy import ApprovedRuntimeManifest, CurrentCloudAuthority
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_from_binding
+
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
+)
+
+
+@pytest.fixture(autouse=True)
+def current_cloud_lineage(monkeypatch):
+    def current_authority(uid, **kwargs):
+        if kwargs.get("profile_class") == "real":
+            raise ProvisioningError("hermes_cloud_synthetic_profile_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
+
+    monkeypatch.setattr(runtime_resolver, "current_cloud_authority", current_authority)
 
 
 class Response:
@@ -54,6 +76,7 @@ def _binding():
         "expected_model": "model-a",
         "allowed_tools": [],
         "required_capabilities": ["responses_api", "session_key_header"],
+        "health_receipt": LINEAGE.as_dict(),
         "prompt_pack_version": "prompt-v1",
         "model_policy_version": "models-v1",
         "prompt_artifact_receipt": {
@@ -335,6 +358,51 @@ def test_responses_api_post_failure_crosses_provider_boundary_first(cloud_env):
     assert [call[0] for call in fake.calls] == ["POST"]
 
 
+def test_responses_api_uses_credentials_returned_at_final_boundary(cloud_env):
+    response_body = {
+        "id": "response-a",
+        "status": "completed",
+        "model": "model-a",
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello"}],
+            }
+        ],
+    }
+    fake = FakeClient(
+        {
+            "https://current.example.test/v1/responses": Response(
+                200,
+                response_body,
+            )
+        }
+    )
+
+    async def current_credentials():
+        return "https://current.example.test", "current-token"
+
+    asyncio.run(
+        HermesCloudClient(http_client_factory=lambda **_kwargs: fake).create_response(
+            _binding(),
+            session_key="scope",
+            hermes_session_id="interaction",
+            idempotency_key="request",
+            user_input="Synthetic",
+            instructions="Synthetic",
+            base_url="https://admitted.example.test",
+            token="admitted-token",
+            max_output_tokens=128,
+            max_tool_calls=0,
+            before_provider_send=current_credentials,
+        )
+    )
+
+    assert fake.calls[0][1] == "https://current.example.test/v1/responses"
+    assert fake.calls[0][2]["headers"]["Authorization"] == "Bearer current-token"
+
+
 def test_honcho_claim_creates_opaque_workspace_and_peers_without_uid(cloud_env):
     responses = {}
     effects = []
@@ -442,7 +510,6 @@ def test_pool_registration_persists_server_approved_prompt_receipt():
     candidate = {
         "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
-        "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
         "observed_prompt_artifacts": {
             "soul_sha256": artifact_hash,
             "agents_sha256": artifact_hash,
@@ -520,9 +587,13 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
         "profile_name": "synthetic-profile",
         "agent_id": "hermes-cloud",
         "runtime_instance_id": "instance-a",
-        "honcho_workspace": "workspace-a",
-        "observed_peer": "user-a",
-        "observer_peer": "companion-a",
+        "honcho_api_key_ref": None,
+        "honcho_workspace": None,
+        "observed_peer": None,
+        "observer_peer": None,
+        "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "runtime_target_mode": "hermes-cloud-chat",
         "prompt_pack_version": "prompt-v1",
         "model_policy_version": "models-v1",
         "voice_policy_version": "voice-v1",
@@ -565,9 +636,13 @@ def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_
         "profile_name": "cloud-user-a",
         "agent_id": "hermes-cloud",
         "runtime_instance_id": "instance-a",
-        "honcho_workspace": "workspace-a",
-        "observed_peer": "user-a",
-        "observer_peer": "companion-a",
+        "honcho_api_key_ref": None,
+        "honcho_workspace": None,
+        "observed_peer": None,
+        "observer_peer": None,
+        "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "runtime_target_mode": "hermes-cloud-chat",
         "revision": 2,
         "workspace_root": None,
         "internal_gateway_url": None,
@@ -582,7 +657,7 @@ def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_
     def credentials_forbidden(_binding):
         raise AssertionError("credentials must not load before consent")
 
-    monkeypatch.setattr(runtime_resolver, "assert_cloud_identity_gate", denied)
+    monkeypatch.setattr(runtime_resolver, "current_cloud_authority", denied)
     monkeypatch.setattr(runtime_resolver.HermesCloudClient, "credentials", credentials_forbidden)
 
     with pytest.raises(ProvisioningError) as error:
@@ -783,7 +858,10 @@ def test_responses_api_rejects_memory_call_when_canary_allows_no_tools(
 
 def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch):
     class Repository:
-        async def resolve_active_runtime(self, uid):
+        async def get_cloud_profile_class(self, uid):
+            return "synthetic"
+
+        async def resolve_active_runtime(self, uid, **_kwargs):
             assert uid == "synthetic-user"
             raise RuntimeError("database unavailable")
 
@@ -791,12 +869,21 @@ def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch
     monkeypatch.setattr(runtime_resolver, "cloud_provisioning_enabled", lambda uid=None: True)
 
     with pytest.raises(RuntimeError, match="database unavailable"):
-        asyncio.run(resolve_isolated_runtime("synthetic-user", Repository()))
+        asyncio.run(
+            resolve_isolated_runtime(
+                "synthetic-user",
+                Repository(),
+                target_mode="hermes-cloud-chat",
+            )
+        )
 
 
 def test_cloud_runtime_resolver_requires_binding_for_enabled_user(monkeypatch):
     class Repository:
-        async def resolve_active_runtime(self, uid):
+        async def get_cloud_profile_class(self, uid):
+            return "synthetic"
+
+        async def resolve_active_runtime(self, uid, **_kwargs):
             return None
 
         async def resolve_cloud_binding_state(self, uid):
@@ -806,6 +893,12 @@ def test_cloud_runtime_resolver_requires_binding_for_enabled_user(monkeypatch):
     monkeypatch.setattr(runtime_resolver, "cloud_provisioning_enabled", lambda uid=None: True)
 
     with pytest.raises(ProvisioningError) as error:
-        asyncio.run(resolve_isolated_runtime("synthetic-user", Repository()))
+        asyncio.run(
+            resolve_isolated_runtime(
+                "synthetic-user",
+                Repository(),
+                target_mode="hermes-cloud-chat",
+            )
+        )
     assert error.value.code == "hermes_cloud_not_provisioned"
     assert error.value.retryable is True

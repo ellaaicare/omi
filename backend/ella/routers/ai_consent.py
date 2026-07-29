@@ -12,6 +12,8 @@ from ella.services.ai_consent import (
     ConsentSubmission,
     get_ai_consent_service,
 )
+from ella.services.consent_authority import submit_with_managed_cloud_authority
+from database.managed_cloud_consent import ManagedCloudAuthorityUnavailable
 from utils.other import endpoints as auth
 
 router = APIRouter(tags=["AI Consent"])
@@ -51,14 +53,15 @@ def get_ai_consent_receipt(receipt_id: str, uid: str = Depends(auth.get_current_
 
 
 @router.post("/v1/users/ai-consent")
-def submit_ai_consent(
+async def submit_ai_consent(
     request: AiConsentSubmissionRequest,
     uid: str = Depends(auth.get_current_user_uid),
 ):
     try:
-        return get_ai_consent_service().submit(
-            uid,
-            ConsentSubmission(
+        return await submit_with_managed_cloud_authority(
+            uid=uid,
+            service=get_ai_consent_service(),
+            submission=ConsentSubmission(
                 decision=request.decision,
                 policy_version=request.policy_version,
                 processor_set_hash=request.processor_set_hash,
@@ -80,3 +83,8 @@ def submit_ai_consent(
         ) from exc
     except ConsentIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={"code": "ai_consent_idempotency_conflict"}) from exc
+    except ManagedCloudAuthorityUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "managed_cloud_consent_authority_unavailable"},
+        ) from exc

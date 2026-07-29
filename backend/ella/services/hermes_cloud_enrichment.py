@@ -17,7 +17,7 @@ from ella.services.hermes_cloud_runtime import (
     HermesCloudTurnRequest,
 )
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import IsolatedRuntime, runtime_from_binding
+from ella.services.runtime_resolver import IsolatedRuntime, resolve_isolated_runtime
 from models.conversation import CategoryEnum
 
 HERMES_CLOUD_ENRICHMENT_CHANNEL = "omi_enrichment"
@@ -271,13 +271,16 @@ class HermesCloudEnrichmentService:
         )
 
     async def _runtime(self, uid: str, *, allow_shadow: bool) -> IsolatedRuntime:
-        binding = await self.repository.resolve_cloud_binding_state(uid)
-        if not binding:
+        runtime = await resolve_isolated_runtime(
+            uid,
+            repository=self.repository,
+            target_mode="hermes-cloud-transcript",
+        )
+        if runtime is None:
             raise ProvisioningError(
                 "hermes_cloud_enrichment_not_provisioned",
                 retryable=True,
             )
-        runtime = runtime_from_binding(binding, uid, allow_shadow=allow_shadow)
         if runtime.provider != "hermes_cloud":
             raise ProvisioningError(
                 "hermes_cloud_enrichment_runtime_required",

@@ -5,9 +5,18 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from database import voice_canary
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
+)
+from database.runtime_targets import RuntimeTargetLineage
+
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
 )
 
 
@@ -62,6 +71,16 @@ class _LookupPool:
     async def fetchrow(self, query, *args):
         self.calls.append((query, args))
         return self.result
+
+    async def execute(self, query, *args):
+        self.calls.append((query, args))
+        return "INSERT 0 1"
+
+    def acquire(self):
+        return _AsyncContext(self)
+
+    def transaction(self):
+        return _AsyncContext(self)
 
 
 def test_fresh_identity_insert_casts_jsonb_parameters():
@@ -346,15 +365,37 @@ class _ExpiredFinalizeConnection:
                 "user_id": uuid.uuid4(),
                 "role": "user",
                 "status": "claiming",
+                "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+                "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+                "honcho_api_key_ref": None,
+                "expected_model": "gpt-5.6-terra",
                 "claim_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
                 "omi_uid": args[0],
             }
         raise AssertionError("expired claim must not publish")
 
 
-def test_cloud_pool_finalize_rechecks_lease_before_publish():
+def test_cloud_pool_finalize_rechecks_lease_before_publish(monkeypatch):
     repository = EllaProvisioningRepository(_Pool(_ExpiredFinalizeConnection()))
 
+    async def allow_revalidation(*_args, **_kwargs):
+        return voice_canary.VoicePolicyDecision(
+            allowed=True,
+            code="ok",
+            entitlement={
+                "consent_policy_version": LINEAGE.policy_version,
+                "consent_processor_set_hash": LINEAGE.processor_set_hash,
+                "consent_scope_version": LINEAGE.scope_version,
+                "consent_scope_hash": LINEAGE.scope_hash,
+            },
+            quota={},
+        )
+
+    monkeypatch.setattr(
+        voice_canary,
+        "revalidate_runtime_activation_on_connection",
+        allow_revalidation,
+    )
     with pytest.raises(RuntimePoolClaimError) as error:
         asyncio.run(
             repository.finalize_cloud_pool_claim(
@@ -364,7 +405,13 @@ def test_cloud_pool_finalize_rechecks_lease_before_publish():
                 honcho_workspace="workspace-a",
                 observed_peer="user-a",
                 observer_peer="companion-a",
-                health_receipt={"content_free": True},
+                admitted_entitlement_revision=3,
+                authority_lineage=LINEAGE,
+                health_receipt={
+                    "content_free": True,
+                    **LINEAGE.as_dict(),
+                    "admission_revision": 3,
+                },
             )
         )
 
@@ -480,16 +527,50 @@ def test_runtime_interaction_claim_serializes_scope_and_assigns_predecessor_at_c
     assert not any("UPDATE ella_runtime_interactions" in query for query, _args in blocked_connection.queries)
 
 
-def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
+def test_shadow_promotion_is_explicit_owner_scoped_revision_cas(monkeypatch):
     pool = _LookupPool(
         {
             "id": uuid.uuid4(),
             "status": "internal_canary",
             "active": True,
             "revision": 3,
+            "account_user_id": uuid.uuid4(),
+            "profile_user_id": uuid.uuid4(),
+            "role": "user",
+            "runtime_target_mode": "hermes-cloud-chat",
+            "runtime_instance_id": "instance-a",
+            "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+            "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+            "expected_model": "gpt-5.6-terra",
+            "health_receipt": {
+                "policy_version": "ai-data-processors-v8",
+                "processor_set_hash": "sha256:" + ("1" * 64),
+                "scope_version": "managed-cloud-internal-pilot-v2",
+                "scope_hash": "sha256:" + ("2" * 64),
+                "admission_revision": 3,
+            },
         }
     )
     binding_id = str(uuid.uuid4())
+
+    async def allow_revalidation(*_args, **_kwargs):
+        return voice_canary.VoicePolicyDecision(
+            allowed=True,
+            code="ok",
+            entitlement={
+                "consent_policy_version": LINEAGE.policy_version,
+                "consent_processor_set_hash": LINEAGE.processor_set_hash,
+                "consent_scope_version": LINEAGE.scope_version,
+                "consent_scope_hash": LINEAGE.scope_hash,
+            },
+            quota={},
+        )
+
+    monkeypatch.setattr(
+        voice_canary,
+        "revalidate_runtime_activation_on_connection",
+        allow_revalidation,
+    )
     result = asyncio.run(
         EllaProvisioningRepository(pool).promote_cloud_binding(
             uid="synthetic-user",
@@ -497,6 +578,8 @@ def test_shadow_promotion_is_explicit_owner_scoped_revision_cas():
             expected_revision=2,
             target_status="internal_canary",
             required_profile_class="synthetic",
+            admitted_entitlement_revision=3,
+            authority_lineage=LINEAGE,
         )
     )
 

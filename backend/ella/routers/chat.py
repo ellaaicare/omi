@@ -732,6 +732,9 @@ async def _stream_hermes_chat(
     import time as _time
 
     _start = _time.time()
+    if runtime is None and runtime_authority_enabled(uid):
+        yield "data: Error: isolated runtime required\n\n"
+        return
 
     gateway_url = runtime.gateway_url if runtime else HERMES_GATEWAY_URL
     gateway_token = runtime.gateway_token if runtime else HERMES_GATEWAY_TOKEN
@@ -1022,7 +1025,7 @@ async def ella_chat_stream(
 
     runtime = None
     try:
-        runtime = await resolve_isolated_runtime(uid)
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-chat")
     except ProvisioningError as exc:
         raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
@@ -1151,7 +1154,7 @@ async def ella_chat_stream(
     )
 
 
-# === Chat History Endpoint (added 2026-03-10 for iOS #301) ===
+# === Chat History Endpoint (added 2026-03-10 for ellaaicare/ella-ai#301) ===
 
 
 class EllaChatHistoryRequest(BaseModel):
@@ -1194,7 +1197,7 @@ async def ella_chat_history(
     runtime_bound = runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
-            await resolve_isolated_runtime(authenticated_uid)
+            await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 

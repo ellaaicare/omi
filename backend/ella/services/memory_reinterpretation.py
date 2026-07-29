@@ -17,6 +17,11 @@ from pydantic import BaseModel, Field, field_validator
 import database.conversations as conversations_db
 from database.memory_reinterpretations import canonical_transcript_hash
 from ella.services.hermes_session import canonical_omi_session_key
+from ella.services.summary_recovery import (
+    extract_json_object,
+    resolve_summary_provider_send,
+    summary_provider_config_for_uid,
+)
 from ella.services.summary_writeback import ConcurrentConversationSummaryChangeError
 
 logger = logging.getLogger(__name__)
@@ -244,15 +249,10 @@ class HermesReinterpretationClient:
         current_summary: dict[str, Any],
         event_ids: list[str],
     ) -> ReinterpretationPlan:
-        from ella.services.summary_recovery import (
-            extract_json_object,
-            summary_provider_config_for_uid,
-        )
-
         config = await summary_provider_config_for_uid(job["uid"])
         if config.provider != "hermes-api":
             raise ReinterpretationWorkerError("hermes_required", retryable=False)
-        if not config.hermes_api_key:
+        if config.cloud_authority is None and not config.hermes_api_key:
             raise ReinterpretationWorkerError("hermes_api_key_missing", retryable=True)
         trace_id = f"memory-reinterpretation:{job['id']}"
         prompt = build_reinterpretation_prompt(
@@ -260,20 +260,21 @@ class HermesReinterpretationClient:
             current_summary=current_summary,
             event_ids=event_ids,
         )
-        headers = {
-            "Authorization": f"Bearer {config.hermes_api_key}",
-            "Content-Type": "application/json",
-            "X-Hermes-Session-Id": job["id"],
-            "X-Hermes-Session-Key": canonical_omi_session_key(job["uid"]),
-            "X-Trace-Id": trace_id,
-        }
         try:
             async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
+                hermes_url, hermes_model, hermes_api_key = await resolve_summary_provider_send(config)
+                headers = {
+                    "Authorization": f"Bearer {hermes_api_key}",
+                    "Content-Type": "application/json",
+                    "X-Hermes-Session-Id": job["id"],
+                    "X-Hermes-Session-Key": canonical_omi_session_key(job["uid"]),
+                    "X-Trace-Id": trace_id,
+                }
                 response = await client.post(
-                    config.hermes_url,
+                    hermes_url,
                     headers=headers,
                     json={
-                        "model": config.hermes_model,
+                        "model": hermes_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0,
                         "max_tokens": 1800,

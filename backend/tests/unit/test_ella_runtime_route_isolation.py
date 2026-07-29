@@ -39,7 +39,7 @@ def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
 
 
 def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, **kwargs):
         assert uid == "user-a"
         return SimpleNamespace(profile_name="omi-user-a")
 
@@ -65,7 +65,7 @@ def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
 
 
 def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, **kwargs):
         assert uid == "user-a"
         return SimpleNamespace(provider="hermes_cloud")
 
@@ -91,7 +91,7 @@ def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
 
 
 def test_isolated_history_fails_closed_without_binding(monkeypatch):
-    async def missing_runtime(uid):
+    async def missing_runtime(uid, **kwargs):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
     monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
@@ -159,7 +159,7 @@ def test_voice_session_rejects_cross_user_before_issuing_token():
 
 
 def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatch):
-    async def missing_runtime(uid):
+    async def missing_runtime(uid, **kwargs):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
@@ -177,7 +177,7 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
 
 
 def test_voice_session_stays_closed_while_isolated_voice_flag_is_disabled(monkeypatch):
-    async def ready_runtime(uid):
+    async def ready_runtime(uid, **kwargs):
         return object()
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
@@ -196,7 +196,7 @@ def test_voice_session_stays_closed_while_isolated_voice_flag_is_disabled(monkey
 
 
 def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch):
-    async def ready_runtime(uid):
+    async def ready_runtime(uid, **kwargs):
         assert uid == "user-a"
         return object()
 
@@ -236,7 +236,7 @@ def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch)
 
 
 def test_memory_scoped_voice_session_resolves_server_context_and_signs_ids(monkeypatch):
-    async def ready_runtime(uid):
+    async def ready_runtime(uid, **kwargs):
         assert uid == "user-a"
         return object()
 
@@ -584,7 +584,7 @@ def test_cloud_resolver_returns_first_party_route_without_vendor_credentials(mon
         gateway_token="must-not-leak",
     )
 
-    async def resolve_runtime(uid, repository):
+    async def resolve_runtime(uid, repository, **kwargs):
         assert uid == "user-a"
         return runtime
 

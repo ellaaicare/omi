@@ -25,6 +25,7 @@ from ella.services.hermes_cloud_photon import (
     PhotonSidecarPreflight,
 )
 from ella.services.hermes_cloud_runtime import HermesCloudTurnResult
+from ella.services.hermes_cloud_runtime import HERMES_CLOUD_PHOTON_MODE
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
@@ -43,6 +44,12 @@ class SimulatedProcessCrash(BaseException):
 def synthetic_owner_gate(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-owner")
+    repository = ai_consent.InMemoryConsentRepository()
+    ai_consent.AiConsentService(repository).submit(
+        "synthetic-owner",
+        _consent_submission(request_id="photon-default-grant"),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", repository)
 
 
 def _opaque_key(namespace: str, raw_value: str) -> str:
@@ -144,6 +151,12 @@ def _runtime(**updates) -> IsolatedRuntime:
         policy_commit_sha=POLICY_SHA,
         approval_manifest_sha256=MANIFEST_SHA,
         profile_class="synthetic",
+        runtime_target_id="00000000-0000-0000-0000-000000000006",
+        runtime_target_mode=HERMES_CLOUD_PHOTON_MODE,
+        runtime_target_updated_at=NOW.isoformat(),
+        target_endpoint_ref="secret://hermes-cloud/api-base",
+        target_credential_ref="secret://hermes-cloud/api-key",
+        target_entitlement_revision=1,
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -162,6 +175,9 @@ class FakeRepository:
             "photon_status": "enabled",
             "provider": "hermes_cloud",
             "expected_model": "gpt-5.6-terra",
+            "runtime_instance_id": "instance-a",
+            "api_base_url_ref": "secret://hermes-cloud/api-base",
+            "api_key_ref": "secret://hermes-cloud/api-key",
             "status": "internal_canary",
             "profile_class": "synthetic",
             "active": True,
@@ -527,6 +543,7 @@ def _adapter(
     runtime_failure=None,
     runtime_failure_after_provider_start=None,
     authorize_synthetic_fixture=True,
+    resolved_runtime=None,
 ):
     config = _config(
         authorize_synthetic_fixture=authorize_synthetic_fixture,
@@ -540,10 +557,11 @@ def _adapter(
         failure_after_provider_start=runtime_failure_after_provider_start,
     )
 
-    async def resolve(uid, repository_arg):
+    async def resolve(uid, repository_arg, *, target_mode):
         assert uid == "synthetic-owner"
         assert repository_arg is repository
-        return _runtime()
+        assert target_mode == HERMES_CLOUD_PHOTON_MODE
+        return resolved_runtime or _runtime()
 
     adapter = HermesCloudPhotonAdapter(
         repository=repository,
@@ -554,6 +572,66 @@ def _adapter(
         runtime_service_factory=lambda: runtime_service,
     )
     return adapter, repository, runtime_service
+
+
+@pytest.mark.parametrize(
+    "runtime_updates",
+    [
+        {"provider": "hermes"},
+        {"expected_model": "unpublished-model"},
+        {"runtime_target_mode": "hermes-cloud-chat"},
+        {"runtime_target_id": ""},
+        {"target_endpoint_ref": "secret://wrong/endpoint"},
+        {"target_credential_ref": "secret://wrong/credential"},
+    ],
+)
+def test_preflight_rejects_non_exact_photon_runtime_authority(runtime_updates):
+    adapter, _repository, _runtime_service = _adapter(
+        resolved_runtime=_runtime(**runtime_updates),
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(adapter.preflight(_preflight()))
+
+    assert error.value.code == "photon_runtime_binding_drift"
+
+
+def test_default_resolver_uses_exact_published_photon_target_for_preflight_and_inbound(
+    monkeypatch,
+):
+    config = _config()
+    repository = FakeRepository(config)
+    event_store = InMemoryCanonicalEventStore()
+    runtime_service = FakeRuntimeService(event_store, repository)
+    resolved_modes = []
+
+    async def exact_default_resolver(uid, repository_arg, *, target_mode):
+        assert uid == config.internal_owner_uid
+        assert repository_arg is repository
+        resolved_modes.append(target_mode)
+        return _runtime()
+
+    monkeypatch.setattr(
+        hermes_cloud_photon,
+        "resolve_isolated_runtime",
+        exact_default_resolver,
+    )
+    adapter = HermesCloudPhotonAdapter(
+        repository=repository,
+        event_store=event_store,
+        config=config,
+        cloud_client=FakeCloudClient(),
+        runtime_service_factory=lambda: runtime_service,
+    )
+
+    asyncio.run(adapter.preflight(_preflight()))
+    result = asyncio.run(adapter.handle_inbound(_message()))
+
+    assert result.status == "awaiting_delivery"
+    assert resolved_modes == [
+        HERMES_CLOUD_PHOTON_MODE,
+        HERMES_CLOUD_PHOTON_MODE,
+    ]
 
 
 def test_sidecar_preflight_turn_replay_and_delivery_ack_are_idempotent_and_opaque():
