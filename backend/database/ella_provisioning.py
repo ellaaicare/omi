@@ -396,16 +396,15 @@ class EllaProvisioningRepository:
                     updated = await connection.fetchrow(
                         """
                         UPDATE users
-                        SET omi_uid = $2,
-                            name = $3,
-                            timezone = $4,
+                        SET omi_uid = $1,
+                            name = $2,
+                            timezone = $3,
                             identities = COALESCE(identities, '{}'::jsonb)
-                                || jsonb_build_object('omi_uid', $2::text, 'email', email),
+                                || jsonb_build_object('omi_uid', $1::text, 'email', email),
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE id = $5
+                        WHERE id = $4
                         RETURNING id, omi_uid, email, name, timezone, status
                         """,
-                        email,
                         uid,
                         name,
                         timezone_name,

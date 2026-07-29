@@ -78,7 +78,7 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ),
     ("database/ella_provisioning.py", "ensure_user_identity"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
-        '"identity_create"',
+        ('"identity_create"', '"identity_update"', '"identity_bind"'),
     ),
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
@@ -206,9 +206,10 @@ def test_every_owner_bound_writer_is_pinned_to_real_postgres_contention_coverage
     assert set(REAL_POSTGRES_WRITER_COVERAGE) == EXPECTED_WRITERS - {
         ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     }
-    for key, (relative_path, marker) in REAL_POSTGRES_WRITER_COVERAGE.items():
+    for key, (relative_path, marker_spec) in REAL_POSTGRES_WRITER_COVERAGE.items():
         source = (BACKEND / relative_path).read_text(encoding="utf-8")
-        assert marker in source, key
+        markers = (marker_spec,) if isinstance(marker_spec, str) else marker_spec
+        assert all(marker in source for marker in markers), key
 
 
 def test_every_owner_bound_writer_has_direct_lock_or_lock_proof():

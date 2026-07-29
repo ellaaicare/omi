@@ -625,7 +625,7 @@ async def _prepare_writer_case(
             expected_after=0,
         )
 
-    if name in {"identity_create", "identity_update", "user_activate"}:
+    if name in {"identity_create", "identity_update", "identity_bind", "user_activate"}:
         email = f"{uid}@example.invalid"
         if name == "identity_create":
             owner = authority_advisory_lock.provisional_identity_owner(uid)
@@ -650,17 +650,59 @@ async def _prepare_writer_case(
             )
 
         async with pool.acquire() as conn:
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO users (
-                    omi_uid, email, name, status, profile_class
-                ) VALUES ($1, $2, 'Synthetic Before', 'PENDING', 'synthetic')
-                RETURNING id
-                """,
-                uid,
-                email,
-            )
+            if name == "identity_bind":
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (
+                        email, name, status, profile_class
+                    ) VALUES ($1, 'Synthetic Before', 'PENDING', 'synthetic')
+                    RETURNING id
+                    """,
+                    email,
+                )
+            else:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (
+                        omi_uid, email, name, status, profile_class
+                    ) VALUES ($1, $2, 'Synthetic Before', 'PENDING', 'synthetic')
+                    RETURNING id
+                    """,
+                    uid,
+                    email,
+                )
         owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+        if name == "identity_bind":
+
+            async def snapshot():
+                row = await pool.fetchrow(
+                    """
+                    SELECT omi_uid, name, timezone, identities ->> 'omi_uid'
+                    FROM users
+                    WHERE id = $1
+                    """,
+                    user_id,
+                )
+                return tuple(row.values())
+
+            return _WriterCase(
+                owner=owner,
+                writer=lambda: repository.ensure_user_identity(
+                    uid=uid,
+                    email=email,
+                    name="Synthetic Bound",
+                    timezone_name="America/Los_Angeles",
+                ),
+                snapshot=snapshot,
+                expected_before=(None, "Synthetic Before", "UTC", None),
+                expected_after=(
+                    uid,
+                    "Synthetic Bound",
+                    "America/Los_Angeles",
+                    uid,
+                ),
+            )
+
         if name == "identity_update":
 
             async def snapshot():
@@ -926,6 +968,7 @@ async def _prepare_writer_case(
         "entitlement_delete",
         "identity_create",
         "identity_update",
+        "identity_bind",
         "user_activate",
         "runtime_stage",
         "runtime_activate",
@@ -1331,6 +1374,160 @@ def test_users_writer_owner_drift_fails_closed_with_zero_protected_write(writer_
             )
         assert tuple(original.values()) == ("Original Owner", "PENDING")
         assert tuple(replacement.values()) == ("Replacement Owner", "PENDING")
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_identity_bind_owner_drift_rolls_back_without_partial_write_and_releases_lock():
+    async def scenario(pool):
+        uid = "synthetic-users-drift-identity-bind"
+        email = f"{uid}@example.invalid"
+        async with pool.acquire() as conn:
+            original_id = await conn.fetchval(
+                """
+                INSERT INTO users (
+                    email, name, status, profile_class
+                ) VALUES (
+                    $1, 'Original Email Owner', 'PENDING', 'synthetic'
+                )
+                RETURNING id
+                """,
+                email,
+            )
+        owner = authority_advisory_lock.AuthorityOwner.from_values(
+            original_id,
+            original_id,
+        )
+        repository = EllaProvisioningRepository(pool)
+
+        async with pool.acquire() as broker:
+            transaction = broker.transaction()
+            await transaction.start()
+            await authority_advisory_lock.acquire_authority_lock(
+                broker,
+                owner=owner,
+            )
+            writer = asyncio.create_task(
+                repository.ensure_user_identity(
+                    uid=uid,
+                    email=email,
+                    name="Unauthorized Bind",
+                    timezone_name="America/Los_Angeles",
+                )
+            )
+            await _wait_for_advisory_waiter(pool, owner)
+            assert not writer.done()
+            async with pool.acquire() as drift:
+                async with drift.transaction():
+                    await drift.execute(
+                        """
+                        UPDATE users
+                        SET email = $2,
+                            profile_class = 'real'
+                        WHERE id = $1
+                        """,
+                        original_id,
+                        f"{uid}-moved@example.invalid",
+                    )
+                    replacement_id = await drift.fetchval(
+                        """
+                        INSERT INTO users (
+                            email, name, status, profile_class
+                        ) VALUES (
+                            $1, 'Replacement Email Owner', 'PENDING', 'synthetic'
+                        )
+                        RETURNING id
+                        """,
+                        email,
+                    )
+            await transaction.commit()
+
+        with pytest.raises(
+            authority_advisory_lock.AuthorityLockError,
+            match="authority_lock_owner_drift",
+        ):
+            await asyncio.wait_for(writer, timeout=5)
+
+        async with pool.acquire() as observer:
+            original = await observer.fetchrow(
+                """
+                SELECT omi_uid, email, name, timezone, profile_class,
+                       identities ->> 'omi_uid'
+                FROM users
+                WHERE id = $1
+                """,
+                original_id,
+            )
+            replacement = await observer.fetchrow(
+                """
+                SELECT omi_uid, email, name, timezone, profile_class,
+                       identities ->> 'omi_uid'
+                FROM users
+                WHERE id = $1
+                """,
+                replacement_id,
+            )
+            authority_counts = await observer.fetchrow(
+                """
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM ella_managed_cloud_consent_authority
+                        WHERE user_id = ANY($1::uuid[])
+                    ) AS consent_rows,
+                    (
+                        SELECT COUNT(*)
+                        FROM ella_runtime_targets
+                        WHERE account_user_id = ANY($1::uuid[])
+                           OR profile_user_id = ANY($1::uuid[])
+                    ) AS target_rows,
+                    (
+                        SELECT COUNT(*)
+                        FROM ella_runtime_bindings
+                        WHERE user_id = ANY($1::uuid[])
+                    ) AS binding_rows,
+                    (
+                        SELECT COUNT(*)
+                        FROM voice_entitlements
+                        WHERE uid = $2
+                    ) AS entitlement_rows
+                """,
+                [original_id, replacement_id],
+                uid,
+            )
+
+        assert tuple(original.values()) == (
+            None,
+            f"{uid}-moved@example.invalid",
+            "Original Email Owner",
+            "UTC",
+            "real",
+            None,
+        )
+        assert tuple(replacement.values()) == (
+            None,
+            email,
+            "Replacement Email Owner",
+            "UTC",
+            "synthetic",
+            None,
+        )
+        assert tuple(authority_counts.values()) == (0, 0, 0, 0)
+
+        async with pool.acquire() as probe:
+            async with probe.transaction():
+                proof = await asyncio.wait_for(
+                    authority_advisory_lock.acquire_authority_lock(
+                        probe,
+                        owner=owner,
+                    ),
+                    timeout=2,
+                )
+                await authority_advisory_lock.require_authority_lock(
+                    probe,
+                    proof,
+                    owner=owner,
+                )
 
     asyncio.run(_run_with_database(scenario))
 
