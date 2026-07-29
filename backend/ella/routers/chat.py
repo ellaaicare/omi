@@ -732,6 +732,9 @@ async def _stream_hermes_chat(
     import time as _time
 
     _start = _time.time()
+    if runtime is None and runtime_authority_enabled(uid):
+        yield "data: Error: isolated runtime required\n\n"
+        return
 
     gateway_url = runtime.gateway_url if runtime else HERMES_GATEWAY_URL
     gateway_token = runtime.gateway_token if runtime else HERMES_GATEWAY_TOKEN
@@ -1151,7 +1154,7 @@ async def ella_chat_stream(
     )
 
 
-# === Chat History Endpoint (added 2026-03-10 for iOS #301) ===
+# === Chat History Endpoint (added 2026-03-10 for ellaaicare/ella-ai#301) ===
 
 
 class EllaChatHistoryRequest(BaseModel):

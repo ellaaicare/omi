@@ -4,6 +4,8 @@
 -- This migration intentionally stores invitation codes, Firebase UID audit
 -- references, and source-address references only as domain-separated HMACs.
 
+BEGIN;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS ella_invitation_capacity_reservations (
@@ -95,19 +97,42 @@ ALTER TABLE voice_entitlements
     ADD COLUMN IF NOT EXISTS invitation_id UUID,
     ADD COLUMN IF NOT EXISTS entitlement_policy_revision TEXT COLLATE "C",
     ADD COLUMN IF NOT EXISTS cohort TEXT COLLATE "C" NOT NULL DEFAULT 'canary',
-    ADD COLUMN IF NOT EXISTS exclude_from_product_analytics BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS exclude_from_product_analytics BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS consent_policy_version TEXT COLLATE "C",
+    ADD COLUMN IF NOT EXISTS consent_processor_set_hash TEXT COLLATE "C",
+    ADD COLUMN IF NOT EXISTS consent_scope_version TEXT COLLATE "C",
+    ADD COLUMN IF NOT EXISTS consent_scope_hash TEXT COLLATE "C";
 
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
         FROM pg_constraint
-        WHERE conname = 'voice_entitlements_invitation_id_fkey'
+        WHERE connamespace = current_schema()::regnamespace
+          AND conname = 'voice_entitlements_invitation_id_fkey'
     ) THEN
         ALTER TABLE voice_entitlements
             ADD CONSTRAINT voice_entitlements_invitation_id_fkey
             FOREIGN KEY (invitation_id) REFERENCES ella_invitations(id)
             ON DELETE RESTRICT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE connamespace = current_schema()::regnamespace
+          AND conname = 'voice_entitlements_invitation_consent_lineage_check'
+    ) THEN
+        ALTER TABLE voice_entitlements
+            ADD CONSTRAINT voice_entitlements_invitation_consent_lineage_check
+            CHECK (
+                invitation_id IS NULL
+                OR (
+                    consent_policy_version IS NOT NULL
+                    AND consent_processor_set_hash ~ '^sha256:[0-9a-f]{64}$'
+                    AND consent_scope_version IS NOT NULL
+                    AND consent_scope_hash ~ '^sha256:[0-9a-f]{64}$'
+                )
+            ) NOT VALID;
     END IF;
 END
 $$;
@@ -213,3 +238,5 @@ CREATE TABLE IF NOT EXISTS ella_invitation_security_alerts (
 CREATE UNIQUE INDEX IF NOT EXISTS ella_invitation_security_one_pending_idx
     ON ella_invitation_security_alerts (alert_type)
     WHERE state = 'pending';
+
+COMMIT;

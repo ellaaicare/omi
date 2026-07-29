@@ -9,8 +9,16 @@ import json
 from pathlib import Path
 
 from database.ella_provisioning import EllaProvisioningRepository
+from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+)
 from ella.services.hermes_cloud import HermesCloudPoolManager
-from ella.services.hermes_cloud_policy import cloud_synthetic_only
+from ella.services.hermes_cloud_policy import (
+    cloud_synthetic_only,
+    current_cloud_authority,
+)
 
 
 async def register(candidate_path: str) -> dict:
@@ -47,12 +55,38 @@ async def promote(
 ) -> dict:
     repository = await EllaProvisioningRepository.create()
     await repository.assert_cloud_schema_ready()
+    binding = await repository.get_cloud_binding_for_owner(
+        uid=uid,
+        binding_id=binding_id,
+    )
+    if not binding:
+        raise SystemExit("Cloud binding not found")
+    health_receipt = binding.get("health_receipt") or {}
+    if isinstance(health_receipt, str):
+        health_receipt = json.loads(health_receipt)
+    admitted_entitlement_revision = int(health_receipt.get("admission_revision") or 0)
+    if admitted_entitlement_revision <= 0:
+        raise SystemExit("Cloud binding admission lineage is incomplete")
+    required_profile_class = "synthetic" if cloud_synthetic_only() else "real"
+    authority = current_cloud_authority(
+        uid,
+        profile_class=required_profile_class,
+        profile_uid=uid,
+        runtime_provider=CLOUD_RUNTIME_PROVIDER,
+        model_route=f"openai-codex/{CLOUD_RUNTIME_MODEL}",
+        memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+        photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+    )
     row = await repository.promote_cloud_binding(
         uid=uid,
         binding_id=binding_id,
         expected_revision=expected_revision,
         target_status=target_status,
-        required_profile_class=("synthetic" if cloud_synthetic_only() else "real"),
+        required_profile_class=required_profile_class,
+        admitted_entitlement_revision=admitted_entitlement_revision,
+        authority_lineage=authority.lineage,
+        provider=CLOUD_RUNTIME_PROVIDER,
+        model=CLOUD_RUNTIME_MODEL,
     )
     return {
         "binding_id": str(row["id"]),

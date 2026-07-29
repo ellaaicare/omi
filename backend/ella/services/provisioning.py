@@ -22,11 +22,11 @@ from database.ella_provisioning import (
     ProvisioningSchemaNotReadyError,
     RuntimePoolClaimError,
 )
+from database.runtime_targets import (
+    CLOUD_RUNTIME_MODEL,
+    CLOUD_RUNTIME_PROVIDER,
+)
 from ella.services.ai_consent import (
-    CURRENT_POLICY_VERSION,
-    CURRENT_PROCESSOR_SET_HASH,
-    CURRENT_SCOPE_HASH,
-    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -35,8 +35,8 @@ from ella.services.hermes_cloud import (
     RuntimePoolAlertPublisher,
 )
 from ella.services.hermes_cloud_policy import (
-    assert_cloud_identity_gate,
     cloud_synthetic_only,
+    current_cloud_authority,
 )
 from ella.services.runtime_errors import ProvisioningError
 
@@ -465,10 +465,31 @@ class ProvisioningCoordinator:
                 error_code="omi_identity_unavailable",
             )
             return job, None, False
-        binding = await self.repository.resolve_active_runtime(
-            identity.uid,
-            template_version=target_schema_version,
-        )
+        if cloud_required:
+            profile_class = await self.repository.get_cloud_profile_class(identity.uid)
+            authority = current_cloud_authority(
+                identity.uid,
+                profile_class=profile_class,
+                profile_uid=identity.uid,
+                runtime_provider=CLOUD_RUNTIME_PROVIDER,
+                model_route=f"openai-codex/{CLOUD_RUNTIME_MODEL}",
+                memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+                photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+            )
+            binding = await self.repository.resolve_active_runtime(
+                identity.uid,
+                template_version=target_schema_version,
+                target_mode="hermes-cloud-chat",
+                required_provider=CLOUD_RUNTIME_PROVIDER,
+                authority_lineage=authority.lineage,
+                model=CLOUD_RUNTIME_MODEL,
+            )
+        else:
+            binding = await self.repository.resolve_active_runtime(
+                identity.uid,
+                template_version=target_schema_version,
+                required_provider="hermes",
+            )
         if binding:
             if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
                 raise ProvisioningError("cloud_runtime_binding_conflict", retryable=False)
@@ -582,9 +603,9 @@ class ProvisioningCoordinator:
             expected_model = str(pool_policy["model"])
             required_profile_class = "synthetic" if cloud_synthetic_only() else "real"
 
-            async def assert_current_cloud_consent() -> None:
+            async def current_authority():
                 current_profile_class = await self.repository.get_cloud_profile_class(identity.uid)
-                assert_cloud_identity_gate(
+                return current_cloud_authority(
                     identity.uid,
                     profile_class=current_profile_class,
                     profile_uid=identity.uid,
@@ -594,7 +615,7 @@ class ProvisioningCoordinator:
                     photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
                 )
 
-            await assert_current_cloud_consent()
+            await current_authority()
             admission = await runtime_admission(
                 uid=identity.uid,
                 provider=str(pool_policy["provider"]),
@@ -660,8 +681,9 @@ class ProvisioningCoordinator:
                     retryable=False,
                 )
 
-            await assert_current_cloud_consent()
+            await current_authority()
             preflight = await cloud_client.preflight(binding)
+            final_authority = await current_authority()
             health_receipt = {
                 **preflight.receipt,
                 "memory": {
@@ -671,18 +693,19 @@ class ProvisioningCoordinator:
                     "account_profile_bound": True,
                     "content_free": True,
                 },
-                "policy_version": CURRENT_POLICY_VERSION,
-                "processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
-                "scope_version": CURRENT_SCOPE_VERSION,
-                "scope_hash": CURRENT_SCOPE_HASH,
+                **final_authority.lineage.as_dict(),
                 "admission_revision": admitted_entitlement_revision,
             }
             activated = await self.repository.finalize_cloud_pool_claim(
                 uid=identity.uid,
                 job_id=str(job["id"]),
                 claim_token=claim_token,
+                admitted_entitlement_revision=admitted_entitlement_revision,
+                authority_lineage=final_authority.lineage,
                 health_receipt=health_receipt,
                 status=os.getenv("ELLA_HERMES_CLOUD_INITIAL_STATUS", "shadow").strip().lower(),
+                provider=str(pool_policy["provider"]),
+                model=expected_model,
             )
             await self.repository.update_job(
                 job_id=str(job["id"]),
@@ -761,18 +784,23 @@ class ProvisioningCoordinator:
         error_code: str,
         retryable: bool,
     ) -> None:
-        await self.repository.update_job(
-            job_id=str(job["id"]),
-            state="rolling_back",
-            stage="runtime_ready",
-            retryable=False,
-            error_code=error_code,
-            receipt={
-                "type": "cloud_claim_rollback_started",
-                "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
-                "content_free": True,
-            },
-        )
+        rollback_start_error = ""
+        try:
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="rolling_back",
+                stage="runtime_ready",
+                retryable=False,
+                error_code=error_code,
+                receipt={
+                    "type": "cloud_claim_rollback_started",
+                    "claim_token_sha256": hashlib.sha256(claim_token.encode("utf-8")).hexdigest(),
+                    "content_free": True,
+                },
+            )
+        except Exception:
+            logger.exception("Cloud rollback start receipt failed for uid=%s; continuing quarantine", identity.uid)
+            rollback_start_error = "cloud_rollback_start_receipt_failed"
         side_effects = await self.repository.get_cloud_side_effects(str(job["id"]))
         cleanup_receipt: dict[str, Any] = {
             "status": "not_required",
@@ -819,6 +847,7 @@ class ProvisioningCoordinator:
                     "original_error": error_code,
                     "cleanup_error": cleanup_error or None,
                     "quarantine_error": quarantine_error or None,
+                    "rollback_start_error": rollback_start_error or None,
                     "side_effect_count": len(side_effects),
                     "content_free": True,
                 },
@@ -832,6 +861,7 @@ class ProvisioningCoordinator:
             rollback_receipt={
                 **cleanup_receipt,
                 "original_error": error_code,
+                "rollback_start_error": rollback_start_error or None,
                 "side_effect_count": len(side_effects),
                 "quarantined": True,
                 "content_free": True,

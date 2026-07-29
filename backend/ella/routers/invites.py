@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from database import invitations
+from ella.services.invitation_authority import authorize_invitation_pilot
 from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/invite", tags=["ella-invites"])
@@ -91,12 +92,16 @@ async def redeem_invite(
 ) -> dict:
     payload = await _validated_payload(request)
     try:
+        pilot_admission = authorize_invitation_pilot(authenticated_uid)
         return await invitations.redeem_invitation(
             uid=authenticated_uid,
             code=payload.code,
             source_address=_source_address(request),
+            pilot_admission=pilot_admission,
             app_build=app_build,
         )
+    except invitations.InvitePilotGateDenied as exc:
+        raise _invalid_request() from exc
     except invitations.InviteRedemptionFailure as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail()) from exc
     except invitations.InviteConfigurationError as exc:

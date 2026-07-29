@@ -375,8 +375,9 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
     requests = []
     runtime = MagicMock(agent_id="omi-isolated")
 
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-isolated"
+        assert target_mode == "hermes-cloud-transcript"
         return runtime
 
     async def fail_legacy(_uid):
@@ -402,7 +403,7 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
             requests.append((url, headers))
             return FakeResponse()
 
-    monkeypatch.setattr(callbacks, "runtime_bindings_enabled", lambda uid=None: uid == "uid-isolated")
+    monkeypatch.setattr(callbacks, "runtime_authority_enabled", lambda uid=None: uid == "uid-isolated")
     monkeypatch.setattr(callbacks, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(callbacks, "_resolve_agent_id_for_uid", fail_legacy)
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", FakeClient)
@@ -418,6 +419,31 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
             {"Authorization": "Bearer hermes-token"},
         )
     ]
+
+
+def test_cloud_internal_assessment_never_calls_mini_or_openclaw(monkeypatch):
+    runtime = MagicMock(provider="hermes_cloud", agent_id="cloud-agent")
+
+    async def fake_runtime(uid, *, target_mode=None):
+        assert uid == "uid-cloud"
+        assert target_mode == "hermes-cloud-transcript"
+        return runtime
+
+    async def fail_legacy(_uid):
+        raise AssertionError("Cloud callback must not resolve a process-global Plato agent")
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Cloud callback must not call a Mini workspace endpoint")
+
+    monkeypatch.setattr(callbacks, "runtime_authority_enabled", lambda uid=None: uid == "uid-cloud")
+    monkeypatch.setattr(callbacks, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(callbacks, "_resolve_agent_id_for_uid", fail_legacy)
+    monkeypatch.setattr(callbacks.httpx, "AsyncClient", ForbiddenClient)
+
+    result = asyncio.run(callbacks._fetch_internal_assessment("uid-cloud", "conv-cloud"))
+
+    assert result is None
 
 
 def test_update_conversation_summary_writes_enriched_omi_to_canonical(monkeypatch):

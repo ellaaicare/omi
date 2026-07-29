@@ -422,7 +422,7 @@ async def build_extraction_result(
     heuristic = _heuristic_extraction_result(events)
     hermes_kwargs: dict[str, str] = {}
     if uid:
-        if runtime_resolver.runtime_bindings_enabled(uid):
+        if runtime_resolver.runtime_authority_enabled(uid):
             runtime = await runtime_resolver.resolve_isolated_runtime(uid, target_mode="hermes-cloud-guardian")
             if runtime is None:
                 return ExtractionResult(

@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
 import posixpath
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
-from database.ella_provisioning import EllaProvisioningRepository
+from database.ella_provisioning import (
+    EllaProvisioningRepository,
+    RuntimePoolClaimError,
+)
+from database.runtime_targets import (
+    CLOUD_RUNTIME_MODEL,
+    CLOUD_RUNTIME_PROVIDER,
+    CLOUD_RUNTIME_TARGET_MODES,
+    RuntimeTargetLineage,
+)
 from ella.services.ai_consent import (
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
@@ -17,7 +27,7 @@ from ella.services.hermes_cloud import (
     HermesCloudClient,
     validate_prompt_artifact_receipt,
 )
-from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
     PROFILE_NAME_RE,
     ProvisioningError,
@@ -111,12 +121,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             raise ProvisioningError("cloud_runtime_target_endpoint_mismatch", retryable=False)
         if str(binding.get("target_credential_ref") or "") != str(binding.get("api_key_ref") or ""):
             raise ProvisioningError("cloud_runtime_target_credential_mismatch", retryable=False)
-        if str(binding.get("runtime_target_mode") or "") not in {
-            "hermes-cloud-chat",
-            "hermes-cloud-voice",
-            "hermes-cloud-transcript",
-            "hermes-cloud-guardian",
-        }:
+        if str(binding.get("runtime_target_mode") or "") not in CLOUD_RUNTIME_TARGET_MODES:
             raise ProvisioningError("cloud_runtime_target_mode_missing", retryable=False)
         prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
         workspace_root = ""
@@ -125,7 +130,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         model_context_window_tokens = int(prompt_artifact_receipt["model_context_window_tokens"])
         if not runtime_instance_id or not expected_model:
             raise ProvisioningError("cloud_runtime_receipt_incomplete", retryable=False)
-        assert_cloud_identity_gate(
+        authority = current_cloud_authority(
             uid,
             profile_class=str(binding.get("profile_class") or ""),
             profile_uid=uid,
@@ -134,6 +139,36 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
             photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
         )
+        health_receipt = binding.get("health_receipt") or {}
+        if isinstance(health_receipt, str):
+            try:
+                health_receipt = json.loads(health_receipt)
+            except json.JSONDecodeError:
+                health_receipt = {}
+        stored_lineage = RuntimeTargetLineage(
+            policy_version=str(
+                binding.get("target_policy_version")
+                or (health_receipt.get("policy_version") if isinstance(health_receipt, dict) else "")
+                or ""
+            ),
+            processor_set_hash=str(
+                binding.get("target_processor_set_hash")
+                or (health_receipt.get("processor_set_hash") if isinstance(health_receipt, dict) else "")
+                or ""
+            ),
+            scope_version=str(
+                binding.get("target_scope_version")
+                or (health_receipt.get("scope_version") if isinstance(health_receipt, dict) else "")
+                or ""
+            ),
+            scope_hash=str(
+                binding.get("target_scope_hash")
+                or (health_receipt.get("scope_hash") if isinstance(health_receipt, dict) else "")
+                or ""
+            ),
+        )
+        if stored_lineage.validate() != authority.lineage:
+            raise ProvisioningError("cloud_runtime_target_lineage_stale", retryable=False)
         gateway_url, gateway_token = HermesCloudClient.credentials(binding)
     else:
         workspace_root = str(binding.get("workspace_root") or "")
@@ -201,37 +236,57 @@ async def resolve_isolated_runtime(
     target_mode: Optional[str] = None,
 ) -> Optional[IsolatedRuntime]:
     """Resolve persisted cloud authority first; retained bindings stay flag-gated."""
+    cloud_required = cloud_provisioning_enabled(uid)
+    retained_required = runtime_bindings_enabled(uid)
+    if not cloud_required and not retained_required:
+        return None
     repository = repository or await EllaProvisioningRepository.create()
     try:
-        try:
-            binding = await repository.resolve_active_runtime(uid, target_mode=target_mode)
-        except TypeError as exc:
-            if "target_mode" not in str(exc):
-                raise
-            binding = await repository.resolve_active_runtime(uid)
-    except Exception:
-        if runtime_authority_enabled(uid):
-            raise
-        return None
-    if binding and str(binding.get("provider") or "").lower() == "hermes_cloud":
-        return runtime_from_binding(binding, uid)
-    if binding and runtime_bindings_enabled(uid):
+        if cloud_required:
+            if target_mode not in CLOUD_RUNTIME_TARGET_MODES:
+                raise ProvisioningError("cloud_runtime_target_mode_required", retryable=False)
+            profile_class = await repository.get_cloud_profile_class(uid)
+            authority = current_cloud_authority(
+                uid,
+                profile_class=profile_class,
+                profile_uid=uid,
+                runtime_provider=CLOUD_RUNTIME_PROVIDER,
+                model_route=f"openai-codex/{CLOUD_RUNTIME_MODEL}",
+                memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+                photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+            )
+            binding = await repository.resolve_active_runtime(
+                uid,
+                target_mode=target_mode,
+                required_provider=CLOUD_RUNTIME_PROVIDER,
+                authority_lineage=authority.lineage,
+                model=CLOUD_RUNTIME_MODEL,
+            )
+        else:
+            binding = await repository.resolve_active_runtime(
+                uid,
+                target_mode=target_mode,
+                required_provider="hermes",
+            )
+    except RuntimePoolClaimError as exc:
+        raise ProvisioningError(exc.code, retryable=False) from exc
+    if binding:
         return runtime_from_binding(binding, uid)
     if not binding:
         try:
             cloud_state = await repository.resolve_cloud_binding_state(uid)
         except Exception:
-            if cloud_provisioning_enabled(uid):
+            if cloud_required:
                 raise
             cloud_state = None
-        if cloud_state:
+        if cloud_required and cloud_state:
             status = str(cloud_state.get("status") or "not_ready").lower()
             raise ProvisioningError(
                 f"hermes_cloud_{status}",
                 retryable=status in {"claiming", "pool_available"},
             )
-    if cloud_provisioning_enabled(uid):
+    if cloud_required:
         raise ProvisioningError("hermes_cloud_not_provisioned", retryable=True)
-    if runtime_bindings_enabled(uid):
+    if retained_required:
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
     return None

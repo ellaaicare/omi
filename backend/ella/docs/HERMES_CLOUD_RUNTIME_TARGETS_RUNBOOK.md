@@ -1,6 +1,7 @@
 # Hermes Cloud Runtime Targets — Flags-Off Deploy Runbook
 
-Issues: `ellaaicare/ella-ai#1124`, `#1126`, `#1123`.
+Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
+`ellaaicare/ella-ai#1123`.
 
 ## Source contract
 
@@ -44,12 +45,16 @@ Cloud.
 Apply only after source approval and database backup:
 
 ```bash
-psql "$ELLA_POSTGRES_DSN" -f backend/migrations/008_create_voice_canary_controls.sql
-psql "$ELLA_POSTGRES_DSN" -f backend/migrations/009_create_hermes_cloud_runtime_pool.sql
-psql "$ELLA_POSTGRES_DSN" -f backend/migrations/010_add_cloud_profile_class.sql
-psql "$ELLA_POSTGRES_DSN" -f backend/migrations/011_create_invitation_redemption.sql
-psql "$ELLA_POSTGRES_DSN" -f backend/migrations/012_create_account_profile_runtime_targets.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/008_create_voice_canary_controls.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/009_create_hermes_cloud_runtime_pool.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/010_add_cloud_profile_class.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/011_create_invitation_redemption.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/012_create_account_profile_runtime_targets.sql
 ```
+
+Migrations 011 and 012 contain their own `BEGIN`/`COMMIT` boundary. The
+`ON_ERROR_STOP` setting is mandatory: any statement failure must exit nonzero
+and roll the whole migration back.
 
 Verify:
 

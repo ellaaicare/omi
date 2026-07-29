@@ -45,6 +45,8 @@ sys.modules["ella.services.ai_consent"] = ai_consent_module
 
 runtime_resolver_module = types.ModuleType("ella.services.runtime_resolver")
 runtime_resolver_module.runtime_bindings_enabled = lambda _uid: False
+runtime_resolver_module.runtime_authority_enabled = lambda _uid: False
+runtime_resolver_module.resolve_isolated_runtime = lambda *_args, **_kwargs: None
 sys.modules["ella.services.runtime_resolver"] = runtime_resolver_module
 
 sys.modules.setdefault("ella.routers", types.ModuleType("ella.routers"))

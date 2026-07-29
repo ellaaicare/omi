@@ -194,9 +194,10 @@ def test_refresh_scanner_keyterms_fetches_provision_file(monkeypatch):
 def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypatch):
     requests = []
 
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-isolated"
-        return SimpleNamespace(agent_id="omi-isolated")
+        assert target_mode == "hermes-cloud-guardian"
+        return SimpleNamespace(agent_id="omi-isolated", provider="hermes")
 
     class FakeResponse:
         status_code = 200
@@ -247,7 +248,33 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
             {"Authorization": "Bearer hermes-token"},
         )
     ]
-    assert scanner_keyterms._cache["uid-isolated"].source == "hermes_provision_api"
+    assert scanner_keyterms._cache["uid-isolated"].source == "isolated:hermes"
+
+
+def test_cloud_scanner_never_calls_mini_or_returns_retained_cache(monkeypatch):
+    async def fake_runtime(uid, *, target_mode=None):
+        assert uid == "uid-cloud"
+        assert target_mode == "hermes-cloud-guardian"
+        return SimpleNamespace(agent_id="cloud-agent", provider="hermes_cloud")
+
+    class ForbiddenClient:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Cloud scanner must not call a Mini workspace endpoint")
+
+    scanner_keyterms._cache["uid-cloud"] = scanner_keyterms.KeytermCacheEntry(
+        terms=["retained-plato-term"],
+        agent_id="legacy-agent",
+        fetched_at=time.time(),
+        source="isolated:hermes",
+    )
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", lambda uid=None: uid == "uid-cloud")
+    monkeypatch.setattr(scanner_keyterms, "resolve_isolated_runtime", fake_runtime)
+    monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
+
+    terms = asyncio.run(scanner_keyterms.refresh_scanner_keyterms("uid-cloud"))
+
+    assert terms == []
+    assert "uid-cloud" not in scanner_keyterms._cache
 
 
 def test_fetch_scanner_tuning_does_not_use_shared_fallback_by_default(monkeypatch):

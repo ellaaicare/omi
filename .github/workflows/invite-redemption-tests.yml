@@ -4,27 +4,37 @@ on:
   pull_request:
     paths:
       - "backend/database/invitations.py"
+      - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - ".github/workflows/invite-redemption-tests.yml"
   push:
     branches: [main]
     paths:
       - "backend/database/invitations.py"
+      - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
+      - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - ".github/workflows/invite-redemption-tests.yml"
 
 jobs:
@@ -77,13 +87,26 @@ jobs:
         run: >-
           python -m py_compile
           database/invitations.py
+          database/runtime_targets.py
           database/voice_canary.py
           ella/routers/invites.py
+          ella/services/invitation_authority.py
+          ella/services/hermes_cloud_policy.py
 
       - name: Run unit and PostgreSQL security tests
-        run: >-
-          pytest
-          tests/unit/test_invitation_redemption.py
-          tests/unit/test_voice_canary.py
-          tests/postgres/test_invitation_redemption_postgres.py
-          -v
+        run: |
+          collected="$(
+            pytest --collect-only -q \
+              tests/unit/test_invitation_redemption.py \
+              tests/unit/test_voice_canary.py \
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
+              grep -c '::'
+          )"
+          test "$collected" -eq 35
+          pytest \
+            tests/unit/test_invitation_redemption.py \
+            tests/unit/test_voice_canary.py \
+            tests/postgres/test_invitation_redemption_postgres.py \
+            tests/postgres/test_runtime_migration_atomicity_postgres.py \
+            -v

@@ -5,13 +5,20 @@ on:
     paths:
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
+      - "backend/database/invitations.py"
+      - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/routers/transcribe.py"
       - "backend/ella/__init__.py"
+      - "backend/ella/routers/auto_provision.py"
+      - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/guardian.py"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/observer.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
@@ -21,11 +28,14 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
@@ -35,28 +45,46 @@ on:
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/scanner_keyterms.py"
+      - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
+      - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
+      - "backend/tests/unit/test_ella_callbacks_summary_update.py"
+      - "backend/tests/unit/test_ella_conversation_corrections.py"
+      - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_listen_runtime_gate.py"
+      - "backend/tests/unit/test_ella_observer.py"
+      - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
     paths:
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
+      - "backend/database/invitations.py"
+      - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
+      - "backend/routers/transcribe.py"
       - "backend/ella/__init__.py"
+      - "backend/ella/routers/auto_provision.py"
+      - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
+      - "backend/ella/routers/guardian.py"
       - "backend/ella/routers/hermes_cloud_enrichment.py"
       - "backend/ella/routers/onboarding.py"
+      - "backend/ella/routers/observer.py"
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
@@ -66,11 +94,14 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
       - "backend/ella/services/hermes_cloud_policy.py"
+      - "backend/ella/services/invitation_authority.py"
+      - "backend/ella/services/observer_extractor.py"
       - "backend/ella/services/hermes_cloud_photon.py"
       - "backend/ella/services/hermes_cloud_runtime.py"
       - "backend/ella/services/provisioning.py"
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
+      - "backend/ella/services/summary_recovery.py"
       - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
@@ -80,15 +111,26 @@ on:
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/utils/ella/postprocess.py"
+      - "backend/utils/ella/scanner_keyterms.py"
+      - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
+      - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/postgres/test_hermes_cloud_pool_postgres.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
+      - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
       - "backend/tests/unit/test_hermes_cloud_*.py"
       - "backend/tests/unit/test_ella_postprocess_cloud_routing.py"
       - "backend/tests/unit/test_voice_proxy_auth.py"
+      - "backend/tests/unit/test_ella_callbacks_summary_update.py"
+      - "backend/tests/unit/test_ella_conversation_corrections.py"
+      - "backend/tests/unit/test_ella_guardian_delivery.py"
+      - "backend/tests/unit/test_ella_listen_runtime_gate.py"
+      - "backend/tests/unit/test_ella_observer.py"
+      - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_scanner_keyterms.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -133,11 +175,14 @@ jobs:
         run: >-
           python -m pip install
           "asyncpg==0.31.0"
+          "black==24.8.0"
           "fastapi==0.112.0"
           "firebase-admin==6.5.0"
           "httpx==0.28.0"
           "PyJWT==2.9.0"
           "pytest==8.3.2"
+          "openapi-spec-validator==0.7.1"
+          "PyYAML==6.0.2"
           "websockets==12.0"
 
       - name: Compile Hermes Cloud runtime modules
@@ -145,9 +190,18 @@ jobs:
           python -m py_compile
           database/ella_provisioning.py
           database/hermes_cloud_enrichment_outbox.py
+          database/invitations.py
+          database/runtime_targets.py
           database/voice_canary.py
+          routers/transcribe.py
+          ella/routers/auto_provision.py
+          ella/routers/callbacks.py
           ella/routers/ai_consent.py
           ella/routers/hermes_cloud_enrichment.py
+          ella/routers/guardian.py
+          ella/routers/invites.py
+          ella/routers/onboarding.py
+          ella/routers/observer.py
           ella/services/ai_consent.py
           ella/services/hermes_cloud.py
           ella/services/hermes_cloud_enrichment.py
@@ -155,36 +209,108 @@ jobs:
           ella/services/hermes_cloud_enrichment_dependencies.py
           ella/services/hermes_cloud_photon.py
           ella/services/hermes_cloud_policy.py
+          ella/services/invitation_authority.py
+          ella/services/observer_extractor.py
           ella/services/hermes_cloud_runtime.py
           ella/routers/photon.py
           ella/services/provisioning.py
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
+          ella/services/summary_recovery.py
           ella/services/voice_honcho.py
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
           scripts/hermes_cloud_shadow.py
           utils/ella/postprocess.py
+          utils/ella/scanner_keyterms.py
 
-      - name: Run Hermes Cloud and isolation failure-path tests
+      - name: Validate formatting and OpenAPI contract
         run: >-
-          pytest
-          tests/unit/test_ella_ai_consent.py
-          tests/unit/test_ella_ai_consent_route_gates.py
-          tests/unit/test_hermes_cloud_migration.py
-          tests/unit/test_hermes_cloud_policy.py
-          tests/unit/test_hermes_cloud_photon.py
-          tests/unit/test_hermes_cloud_provider.py
-          tests/unit/test_hermes_cloud_provisioning.py
-          tests/unit/test_hermes_cloud_runtime.py
-          tests/unit/test_hermes_cloud_enrichment.py
-          tests/unit/test_hermes_cloud_enrichment_outbox.py
-          tests/unit/test_hermes_cloud_enrichment_router.py
-          tests/unit/test_ella_postprocess_cloud_routing.py
-          tests/unit/test_ella_chat_temporal_context.py
-          tests/unit/test_ella_provisioning_repository.py
-          tests/unit/test_ella_runtime_route_isolation.py
-          tests/unit/test_voice_proxy_auth.py
+          black --check --line-length 120 --skip-string-normalization
+          database/ella_provisioning.py database/invitations.py
+          database/runtime_targets.py database/voice_canary.py
+          ella/routers/auto_provision.py ella/routers/callbacks.py
+          ella/routers/chat.py ella/routers/guardian.py ella/routers/invites.py
+          ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
+          ella/services/invitation_authority.py ella/services/observer_extractor.py
+          ella/services/provisioning.py ella/services/runtime_resolver.py
+          ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
+          tests/unit/test_ella_callbacks_summary_update.py
+          tests/unit/test_ella_conversation_corrections.py
+          tests/unit/test_ella_guardian_delivery.py
+          tests/unit/test_ella_listen_runtime_gate.py
+          tests/unit/test_ella_observer.py tests/unit/test_invitation_redemption.py
+          tests/unit/test_hermes_cloud_openapi.py
+          tests/unit/test_scanner_keyterms.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
-          -v
+          tests/postgres/test_runtime_migration_atomicity_postgres.py
+          &&
+          python -c "import yaml; from openapi_spec_validator import validate; validate(yaml.safe_load(open('ella/docs/hermes-cloud-runtime-targets.openapi.yaml', encoding='utf-8')))"
+
+      - name: Run Hermes Cloud and isolation failure-path tests
+        run: |
+          collected="$(
+            pytest --collect-only -q \
+              tests/unit/test_ella_ai_consent.py \
+              tests/unit/test_ella_ai_consent_route_gates.py \
+              tests/unit/test_hermes_cloud_migration.py \
+              tests/unit/test_hermes_cloud_openapi.py \
+              tests/unit/test_hermes_cloud_policy.py \
+              tests/unit/test_hermes_cloud_photon.py \
+              tests/unit/test_hermes_cloud_provider.py \
+              tests/unit/test_hermes_cloud_provisioning.py \
+              tests/unit/test_hermes_cloud_runtime.py \
+              tests/unit/test_hermes_cloud_enrichment.py \
+              tests/unit/test_hermes_cloud_enrichment_outbox.py \
+              tests/unit/test_hermes_cloud_enrichment_router.py \
+              tests/unit/test_ella_postprocess_cloud_routing.py \
+              tests/unit/test_ella_chat_temporal_context.py \
+              tests/unit/test_ella_provisioning_repository.py \
+              tests/unit/test_ella_runtime_route_isolation.py \
+              tests/unit/test_voice_proxy_auth.py \
+              tests/postgres/test_hermes_cloud_pool_postgres.py \
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
+              grep -c '::'
+          )"
+          test "$collected" -eq 289
+          pytest \
+            tests/unit/test_ella_ai_consent.py \
+            tests/unit/test_ella_ai_consent_route_gates.py \
+            tests/unit/test_hermes_cloud_migration.py \
+            tests/unit/test_hermes_cloud_openapi.py \
+            tests/unit/test_hermes_cloud_policy.py \
+            tests/unit/test_hermes_cloud_photon.py \
+            tests/unit/test_hermes_cloud_provider.py \
+            tests/unit/test_hermes_cloud_provisioning.py \
+            tests/unit/test_hermes_cloud_runtime.py \
+            tests/unit/test_hermes_cloud_enrichment.py \
+            tests/unit/test_hermes_cloud_enrichment_outbox.py \
+            tests/unit/test_hermes_cloud_enrichment_router.py \
+            tests/unit/test_ella_postprocess_cloud_routing.py \
+            tests/unit/test_ella_chat_temporal_context.py \
+            tests/unit/test_ella_provisioning_repository.py \
+            tests/unit/test_ella_runtime_route_isolation.py \
+            tests/unit/test_voice_proxy_auth.py \
+            tests/postgres/test_hermes_cloud_pool_postgres.py \
+            tests/postgres/test_invitation_redemption_postgres.py \
+            tests/postgres/test_runtime_migration_atomicity_postgres.py \
+            -v
+
+      - name: Run exact reviewed boundary collections
+        run: |
+          test "$(pytest --collect-only -q tests/unit/test_ella_callbacks_summary_update.py | grep -c '::')" -eq 15
+          pytest tests/unit/test_ella_callbacks_summary_update.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_conversation_corrections.py | grep -c '::')" -eq 60
+          pytest tests/unit/test_ella_conversation_corrections.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_guardian_delivery.py | grep -c '::')" -eq 16
+          pytest tests/unit/test_ella_guardian_delivery.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_listen_runtime_gate.py | grep -c '::')" -eq 7
+          pytest tests/unit/test_ella_listen_runtime_gate.py -v
+          test "$(pytest --collect-only -q tests/unit/test_ella_observer.py | grep -c '::')" -eq 15
+          pytest tests/unit/test_ella_observer.py -v
+          test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 18
+          pytest tests/unit/test_invitation_redemption.py -v
+          test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
+          pytest tests/unit/test_scanner_keyterms.py -v

@@ -7,6 +7,8 @@
 -- - No global default target is created by this migration.
 -- - Existing retained/Plato bindings are not updated.
 
+BEGIN;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 ALTER TABLE ella_runtime_bindings
@@ -19,7 +21,10 @@ ALTER TABLE ella_runtime_bindings
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'ella_runtime_bindings_account_user_id_fkey'
+        SELECT 1
+        FROM pg_constraint
+        WHERE connamespace = current_schema()::regnamespace
+          AND conname = 'ella_runtime_bindings_account_user_id_fkey'
     ) THEN
         ALTER TABLE ella_runtime_bindings
             ADD CONSTRAINT ella_runtime_bindings_account_user_id_fkey
@@ -28,7 +33,10 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'ella_runtime_bindings_profile_user_id_fkey'
+        SELECT 1
+        FROM pg_constraint
+        WHERE connamespace = current_schema()::regnamespace
+          AND conname = 'ella_runtime_bindings_profile_user_id_fkey'
     ) THEN
         ALTER TABLE ella_runtime_bindings
             ADD CONSTRAINT ella_runtime_bindings_profile_user_id_fkey
@@ -37,7 +45,10 @@ BEGIN
     END IF;
 
     IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'ella_runtime_bindings_cloud_target_shape_check'
+        SELECT 1
+        FROM pg_constraint
+        WHERE connamespace = current_schema()::regnamespace
+          AND conname = 'ella_runtime_bindings_cloud_target_shape_check'
     ) THEN
         ALTER TABLE ella_runtime_bindings
             ADD CONSTRAINT ella_runtime_bindings_cloud_target_shape_check
@@ -178,3 +189,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS ella_runtime_targets_active_retained_key
 CREATE INDEX IF NOT EXISTS ella_runtime_targets_binding_idx
     ON ella_runtime_targets(runtime_binding_id)
     WHERE runtime_binding_id IS NOT NULL;
+
+COMMIT;

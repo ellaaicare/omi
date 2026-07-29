@@ -46,7 +46,10 @@ from models.conversation import CategoryEnum
 from database.ella_contacts import create_contact, delete_contact, get_contact, get_contacts, update_contact
 from ella.config import ELLA_CONFIG
 from ella.services.ai_consent import assert_current_ai_consent
-from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+)
 from ella.services.summary_sanitizer import SummarySanitizationError
 from ella.services.summary_writeback import (
     ConversationSummaryNotFoundError,
@@ -271,9 +274,12 @@ async def _resolve_agent_id_for_uid(uid: str) -> Optional[str]:
 
 
 async def _resolve_workspace_target_for_uid(uid: str) -> Optional[tuple[str, str, str]]:
-    if runtime_bindings_enabled(uid):
+    if runtime_authority_enabled(uid):
         runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-transcript")
         if runtime is None:
+            return None
+        if runtime.provider == "hermes_cloud":
+            # Managed Cloud exposes no Mini workspace/history control plane.
             return None
         return (
             runtime.agent_id,

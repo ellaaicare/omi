@@ -1,14 +1,39 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from database.runtime_targets import RuntimeTargetLineage
 from ella.services import provisioning
 from ella.services.hermes_cloud import HermesCloudPreflight
+from ella.services.hermes_cloud_policy import CurrentCloudAuthority
 from ella.services.provisioning import (
     HermesProvisionClient,
     ProvisioningCoordinator,
     ProvisioningError,
     VerifiedIdentity,
 )
+
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
+)
+
+
+@pytest.fixture(autouse=True)
+def current_cloud_lineage(monkeypatch):
+    def current_authority(uid, **kwargs):
+        if kwargs.get("profile_class") != "synthetic":
+            raise ProvisioningError("hermes_cloud_synthetic_profile_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
+
+    monkeypatch.setattr(provisioning, "current_cloud_authority", current_authority)
 
 
 class ForbiddenLocalClient(HermesProvisionClient):
@@ -17,9 +42,10 @@ class ForbiddenLocalClient(HermesProvisionClient):
 
 
 class FakeRepository:
-    def __init__(self, *, pool_empty=False, claim_error=None):
+    def __init__(self, *, pool_empty=False, claim_error=None, ready_receipt_error=None):
         self.pool_empty = pool_empty
         self.claim_error = claim_error
+        self.ready_receipt_error = ready_receipt_error
         self.quarantined = []
         self.finalized = []
         self.jobs = []
@@ -80,6 +106,8 @@ class FakeRepository:
         return {"status": "quarantined"}
 
     async def update_job(self, **kwargs):
+        if kwargs.get("state") == "ready" and self.ready_receipt_error:
+            raise self.ready_receipt_error
         self.jobs.append(kwargs)
         return kwargs
 
@@ -266,6 +294,27 @@ def test_cloud_preflight_failure_quarantines_claim_and_never_publishes(monkeypat
     assert repository.rollbacks[-1]["rollback_receipt"]["status"] == "not_required"
 
 
+def test_post_publication_ready_receipt_failure_still_quarantines_claim(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = FakeRepository(ready_receipt_error=RuntimeError("synthetic receipt failure"))
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=FakeCloud(),
+        honcho_client=FakeHoncho(),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(repository.finalized) == 1
+    assert repository.quarantined[0]["reason"] == "cloud_provisioning_internal_error"
+    assert repository.rollbacks[-1]["state"] == "blocked"
+    assert repository.rollbacks[-1]["rollback_receipt"]["quarantined"] is True
+
+
 def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
     repository = FakeRepository()
@@ -273,13 +322,18 @@ def test_consent_revoked_after_claim_blocks_honcho_and_cloud_side_effects(monkey
     honcho = FakeHoncho()
     checks = 0
 
-    def consent_gate(*_args, **_kwargs):
+    def consent_gate(uid, **_kwargs):
         nonlocal checks
         checks += 1
         if checks == 2:
             raise ProvisioningError("managed_cloud_consent_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
 
-    monkeypatch.setattr(provisioning, "assert_cloud_identity_gate", consent_gate)
+    monkeypatch.setattr(provisioning, "current_cloud_authority", consent_gate)
     coordinator = ProvisioningCoordinator(
         repository,
         ForbiddenLocalClient(),

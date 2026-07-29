@@ -14,6 +14,13 @@ from database.ella_provisioning import (
     IdentityConflictError,
     ProvisioningSchemaNotReadyError,
 )
+from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
+from ella.services.ai_consent import (
+    MANAGED_CLOUD_MEMORY_PROVIDER,
+    MANAGED_CLOUD_PHOTON_SCOPE,
+    require_current_ai_consent,
+)
+from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.provisioning import (
     DEFAULT_TARGET_SCHEMA_VERSION,
     ProvisioningCoordinator,
@@ -26,7 +33,6 @@ from ella.services.provisioning import (
     retained_compatibility_receipt,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
-from ella.services.ai_consent import require_current_ai_consent
 from utils.other import endpoints as auth
 
 logger = logging.getLogger("ella.onboarding")
@@ -179,10 +185,31 @@ async def onboarding_status(
     job = await repository.get_job(uid, target_schema_version)
     if not job:
         raise HTTPException(status_code=404, detail={"code": "setup_not_started"})
-    binding = await repository.resolve_active_runtime(
-        uid,
-        template_version=target_schema_version,
-    )
+    if cloud_provisioning_enabled(uid):
+        profile_class = await repository.get_cloud_profile_class(uid)
+        authority = current_cloud_authority(
+            uid,
+            profile_class=profile_class,
+            profile_uid=uid,
+            runtime_provider=CLOUD_RUNTIME_PROVIDER,
+            model_route=f"openai-codex/{CLOUD_RUNTIME_MODEL}",
+            memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
+            photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
+        )
+        binding = await repository.resolve_active_runtime(
+            uid,
+            template_version=target_schema_version,
+            target_mode="hermes-cloud-chat",
+            required_provider=CLOUD_RUNTIME_PROVIDER,
+            authority_lineage=authority.lineage,
+            model=CLOUD_RUNTIME_MODEL,
+        )
+    else:
+        binding = await repository.resolve_active_runtime(
+            uid,
+            template_version=target_schema_version,
+            required_provider="hermes",
+        )
     if not binding and cloud_provisioning_enabled(uid):
         binding = await repository.resolve_cloud_binding_state(uid)
     return public_receipt(job, binding)

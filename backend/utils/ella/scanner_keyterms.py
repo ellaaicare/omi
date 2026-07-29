@@ -8,9 +8,14 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
+import asyncpg
 import httpx
 
-from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.runtime_errors import ProvisioningError
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+)
 
 logger = logging.getLogger("ella.scanner_keyterms")
 
@@ -24,6 +29,7 @@ DEFAULT_DEEPGRAM_MAX_TOKENS = 250
 
 _cache: dict[str, "KeytermCacheEntry"] = {}
 _uid_agent_ids: dict[str, str] = {}
+_uid_runtime_providers: dict[str, str] = {}
 _refreshing: set[str] = set()
 _background_tasks: set[asyncio.Task] = set()
 _pool = None
@@ -63,7 +69,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _provision_url(uid: str = "") -> str:
-    if uid and runtime_bindings_enabled(uid):
+    if uid and runtime_authority_enabled(uid):
         return os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/")
     return (
         os.getenv("ELLA_PROVISION_API_URL")
@@ -74,7 +80,7 @@ def _provision_url(uid: str = "") -> str:
 
 
 def _provision_token(uid: str = "") -> str:
-    if uid and runtime_bindings_enabled(uid):
+    if uid and runtime_authority_enabled(uid):
         return os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
     return (
         os.getenv("ELLA_PROVISION_API_TOKEN")
@@ -113,7 +119,7 @@ def _enabled() -> bool:
 
 
 def _allow_shared_fallback(uid: str = "") -> bool:
-    if uid and runtime_bindings_enabled(uid):
+    if uid and runtime_authority_enabled(uid):
         return False
     return os.getenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
 
@@ -121,8 +127,6 @@ def _allow_shared_fallback(uid: str = "") -> bool:
 async def _get_pool():
     global _pool
     if _pool is None:
-        import asyncpg
-
         _pool = await asyncpg.create_pool(
             host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
             port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
@@ -139,13 +143,17 @@ async def _resolve_agent_id(uid: str) -> str:
     if not uid:
         return ""
 
-    if runtime_bindings_enabled(uid):
-        runtime = await resolve_isolated_runtime(uid)
+    if runtime_authority_enabled(uid):
+        runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-guardian")
         if runtime is None:
             return ""
         _uid_agent_ids[uid] = runtime.agent_id
+        _uid_runtime_providers[uid] = runtime.provider
         return runtime.agent_id
 
+    if uid in _uid_runtime_providers:
+        _uid_runtime_providers.pop(uid, None)
+        _uid_agent_ids.pop(uid, None)
     if uid in _uid_agent_ids:
         return _uid_agent_ids[uid]
 
@@ -378,6 +386,11 @@ def combine_deepgram_keyterms(vocabulary: list[str], scanner_terms: list[str]) -
 
 
 async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
+    if uid and _uid_runtime_providers.get(uid) == "hermes_cloud":
+        raise ProvisioningError(
+            "hermes_cloud_scanner_keyterms_unavailable",
+            retryable=False,
+        )
     token = _provision_token(uid)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     url = f"{_provision_url(uid)}/workspace/{agent_id}/files/scanner-tuning.md"
@@ -401,15 +414,20 @@ async def refresh_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> 
     if not _enabled() or not uid:
         return []
 
-    isolated = runtime_bindings_enabled(uid)
+    isolated = runtime_authority_enabled(uid)
     resolved_agent_id = await _resolve_agent_id(uid) if isolated else agent_id or await _resolve_agent_id(uid)
     key = resolved_agent_id or uid
+    runtime_provider = _uid_runtime_providers.get(uid, "") if isolated else ""
+    if runtime_provider == "hermes_cloud":
+        _cache.pop(key, None)
+        _cache.pop(uid, None)
+        return []
     _refreshing.add(key)
     started = time.time()
     try:
         content = await _fetch_scanner_tuning(resolved_agent_id, uid=uid)
         terms = parse_scanner_tuning_keyterms(content)
-        source = "hermes_provision_api" if isolated else "provision_api"
+        source = f"isolated:{runtime_provider}" if isolated else "provision_api"
         entry = KeytermCacheEntry(terms=terms, agent_id=resolved_agent_id, fetched_at=time.time(), source=source)
         _cache[key] = entry
         _cache[uid] = entry
@@ -424,7 +442,7 @@ async def refresh_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> 
         return terms
     except Exception as e:
         stale = _cache.get(key) or _cache.get(uid)
-        if isolated and stale and stale.source != "hermes_provision_api":
+        if isolated and stale and stale.source != f"isolated:{runtime_provider}":
             stale = None
         if stale:
             stale.error = str(e)
@@ -459,8 +477,12 @@ async def get_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> list
 
     resolved_key = agent_id or _uid_agent_ids.get(uid) or uid
     entry = _cache.get(resolved_key) or _cache.get(uid)
-    if runtime_bindings_enabled(uid) and entry and entry.source != "hermes_provision_api":
-        entry = None
+    if runtime_authority_enabled(uid):
+        runtime_provider = _uid_runtime_providers.get(uid, "")
+        if not runtime_provider or runtime_provider == "hermes_cloud":
+            entry = None
+        elif entry and entry.source != f"isolated:{runtime_provider}":
+            entry = None
     now = time.time()
     if entry and now - entry.fetched_at <= _ttl_seconds():
         return entry.terms
@@ -487,4 +509,5 @@ def cache_status(uid: str, agent_id: Optional[str] = None) -> dict:
 def clear_scanner_keyterm_cache():
     _cache.clear()
     _uid_agent_ids.clear()
+    _uid_runtime_providers.clear()
     _refreshing.clear()

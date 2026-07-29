@@ -20,6 +20,7 @@ from database import invitations
 from ella.routers import invites
 from ella.routers import voice
 from ella.services import ai_consent
+from ella.services import invitation_authority
 from utils.other import endpoints as auth
 
 
@@ -140,7 +141,7 @@ def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
 
     with pytest.raises(invitations.InvitePilotGateDenied):
-        invitations.authorize_invitation_pilot(uid)
+        invitation_authority.authorize_invitation_pilot(uid)
 
     ai_consent.AiConsentService(repository).submit(
         uid,
@@ -156,13 +157,13 @@ def test_pilot_gate_requires_exact_v7_consent_and_both_uid_allowlists(
             scope_hash=ai_consent.CURRENT_SCOPE_HASH,
         ),
     )
-    admission = invitations.authorize_invitation_pilot(uid)
+    admission = invitation_authority.authorize_invitation_pilot(uid)
     assert admission.policy_version == "ai-data-processors-v8"
     assert admission.account_uid == admission.profile_uid == uid
 
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "")
     with pytest.raises(invitations.InvitePilotGateDenied):
-        invitations.authorize_invitation_pilot(uid)
+        invitation_authority.authorize_invitation_pilot(uid)
 
 
 def test_source_address_trusts_forwarding_only_from_enumerated_proxy(monkeypatch):
@@ -189,6 +190,19 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
             "correlation_id": "11111111-1111-1111-1111-111111111111",
         }
 
+    monkeypatch.setattr(
+        invites,
+        "authorize_invitation_pilot",
+        lambda uid: invitations.InvitationPilotAdmission(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-receipt",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
     monkeypatch.setattr(invites.invitations, "redeem_invitation", fake_redeem)
     app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
     response = client.post(
@@ -301,6 +315,19 @@ def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):
             retry_after_s=42,
         )
 
+    monkeypatch.setattr(
+        invites,
+        "authorize_invitation_pilot",
+        lambda uid: invitations.InvitationPilotAdmission(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="synthetic-receipt",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
     monkeypatch.setattr(invites.invitations, "redeem_invitation", fake_redeem)
     response = TestClient(app).post("/v1/invite/redeem", json={"code": "ABCD-2345"})
 

@@ -267,7 +267,7 @@ New-user Hermes provisioning is disabled by default and has two separate rollout
 - `ELLA_ISOLATED_VOICE_ROUTING_ENABLED` is a separate default-off gate. The voice proxy and OMI backend use a short-lived, Firebase-subject-bound JWT plus the independent `ELLA_VOICE_PROXY_SERVICE_TOKEN` for context/search/tool calls; isolated failures do not fall back to OpenClaw. Keep this gate off until the coordinated proxy/OMI/8210 deployment and two-UID canary pass.
 
 Apply the shared Prisma migration from `ellaaicare/ella-ai` first:
-`packages/database/prisma/migrations/20260721000000_add_ella_provisioning_runtime/migration.sql` (merged in ella-ai PR #1066). OMI intentionally does not duplicate this schema. Both onboarding endpoints preflight the two tables and every required isolation index; an incomplete deployment returns retryable `503 provisioning_schema_not_ready` before any identity write.
+`packages/database/prisma/migrations/20260721000000_add_ella_provisioning_runtime/migration.sql` (merged in `ellaaicare/ella-ai#1066`). OMI intentionally does not duplicate this schema. Both onboarding endpoints preflight the two tables and every required isolation index; an incomplete deployment returns retryable `503 provisioning_schema_not_ready` before any identity write.
 
 Enable provisioning first for two synthetic Firebase users; enable runtime dispatch only after distinct profile, gateway, account/profile runtime target, Hermes profile-memory, and canonical timeline receipts pass the two-user isolation canary. Existing Plato remains valid only for the exact `ELLA_PLATO_UID` binding.
 

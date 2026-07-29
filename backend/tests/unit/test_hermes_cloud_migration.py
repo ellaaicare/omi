@@ -67,3 +67,29 @@ def test_cloud_profile_classification_defaults_real_and_is_constrained():
     assert "profile_class text not null default 'real'" in migration
     assert "check (profile_class in ('real', 'synthetic'))" in migration
     assert "users_profile_class_idx" in migration
+
+
+def test_runtime_authority_migrations_and_documented_psql_are_fail_fast_atomic():
+    backend = Path(__file__).resolve().parents[2]
+    for filename in (
+        "011_create_invitation_redemption.sql",
+        "012_create_account_profile_runtime_targets.sql",
+    ):
+        migration = (backend / "migrations" / filename).read_text(encoding="utf-8").strip()
+        statements = [
+            line.strip() for line in migration.splitlines() if line.strip() and not line.lstrip().startswith("--")
+        ]
+        assert statements[0] == "BEGIN;"
+        assert migration.endswith("COMMIT;")
+
+    runbook = (backend / "ella" / "docs" / "HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md").read_text(encoding="utf-8")
+    documented_commands = [
+        line.strip()
+        for line in runbook.splitlines()
+        if line.strip().startswith("psql ")
+        and "--file=" in line
+        and ("011_create_invitation_redemption.sql" in line or "012_create_account_profile_runtime_targets.sql" in line)
+    ]
+    assert len(documented_commands) == 2
+    assert all("-X" in command for command in documented_commands)
+    assert all("--set=ON_ERROR_STOP=1" in command for command in documented_commands)

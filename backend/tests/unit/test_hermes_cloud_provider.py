@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 
+from database.runtime_targets import RuntimeTargetLineage
 from ella.services import hermes_cloud
 from ella.services import runtime_resolver
 from ella.services.hermes_cloud import (
@@ -9,9 +10,30 @@ from ella.services.hermes_cloud import (
     HermesCloudPoolManager,
     estimate_turn_cost_microusd,
 )
-from ella.services.hermes_cloud_policy import ApprovedRuntimeManifest
+from ella.services.hermes_cloud_policy import ApprovedRuntimeManifest, CurrentCloudAuthority
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_from_binding
+
+LINEAGE = RuntimeTargetLineage(
+    policy_version="ai-data-processors-v8",
+    processor_set_hash="sha256:" + ("1" * 64),
+    scope_version="managed-cloud-internal-pilot-v2",
+    scope_hash="sha256:" + ("2" * 64),
+)
+
+
+@pytest.fixture(autouse=True)
+def current_cloud_lineage(monkeypatch):
+    def current_authority(uid, **kwargs):
+        if kwargs.get("profile_class") == "real":
+            raise ProvisioningError("hermes_cloud_synthetic_profile_required", retryable=False)
+        return CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        )
+
+    monkeypatch.setattr(runtime_resolver, "current_cloud_authority", current_authority)
 
 
 class Response:
@@ -54,6 +76,7 @@ def _binding():
         "expected_model": "model-a",
         "allowed_tools": [],
         "required_capabilities": ["responses_api", "session_key_header"],
+        "health_receipt": LINEAGE.as_dict(),
         "prompt_pack_version": "prompt-v1",
         "model_policy_version": "models-v1",
         "prompt_artifact_receipt": {
@@ -589,7 +612,7 @@ def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_
     def credentials_forbidden(_binding):
         raise AssertionError("credentials must not load before consent")
 
-    monkeypatch.setattr(runtime_resolver, "assert_cloud_identity_gate", denied)
+    monkeypatch.setattr(runtime_resolver, "current_cloud_authority", denied)
     monkeypatch.setattr(runtime_resolver.HermesCloudClient, "credentials", credentials_forbidden)
 
     with pytest.raises(ProvisioningError) as error:
@@ -790,7 +813,10 @@ def test_responses_api_rejects_memory_call_when_canary_allows_no_tools(
 
 def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch):
     class Repository:
-        async def resolve_active_runtime(self, uid):
+        async def get_cloud_profile_class(self, uid):
+            return "synthetic"
+
+        async def resolve_active_runtime(self, uid, **_kwargs):
             assert uid == "synthetic-user"
             raise RuntimeError("database unavailable")
 
@@ -798,12 +824,21 @@ def test_cloud_runtime_resolver_does_not_fall_back_when_lookup_fails(monkeypatch
     monkeypatch.setattr(runtime_resolver, "cloud_provisioning_enabled", lambda uid=None: True)
 
     with pytest.raises(RuntimeError, match="database unavailable"):
-        asyncio.run(resolve_isolated_runtime("synthetic-user", Repository()))
+        asyncio.run(
+            resolve_isolated_runtime(
+                "synthetic-user",
+                Repository(),
+                target_mode="hermes-cloud-chat",
+            )
+        )
 
 
 def test_cloud_runtime_resolver_requires_binding_for_enabled_user(monkeypatch):
     class Repository:
-        async def resolve_active_runtime(self, uid):
+        async def get_cloud_profile_class(self, uid):
+            return "synthetic"
+
+        async def resolve_active_runtime(self, uid, **_kwargs):
             return None
 
         async def resolve_cloud_binding_state(self, uid):
@@ -813,6 +848,12 @@ def test_cloud_runtime_resolver_requires_binding_for_enabled_user(monkeypatch):
     monkeypatch.setattr(runtime_resolver, "cloud_provisioning_enabled", lambda uid=None: True)
 
     with pytest.raises(ProvisioningError) as error:
-        asyncio.run(resolve_isolated_runtime("synthetic-user", Repository()))
+        asyncio.run(
+            resolve_isolated_runtime(
+                "synthetic-user",
+                Repository(),
+                target_mode="hermes-cloud-chat",
+            )
+        )
     assert error.value.code == "hermes_cloud_not_provisioned"
     assert error.value.retryable is True

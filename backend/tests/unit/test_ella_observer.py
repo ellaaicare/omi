@@ -15,7 +15,7 @@ def _install_proposal_stubs():
     proposals.list_proposals = MagicMock(return_value=[])
     proposals.save_proposal = MagicMock(side_effect=lambda proposal: proposal)
     proposals.update_proposal_status = MagicMock(return_value=None)
-    database = sys.modules.setdefault("database", types.ModuleType("database"))
+    database = importlib.import_module("database")
     setattr(database, "proposals", proposals)
     sys.modules["database.proposals"] = proposals
 
@@ -425,8 +425,9 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
     extractor_module = importlib.import_module("ella.services.observer_extractor")
     captured = {}
 
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-isolated"
+        assert target_mode == "hermes-cloud-guardian"
         return types.SimpleNamespace(
             gateway_url="http://isolated-hermes:8642",
             gateway_token="isolated-token",
@@ -439,7 +440,7 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
 
     monkeypatch.setattr(
         extractor_module.runtime_resolver,
-        "runtime_bindings_enabled",
+        "runtime_authority_enabled",
         lambda uid=None: uid == "uid-isolated",
     )
     monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)

@@ -12,21 +12,24 @@ import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import asyncpg
 
 from database import voice_canary
-from ella.services import ai_consent
-from ella.services.hermes_cloud_policy import cloud_synthetic_only
+from database.runtime_targets import (
+    CLOUD_RUNTIME_MODEL,
+    CLOUD_RUNTIME_PROVIDER,
+    CLOUD_RUNTIME_TARGET_MODES,
+)
 
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 INVITE_CODE_RE = re.compile(rf"^[{INVITE_ALPHABET}]{{8}}$")
 SAFE_POLICY_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SAFE_APP_BUILD_RE = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
-PILOT_RUNTIME_PROVIDER = "hermes_cloud"
-PILOT_MODEL = "gpt-5.6-terra"
-PILOT_MODE = "hermes-cloud-enrichment"
+PILOT_RUNTIME_PROVIDER = CLOUD_RUNTIME_PROVIDER
+PILOT_MODEL = CLOUD_RUNTIME_MODEL
+PILOT_TARGET_MODES = CLOUD_RUNTIME_TARGET_MODES
 
 
 @dataclass(frozen=True)
@@ -157,47 +160,6 @@ def invitation_target_refs(
     return (
         _hmac_ref(config, "target-account-v1", account_uid),
         _hmac_ref(config, "target-profile-v1", profile_uid),
-    )
-
-
-def _exact_allowlist(name: str) -> set[str]:
-    return {value.strip() for value in os.getenv(name, "").split(",") if value.strip()}
-
-
-def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
-    """Authorize the exact synthetic profile before redemption can mutate SQL."""
-    if (
-        not cloud_synthetic_only()
-        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS")
-        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS")
-    ):
-        raise InvitePilotGateDenied("invite_pilot_identity_not_allowed")
-
-    status = ai_consent.get_ai_consent_service().status(uid)
-    consent = dict(status.get("consent") or {})
-    expected_profile_binding = ai_consent.derive_profile_binding_id(
-        account_uid=uid,
-        profile_uid=uid,
-    )
-    if (
-        status.get("authorized") is not True
-        or consent.get("decision") != "granted"
-        or consent.get("policy_version") != ai_consent.CURRENT_POLICY_VERSION
-        or consent.get("processor_set_hash") != ai_consent.CURRENT_PROCESSOR_SET_HASH
-        or consent.get("scope_version") != ai_consent.CURRENT_SCOPE_VERSION
-        or consent.get("scope_hash") != ai_consent.CURRENT_SCOPE_HASH
-        or consent.get("profile_binding_id") != expected_profile_binding
-        or not consent.get("receipt_id")
-    ):
-        raise InvitePilotGateDenied("invite_pilot_consent_required")
-    return InvitationPilotAdmission(
-        account_uid=uid,
-        profile_uid=uid,
-        consent_receipt_id=str(consent["receipt_id"]),
-        policy_version=str(consent["policy_version"]),
-        processor_set_hash=str(consent["processor_set_hash"]),
-        scope_version=str(consent["scope_version"]),
-        scope_hash=str(consent["scope_hash"]),
     )
 
 
@@ -458,9 +420,9 @@ async def redeem_invitation(
     uid: str,
     code: str,
     source_address: str,
+    pilot_admission: Optional[InvitationPilotAdmission] = None,
     app_build: str = "",
     config: Optional[InvitationConfig] = None,
-    pilot_authorizer: Optional[Callable[[str], InvitationPilotAdmission]] = None,
 ) -> dict[str, Any]:
     settings = config or InvitationConfig.from_env()
     support_code = _support_code()
@@ -471,14 +433,16 @@ async def redeem_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
-    try:
-        pilot_admission = (pilot_authorizer or authorize_invitation_pilot)(uid)
-    except InvitePilotGateDenied:
+    if (
+        not isinstance(pilot_admission, InvitationPilotAdmission)
+        or pilot_admission.account_uid != uid
+        or pilot_admission.profile_uid != uid
+    ):
         raise _failure(
             "invalid",
             support_code=support_code,
             correlation_id=correlation_id,
-        ) from None
+        )
 
     normalized_code = normalize_invite_code(code)
     uid_ref_hmac = _hmac_ref(settings, "uid-v1", uid)
@@ -643,16 +607,19 @@ async def _redeem_locked_invitation(
         and str(user["profile_class"]) == "synthetic"
         and pilot_admission.account_uid == uid
         and pilot_admission.profile_uid == uid
-        and invitation["required_consent_policy_version"]
-        == pilot_admission.policy_version
-        == ai_consent.CURRENT_POLICY_VERSION
-        and invitation["required_consent_processor_set_hash"]
-        == pilot_admission.processor_set_hash
-        == ai_consent.CURRENT_PROCESSOR_SET_HASH
-        and invitation["required_consent_scope_version"]
-        == pilot_admission.scope_version
-        == ai_consent.CURRENT_SCOPE_VERSION
-        and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash == ai_consent.CURRENT_SCOPE_HASH
+        and invitation["required_consent_policy_version"] == pilot_admission.policy_version
+        and invitation["required_consent_processor_set_hash"] == pilot_admission.processor_set_hash
+        and invitation["required_consent_scope_version"] == pilot_admission.scope_version
+        and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash
+        and all(
+            (
+                pilot_admission.consent_receipt_id,
+                pilot_admission.policy_version,
+                pilot_admission.processor_set_hash,
+                pilot_admission.scope_version,
+                pilot_admission.scope_hash,
+            )
+        )
     )
     if not contract_matches:
         await _record_failure(
@@ -853,7 +820,7 @@ async def _redeem_locked_invitation(
     if (
         policy["provider_allowlist"] != [PILOT_RUNTIME_PROVIDER]
         or policy["model_allowlist"] != [PILOT_MODEL]
-        or policy["mode_allowlist"] != [PILOT_MODE]
+        or policy["mode_allowlist"] != list(PILOT_TARGET_MODES)
         or policy["fallback_policy"] != {"enabled": False, "order": []}
     ):
         await _record_audit(
@@ -902,10 +869,12 @@ async def _redeem_locked_invitation(
                 max_audio_bytes_per_session, max_audio_bytes_per_minute,
                 provider_allowlist, model_allowlist, mode_allowlist, fallback_policy,
                 invitation_id, entitlement_policy_revision, cohort,
-                exclude_from_product_analytics
+                exclude_from_product_analytics, consent_policy_version,
+                consent_processor_set_hash, consent_scope_version, consent_scope_hash
             ) VALUES (
                 $1, 'invited', $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14::jsonb, $15, $16, $17, $18
+                $11, $12, $13, $14::jsonb, $15, $16, $17, $18,
+                $19, $20, $21, $22
             )
             RETURNING revision
             """,
@@ -927,6 +896,10 @@ async def _redeem_locked_invitation(
             invitation["entitlement_policy_revision"],
             invitation["cohort"],
             bool(invitation["exclude_from_product_analytics"]),
+            pilot_admission.policy_version,
+            pilot_admission.processor_set_hash,
+            pilot_admission.scope_version,
+            pilot_admission.scope_hash,
         )
     )
     if kind == "ordinary":

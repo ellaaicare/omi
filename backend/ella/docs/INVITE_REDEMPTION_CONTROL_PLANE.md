@@ -22,8 +22,9 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
   ordinary capacity, and marks an ordinary invitation redeemed.
 - Provisioning is not performed by this endpoint. After commit, the client uses
   the existing authenticated `/v1/ella/onboarding/ensure` receipt. That receipt
-  remains the single owner of the #1124 warm-pool claim.
-- Voice allow/deny and quota frames remain server-authoritative under #1113.
+  remains the single owner of the `ellaaicare/ella-ai#1124` warm-pool claim.
+- Voice allow/deny and quota frames remain server-authoritative under
+  `ellaaicare/ella-ai#1113`.
 
 ## Feature gates
 
@@ -53,7 +54,8 @@ account/profile, and have a synthetic database profile classification.
 
 ## Migration
 
-Apply only after the integrated #1124 migration lineage is approved:
+Apply only after the integrated `ellaaicare/ella-ai#1124` migration lineage is
+approved:
 
 ```bash
 psql "$ELLA_POSTGRES_DSN" \
@@ -121,7 +123,7 @@ synthetic code must remain unconsumed and must not create an entitlement.
 5. Keep global cloud and ordinary self-service flags off. Enable only the exact
    synthetic test UID in both cloud allowlists and issue its HMAC-bound target.
 6. Verify same-UID retry, two-UID exclusion, typed failures, rate limiting,
-   canonical entitlement, #1124 ensure idempotency, and authoritative quota
+   canonical entitlement, `ellaaicare/ella-ai#1124` ensure idempotency, and authoritative quota
    frames.
 7. Roll all invitation flags back off before any incident investigation.
 
@@ -136,10 +138,11 @@ ELLA_INVITE_APP_REVIEW_ENABLED=false
 ```
 
 Do not drop migration 011 tables during rollback. They hold audit and
-idempotency evidence. Existing entitlements remain under the #1113 operator
+idempotency evidence. Existing entitlements remain under the
+`ellaaicare/ella-ai#1113` operator
 grant/suspend/revoke controls. The voice global kill switch remains the
 authoritative emergency stop.
 
 No production invitation, entitlement, vendor workspace, or provisioning claim
-may be created until the AI consent gate in #1123 and the independent release
+may be created until the AI consent gate in `ellaaicare/ella-ai#1123` and the independent release
 review are green.

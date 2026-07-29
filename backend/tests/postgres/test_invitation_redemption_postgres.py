@@ -15,6 +15,7 @@ from database.ella_provisioning import (
     RuntimePoolClaimError,
 )
 from ella.services import ai_consent
+from ella.services import invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime
@@ -40,7 +41,7 @@ POLICY = {
     "hard_limit_ratio": 1.0,
     "provider_allowlist": [invitations.PILOT_RUNTIME_PROVIDER],
     "model_allowlist": [invitations.PILOT_MODEL],
-    "mode_allowlist": [invitations.PILOT_MODE],
+    "mode_allowlist": list(invitations.PILOT_TARGET_MODES),
     "fallback_policy": {"enabled": False, "order": []},
 }
 
@@ -63,6 +64,7 @@ def _prompt_receipt(*, model: str = invitations.PILOT_MODEL) -> dict:
         "model_policy_sha256": "e" * 64,
         "observed_model_policy_sha256": "e" * 64,
     }
+
 
 pytestmark = pytest.mark.skipif(
     not TEST_DSN,
@@ -296,13 +298,22 @@ async def _redeem(
     config: invitations.InvitationConfig = CONFIG,
     use_real_gate: bool = False,
 ):
+    try:
+        admission = invitation_authority.authorize_invitation_pilot(uid) if use_real_gate else _admission(uid)
+    except invitations.InvitePilotGateDenied as exc:
+        raise invitations.InviteRedemptionFailure(
+            "invalid",
+            status_code=400,
+            support_code="INV-UNITTEST",
+            correlation_id=str(uuid.uuid4()),
+        ) from exc
     return await invitations.redeem_invitation(
         uid=uid,
         code=code,
         source_address=source,
         app_build=app_build,
         config=config,
-        pilot_authorizer=None if use_real_gate else _admission,
+        pilot_admission=admission,
     )
 
 
@@ -758,6 +769,9 @@ def test_invite_to_atomic_cloud_claim_is_idempotent_and_has_zero_fallback(
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "synthetic-integrated-claim"
         legacy_uid = "legacy-plato-preserved"
+        consent_repository = ai_consent.InMemoryConsentRepository()
+        monkeypatch.setattr(ai_consent, "_repository", consent_repository)
+        _grant_v7(consent_repository, uid)
         monkeypatch.setenv(
             "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
             uid,
@@ -801,7 +815,11 @@ def test_invite_to_atomic_cloud_claim_is_idempotent_and_has_zero_fallback(
         await _register_pool(repository, runtime_instance_id="integrated-a")
 
         with pytest.raises(ProvisioningError) as before_claim:
-            await resolve_isolated_runtime(uid, repository)
+            await resolve_isolated_runtime(
+                uid,
+                repository,
+                target_mode="hermes-cloud-chat",
+            )
         assert before_claim.value.code == "hermes_cloud_not_provisioned"
 
         async def _schema_ready() -> None:
@@ -862,7 +880,11 @@ def test_invite_to_atomic_cloud_claim_is_idempotent_and_has_zero_fallback(
         assert first["id"] == replay["id"]
         assert first["claim_token"] == replay["claim_token"]
         with pytest.raises(ProvisioningError) as claiming:
-            await resolve_isolated_runtime(uid, restarted_repository)
+            await resolve_isolated_runtime(
+                uid,
+                restarted_repository,
+                target_mode="hermes-cloud-chat",
+            )
         assert claiming.value.code == "hermes_cloud_claiming"
 
         async with pool.acquire() as conn:
@@ -905,7 +927,7 @@ def test_invite_to_atomic_cloud_claim_is_idempotent_and_has_zero_fallback(
         }
         assert entitlement["provider_allowlist"] == [invitations.PILOT_RUNTIME_PROVIDER]
         assert entitlement["model_allowlist"] == [invitations.PILOT_MODEL]
-        assert entitlement["mode_allowlist"] == [invitations.PILOT_MODE]
+        assert entitlement["mode_allowlist"] == list(invitations.PILOT_TARGET_MODES)
         fallback_policy = entitlement["fallback_policy"]
         if isinstance(fallback_policy, str):
             fallback_policy = json.loads(fallback_policy)

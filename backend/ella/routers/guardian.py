@@ -33,7 +33,7 @@ from ella.routers.resolve import resolve_user_routing
 from database import app_settings as app_settings_db
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
-from ella.services.runtime_resolver import runtime_bindings_enabled
+from ella.services.runtime_resolver import runtime_authority_enabled
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
@@ -1047,7 +1047,7 @@ async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
             flush=True,
         )
 
-    if runtime_bindings_enabled(uid):
+    if runtime_authority_enabled(uid):
         print(
             f"[FLOW:GUARDIAN-CONTEXT] uid={uid} isolated=true canonical_empty=true fallback=disabled",
             flush=True,

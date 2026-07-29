@@ -21,6 +21,7 @@ See ella/README.md for full documentation.
 import os
 from typing import Optional, Callable, Dict
 
+from ella.routers.invites import router as invite_router
 from ella.routers.onboarding import configure_firestore_db, router as onboarding_router
 
 # =============================================================================
@@ -453,8 +454,6 @@ def _register_routers(app) -> None:
     # Authenticated invitation redemption. This commits entitlement before the
     # client invokes the existing onboarding ensure boundary.
     try:
-        from ella.routers.invites import router as invite_router
-
         app.include_router(invite_router, tags=["Ella Invites"])
         print("  🌐 /v1/invite/redeem - Invitation redemption", flush=True)
     except ImportError as e:

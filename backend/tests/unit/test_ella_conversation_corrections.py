@@ -34,6 +34,7 @@ assert _corrections_spec is not None and _corrections_spec.loader is not None
 _corrections_spec.loader.exec_module(corrections)
 corrections.ELLA_CONFIG = SimpleNamespace(n8n_base_url="https://n8n.test")
 from ella.services import summary_recovery, summary_writeback
+from ella.services.runtime_errors import ProvisioningError
 
 
 @pytest.fixture(autouse=True)
@@ -1324,8 +1325,9 @@ def test_correction_session_key_matches_chat_memory_scope(monkeypatch):
 
 
 def test_isolated_summary_config_uses_uid_runtime_and_removes_legacy_key(monkeypatch):
-    async def fake_runtime(uid):
+    async def fake_runtime(uid, *, target_mode=None):
         assert uid == "user-a"
+        assert target_mode == "hermes-cloud-transcript"
         return SimpleNamespace(
             gateway_url="http://100.76.138.56:8701",
             gateway_token="isolated-secret",
@@ -1351,6 +1353,31 @@ def test_isolated_summary_config_uses_uid_runtime_and_removes_legacy_key(monkeyp
     assert selected.hermes_model == "omi-user-a"
     assert selected.hermes_api_key == "isolated-secret"
     assert selected.legacy_api_key == ""
+
+
+def test_cloud_summary_resolution_failure_never_returns_legacy_config(monkeypatch):
+    async def missing_runtime(uid, *, target_mode=None):
+        assert uid == "cloud-user"
+        assert target_mode == "hermes-cloud-transcript"
+        raise ProvisioningError("hermes_cloud_not_provisioned", retryable=True)
+
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", missing_runtime)
+    legacy = summary_recovery.SummaryProviderConfig(
+        provider="legacy",
+        hermes_url="http://shared-mini.test/v1/chat/completions",
+        hermes_model="shared-plato",
+        hermes_api_key="shared-secret",
+        legacy_url="https://legacy.test/v1/chat/completions",
+        legacy_model="legacy-model",
+        legacy_api_key="legacy-secret",
+        timeout_seconds=45,
+    )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(summary_recovery.summary_provider_config_for_uid("cloud-user", legacy))
+
+    assert error.value.code == "hermes_cloud_not_provisioned"
+
 
 def test_generate_corrected_summary_can_use_legacy_provider(monkeypatch):
     calls = []
