@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import asyncpg
 
-from database import voice_canary
+from database import managed_cloud_consent, voice_canary
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
@@ -76,6 +76,7 @@ class InvitationPilotAdmission:
     account_uid: str
     profile_uid: str
     consent_receipt_id: str
+    profile_binding_id: str
     policy_version: str
     processor_set_hash: str
     scope_version: str
@@ -601,6 +602,26 @@ async def _redeem_locked_invitation(
         """,
         pilot_admission.profile_uid,
     )
+    current_pilot_admission = await pilot_admission_revalidator(pilot_admission)
+    if not isinstance(current_pilot_admission, InvitationPilotAdmission) or current_pilot_admission != pilot_admission:
+        raise InvitePilotGateDenied("invite_pilot_authority_changed")
+    pilot_admission = current_pilot_admission
+    try:
+        consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
+            conn,
+            grant=managed_cloud_consent.ManagedCloudGrant(
+                account_uid=pilot_admission.account_uid,
+                profile_uid=pilot_admission.profile_uid,
+                consent_receipt_id=pilot_admission.consent_receipt_id,
+                profile_binding_id=pilot_admission.profile_binding_id,
+                policy_version=pilot_admission.policy_version,
+                processor_set_hash=pilot_admission.processor_set_hash,
+                scope_version=pilot_admission.scope_version,
+                scope_hash=pilot_admission.scope_hash,
+            ),
+        )
+    except managed_cloud_consent.ManagedCloudAuthorityDenied as exc:
+        raise InvitePilotGateDenied("invite_pilot_authority_changed") from exc
     contract_matches = bool(
         target
         and hmac.compare_digest(
@@ -624,6 +645,7 @@ async def _redeem_locked_invitation(
         and all(
             (
                 pilot_admission.consent_receipt_id,
+                pilot_admission.profile_binding_id,
                 pilot_admission.policy_version,
                 pilot_admission.processor_set_hash,
                 pilot_admission.scope_version,
@@ -661,13 +683,18 @@ async def _redeem_locked_invitation(
     if existing:
         entitlement = await conn.fetchrow(
             """
-            SELECT uid FROM voice_entitlements
+            SELECT uid, status, consent_authority_epoch
+            FROM voice_entitlements
             WHERE uid = $1 AND invitation_id = $2
             """,
             uid,
             invitation_id,
         )
-        if not entitlement:
+        if (
+            not entitlement
+            or str(entitlement["status"]) not in {"invited", "active"}
+            or entitlement["consent_authority_epoch"] != consent_authority_epoch
+        ):
             await _record_audit(
                 conn,
                 invitation_id=invitation_id,
@@ -870,11 +897,6 @@ async def _redeem_locked_invitation(
             correlation_id=correlation_id,
         )
 
-    current_pilot_admission = await pilot_admission_revalidator(pilot_admission)
-    if not isinstance(current_pilot_admission, InvitationPilotAdmission) or current_pilot_admission != pilot_admission:
-        raise InvitePilotGateDenied("invite_pilot_authority_changed")
-    pilot_admission = current_pilot_admission
-
     entitlement_revision = int(
         await conn.fetchval(
             """
@@ -885,11 +907,12 @@ async def _redeem_locked_invitation(
                 provider_allowlist, model_allowlist, mode_allowlist, fallback_policy,
                 invitation_id, entitlement_policy_revision, cohort,
                 exclude_from_product_analytics, consent_policy_version,
-                consent_processor_set_hash, consent_scope_version, consent_scope_hash
+                consent_processor_set_hash, consent_scope_version, consent_scope_hash,
+                consent_authority_epoch
             ) VALUES (
                 $1, 'invited', $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14::jsonb, $15, $16, $17, $18,
-                $19, $20, $21, $22
+                $19, $20, $21, $22, $23
             )
             RETURNING revision
             """,
@@ -915,6 +938,7 @@ async def _redeem_locked_invitation(
             pilot_admission.processor_set_hash,
             pilot_admission.scope_version,
             pilot_admission.scope_hash,
+            consent_authority_epoch,
         )
     )
     if kind == "ordinary":

@@ -197,6 +197,10 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
             account_uid=uid,
             profile_uid=uid,
             consent_receipt_id="synthetic-receipt",
+            profile_binding_id=ai_consent.derive_profile_binding_id(
+                account_uid=uid,
+                profile_uid=uid,
+            ),
             policy_version=ai_consent.CURRENT_POLICY_VERSION,
             processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
             scope_version=ai_consent.CURRENT_SCOPE_VERSION,
@@ -323,6 +327,10 @@ def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):
             account_uid=uid,
             profile_uid=uid,
             consent_receipt_id="synthetic-receipt",
+            profile_binding_id=ai_consent.derive_profile_binding_id(
+                account_uid=uid,
+                profile_uid=uid,
+            ),
             policy_version=ai_consent.CURRENT_POLICY_VERSION,
             processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
             scope_version=ai_consent.CURRENT_SCOPE_VERSION,

@@ -61,6 +61,10 @@ async def _assert_failure_rolls_back(filename: str, leaked_relations: tuple[str,
                 "ella_runtime_interactions",
             ),
         ),
+        (
+            "013_create_managed_cloud_consent_authority.sql",
+            ("ella_managed_cloud_consent_authority",),
+        ),
     ],
 )
 def test_migration_prerequisite_failure_is_atomic(filename, leaked_relations):

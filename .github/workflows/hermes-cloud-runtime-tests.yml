@@ -6,6 +6,7 @@ on:
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
@@ -27,6 +28,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
@@ -42,6 +44,7 @@ on:
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
@@ -75,6 +78,7 @@ on:
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/routers/transcribe.py"
@@ -96,6 +100,7 @@ on:
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
       - "backend/ella/services/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/memory_reinterpretation.py"
@@ -111,6 +116,7 @@ on:
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_cloud_shadow.py"
@@ -198,6 +204,7 @@ jobs:
           database/ella_provisioning.py
           database/hermes_cloud_enrichment_outbox.py
           database/invitations.py
+          database/managed_cloud_consent.py
           database/runtime_targets.py
           database/voice_canary.py
           routers/transcribe.py
@@ -210,6 +217,7 @@ jobs:
           ella/routers/onboarding.py
           ella/routers/observer.py
           ella/services/ai_consent.py
+          ella/services/consent_authority.py
           ella/services/hermes_cloud.py
           ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_enrichment_outbox.py
@@ -236,17 +244,21 @@ jobs:
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/ella_provisioning.py database/invitations.py
+          database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
           ella/routers/auto_provision.py ella/routers/callbacks.py
-          ella/routers/chat.py ella/routers/guardian.py ella/routers/invites.py
+          ella/routers/ai_consent.py ella/routers/chat.py
+          ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_runtime.py
-          ella/services/invitation_authority.py ella/services/memory_reinterpretation.py
+          ella/services/consent_authority.py ella/services/invitation_authority.py
+          ella/services/memory_reinterpretation.py
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
           tests/unit/test_ella_callbacks_summary_update.py
+          tests/unit/test_ella_ai_consent.py
           tests/unit/test_ella_conversation_corrections.py
           tests/unit/test_ella_guardian_delivery.py
           tests/unit/test_ella_listen_runtime_gate.py
@@ -292,7 +304,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 333
+          test "$collected" -eq 349
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \

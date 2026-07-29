@@ -68,6 +68,8 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/011_create_invitation_redemption.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/012_create_account_profile_runtime_targets.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/013_create_managed_cloud_consent_authority.sql
 ```
 
 The migration is forward-only and idempotent. It adds:
@@ -81,6 +83,8 @@ The migration is forward-only and idempotent. It adds:
 - deduplicated anomaly alerts.
 - account/profile-owned runtime targets that keep retained Mini routing NULL and
   require exact ready Hermes Cloud binding/endpoint/credential/mode ownership.
+- a per-UID managed-cloud consent authority epoch that serializes consent
+  mutation through invitation entitlement publication and revocation quarantine.
 
 It does not seed codes, grants, or production users.
 

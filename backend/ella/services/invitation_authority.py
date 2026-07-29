@@ -47,6 +47,7 @@ def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
         account_uid=uid,
         profile_uid=uid,
         consent_receipt_id=authority.consent_receipt_id,
+        profile_binding_id=authority.profile_binding_id,
         policy_version=authority.lineage.policy_version,
         processor_set_hash=authority.lineage.processor_set_hash,
         scope_version=authority.lineage.scope_version,

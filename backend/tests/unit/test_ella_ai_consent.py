@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from datetime import datetime, timezone
 
@@ -7,7 +8,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from ella.routers import ai_consent
-from ella.services import ai_consent as consent
+from ella.services import ai_consent as consent, consent_authority
+from database import managed_cloud_consent
 
 
 def _submission(
@@ -835,10 +837,142 @@ def test_router_returns_conflict_for_stale_grant(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as error:
-        ai_consent.submit_ai_consent(request, uid="user-a")
+        asyncio.run(ai_consent.submit_ai_consent(request, uid="user-a"))
 
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "ai_consent_policy_mismatch"
+
+
+def test_managed_cloud_consent_orders_denial_before_firestore_and_grant_after(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    events = []
+    original_record = repository.record
+
+    def record(*args, **kwargs):
+        events.append(f"firestore:{args[2]['decision']}")
+        return original_record(*args, **kwargs)
+
+    async def deny(**kwargs):
+        events.append(f"postgres:{kwargs['decision']}")
+        return {"decision": kwargs["decision"]}
+
+    async def grant(**kwargs):
+        events.append("postgres:granted")
+        return {"decision": "granted"}
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(repository, "record", record)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_denial",
+        deny,
+    )
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_grant",
+        grant,
+    )
+
+    asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(request_id="request-grant-order"),
+            service=service,
+        )
+    )
+    asyncio.run(
+        consent_authority.submit_with_managed_cloud_authority(
+            uid=uid,
+            submission=_submission(
+                decision="revoked",
+                request_id="request-revoke-order",
+            ),
+            service=service,
+        )
+    )
+
+    assert events == [
+        "firestore:granted",
+        "postgres:granted",
+        "postgres:revoked",
+        "firestore:revoked",
+    ]
+
+
+def test_managed_cloud_denial_authority_error_prevents_firestore_mutation(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+    firestore_calls = 0
+    original_record = repository.record
+
+    def record(*args, **kwargs):
+        nonlocal firestore_calls
+        firestore_calls += 1
+        return original_record(*args, **kwargs)
+
+    async def unavailable(**_kwargs):
+        raise managed_cloud_consent.ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable")
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(repository, "record", record)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_denial",
+        unavailable,
+    )
+
+    with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(
+                    decision="revoked",
+                    request_id="request-revoke-unavailable",
+                ),
+                service=service,
+            )
+        )
+
+    assert firestore_calls == 0
+
+
+def test_managed_cloud_grant_authority_error_returns_failure_after_receipt(
+    monkeypatch,
+):
+    uid = "user-a"
+    repository = consent.InMemoryConsentRepository()
+    service = _service(repository)
+
+    async def unavailable(**_kwargs):
+        raise managed_cloud_consent.ManagedCloudAuthorityUnavailable("managed_cloud_authority_unavailable")
+
+    monkeypatch.setenv("ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS", uid)
+    monkeypatch.setattr(
+        consent_authority.managed_cloud_consent,
+        "synchronize_grant",
+        unavailable,
+    )
+
+    with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+        asyncio.run(
+            consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=_submission(request_id="request-grant-unavailable"),
+                service=service,
+            )
+        )
+
+    # The immutable receipt may exist, but no successful authority publication
+    # was acknowledged. The caller receives 503 and redemption still requires
+    # an exact PostgreSQL authority row behind its transaction lock.
+    assert service.status(uid)["authorized"] is True
 
 
 def test_submission_rejects_device_identifiers_and_unknown_metadata():

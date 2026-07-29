@@ -4,15 +4,19 @@ on:
   pull_request:
     paths:
       - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
@@ -22,15 +26,19 @@ on:
     branches: [main]
     paths:
       - "backend/database/invitations.py"
+      - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
       - "backend/database/voice_canary.py"
       - "backend/ella/routers/invites.py"
+      - "backend/ella/routers/ai_consent.py"
+      - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
+      - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
@@ -87,9 +95,12 @@ jobs:
         run: >-
           python -m py_compile
           database/invitations.py
+          database/managed_cloud_consent.py
           database/runtime_targets.py
           database/voice_canary.py
           ella/routers/invites.py
+          ella/routers/ai_consent.py
+          ella/services/consent_authority.py
           ella/services/invitation_authority.py
           ella/services/hermes_cloud_policy.py
 
@@ -103,7 +114,7 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 36
+          test "$collected" -eq 42
           pytest \
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_voice_canary.py \

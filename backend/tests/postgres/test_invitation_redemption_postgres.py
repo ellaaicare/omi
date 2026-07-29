@@ -9,13 +9,13 @@ from typing import Awaitable, Callable, Iterable
 import asyncpg
 import pytest
 
-from database import invitations, voice_canary
+from database import invitations, managed_cloud_consent, voice_canary
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
 from ella.services import ai_consent
-from ella.services import invitation_authority
+from ella.services import consent_authority, invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime
@@ -135,6 +135,10 @@ def _admission(uid: str) -> invitations.InvitationPilotAdmission:
         account_uid=uid,
         profile_uid=uid,
         consent_receipt_id=f"synthetic-receipt-{uid}",
+        profile_binding_id=ai_consent.derive_profile_binding_id(
+            account_uid=uid,
+            profile_uid=uid,
+        ),
         policy_version=ai_consent.CURRENT_POLICY_VERSION,
         processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
         scope_version=ai_consent.CURRENT_SCOPE_VERSION,
@@ -165,6 +169,7 @@ async def _run_with_database(
                 "010_add_cloud_profile_class.sql",
                 "011_create_invitation_redemption.sql",
                 "012_create_account_profile_runtime_targets.sql",
+                "013_create_managed_cloud_consent_authority.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -580,6 +585,339 @@ def test_consent_revocation_at_insert_boundary_rolls_back_all_redemption_mutatio
         async with pool.acquire() as conn:
             assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_audit_receipts") == 0
             assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_rate_limit_events") == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_revocation_started_after_revalidation_is_serialized_and_quarantines_grant(
+    monkeypatch,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-consent-serialized"
+        repository = ai_consent.InMemoryConsentRepository()
+        monkeypatch.setattr(ai_consent, "_repository", repository)
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
+        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+        _grant_v7(repository, uid)
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="DEFG-2345",
+            target_uids=[uid],
+        )
+        pilot_admission = invitation_authority.authorize_invitation_pilot(uid)
+        authority_locked = asyncio.Event()
+        resume_before_insert = asyncio.Event()
+        original_lock = managed_cloud_consent.lock_or_bootstrap_grant_on_connection
+
+        async def pause_after_revalidation(conn, *, grant):
+            epoch = await original_lock(conn, grant=grant)
+            authority_locked.set()
+            await resume_before_insert.wait()
+            return epoch
+
+        monkeypatch.setattr(
+            invitations.managed_cloud_consent,
+            "lock_or_bootstrap_grant_on_connection",
+            pause_after_revalidation,
+        )
+        redemption = asyncio.create_task(
+            invitations.redeem_invitation(
+                uid=uid,
+                code="DEFG-2345",
+                source_address="192.0.2.31",
+                app_build="synthetic-serialized-test",
+                config=CONFIG,
+                pilot_admission=pilot_admission,
+                pilot_admission_revalidator=invitation_authority.revalidate_invitation_pilot,
+            )
+        )
+        await asyncio.wait_for(authority_locked.wait(), timeout=5)
+        revocation_started = asyncio.Event()
+
+        async def revoke():
+            revocation_started.set()
+            return await managed_cloud_consent.synchronize_denial(
+                uid=uid,
+                decision="revoked",
+            )
+
+        revocation = asyncio.create_task(revoke())
+        await asyncio.wait_for(revocation_started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert not revocation.done()
+
+        resume_before_insert.set()
+        redeemed = await asyncio.wait_for(redemption, timeout=5)
+        revoked = await asyncio.wait_for(revocation, timeout=5)
+
+        assert redeemed["status"] == "invited"
+        assert revoked["decision"] == "revoked"
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT i.state, i.redemption_count, r.consumed_slots,
+                       e.status AS entitlement_status,
+                       e.consent_authority_epoch AS entitlement_epoch,
+                       a.authority_epoch AS current_epoch,
+                       a.decision AS authority_decision,
+                       d.redeemed_at, a.updated_at AS authority_updated_at
+                FROM ella_invitations i
+                JOIN ella_invitation_capacity_reservations r
+                  ON r.id = i.capacity_reservation_id
+                JOIN ella_invitation_redemptions d
+                  ON d.invitation_id = i.id
+                JOIN voice_entitlements e
+                  ON e.invitation_id = i.id
+                JOIN users u ON u.omi_uid = e.uid
+                JOIN ella_managed_cloud_consent_authority a
+                  ON a.user_id = u.id
+                WHERE i.id = $1::uuid
+                """,
+                invitation_id,
+            )
+            assert state["state"] == "redeemed"
+            assert state["redemption_count"] == 1
+            assert state["consumed_slots"] == 1
+            assert state["entitlement_status"] == "revoked"
+            assert state["authority_decision"] == "revoked"
+            assert state["entitlement_epoch"] != state["current_epoch"]
+            assert state["authority_updated_at"] >= state["redeemed_at"]
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM ella_runtime_targets t
+                    JOIN users u ON u.id = t.account_user_id
+                    WHERE u.omi_uid = $1
+                      AND t.provider = 'hermes_cloud'
+                      AND t.status = 'ready'
+                    """,
+                    uid,
+                )
+                == 0
+            )
+
+        # The invitation/capacity/redemption rows are historical proof of the
+        # ordering winner. The only durable entitlement is revoked under the
+        # newer epoch, so none of that state authorizes use after revocation.
+        assert reservation_id
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_postgres_revocation_epoch_wins_before_redemption_with_zero_mutation():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-consent-revocation-wins"
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="EFGH-2345",
+            target_uids=[uid],
+        )
+        await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+
+        with pytest.raises(invitations.InvitePilotGateDenied):
+            await _redeem(uid, "EFGH-2345")
+
+        await _assert_unconsumed(
+            pool,
+            invitation_id=invitation_id,
+            reservation_id=reservation_id,
+            uid=uid,
+        )
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_audit_receipts") == 0
+            assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_rate_limit_events") == 0
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT decision
+                    FROM ella_managed_cloud_consent_authority a
+                    JOIN users u ON u.id = a.user_id
+                    WHERE u.omi_uid = $1
+                    """,
+                    uid,
+                )
+                == "revoked"
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_idempotent_retry_after_revocation_returns_no_authority_or_new_mutation():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-idempotent-revoked"
+        invitation_id, reservation_id = await _seed_invitation(
+            pool,
+            code="GHJK-2345",
+            target_uids=[uid],
+        )
+        await _redeem(uid, "GHJK-2345")
+        await managed_cloud_consent.synchronize_denial(
+            uid=uid,
+            decision="revoked",
+        )
+
+        with pytest.raises(invitations.InvitePilotGateDenied):
+            await _redeem(uid, "GHJK-2345")
+
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT i.state, i.redemption_count, r.consumed_slots,
+                       e.status AS entitlement_status
+                FROM ella_invitations i
+                JOIN ella_invitation_capacity_reservations r
+                  ON r.id = i.capacity_reservation_id
+                JOIN voice_entitlements e
+                  ON e.invitation_id = i.id
+                WHERE i.id = $1::uuid
+                  AND r.id = $2::uuid
+                """,
+                invitation_id,
+                reservation_id,
+            )
+            assert dict(state) == {
+                "state": "redeemed",
+                "redemption_count": 1,
+                "consumed_slots": 1,
+                "entitlement_status": "revoked",
+            }
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM ella_invitation_redemptions
+                    WHERE invitation_id = $1::uuid
+                    """,
+                    invitation_id,
+                )
+                == 1
+            )
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                    WHERE invitation_id = $1::uuid
+                    """,
+                    invitation_id,
+                )
+                == 1
+            )
+            assert await conn.fetchval("SELECT COUNT(*) FROM ella_invitation_rate_limit_events") == 0
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_revocation_transaction_error_rolls_back_epoch_and_quarantine():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-consent-revoke-error"
+        await _seed_invitation(
+            pool,
+            code="FGHJ-2345",
+            target_uids=[uid],
+        )
+        await _redeem(uid, "FGHJ-2345")
+        async with pool.acquire() as conn:
+            before = await conn.fetchrow(
+                """
+                SELECT a.authority_epoch, a.revision, a.decision, e.status
+                FROM ella_managed_cloud_consent_authority a
+                JOIN users u ON u.id = a.user_id
+                JOIN voice_entitlements e ON e.uid = u.omi_uid
+                WHERE u.omi_uid = $1
+                """,
+                uid,
+            )
+            await conn.execute(
+                """
+                CREATE FUNCTION fail_consent_quarantine() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'synthetic quarantine failure';
+                END
+                $$;
+                CREATE TRIGGER fail_consent_quarantine
+                BEFORE UPDATE ON voice_entitlements
+                FOR EACH ROW
+                WHEN (NEW.status = 'revoked')
+                EXECUTE FUNCTION fail_consent_quarantine();
+                """
+            )
+
+        with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
+            await managed_cloud_consent.synchronize_denial(
+                uid=uid,
+                decision="revoked",
+            )
+
+        async with pool.acquire() as conn:
+            after = await conn.fetchrow(
+                """
+                SELECT a.authority_epoch, a.revision, a.decision, e.status
+                FROM ella_managed_cloud_consent_authority a
+                JOIN users u ON u.id = a.user_id
+                JOIN voice_entitlements e ON e.uid = u.omi_uid
+                WHERE u.omi_uid = $1
+                """,
+                uid,
+            )
+        assert dict(after) == dict(before)
+        assert after["decision"] == "granted"
+        assert after["status"] == "invited"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_firestore_error_after_postgres_revocation_remains_fail_closed(
+    monkeypatch,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-consent-firestore-error"
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, [uid])
+
+        class FailingConsentService:
+            @staticmethod
+            def submit(_uid, _submission):
+                raise RuntimeError("synthetic Firestore failure")
+
+        monkeypatch.setenv(
+            "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
+            uid,
+        )
+        with pytest.raises(RuntimeError, match="synthetic Firestore failure"):
+            await consent_authority.submit_with_managed_cloud_authority(
+                uid=uid,
+                submission=ai_consent.ConsentSubmission(
+                    decision="revoked",
+                    policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                    processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                    request_id=f"request-revoke-{uid}",
+                    app_version="synthetic",
+                    build_number="1",
+                    locale="en",
+                    scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                    scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+                ),
+                service=FailingConsentService(),
+            )
+
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT decision
+                    FROM ella_managed_cloud_consent_authority a
+                    JOIN users u ON u.id = a.user_id
+                    WHERE u.omi_uid = $1
+                    """,
+                    uid,
+                )
+                == "revoked"
+            )
 
     asyncio.run(_run_with_database(scenario))
 

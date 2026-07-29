@@ -12,6 +12,7 @@ CLOUD_RUNTIME_TARGET_MODES = (
     "hermes-cloud-voice",
     "hermes-cloud-transcript",
     "hermes-cloud-guardian",
+    "hermes-cloud-photon",
 )
 
 

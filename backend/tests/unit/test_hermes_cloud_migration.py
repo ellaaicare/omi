@@ -74,6 +74,7 @@ def test_runtime_authority_migrations_and_documented_psql_are_fail_fast_atomic()
     for filename in (
         "011_create_invitation_redemption.sql",
         "012_create_account_profile_runtime_targets.sql",
+        "013_create_managed_cloud_consent_authority.sql",
     ):
         migration = (backend / "migrations" / filename).read_text(encoding="utf-8").strip()
         statements = [
@@ -88,8 +89,12 @@ def test_runtime_authority_migrations_and_documented_psql_are_fail_fast_atomic()
         for line in runbook.splitlines()
         if line.strip().startswith("psql ")
         and "--file=" in line
-        and ("011_create_invitation_redemption.sql" in line or "012_create_account_profile_runtime_targets.sql" in line)
+        and (
+            "011_create_invitation_redemption.sql" in line
+            or "012_create_account_profile_runtime_targets.sql" in line
+            or "013_create_managed_cloud_consent_authority.sql" in line
+        )
     ]
-    assert len(documented_commands) == 2
+    assert len(documented_commands) == 3
     assert all("-X" in command for command in documented_commands)
     assert all("--set=ON_ERROR_STOP=1" in command for command in documented_commands)

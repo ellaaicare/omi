@@ -128,6 +128,7 @@ async def _run_with_database(scenario):
                 "010_add_cloud_profile_class.sql",
                 "011_create_invitation_redemption.sql",
                 "012_create_account_profile_runtime_targets.sql",
+                "013_create_managed_cloud_consent_authority.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -289,7 +290,8 @@ async def _seed_claim(
                 $1, 'active', ARRAY['hermes_cloud'], ARRAY[$2],
                 ARRAY[
                     'hermes-cloud-chat', 'hermes-cloud-voice',
-                    'hermes-cloud-transcript', 'hermes-cloud-guardian'
+                    'hermes-cloud-transcript', 'hermes-cloud-guardian',
+                    'hermes-cloud-photon'
                 ],
                 $3, $4, $5, $6, $7
             )
@@ -552,12 +554,25 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets():
         assert [row["mode"] for row in targets] == [
             "hermes-cloud-chat",
             "hermes-cloud-guardian",
+            "hermes-cloud-photon",
             "hermes-cloud-transcript",
             "hermes-cloud-voice",
         ]
         assert {row["candidate_runtime_instance_id"] for row in targets} == {instance}
         assert {row["endpoint_ref"] for row in targets} == {"env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC"}
         assert {row["credential_ref"] for row in targets} == {"env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC"}
+        photon = await repository.resolve_active_runtime(
+            uid,
+            target_mode="hermes-cloud-photon",
+            required_provider="hermes_cloud",
+            authority_lineage=LINEAGE,
+            model=model,
+        )
+        assert photon["runtime_target_mode"] == "hermes-cloud-photon"
+        assert photon["runtime_target_id"]
+        assert photon["runtime_instance_id"] == instance
+        assert photon["target_endpoint_ref"] == photon["api_base_url_ref"]
+        assert photon["target_credential_ref"] == photon["api_key_ref"]
 
     asyncio.run(_run_with_database(scenario))
 
@@ -867,7 +882,7 @@ def test_post_publication_rollback_revokes_cloud_targets_and_preserves_retained_
                     """
                 )
             )
-        assert [dict(row) for row in target_states] == [{"status": "revoked", "count": 4}]
+        assert [dict(row) for row in target_states] == [{"status": "revoked", "count": 5}]
         assert retained == {
             "provider": "hermes",
             "status": "active",

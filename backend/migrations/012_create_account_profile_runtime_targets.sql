@@ -70,7 +70,8 @@ BEGIN
                         'hermes-cloud-chat',
                         'hermes-cloud-voice',
                         'hermes-cloud-transcript',
-                        'hermes-cloud-guardian'
+                        'hermes-cloud-guardian',
+                        'hermes-cloud-photon'
                     )
                 )
             ) NOT VALID;
@@ -170,7 +171,8 @@ CREATE TABLE IF NOT EXISTS ella_runtime_targets (
                 'hermes-cloud-chat',
                 'hermes-cloud-voice',
                 'hermes-cloud-transcript',
-                'hermes-cloud-guardian'
+                'hermes-cloud-guardian',
+                'hermes-cloud-photon'
             )
         )
     )

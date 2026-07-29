@@ -13,6 +13,9 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
 - OMI transcript enrichment is admitted through the published
   `hermes-cloud-transcript` target. There is no separate enrichment target and
   no default-mode fallback.
+- Photon is admitted only through the published `hermes-cloud-photon` target.
+  Preflight and inbound handling must resolve that exact mode; Photon cannot
+  borrow chat, voice, transcript, Guardian, retained Mini, or Plato authority.
 - Immediately before every protected Hermes Cloud POST, the sender must
   re-resolve that exact target and revalidate current entitlement
   status/revision/expiry, kill switches, binding health, consent lineage,
@@ -28,6 +31,14 @@ Issues: `ellaaicare/ella-ai#1124`, `ellaaicare/ella-ai#1126`,
 - `ai-data-processors-v7` is immutable historical consent. Cloud target traffic
   requires `ai-data-processors-v8`, `managed-cloud-internal-pilot-v2`, and the
   current processor/scope hashes.
+- Managed-cloud consent mutation and invitation redemption share the same
+  PostgreSQL per-UID advisory lock and authority row. Redemption locks the exact
+  granted epoch through entitlement insertion. Decline/revocation advances the
+  epoch and atomically revokes the entitlement/targets and quarantines the Cloud
+  binding before Firestore is updated. Thus redemption either commits before
+  revocation and is immediately quarantined, or revocation wins and redemption
+  performs no durable invite/capacity/redemption mutation. PostgreSQL or
+  Firestore partial failure always leaves Cloud authority unusable.
 
 ## Flags that must stay off for source deploy
 
@@ -59,9 +70,10 @@ psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/009
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/010_add_cloud_profile_class.sql
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/011_create_invitation_redemption.sql
 psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/012_create_account_profile_runtime_targets.sql
+psql -X --set=ON_ERROR_STOP=1 "$ELLA_POSTGRES_DSN" --file=backend/migrations/013_create_managed_cloud_consent_authority.sql
 ```
 
-Migrations 011 and 012 contain their own `BEGIN`/`COMMIT` boundary. The
+Migrations 011, 012, and 013 contain their own `BEGIN`/`COMMIT` boundary. The
 `ON_ERROR_STOP` setting is mandatory: any statement failure must exit nonzero
 and roll the whole migration back.
 
@@ -87,7 +99,7 @@ SELECT conname FROM pg_constraint WHERE conname IN (
    capacity, and voice canary admission before `claim_cloud_pool_binding`.
 5. Register only Honcho-free Hermes Cloud pool candidates.
 6. Promote from `shadow` only through revision-checked CAS. Promotion creates
-   ready targets for chat, voice, transcript, and Guardian modes.
+   ready targets for chat, voice, transcript, Guardian, and Photon modes.
 
 Rollback is source/config only while flags remain off. If a claim reaches
 `claiming`, rollback quarantines the candidate and records a content-free receipt;
