@@ -64,6 +64,34 @@ void main() {
     expect(find.text('Not now').hitTestable(), findsOneWidget);
   });
 
+  testWidgets('non-English internal pilot cannot open the English-only consent disclosure', (tester) async {
+    bool? result = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('es'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await AiConsentSheet.show(context, pilotLocaleRestricted: true);
+              },
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    expect(result, isNull);
+    expect(find.byType(AiConsentSheet), findsNothing);
+    expect(find.text('Allow and continue'), findsNothing);
+  });
+
   testWidgets('names managed-cloud recipients, data, purpose, and narrow scope before acceptance', (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();
@@ -81,8 +109,10 @@ void main() {
     expect(disclosure, contains('Nous Research / Hermes Cloud'));
     expect(disclosure, contains('what you say or type'));
     expect(disclosure, contains('OpenAI'));
-    expect(disclosure, contains('Honcho / Plastic Labs'));
-    expect(disclosure, contains('remember useful details'));
+    expect(disclosure, contains('Nous Research / Hermes Cloud profile memory'));
+    expect(disclosure, contains('selected Ella profile'));
+    expect(disclosure, contains('same account and profile'));
+    expect(disclosure, isNot(contains('Honcho / Plastic Labs')));
     expect(disclosure, contains('Photon'));
     expect(disclosure, contains('one person you choose for testing'));
     expect(disclosure, contains('cannot message everyone'));

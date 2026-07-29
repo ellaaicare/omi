@@ -7,6 +7,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 
 typedef AiConsentPrompt = Future<bool> Function();
 typedef AiConsentProtectedAction = Future<void> Function();
@@ -51,6 +52,10 @@ class AiConsentCoordinator {
   static final AiConsentActionGate _gate = AiConsentActionGate();
 
   static Future<bool> ensure(BuildContext context) async {
+    if (isEllaInternalPilotEnabled &&
+        !isEllaInternalPilotLocaleSupported(Localizations.localeOf(context).languageCode)) {
+      return false;
+    }
     final preferences = SharedPreferencesUtil();
     if (preferences.aiConsentAccepted) return true;
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';

@@ -4,10 +4,12 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_legal_links.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class AiConsentSheet extends StatefulWidget {
-  static final Uri privacyPolicyUri = Uri.parse('https://ella-ai-care.com/privacy');
+  static final Uri privacyPolicyUri = EllaLegalLinks.privacy;
 
   const AiConsentSheet({super.key, this.onAccept, this.onDecline, this.onRequestDeletion, this.reviewMode = false});
 
@@ -22,7 +24,11 @@ class AiConsentSheet extends StatefulWidget {
     Future<bool> Function()? onDecline,
     Future<void> Function()? onRequestDeletion,
     bool reviewMode = false,
+    bool pilotLocaleRestricted = isEllaInternalPilotEnabled,
   }) {
+    if (pilotLocaleRestricted && !isEllaInternalPilotLocaleSupported(Localizations.localeOf(context).languageCode)) {
+      return Future<bool?>.value();
+    }
     return showModalBottomSheet<bool>(
       context: context,
       isDismissible: false,
@@ -172,8 +178,8 @@ class _AiConsentSheetState extends State<AiConsentSheet> {
                     const SizedBox(height: 10),
                     _processorDisclosure(
                       icon: Icons.psychology_alt_outlined,
-                      title: context.l10n.aiConsentHonchoCloudTitle,
-                      body: context.l10n.aiConsentHonchoCloudBody,
+                      title: context.l10n.aiConsentHermesProfileMemoryTitle,
+                      body: context.l10n.aiConsentHermesProfileMemoryBody,
                     ),
                     const SizedBox(height: 10),
                     _processorDisclosure(

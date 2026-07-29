@@ -20,6 +20,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
@@ -31,6 +32,7 @@ import 'package:omi/ella/widgets/memory_correction_receipt.dart';
 import 'package:omi/ella/widgets/v2v_fallback_dialog.dart';
 import 'package:omi/ella/widgets/voice_modal_scaffold.dart';
 import 'package:omi/providers/capture_provider.dart';
+import 'package:omi/providers/ella_entitlement_provider.dart';
 import 'package:omi/providers/home_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/utils/enums.dart';
@@ -40,6 +42,15 @@ import 'package:omi/utils/l10n_extensions.dart';
 ///
 /// Flow: Tap orb → always-listen via on-device speech recognition →
 /// auto-detect silence → send text to Ella chat → TTS → play audio → repeat.
+@immutable
+class EllaVoiceDemoState {
+  const EllaVoiceDemoState({required this.quota, this.policyReason, this.technicalFailure = false});
+
+  final EllaQuota quota;
+  final EllaVoicePolicyReason? policyReason;
+  final bool technicalFailure;
+}
+
 class EllaVoiceChatPage extends StatefulWidget {
   const EllaVoiceChatPage({
     super.key,
@@ -47,15 +58,20 @@ class EllaVoiceChatPage extends StatefulWidget {
     this.memoryTitle,
     this.onMemorySessionEnded,
     this.modalPresentation = false,
+    this.demoState,
   });
 
   final V2VSessionScope? sessionScope;
   final String? memoryTitle;
   final ValueChanged<MemoryReceiptDiscoveryRequest>? onMemorySessionEnded;
   final bool modalPresentation;
+  final EllaVoiceDemoState? demoState;
 
   @visibleForTesting
   static bool shouldInjectVoiceTurns(V2VSessionScope? sessionScope) => sessionScope == null;
+
+  @visibleForTesting
+  static bool shouldInitializeSpeech(EllaVoiceDemoState? demoState) => demoState == null;
 
   @visibleForTesting
   static V2VSessionScope refreshedMemoryScope(V2VSessionScope current, String? activeSummaryVersionId) =>
@@ -113,6 +129,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   Timer? _memoryReceiptPollTimer;
   int _memoryReceiptPollAttempts = 0;
   String? _memorySessionNotificationKey;
+  EllaVoicePolicyReason? _policyReason;
+  DateTime? _policyResetsAt;
+  DateTime? _voiceSessionStartedAt;
+  EllaQuota? _liveQuota;
+  bool _authoritativeSoftWarning = false;
+  Timer? _quotaClock;
+  bool _endingForPolicy = false;
 
   /// Regex to strip emojis from text before sending to TTS
   static final _emojiRegex = RegExp(
@@ -146,6 +169,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void initState() {
     super.initState();
     _sessionScope = widget.sessionScope;
+    _policyReason = widget.demoState?.policyReason;
     // Voice mode auto-starts when the Voice tab becomes active (see didChangeDependencies)
     _playerSub = _audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed && _orbState == VoiceOrbState.speaking) {
@@ -159,8 +183,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
       }
     });
-    _initSpeech();
-    if (widget.sessionScope != null) {
+    if (EllaVoiceChatPage.shouldInitializeSpeech(widget.demoState)) {
+      _initSpeech();
+    }
+    if (widget.sessionScope != null && widget.demoState == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         Future.delayed(const Duration(milliseconds: 300), () {
           if (mounted && !_voiceModeActive) _activateSelectedVoice();
@@ -172,6 +198,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _applyDemoStatus();
     if (widget.sessionScope != null) return;
     // Auto-start listening when user navigates TO the Voice tab (index 2)
     try {
@@ -196,6 +223,28 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _wasOnVoiceTab = isOnVoiceTab;
     } catch (_) {
       // HomeProvider not available
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant EllaVoiceChatPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.demoState != widget.demoState) {
+      _policyReason = widget.demoState?.policyReason;
+      _policyResetsAt = null;
+      _applyDemoStatus();
+    }
+  }
+
+  void _applyDemoStatus() {
+    final demoState = widget.demoState;
+    if (demoState == null) return;
+    if (demoState.technicalFailure) {
+      _statusText = context.l10n.ellaVoiceTechnicalFailure;
+    } else if (demoState.policyReason != null) {
+      _statusText = _policyStatus(context, demoState.policyReason!);
+    } else {
+      _statusText = context.l10n.ellaVoiceDemoPreview;
     }
   }
 
@@ -235,6 +284,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _voiceStartupGuard.dispose();
     _voiceModeActive = false;
     _typewriterTimer?.cancel();
+    _quotaClock?.cancel();
     _memoryReceiptPollTimer?.cancel();
     _playerSub?.cancel();
     _audioPlayer.dispose();
@@ -276,7 +326,17 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _activateSelectedVoice() async {
+    if (widget.demoState != null) return;
     if (!await _ensureVoiceConsent() || !mounted) return;
+
+    final quota = isEllaEntitlementGateEnabled ? context.read<EllaEntitlementProvider>().quota : null;
+    if (quota?.isHardStop == true) {
+      final reason = quota!.dailyFraction >= 1 ? EllaVoicePolicyReason.quotaDaily : EllaVoicePolicyReason.quotaMonthly;
+      _showPolicyStop(reason, resetsAt: quota.resetsAt);
+      return;
+    }
+    _policyReason = null;
+    _policyResetsAt = null;
 
     final provider = _effectiveVoiceProvider;
     if (_sessionScope != null && !V2VClient.isMemoryScopedProvider(provider)) {
@@ -314,6 +374,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _orbState = VoiceOrbState.processing;
       _statusText = context.l10n.voiceV2vConnecting(providerName);
       _audioLevel = 0.0;
+      _policyReason = null;
+      _policyResetsAt = null;
+      _liveQuota = null;
+      _authoritativeSoftWarning = false;
     });
     return startupGeneration;
   }
@@ -582,12 +646,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     return true;
   }
 
-  Future<void> _startV2V(
-    String provider, {
-    required int startupGeneration,
-    bool allowScopeRefresh = true,
-  }) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted || !_isCurrentV2VStartup(startupGeneration)) return;
+  Future<void> _startV2V(String provider, {required int startupGeneration, bool allowScopeRefresh = true}) async {
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: SharedPreferencesUtil().uid);
+    bool hasCurrentStartupAuthority() => _isCurrentV2VStartup(startupGeneration) && authority?.isCurrent() == true;
+    if (!hasCurrentStartupAuthority()) return;
     provider = V2VClient.normalizeProvider(provider);
     final providerName = localizedV2VProviderName(context, provider);
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
@@ -597,7 +659,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (captureProvider.recordingState == RecordingState.record) {
       debugPrint('[VoiceChat] Pausing capture recording for V2V');
       await captureProvider.stopStreamRecording();
-      if (!_isCurrentV2VStartup(startupGeneration)) return;
+      if (!hasCurrentStartupAuthority()) return;
     }
 
     setState(() {
@@ -610,7 +672,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     try {
       await _audioPlayer.stop();
     } catch (_) {}
-    if (!_isCurrentV2VStartup(startupGeneration)) return;
+    if (!hasCurrentStartupAuthority()) return;
 
     late final V2VClient client;
     client = V2VClient(
@@ -620,7 +682,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       },
       onConnectionChanged: (connected) {
         if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) return;
-        if (!connected && _isV2VMode) {
+        if (!connected && _isV2VMode && !_endingForPolicy) {
           final endedSessionId = _activeSessionId;
           debugPrint('[VoiceChat] V2V disconnected unexpectedly');
           _voiceStartupGuard.cancel();
@@ -636,7 +698,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
       },
     );
-    if (!_isCurrentV2VStartup(startupGeneration)) {
+    if (!hasCurrentStartupAuthority()) {
       await client.disconnect();
       return;
     }
@@ -645,7 +707,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final receipt = await client.connect(
       provider: provider,
       sessionScope: _sessionScope,
-      shouldContinue: () => _isCurrentV2VStartup(startupGeneration) && identical(_v2vClient, client),
+      shouldContinue: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
     );
     if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
       await client.disconnect();
@@ -658,11 +720,12 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       await client.disconnect();
       if (!_isCurrentV2VStartup(startupGeneration)) return;
       if (allowScopeRefresh && receipt.shouldRefreshMemoryScope && await _refreshMemoryScope(startupGeneration)) {
-        await _startV2V(
-          provider,
-          startupGeneration: startupGeneration,
-          allowScopeRefresh: false,
-        );
+        await _startV2V(provider, startupGeneration: startupGeneration, allowScopeRefresh: false);
+        return;
+      }
+      if (receipt.isPolicyDenial) {
+        _voiceStartupGuard.complete(startupGeneration);
+        _showPolicyStop(receipt.policyReason!);
         return;
       }
       _voiceStartupGuard.complete(startupGeneration);
@@ -714,6 +777,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _memoryReceiptPollTimer?.cancel();
     _activeV2VProvider = providerName;
     _usingElevenLabsFallback = false;
+    _voiceSessionStartedAt = DateTime.now();
+    _startQuotaClock();
     setState(() {
       _memoryCorrectionReceipt = null;
       _orbState = VoiceOrbState.listening;
@@ -733,6 +798,10 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _notifyMemorySessionEnded(endedSessionId);
     _activeSessionId = '';
     _activeV2VProvider = '';
+    _voiceSessionStartedAt = null;
+    _liveQuota = null;
+    _authoritativeSoftWarning = false;
+    _quotaClock?.cancel();
     _pauseVoiceMode(cancelStartup: false);
   }
 
@@ -848,6 +917,16 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           _handleMemoryReinterpretation(memoryReinterpretation);
         }
         break;
+      case 'quota_state':
+        if (event.policyReason != null) {
+          _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
+          break;
+        }
+        setState(() {
+          _liveQuota = event.quota ?? _liveQuota;
+          _authoritativeSoftWarning = event.quotaState == 'soft_warning';
+        });
+        break;
       case 'v2v_debug':
         // Debug info from V2V client — show on screen temporarily
         setState(() {
@@ -858,9 +937,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         // The connect caller owns the explicit success/failure UI.
         break;
       case 'error':
+        if (event.policyReason != null) {
+          _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
+          break;
+        }
         debugPrint('[VoiceChat] V2V error: ${event.text}');
         setState(() {
-          _statusText = 'Error: ${event.text ?? "unknown"}';
+          _statusText = context.l10n.ellaVoiceTechnicalFailure;
         });
         break;
       case 'consent_authority_lost':
@@ -880,11 +963,57 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         break;
       case 'session_end':
         debugPrint('[VoiceChat] V2V session ended: ${event.text}');
-        if (_isV2VMode) {
+        if (event.policyReason != null) {
+          _showPolicyStop(event.policyReason!, resetsAt: event.resetsAt);
+        } else if (_isV2VMode) {
           _stopV2V();
         }
         break;
     }
+  }
+
+  void _showPolicyStop(EllaVoicePolicyReason reason, {DateTime? resetsAt}) {
+    _endingForPolicy = true;
+    _voiceStartupGuard.cancel();
+    final client = _v2vClient;
+    _v2vClient = null;
+    _voiceModeActive = false;
+    _isV2VMode = false;
+    _activeSessionId = '';
+    _activeV2VProvider = '';
+    _voiceSessionStartedAt = null;
+    _authoritativeSoftWarning = false;
+    _quotaClock?.cancel();
+    if (client != null) unawaited(client.disconnect());
+    if (mounted) {
+      setState(() {
+        _policyReason = reason;
+        _policyResetsAt = resetsAt;
+        _orbState = VoiceOrbState.idle;
+        _audioLevel = 0;
+        _statusText = _policyStatus(context, reason);
+      });
+    }
+    _endingForPolicy = false;
+  }
+
+  void _startQuotaClock() {
+    _quotaClock?.cancel();
+    _quotaClock = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  EllaQuota? _visibleQuota(BuildContext context) {
+    if (widget.demoState != null) return widget.demoState!.quota;
+    if (_liveQuota != null) return _liveQuota;
+    if (!isEllaEntitlementGateEnabled) return null;
+    return context.watch<EllaEntitlementProvider>().quota;
+  }
+
+  int _remainingVoiceSeconds(EllaQuota quota) {
+    final elapsed = _voiceSessionStartedAt == null ? 0 : DateTime.now().difference(_voiceSessionStartedAt!).inSeconds;
+    return (quota.voiceRemainingSeconds - elapsed).clamp(0, quota.voiceRemainingSeconds);
   }
 
   void _handleMemoryReinterpretation(MemoryReinterpretationEvent event) {
@@ -1174,6 +1303,8 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final quota = _visibleQuota(context);
+    final policyReason = _policyReason;
 
     final body = SafeArea(
       child: Column(
@@ -1210,6 +1341,22 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           Center(
             child: EllaVoiceOrb(state: _orbState, audioLevel: _audioLevel, onTap: _onOrbTap),
           ),
+          if (quota != null && policyReason == null) ...[
+            const SizedBox(height: 10),
+            Text(
+              context.l10n.ellaVoiceTimeRemaining(_compactVoiceTime(_remainingVoiceSeconds(quota))),
+              style: EllaTextStyles.caption.copyWith(color: EllaColors.inkSoft),
+              textAlign: TextAlign.center,
+            ),
+          ],
+          if ((_authoritativeSoftWarning || quota?.isSoftWarning == true) && policyReason == null) ...[
+            const SizedBox(height: 12),
+            _VoiceLimitNotice(text: context.l10n.ellaVoiceSoftWarning),
+          ],
+          if (policyReason != null) ...[
+            const SizedBox(height: 12),
+            _VoiceLimitNotice(text: _policyBody(context, policyReason, resetsAt: _policyResetsAt)),
+          ],
           const SizedBox(height: 24),
           Center(
             child: Container(
@@ -1223,16 +1370,18 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (_orbState == VoiceOrbState.listening) ...[const EllaBreathingDot(), const SizedBox(width: 10)],
-                  Text(
-                    _orbState == VoiceOrbState.listening
-                        ? _usingElevenLabsFallback
-                            ? context.l10n.voiceElevenLabsFallbackActive
-                            : _isV2VMode && _activeV2VProvider.isNotEmpty
-                                ? context.l10n.voiceV2vActive(_activeV2VProvider)
-                                : context.l10n.voiceListening
-                        : _statusText,
-                    style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
-                    textAlign: TextAlign.center,
+                  Flexible(
+                    child: Text(
+                      _orbState == VoiceOrbState.listening
+                          ? _usingElevenLabsFallback
+                              ? context.l10n.voiceElevenLabsFallbackActive
+                              : _isV2VMode && _activeV2VProvider.isNotEmpty
+                                  ? context.l10n.voiceV2vActive(_activeV2VProvider)
+                                  : context.l10n.voiceListening
+                          : _statusText,
+                      style: EllaTextStyles.body.copyWith(fontWeight: FontWeight.w600),
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                 ],
               ),
@@ -1243,37 +1392,40 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
             MemoryCorrectionReceiptChip(receipt: _memoryCorrectionReceipt!, onReview: _reviewMemoryCorrection),
           ],
           const SizedBox(height: 16),
-          SizedBox(
-            height: 100,
-            width: double.infinity,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
-                  ? const SizedBox.shrink()
-                  : SingleChildScrollView(
-                      controller: _transcriptScrollController,
-                      child: Column(
-                        children: [
-                          if (_lastUserText.isNotEmpty)
-                            Opacity(
-                              opacity: 0.6,
-                              child: Text(
-                                _lastUserText,
-                                style: EllaTextStyles.secondary,
+          Flexible(
+            flex: 2,
+            child: SizedBox(
+              height: 100,
+              width: double.infinity,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: _lastUserText.isEmpty && _ellaDisplayText.isEmpty && _currentWords.isEmpty
+                    ? const SizedBox.shrink()
+                    : SingleChildScrollView(
+                        controller: _transcriptScrollController,
+                        child: Column(
+                          children: [
+                            if (_lastUserText.isNotEmpty)
+                              Opacity(
+                                opacity: 0.6,
+                                child: Text(
+                                  _lastUserText,
+                                  style: EllaTextStyles.secondary,
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
+                              const SizedBox(height: 8),
+                            if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
+                              Text(
+                                _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
+                                style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
                                 textAlign: TextAlign.center,
                               ),
-                            ),
-                          if (_lastUserText.isNotEmpty && (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty))
-                            const SizedBox(height: 8),
-                          if (_ellaDisplayText.isNotEmpty || _currentWords.isNotEmpty)
-                            Text(
-                              _ellaDisplayText.isNotEmpty ? _ellaDisplayText : _currentWords,
-                              style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
-                              textAlign: TextAlign.center,
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
+              ),
             ),
           ),
           const Spacer(flex: 3),
@@ -1292,7 +1444,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(
-        automaticallyImplyLeading: widget.sessionScope != null,
+        automaticallyImplyLeading: widget.sessionScope != null || widget.demoState != null,
         backgroundColor: EllaColors.bgPrimary,
         title: Text(
           context.l10n.voiceChatTitle,
@@ -1302,6 +1454,62 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         centerTitle: true,
       ),
       body: body,
+    );
+  }
+}
+
+String _compactVoiceTime(int seconds) {
+  if (seconds < 60) return '<1 min';
+  final minutes = (seconds / 60).ceil();
+  if (minutes < 60) return '$minutes min';
+  final hours = minutes ~/ 60;
+  final remainder = minutes % 60;
+  return remainder == 0 ? '$hours hr' : '$hours hr $remainder min';
+}
+
+String _policyStatus(BuildContext context, EllaVoicePolicyReason reason) => switch (reason) {
+      EllaVoicePolicyReason.quotaDaily => context.l10n.ellaVoiceDailyRestTitle,
+      EllaVoicePolicyReason.quotaMonthly => context.l10n.ellaVoiceMonthlyRestTitle,
+      EllaVoicePolicyReason.concurrent => context.l10n.ellaVoiceConcurrentTitle,
+      EllaVoicePolicyReason.suspended => context.l10n.ellaVoicePausedTitle,
+      EllaVoicePolicyReason.sessionMax => context.l10n.ellaVoiceSessionCompleteTitle,
+    };
+
+String _policyBody(BuildContext context, EllaVoicePolicyReason reason, {DateTime? resetsAt}) => switch (reason) {
+      EllaVoicePolicyReason.quotaDaily => context.l10n.ellaVoiceDailyRestBody,
+      EllaVoicePolicyReason.quotaMonthly => context.l10n.ellaVoiceMonthlyRestBody,
+      EllaVoicePolicyReason.concurrent => context.l10n.ellaVoiceConcurrentBody,
+      EllaVoicePolicyReason.suspended => context.l10n.ellaVoicePausedBody,
+      EllaVoicePolicyReason.sessionMax => context.l10n.ellaVoiceSessionCompleteBody,
+    };
+
+class _VoiceLimitNotice extends StatelessWidget {
+  const _VoiceLimitNotice({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+        decoration: BoxDecoration(
+          color: EllaColors.card,
+          borderRadius: BorderRadius.circular(EllaSizes.radiusMedium),
+          border: Border.all(color: EllaColors.cardEdge),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.schedule_rounded, color: EllaColors.tealDeep, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(text, style: EllaTextStyles.caption.copyWith(color: EllaColors.ink)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

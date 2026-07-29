@@ -44,6 +44,10 @@ void main() {
     });
     expect(payload.containsKey('uid'), isFalse);
     expect(payload.containsKey('email'), isFalse);
+    expect(payload.containsKey('profile_id'), isFalse);
+    expect(payload.containsKey('runtime_provider'), isFalse);
+    expect(payload.containsKey('runtime_mode'), isFalse);
+    expect(payload.containsKey('endpoint'), isFalse);
     expect(payload.toString(), isNot(contains('token')));
   });
 
@@ -70,6 +74,35 @@ void main() {
     expect(ready.isOperational, isTrue);
     expect(ready.bindingRevision, 2);
     expect(incomplete.isOperational, isFalse);
+  });
+
+  test('public route receipt distinguishes an isolated cloud pilot from retained compatibility', () {
+    final cloud = EllaProvisioningReceipt.fromJson({
+      'state': 'ready',
+      'binding_state': 'active',
+      'binding_revision': 4,
+      'effective_policy_revision': 'cloud-policy-v1',
+      'runtime_provider': 'hermes_cloud',
+      'runtime_status': 'internal_canary',
+    });
+    final retained = EllaProvisioningReceipt.fromJson({
+      'state': 'ready',
+      'binding_state': 'active',
+      'binding_revision': 1,
+      'effective_policy_revision': 'retained-compatibility-v1',
+      'compatibility_mode': 'retained',
+    });
+
+    expect(cloud.isOperational, isTrue);
+    expect(cloud.isCloudRuntime, isTrue);
+    expect(cloud.runtimeStatus, 'internal_canary');
+    expect(cloud.compatibilityMode, isEmpty);
+    expect(cloud.effectiveVoiceMode, isEmpty);
+
+    expect(retained.isOperational, isTrue);
+    expect(retained.isRetainedCompatibility, isTrue);
+    expect(retained.runtimeProvider, isEmpty);
+    expect(retained.effectiveVoiceMode, isEmpty);
   });
 
   test('status request uses the same canonical schema as ensure', () {
@@ -365,7 +398,7 @@ void main() {
     provider.dispose();
   });
 
-  test('AI consent becomes authority only after an exact server v6 managed-cloud grant', () async {
+  test('AI consent becomes authority only after an exact server v8 managed-cloud grant', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(policy: AiConsentPolicy.bundled, submitResponse: _consentStatus());
     final service = EllaAiConsentService(
@@ -422,7 +455,7 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentReceiptId, isEmpty);
   });
 
-  test('decline submits only v6 consent metadata and grants no data authority', () async {
+  test('decline submits only v8 consent metadata and grants no data authority', () async {
     SharedPreferencesUtil().uid = 'uid-a';
     final transport = _FakeConsentTransport(
       policy: AiConsentPolicy.bundled,
@@ -625,7 +658,7 @@ void main() {
     expect(preferences.aiConsentReceiptId, isEmpty);
   });
 
-  test('missing server decision timestamp never becomes v6 authority', () async {
+  test('missing server decision timestamp never becomes v8 authority', () async {
     final transport = _FakeConsentTransport(
       policy: AiConsentPolicy.bundled,
       submitResponse: _consentStatus(includeServerDecidedAt: false),
@@ -642,7 +675,7 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentAccepted, isFalse);
   });
 
-  test('malformed v6 server status parses safely and cannot become authority', () {
+  test('malformed v8 server status parses safely and cannot become authority', () {
     final status = AiConsentStatus.fromJson({
       'subject_uid': 42,
       'authorized': 'true',

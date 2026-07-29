@@ -7,6 +7,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ai_consent_policy.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 enum AiConsentDecision {
@@ -199,17 +200,23 @@ class EllaAiConsentService {
     String Function()? requestIdFactory,
     String Function()? clientVersionFactory,
     String Function()? localeFactory,
+    bool pilotLocaleRestricted = isEllaInternalPilotEnabled,
+    String Function()? appLocaleFactory,
   })  : _transport = transport ?? const EllaAiConsentHttpTransport(),
         _preferences = preferences ?? SharedPreferencesUtil(),
         _requestIdFactory = requestIdFactory ?? (() => const Uuid().v4()),
         _clientVersionFactory = clientVersionFactory ?? (() => PlatformManager.instance.appVersion),
-        _localeFactory = localeFactory ?? (() => PlatformDispatcher.instance.locale.toLanguageTag());
+        _localeFactory = localeFactory ?? (() => PlatformDispatcher.instance.locale.toLanguageTag()),
+        _pilotLocaleRestricted = pilotLocaleRestricted,
+        _appLocaleFactory = appLocaleFactory ?? (() => SharedPreferencesUtil().getString('app_locale'));
 
   final EllaAiConsentTransport _transport;
   final SharedPreferencesUtil _preferences;
   final String Function() _requestIdFactory;
   final String Function() _clientVersionFactory;
   final String Function() _localeFactory;
+  final bool _pilotLocaleRestricted;
+  final String Function() _appLocaleFactory;
 
   Future<bool> refreshServerAuthority({required String uid}) async {
     final authority = _captureAuthority(uid);
@@ -324,7 +331,11 @@ class EllaAiConsentService {
   }
 
   _AiConsentAuthority? _captureAuthority(String uid) {
-    if (uid.isEmpty || _preferences.uid != uid) return null;
+    if (!canUseEllaInternalPilotLocale(_appLocaleFactory(), pilotEnabled: _pilotLocaleRestricted) ||
+        uid.isEmpty ||
+        _preferences.uid != uid) {
+      return null;
+    }
     return _AiConsentAuthority(
       generation: _preferences.aiConsentAuthorityGeneration,
       uid: uid,
@@ -334,7 +345,8 @@ class EllaAiConsentService {
   }
 
   bool _isCurrentAuthority(_AiConsentAuthority authority) {
-    return _preferences.aiConsentAuthorityGeneration == authority.generation &&
+    return canUseEllaInternalPilotLocale(_appLocaleFactory(), pilotEnabled: _pilotLocaleRestricted) &&
+        _preferences.aiConsentAuthorityGeneration == authority.generation &&
         _preferences.uid == authority.uid &&
         _preferences.verifiedPersonaId == authority.verifiedPersonaId &&
         _preferences.aiConsentProfileBindingId == authority.profileBindingId;

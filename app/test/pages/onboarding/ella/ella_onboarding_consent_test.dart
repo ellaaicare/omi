@@ -4,6 +4,36 @@ import 'package:omi/pages/onboarding/ella/ella_onboarding.dart';
 
 void main() {
   group('Ella onboarding voice consent policy', () {
+    test('Hermes provisioning never starts directly while entitlement verification owns the gate', () {
+      expect(
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: true,
+          hasCurrentConsent: true,
+        ),
+        isFalse,
+      );
+      expect(
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: false,
+          hasCurrentConsent: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('Hermes provisioning never starts without current account consent', () {
+      expect(
+        EllaOnboarding.shouldStartProvisioningDirectly(
+          provisioningGateEnabled: true,
+          entitlementGateEnabled: false,
+          hasCurrentConsent: false,
+        ),
+        isFalse,
+      );
+    });
+
     test('new user sees the current voice consent during onboarding', () {
       expect(
         EllaOnboarding.shouldPresentVoiceConsent(

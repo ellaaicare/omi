@@ -56,6 +56,9 @@ class EllaProvisioningReceipt {
     this.effectivePolicyRevision = '',
     this.effectiveVoiceMode = '',
     this.effectiveModel = '',
+    this.runtimeProvider = '',
+    this.runtimeStatus = '',
+    this.compatibilityMode = '',
     this.errorCode = '',
   });
 
@@ -71,6 +74,9 @@ class EllaProvisioningReceipt {
   final String effectivePolicyRevision;
   final String effectiveVoiceMode;
   final String effectiveModel;
+  final String runtimeProvider;
+  final String runtimeStatus;
+  final String compatibilityMode;
   final String errorCode;
 
   bool get isOperational =>
@@ -78,6 +84,10 @@ class EllaProvisioningReceipt {
       bindingState.toLowerCase() == 'active' &&
       bindingRevision > 0 &&
       effectivePolicyRevision.isNotEmpty;
+
+  bool get isRetainedCompatibility => compatibilityMode == 'retained';
+
+  bool get isCloudRuntime => runtimeProvider == 'hermes_cloud';
 
   Map<String, dynamic> toCacheJson() => {
         'state': state.name,
@@ -92,6 +102,9 @@ class EllaProvisioningReceipt {
         'effective_policy_revision': effectivePolicyRevision,
         'effective_voice_mode': effectiveVoiceMode,
         'effective_model': effectiveModel,
+        'runtime_provider': runtimeProvider,
+        'runtime_status': runtimeStatus,
+        'compatibility_mode': compatibilityMode,
         'error_code': errorCode,
       };
 
@@ -143,6 +156,9 @@ class EllaProvisioningReceipt {
       effectiveModel: _stringValue(policy, const ['model', 'chat_model', 'chatModel']) ??
           _stringValue(receipt, const ['effective_model', 'model', 'chat_model', 'chatModel']) ??
           '',
+      runtimeProvider: _stringValue(receipt, const ['runtime_provider', 'runtimeProvider']) ?? '',
+      runtimeStatus: _stringValue(receipt, const ['runtime_status', 'runtimeStatus']) ?? '',
+      compatibilityMode: _stringValue(receipt, const ['compatibility_mode', 'compatibilityMode']) ?? '',
       errorCode: _stringValue(error, const ['code']) ??
           _stringValue(detail, const ['code']) ??
           (errorValue is String ? errorValue : null) ??

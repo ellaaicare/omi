@@ -6,6 +6,7 @@ import 'package:app_links/app_links.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_invite_link_controller.dart';
 import 'package:omi/desktop/desktop_app.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
@@ -30,6 +31,7 @@ import 'package:omi/services/todoist_service.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/log_redaction.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 class AppShell extends StatefulWidget {
@@ -46,16 +48,22 @@ class _AppShellState extends State<AppShell> {
   Future<void> initDeepLinks() async {
     _appLinks = AppLinks();
 
-    // Handle links
+    final initialLink = await _appLinks.getInitialLink();
+    if (initialLink != null) openAppLink(initialLink);
+
     _linkSubscription = _appLinks.uriLinkStream.distinct().listen((uri) {
-      Logger.debug('onAppLink: $uri');
+      Logger.debug('onAppLink: ${redactUrlForLogs(uri.toString())}');
       openAppLink(uri);
     });
   }
 
   void openAppLink(Uri uri) async {
+    if (EllaInviteLinkController.instance.accept(uri)) {
+      Logger.debug('Ella invite link accepted');
+      return;
+    }
     if (uri.pathSegments.isEmpty) {
-      Logger.debug('No path segments in URI: $uri');
+      Logger.debug('No path segments in URI: ${redactUrlForLogs(uri.toString())}');
       return;
     }
 
@@ -86,7 +94,7 @@ class _AppShellState extends State<AppShell> {
       // Handle Todoist OAuth callback
       final error = uri.queryParameters['error'];
       if (error != null) {
-        Logger.debug('Todoist OAuth error: $error');
+        Logger.debug('Todoist OAuth callback reported an error');
         AppSnackbar.showSnackbarError(context.l10n.failedToConnectTodoist);
         return;
       }
@@ -102,7 +110,7 @@ class _AppShellState extends State<AppShell> {
       // Handle Asana OAuth callback
       final error = uri.queryParameters['error'];
       if (error != null) {
-        Logger.debug('Asana OAuth error: $error');
+        Logger.debug('Asana OAuth callback reported an error');
         AppSnackbar.showSnackbarError(context.l10n.failedToConnectAsana);
         return;
       }
@@ -119,7 +127,7 @@ class _AppShellState extends State<AppShell> {
       // Handle Google Tasks OAuth callback
       final error = uri.queryParameters['error'];
       if (error != null) {
-        Logger.debug('Google Tasks OAuth error: $error');
+        Logger.debug('Google Tasks OAuth callback reported an error');
         AppSnackbar.showSnackbarError(context.l10n.failedToConnectGoogleTasks);
         return;
       }
@@ -135,7 +143,7 @@ class _AppShellState extends State<AppShell> {
       // Handle ClickUp OAuth callback
       final error = uri.queryParameters['error'];
       if (error != null) {
-        Logger.debug('ClickUp OAuth error: $error');
+        Logger.debug('ClickUp OAuth callback reported an error');
         AppSnackbar.showSnackbarError(context.l10n.failedToConnectClickUp);
         return;
       }
@@ -151,7 +159,7 @@ class _AppShellState extends State<AppShell> {
     } else if (uri.host == 'google_calendar' && uri.pathSegments.isNotEmpty && uri.pathSegments.first == 'callback') {
       await _handleOAuthCallback(uri, 'Google', 'Google Calendar', _handleGoogleCalendarCallback);
     } else {
-      Logger.debug('Unknown link: $uri');
+      Logger.debug('Unknown link: ${redactUrlForLogs(uri.toString())}');
     }
   }
 
@@ -163,7 +171,7 @@ class _AppShellState extends State<AppShell> {
   ) async {
     final error = uri.queryParameters['error'];
     if (error != null) {
-      Logger.debug('$oauthLogName OAuth error: $error');
+      Logger.debug('$oauthLogName OAuth callback reported an error');
       AppSnackbar.showSnackbarError(context.l10n.failedToConnectServiceWithError(errorDisplayName, error));
       return;
     }

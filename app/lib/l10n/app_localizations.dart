@@ -16560,7 +16560,7 @@ abstract class AppLocalizations {
   /// No description provided for @aiConsentNotAllowedStatus.
   ///
   /// In en, this message translates to:
-  /// **'Cloud AI permission is off — v7 permission required'**
+  /// **'Cloud AI permission is off — review the updated choices to continue'**
   String get aiConsentNotAllowedStatus;
 
   /// No description provided for @aiConsentRevokeSyncFailed.
@@ -16635,17 +16635,17 @@ abstract class AppLocalizations {
   /// **'Helps Ella prepare an answer. It may receive what you say or type and the details needed for your request through Ella’s secure connection.'**
   String get aiConsentOpenAiManagedBody;
 
-  /// Legal recipient and product name for managed derived memory
+  /// Legal recipient and product name for built-in managed profile memory
   ///
   /// In en, this message translates to:
-  /// **'Honcho / Plastic Labs'**
-  String get aiConsentHonchoCloudTitle;
+  /// **'Nous Research / Hermes Cloud profile memory'**
+  String get aiConsentHermesProfileMemoryTitle;
 
-  /// Data categories and purpose for Honcho / Plastic Labs
+  /// Data categories and purpose for built-in Hermes Cloud profile memory
   ///
   /// In en, this message translates to:
-  /// **'Helps Ella remember useful details for your account. It may receive details from your conversations and information you choose to save. Ella keeps its own main copy of your information.'**
-  String get aiConsentHonchoCloudBody;
+  /// **'Keeps helpful details inside your selected Ella profile so Ella can remember them for that same account and profile. It may receive what you say or type, details you choose to save, and basic information that connects them to that profile.'**
+  String get aiConsentHermesProfileMemoryBody;
 
   /// Legal recipient for the narrow messaging channel
   ///
@@ -16664,6 +16664,420 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'This permission belongs only to the signed-in account and selected profile. Photon can message only one person you choose for testing. It cannot message everyone, contact family support, or accept files. If these company, profile, or messaging choices change, Ella will ask again.'**
   String get aiConsentManagedCloudScope;
+
+  /// No description provided for @ellaAccessCheckingTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking your Ella access'**
+  String get ellaAccessCheckingTitle;
+
+  /// No description provided for @ellaAccessCheckingBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This should only take a moment.'**
+  String get ellaAccessCheckingBody;
+
+  /// No description provided for @ellaAccessPausedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice access is paused'**
+  String get ellaAccessPausedTitle;
+
+  /// No description provided for @ellaAccessPausedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your other Ella features are still here. Try again later or contact the person who arranged your access.'**
+  String get ellaAccessPausedBody;
+
+  /// No description provided for @ellaAccessUnavailableTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not check access just now'**
+  String get ellaAccessUnavailableTitle;
+
+  /// No description provided for @ellaAccessUnavailableBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Your connection may need a moment. Try again when you are ready.'**
+  String get ellaAccessUnavailableBody;
+
+  /// No description provided for @ellaAccessNeedsCheckTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your invitation needs a quick check'**
+  String get ellaAccessNeedsCheckTitle;
+
+  /// No description provided for @ellaAccessNeedsCheckBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Please email our team and include the support code below.'**
+  String get ellaAccessNeedsCheckBody;
+
+  /// No description provided for @ellaWaitlistTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'You’re on the list'**
+  String get ellaWaitlistTitle;
+
+  /// No description provided for @ellaWaitlistBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Thanks for joining us. Ella is opening to a small group at a time. We’ll let you know when a place is ready.'**
+  String get ellaWaitlistBody;
+
+  /// No description provided for @ellaEnterInviteCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter an invite code'**
+  String get ellaEnterInviteCode;
+
+  /// No description provided for @ellaInviteEntryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Use your Ella invite'**
+  String get ellaInviteEntryTitle;
+
+  /// No description provided for @ellaInviteEntryBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter the code from your invitation. You can also paste it or open the invitation link.'**
+  String get ellaInviteEntryBody;
+
+  /// No description provided for @ellaInviteReadyTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Your invite is ready'**
+  String get ellaInviteReadyTitle;
+
+  /// No description provided for @ellaInviteReadyBody.
+  ///
+  /// In en, this message translates to:
+  /// **'We filled in the code from your invitation. Check it, then confirm to continue.'**
+  String get ellaInviteReadyBody;
+
+  /// No description provided for @ellaInviteCodeFieldLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite code'**
+  String get ellaInviteCodeFieldLabel;
+
+  /// No description provided for @ellaInviteCodeHint.
+  ///
+  /// In en, this message translates to:
+  /// **'ELLA7K9Q'**
+  String get ellaInviteCodeHint;
+
+  /// No description provided for @ellaInviteCodeHelp.
+  ///
+  /// In en, this message translates to:
+  /// **'Capital letters and numbers are easiest to read. Spaces and dashes are handled for you.'**
+  String get ellaInviteCodeHelp;
+
+  /// No description provided for @ellaPasteInviteCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Paste code'**
+  String get ellaPasteInviteCode;
+
+  /// No description provided for @ellaConfirmInviteCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm invite'**
+  String get ellaConfirmInviteCode;
+
+  /// No description provided for @ellaInviteInvalidBody.
+  ///
+  /// In en, this message translates to:
+  /// **'The code we received does not match an invite. Check the letters and numbers, or paste it from your invitation.'**
+  String get ellaInviteInvalidBody;
+
+  /// No description provided for @ellaInviteExpiredBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This invitation has reached its end date. The person who shared it can send a new one.'**
+  String get ellaInviteExpiredBody;
+
+  /// No description provided for @ellaInviteCapacityBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is welcoming a few people at a time. You’re on the list, and we’ll let you know when a place opens.'**
+  String get ellaInviteCapacityBody;
+
+  /// No description provided for @ellaInviteRateLimitedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Let’s pause for a moment before trying that code again.'**
+  String get ellaInviteRateLimitedBody;
+
+  /// Invite redemption backoff using the authoritative server retry time
+  ///
+  /// In en, this message translates to:
+  /// **'Let’s pause for a moment. Try again in {seconds} seconds.'**
+  String ellaInviteRateLimitedWithRetryBody(int seconds);
+
+  /// No description provided for @ellaProvisioningTimeoutTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella needs another moment'**
+  String get ellaProvisioningTimeoutTitle;
+
+  /// No description provided for @ellaProvisioningTimeoutBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Setup is taking longer than usual. Nothing you entered was lost. Try again when you are ready.'**
+  String get ellaProvisioningTimeoutBody;
+
+  /// No description provided for @ellaProvisioningConnectionTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Setup is waiting for a connection'**
+  String get ellaProvisioningConnectionTitle;
+
+  /// No description provided for @ellaProvisioningConnectionBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella will continue when the connection is ready. You can also try again now.'**
+  String get ellaProvisioningConnectionBody;
+
+  /// No description provided for @ellaProvisioningPausedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Setup is paused'**
+  String get ellaProvisioningPausedTitle;
+
+  /// No description provided for @ellaProvisioningPausedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not finish setup yet. Try again if the button is available, or use the support code below.'**
+  String get ellaProvisioningPausedBody;
+
+  /// Small voice-surface estimate of remaining allowed voice time
+  ///
+  /// In en, this message translates to:
+  /// **'About {time} left'**
+  String ellaVoiceTimeRemaining(String time);
+
+  /// No description provided for @ellaVoiceSoftWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'You are nearing today’s voice time. Ella can finish this conversation, then may need a short rest.'**
+  String get ellaVoiceSoftWarning;
+
+  /// No description provided for @ellaVoiceDailyRestTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'A short rest for Ella'**
+  String get ellaVoiceDailyRestTitle;
+
+  /// No description provided for @ellaVoiceDailyRestBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella needs a short rest — you can talk again tomorrow.'**
+  String get ellaVoiceDailyRestBody;
+
+  /// No description provided for @ellaVoiceMonthlyRestTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Monthly voice time used'**
+  String get ellaVoiceMonthlyRestTitle;
+
+  /// No description provided for @ellaVoiceMonthlyRestBody.
+  ///
+  /// In en, this message translates to:
+  /// **'This month’s voice time is complete. Ella can talk again after the monthly reset.'**
+  String get ellaVoiceMonthlyRestBody;
+
+  /// No description provided for @ellaVoiceConcurrentTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is already in a conversation'**
+  String get ellaVoiceConcurrentTitle;
+
+  /// No description provided for @ellaVoiceConcurrentBody.
+  ///
+  /// In en, this message translates to:
+  /// **'End the other voice conversation, then try again here.'**
+  String get ellaVoiceConcurrentBody;
+
+  /// No description provided for @ellaVoicePausedTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice conversations are paused'**
+  String get ellaVoicePausedTitle;
+
+  /// No description provided for @ellaVoicePausedBody.
+  ///
+  /// In en, this message translates to:
+  /// **'You can still use Ella’s other features. Try again later or contact the person who arranged your access.'**
+  String get ellaVoicePausedBody;
+
+  /// No description provided for @ellaVoiceSessionCompleteTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'This conversation is complete'**
+  String get ellaVoiceSessionCompleteTitle;
+
+  /// No description provided for @ellaVoiceSessionCompleteBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella has reached the conversation-time limit. Start a new voice conversation whenever you are ready.'**
+  String get ellaVoiceSessionCompleteBody;
+
+  /// No description provided for @ellaVoiceTechnicalFailure.
+  ///
+  /// In en, this message translates to:
+  /// **'The voice connection needs a moment. Tap to try again.'**
+  String get ellaVoiceTechnicalFailure;
+
+  /// No description provided for @ellaDemoAccessTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Access and voice-limit states'**
+  String get ellaDemoAccessTitle;
+
+  /// No description provided for @ellaDemoAccessBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Open every invite, waitlist, setup, quota, and connection state without calling a live service.'**
+  String get ellaDemoAccessBody;
+
+  /// No description provided for @ellaDemoAccessEntryBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Review all new invite and quota screens offline.'**
+  String get ellaDemoAccessEntryBody;
+
+  /// No description provided for @ellaDemoActiveTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Access confirmed — onboarding continues'**
+  String get ellaDemoActiveTitle;
+
+  /// No description provided for @ellaDemoStateWaitlist.
+  ///
+  /// In en, this message translates to:
+  /// **'Waitlist — no entitlement'**
+  String get ellaDemoStateWaitlist;
+
+  /// No description provided for @ellaDemoStateInviteEntry.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — code entry'**
+  String get ellaDemoStateInviteEntry;
+
+  /// No description provided for @ellaDemoStateInviteLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — link or QR prefilled'**
+  String get ellaDemoStateInviteLink;
+
+  /// No description provided for @ellaDemoStateActive.
+  ///
+  /// In en, this message translates to:
+  /// **'Entitled — continue'**
+  String get ellaDemoStateActive;
+
+  /// No description provided for @ellaDemoStateInvalidCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — code not recognized'**
+  String get ellaDemoStateInvalidCode;
+
+  /// No description provided for @ellaDemoStateExpiredCode.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — end date reached'**
+  String get ellaDemoStateExpiredCode;
+
+  /// No description provided for @ellaDemoStateCapacity.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — capacity reached'**
+  String get ellaDemoStateCapacity;
+
+  /// No description provided for @ellaDemoStateRateLimited.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite — retry pause'**
+  String get ellaDemoStateRateLimited;
+
+  /// No description provided for @ellaDemoStateSuspended.
+  ///
+  /// In en, this message translates to:
+  /// **'Entitlement — suspended'**
+  String get ellaDemoStateSuspended;
+
+  /// No description provided for @ellaDemoStateRevoked.
+  ///
+  /// In en, this message translates to:
+  /// **'Entitlement — revoked'**
+  String get ellaDemoStateRevoked;
+
+  /// No description provided for @ellaDemoStateExpiredEntitlement.
+  ///
+  /// In en, this message translates to:
+  /// **'Entitlement — expired'**
+  String get ellaDemoStateExpiredEntitlement;
+
+  /// No description provided for @ellaDemoStateProvisioningTimeout.
+  ///
+  /// In en, this message translates to:
+  /// **'Setup — taking longer'**
+  String get ellaDemoStateProvisioningTimeout;
+
+  /// No description provided for @ellaDemoStateQuotaWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — gentle 80% warning'**
+  String get ellaDemoStateQuotaWarning;
+
+  /// No description provided for @ellaDemoStateQuotaDaily.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — daily rest'**
+  String get ellaDemoStateQuotaDaily;
+
+  /// No description provided for @ellaDemoStateQuotaMonthly.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — monthly reset'**
+  String get ellaDemoStateQuotaMonthly;
+
+  /// No description provided for @ellaDemoStateQuotaConcurrent.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — another conversation active'**
+  String get ellaDemoStateQuotaConcurrent;
+
+  /// No description provided for @ellaDemoStateQuotaSuspended.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — access paused'**
+  String get ellaDemoStateQuotaSuspended;
+
+  /// No description provided for @ellaDemoStateSessionMaximum.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — conversation-time limit'**
+  String get ellaDemoStateSessionMaximum;
+
+  /// No description provided for @ellaDemoStateTechnicalFailure.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice — technical connection issue'**
+  String get ellaDemoStateTechnicalFailure;
+
+  /// No description provided for @todayPhoneOnly.
+  ///
+  /// In en, this message translates to:
+  /// **'Phone only'**
+  String get todayPhoneOnly;
+
+  /// No description provided for @ellaVoiceDemoPreview.
+  ///
+  /// In en, this message translates to:
+  /// **'Demo preview — voice is not active'**
+  String get ellaVoiceDemoPreview;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

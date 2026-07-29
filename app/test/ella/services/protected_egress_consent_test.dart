@@ -35,14 +35,18 @@ void main() {
     expect(await reProcessConversationServer('conversation-a'), isNull);
   });
 
-  test('a cached v5 receipt sends no protected data under managed-cloud v6', () async {
+  test('a cached v7 receipt sends no protected data under managed-cloud v8', () async {
     SharedPreferences.setMockInitialValues({
       'uid': 'uid-a',
       'aiConsentAccepted': true,
-      'aiConsentContractVersion': 'ai-data-processors-v5',
-      'aiConsentProcessorSetHash': 'sha256:9c2529babbd6241f20242cf0836baf7e1899d05bb3d945a0d38a357113d4cbc4',
-      'aiConsentReceiptId': 'aicr_v5-receipt',
+      'aiConsentContractVersion': 'ai-data-processors-v7',
+      'aiConsentProcessorSetHash': 'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296',
+      'aiConsentReceiptId': 'aicr_v7-receipt',
       'aiConsentReceiptUid': 'uid-a',
+      'aiConsentProfileBindingId': 'profile-binding-a',
+      'aiConsentScopeVersion': 'managed-cloud-internal-pilot-v1',
+      'aiConsentScopeHash': 'sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30',
+      'aiConsentServerDecidedAt': '2026-07-27T00:00:00Z',
     });
     await SharedPreferencesUtil.init();
 
@@ -73,7 +77,7 @@ void main() {
 
     preferences.declineAiConsent();
 
-    final file = File('${Directory.systemTemp.path}/revoked-v6-audio');
+    final file = File('${Directory.systemTemp.path}/revoked-v8-audio');
     expect(await sendEllaMessageStream('must not leave device').toList(), isEmpty);
     expect(await sendVoiceMessageStreamServer([file]).toList(), isEmpty);
     expect(await updateUserGeolocation(geolocation: Geolocation(latitude: 1, longitude: 2)), isFalse);

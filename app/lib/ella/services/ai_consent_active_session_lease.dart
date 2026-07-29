@@ -14,6 +14,71 @@ class AiConsentAuthorityLostException implements Exception {
   String toString() => 'AI processing permission could not be verified';
 }
 
+@immutable
+class AiConsentAuthoritySnapshot {
+  const AiConsentAuthoritySnapshot({
+    required this.generation,
+    required this.uid,
+    required this.verifiedPersonaId,
+    required this.profileBindingId,
+    required this.receiptId,
+    required this.policyVersion,
+    required this.processorSetHash,
+    required this.scopeVersion,
+    required this.scopeHash,
+  });
+
+  final int generation;
+  final String uid;
+  final String? verifiedPersonaId;
+  final String profileBindingId;
+  final String receiptId;
+  final String policyVersion;
+  final String processorSetHash;
+  final String scopeVersion;
+  final String scopeHash;
+
+  static AiConsentAuthoritySnapshot? capture({
+    SharedPreferencesUtil? preferences,
+    String? expectedUid,
+  }) {
+    final current = preferences ?? SharedPreferencesUtil();
+    final uid = current.uid;
+    final verifiedPersonaId = current.verifiedPersonaId?.trim();
+    if (!current.aiConsentAccepted ||
+        uid.isEmpty ||
+        (expectedUid != null && uid != expectedUid) ||
+        current.aiConsentProfileBindingId.isEmpty) {
+      return null;
+    }
+    return AiConsentAuthoritySnapshot(
+      generation: current.aiConsentAuthorityGeneration,
+      uid: uid,
+      verifiedPersonaId: verifiedPersonaId,
+      profileBindingId: current.aiConsentProfileBindingId,
+      receiptId: current.aiConsentReceiptId,
+      policyVersion: current.aiConsentContractVersion,
+      processorSetHash: current.aiConsentProcessorSetHash,
+      scopeVersion: current.aiConsentScopeVersion,
+      scopeHash: current.aiConsentScopeHash,
+    );
+  }
+
+  bool isCurrent({SharedPreferencesUtil? preferences}) {
+    final current = preferences ?? SharedPreferencesUtil();
+    return current.aiConsentAccepted &&
+        current.aiConsentAuthorityGeneration == generation &&
+        current.uid == uid &&
+        current.verifiedPersonaId?.trim() == verifiedPersonaId &&
+        current.aiConsentProfileBindingId == profileBindingId &&
+        current.aiConsentReceiptId == receiptId &&
+        current.aiConsentContractVersion == policyVersion &&
+        current.aiConsentProcessorSetHash == processorSetHash &&
+        current.aiConsentScopeVersion == scopeVersion &&
+        current.aiConsentScopeHash == scopeHash;
+  }
+}
+
 /// Keeps server-authoritative AI consent fresh while personal data is actively
 /// being streamed. Refreshing one minute before the five-minute TTL leaves room
 /// for the bounded backend request without extending stale authority.
@@ -21,9 +86,11 @@ class AiConsentActiveSessionLease {
   AiConsentActiveSessionLease({
     required this.uid,
     required FutureOr<void> Function() onAuthorityLost,
+    AiConsentAuthoritySnapshot? authority,
     Future<bool> Function(String uid)? refreshAuthority,
     SharedPreferencesUtil? preferences,
   })  : _onAuthorityLost = onAuthorityLost,
+        _authority = authority,
         _refreshAuthority = refreshAuthority ?? ((uid) => EllaAiConsentService().refreshServerAuthority(uid: uid)),
         _preferences = preferences ?? SharedPreferencesUtil();
 
@@ -34,6 +101,7 @@ class AiConsentActiveSessionLease {
   final FutureOr<void> Function() _onAuthorityLost;
   final Future<bool> Function(String uid) _refreshAuthority;
   final SharedPreferencesUtil _preferences;
+  AiConsentAuthoritySnapshot? _authority;
 
   Timer? _refreshTimer;
   bool _active = false;
@@ -44,8 +112,9 @@ class AiConsentActiveSessionLease {
 
   void start() {
     if (_active) return;
+    _authority ??= AiConsentAuthoritySnapshot.capture(preferences: _preferences, expectedUid: uid);
     _active = true;
-    if (uid.isEmpty || _preferences.uid != uid || !_preferences.aiConsentAccepted) {
+    if (_authority == null || !_authority!.isCurrent(preferences: _preferences)) {
       unawaited(_loseAuthority('invalid_start_authority'));
       return;
     }
@@ -93,7 +162,7 @@ class AiConsentActiveSessionLease {
     }
 
     if (!_active) return;
-    if (!authorized || _preferences.uid != uid || !_preferences.aiConsentAccepted) {
+    if (!authorized || _authority == null || !_authority!.isCurrent(preferences: _preferences)) {
       await _loseAuthority('refresh_denied_or_unavailable');
       return;
     }

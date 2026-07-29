@@ -17,6 +17,8 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/geolocation.dart';
 import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
+import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
@@ -57,12 +59,19 @@ class HomePageWrapper extends StatefulWidget {
   final bool provisioningGateStartOnMount;
 
   const HomePageWrapper({super.key, this.navigateToRoute, this.autoMessage, this.provisioningGateStartOnMount = true})
-      : _provisioningVerified = false;
+      : _entitlementVerified = false,
+        _provisioningVerified = false;
+
+  const HomePageWrapper._entitled({this.navigateToRoute, this.autoMessage, this.provisioningGateStartOnMount = true})
+      : _entitlementVerified = true,
+        _provisioningVerified = false;
 
   const HomePageWrapper._provisioned({this.navigateToRoute, this.autoMessage})
       : provisioningGateStartOnMount = true,
+        _entitlementVerified = true,
         _provisioningVerified = true;
 
+  final bool _entitlementVerified;
   final bool _provisioningVerified;
 
   @override
@@ -75,7 +84,7 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
 
   @override
   void initState() {
-    if (!_requiresProvisioningGate) {
+    if (!_requiresEntitlementGate && !_requiresProvisioningGate) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (mounted) {
           context.read<DeviceProvider>().periodicConnect('coming from HomePageWrapper', boundDeviceOnly: true);
@@ -97,10 +106,20 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     super.initState();
   }
 
+  bool get _requiresEntitlementGate => isEllaEntitlementGateEnabled && !widget._entitlementVerified;
   bool get _requiresProvisioningGate => isHermesProvisioningGateEnabled && !widget._provisioningVerified;
 
   @override
   Widget build(BuildContext context) {
+    if (_requiresEntitlementGate) {
+      return EllaEntitlementGatePage(
+        readyChild: HomePageWrapper._entitled(
+          navigateToRoute: _navigateToRoute,
+          autoMessage: _autoMessage,
+          provisioningGateStartOnMount: widget.provisioningGateStartOnMount,
+        ),
+      );
+    }
     if (_requiresProvisioningGate) {
       return EllaProvisioningGatePage(
         startOnMount: widget.provisioningGateStartOnMount,

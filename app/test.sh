@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
+flutter_test() {
+  local args=(test)
+  if [[ "${ELLA_TEST_NO_PUB:-false}" == "true" ]]; then
+    args+=(--no-pub)
+  fi
+  flutter "${args[@]}" "$@"
+}
+
 missing_files=()
 required_files=(
   "lib/firebase_options_dev.dart"
@@ -40,9 +48,16 @@ if [[ ${#missing_files[@]} -gt 0 ]]; then
   echo "USE_WEB_AUTH=true" >> .dev.env
   echo "USE_AUTH_CUSTOM_TOKEN=true" >> .dev.env
 
-  flutter pub get
+  if [[ "${ELLA_TEST_NO_PUB:-false}" == "true" ]]; then
+    [[ -f .dart_tool/package_config.json ]] || {
+      echo "ELLA_TEST_NO_PUB requires a completed flutter pub get." >&2
+      exit 1
+    }
+  else
+    flutter pub get
+  fi
   dart run build_runner build --delete-conflicting-outputs
 fi
 
-flutter test test/providers/capture_provider_test.dart
-flutter test test/widgets/transcript_test.dart
+flutter_test test/providers/capture_provider_test.dart
+flutter_test test/widgets/transcript_test.dart

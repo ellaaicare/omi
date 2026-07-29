@@ -1,4 +1,4 @@
-# Ella Managed-Cloud Consent v6
+# Ella Managed-Cloud Consent v8
 
 Status: draft for legal, backend, security, and App Review review. Do not publish
 or copy into App Store Connect until the deployed processor inventory and vendor
@@ -10,24 +10,24 @@ Issue: https://github.com/ellaaicare/ella-ai/issues/1123
 
 The iOS client accepts only all of the following values:
 
-- Policy version: `ai-data-processors-v6`
+- Policy version: `ai-data-processors-v8`
 - Processor-set hash:
-  `sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296`
-- Scope version: `managed-cloud-internal-pilot-v1`
+  `sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d`
+- Scope version: `managed-cloud-internal-pilot-v2`
 - Scope hash:
-  `sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30`
+  `sha256:2878e09958faadb799af99a8975736ce63010dd1d682cf944f60743a4faf92e5`
 - Opaque server receipt prefix: `aicr_`
 - A non-empty opaque `profile_binding_id`
 - A parseable server-owned `server_decided_at`
 - The authenticated Firebase UID as `subject_uid`; the client never submits a UID
 
-The v6 policy response must add `scope_version`, `scope_hash`, and
-`canonical_scope` to the v5 policy response. Grant, decline, and revoke
+The v8 policy response includes `scope_version`, `scope_hash`, and
+`canonical_scope`. Grant, decline, and revoke
 submissions add `scope_version` and `scope_hash`. Authenticated status and
 receipt responses add those fields plus `profile_binding_id` and
 `server_decided_at`.
 
-Any missing field, v5 response, changed processor hash, changed runtime/model/
+Any missing field, v7 response, changed processor hash, changed runtime/model/
 memory/Photon scope, changed profile binding, changed account, expired
 verification, revoked decision, or unavailable authority fails closed. A changed
 scope requires a new explicit grant; it is not a silent refresh.
@@ -37,8 +37,8 @@ scope requires a new explicit grant; it is not a silent refresh.
 | Legal recipient | Purpose | Data categories |
 | --- | --- | --- |
 | Nous Research / Hermes Cloud | Managed Ella agent runtime and session continuity | Prompt policy, messages, voice/transcript text, selected first-party context, session metadata, and model/tool usage |
+| Nous Research / Hermes Cloud | Built-in profile-scoped memory and context | Profile-bound conversation text, saved facts, derived memory context, and session identifiers used only for the same account/profile scope |
 | OpenAI | Model processing through the approved `openai-codex/gpt-5.6-terra` OAuth-backed route | Model input and output required to generate the response |
-| Honcho Cloud | Profile-isolated derived memory and recall | Consented derived memory, selected context, and memory relationships for the bound profile |
 | Photon | Narrow test/shared-line iMessage delivery | Message content and messaging identifiers for one explicitly allowed test contact |
 
 The first-party Ella Cloudflare/Vultr control plane remains the authority for
@@ -46,11 +46,14 @@ identity, consent, entitlement, canonical events, corrections, usage, and kill
 switches. It derives the profile binding and never returns vendor credentials to
 iOS.
 
-The bundled v6 manifest also retains every processor still routable under v5:
+The bundled v8 manifest also retains processors still routable on existing
+features:
 Deepgram, Soniox, Speechmatics, Google Firebase, Ella self-hosted Hermes/Honcho/
 voice synthesis, OpenRouter, Google Gemini, OpenAI live voice, Groq, xAI Grok,
-Inworld AI, and ElevenLabs. A release inventory must remove any route that is no
-longer reachable rather than over-disclose it as active.
+Inworld AI, and ElevenLabs. Ella self-hosted Honcho belongs only to the retained
+Plato/Mini path; Honcho Cloud is not a Hermes Cloud route processor. A release
+inventory must remove any route that is no longer reachable rather than
+over-disclose it as active.
 
 Photon scope is restricted to the shared test line and an explicit single test
 contact. `allow_all`, caregiver delivery, and inbound attachments are false.
@@ -63,13 +66,13 @@ Changing any of those values requires a new scope hash and re-consent.
 > Ella's secure first-party control plane to named service providers. Nous
 > Research / Hermes Cloud may process messages, voice or transcript text,
 > selected Ella context, session metadata, prompt policy, and model/tool usage
-> to run the managed Ella agent. OpenAI may process model input and output
+> to run the managed Ella agent. Hermes Cloud's built-in profile memory may
+> process profile-bound conversation text, saved facts, derived memory context,
+> and session identifiers so Ella can recall information for that same account
+> and profile. OpenAI may process model input and output
 > through Ella's approved OAuth-backed model route to generate responses.
-> Honcho Cloud may process consented derived memory and selected context for the
-> profile bound to your Ella account so Ella can recall relevant information;
-> Ella's canonical records remain in Ella's first-party system. Photon may
-> process iMessage content and the messaging identifiers required to deliver
-> messages for the explicitly enabled contact/channel scope.
+> Photon may process iMessage content and the messaging identifiers required to
+> deliver messages for the explicitly enabled contact/channel scope.
 >
 > Ella does not send this content to those processors until you choose Allow.
 > Choosing Not now keeps the related cloud AI, memory, voice, and messaging
@@ -80,10 +83,10 @@ Changing any of those values requires a new scope hash and re-consent.
 
 Before publication, legal/vendor review must insert verified retention,
 deletion, export, data-location, subprocessors, and contact terms for Nous
-Research, OpenAI, Honcho Cloud, and Photon. Honcho's currently reported
-90-day content/log/backup posture is a launch question, not an approved final
-claim. The policy must also retain accurate disclosures for every active
-fallback processor.
+Research, OpenAI, and Photon, including the built-in Hermes Cloud profile-memory
+behavior. The policy must also retain accurate disclosures for every active
+fallback processor and accurately describe the retained first-party
+Plato/Honcho path.
 
 ## Draft App Privacy changes
 
@@ -113,12 +116,12 @@ definition; verify rather than infer.
 > review account, choose Chat, Voice, recording, memory interaction, or the
 > managed messaging entry point, and the non-dismissible "Choose how Ella uses
 > cloud AI" sheet appears before the request starts. The sheet names Nous
-> Research / Hermes Cloud, OpenAI, Honcho Cloud, and Photon, explains the data
-> and purpose for each, identifies the restricted Photon scope, links the
-> Privacy Policy, and provides Allow and Not now. Not now sends no protected
-> payload and leaves those features off.
+> Research / Hermes Cloud, its built-in profile memory, OpenAI, and Photon,
+> explains the data and purpose for each, identifies the restricted Photon
+> scope, links the Privacy Policy, and provides Allow and Not now. Not now sends
+> no protected payload and leaves those features off.
 >
-> Settings > Listening and consent shows whether an exact server-verified v6
+> Settings > Listening and consent shows whether an exact server-verified v8
 > receipt is active for the signed-in account/profile. Reviewers can revoke
 > permission or request account/data deletion there. Revocation stops active
 > audio/voice sessions and blocks subsequent protected requests. Material
@@ -134,7 +137,7 @@ family-account data in App Review notes.
 
 ## Release evidence still required
 
-- Reviewed backend v6 implementation and migration.
+- Reviewed backend v8 implementation and migration.
 - Deployed immutable backend revision with enforcement initially off.
 - Synthetic authenticated policy/grant/decline/revoke/profile/scope/delete
   receipts and protected-route canaries.
@@ -145,4 +148,4 @@ family-account data in App Review notes.
 - Independent legal/security review of vendor retention, deletion, location,
   subprocessors, and contractual terms.
 
-No real managed-cloud or Photon content is authorized by v5.
+No real managed-cloud or Photon content is authorized by v7.

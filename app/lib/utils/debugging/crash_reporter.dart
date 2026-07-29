@@ -7,8 +7,8 @@ abstract class CrashReporter {
     throw UnimplementedError('init() must be implemented');
   }
 
-  /// Identify user with email, name, and user ID
-  void identifyUser(String email, String name, String userId);
+  /// Identify a user with a locally pseudonymized account identifier.
+  void identifyUser(String userId);
 
   /// Log info message
   void logInfo(String message);

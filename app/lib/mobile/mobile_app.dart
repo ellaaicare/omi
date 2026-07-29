@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/pages/ella_access_demo_gallery_page.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/device_selection.dart';
@@ -31,6 +32,11 @@ class _MobileAppState extends State<MobileApp> {
   @override
   Widget build(BuildContext context) {
     const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
+    const debugAccessGallery = bool.fromEnvironment('ELLA_ACCESS_DEMO_GALLERY');
+
+    if (debugAccessGallery) {
+      return const EllaAccessDemoGalleryPage();
+    }
 
     // Debug mode: bypass auth and go straight to home
     if (debugAutoCall && !isHermesProvisioningGateEnabled) {

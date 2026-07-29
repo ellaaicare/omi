@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/logger.dart';
 
 class SharedPreferencesUtil {
@@ -29,12 +30,12 @@ class SharedPreferencesUtil {
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
   static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
-  static const String currentAiConsentContractVersion = 'ai-data-processors-v7';
+  static const String currentAiConsentContractVersion = 'ai-data-processors-v8';
   static const String currentAiConsentProcessorSetHash =
-      'sha256:dd84e4a9da1166cff66e5de55c2570d0496a2c89d46ca431530e993758616296';
-  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v1';
+      'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d';
+  static const String currentAiConsentScopeVersion = 'managed-cloud-internal-pilot-v2';
   static const String currentAiConsentScopeHash =
-      'sha256:727b1db818ce79090a02279f1cc6d15dfc3d65a58592b13fbed53ad048c38a30';
+      'sha256:2878e09958faadb799af99a8975736ce63010dd1d682cf944f60743a4faf92e5';
   static const String currentAiConsentReceiptPrefix = 'aicr_';
 
   factory SharedPreferencesUtil() {
@@ -220,7 +221,14 @@ class SharedPreferencesUtil {
 
   set aiConsentAccepted(bool value) => saveBool('aiConsentAccepted', value);
 
-  bool get aiConsentAccepted {
+  bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
+
+  bool hasCurrentAiConsentAuthority({
+    bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled,
+  }) {
+    if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
+      return false;
+    }
     final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;

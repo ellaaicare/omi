@@ -16,10 +16,16 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 class EllaProvisioningGatePage extends StatefulWidget {
-  const EllaProvisioningGatePage({super.key, required this.readyChild, this.startOnMount = true});
+  const EllaProvisioningGatePage({
+    super.key,
+    required this.readyChild,
+    this.startOnMount = true,
+    this.onSignOutOverride,
+  });
 
   final Widget readyChild;
   final bool startOnMount;
+  final VoidCallback? onSignOutOverride;
 
   @override
   State<EllaProvisioningGatePage> createState() => _EllaProvisioningGatePageState();
@@ -100,6 +106,10 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
   }
 
   Future<void> _signOut() async {
+    if (widget.onSignOutOverride != null) {
+      widget.onSignOutOverride!();
+      return;
+    }
     context.read<EllaProvisioningProvider>().reset();
     await signOutAndClearUserData(context);
   }
@@ -163,19 +173,22 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
         final isBlocked = provider.state == EllaProvisioningState.blocked;
         final canRetry =
             provider.state == EllaProvisioningState.degraded || (isBlocked && (provider.receipt?.retryable ?? false));
+        final timedOut = provider.errorCode == 'provisioning_timeout';
 
         final title = switch (provider.state) {
           EllaProvisioningState.idle || EllaProvisioningState.checking => context.l10n.settingUp,
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.settingUp,
-          EllaProvisioningState.degraded => context.l10n.connectionError,
-          EllaProvisioningState.blocked => context.l10n.somethingWentWrong,
+          EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutTitle,
+          EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionTitle,
+          EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedTitle,
           EllaProvisioningState.ready => context.l10n.settingUp,
         };
         final body = switch (provider.state) {
           EllaProvisioningState.idle || EllaProvisioningState.checking => context.l10n.pleaseWait,
           EllaProvisioningState.queued || EllaProvisioningState.provisioning => context.l10n.pleaseWait,
-          EllaProvisioningState.degraded => context.l10n.connectionErrorDesc,
-          EllaProvisioningState.blocked => context.l10n.contactSupport,
+          EllaProvisioningState.degraded when timedOut => context.l10n.ellaProvisioningTimeoutBody,
+          EllaProvisioningState.degraded => context.l10n.ellaProvisioningConnectionBody,
+          EllaProvisioningState.blocked => context.l10n.ellaProvisioningPausedBody,
           EllaProvisioningState.ready => context.l10n.pleaseWait,
         };
 
@@ -207,7 +220,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
                                 )
                               : Icon(
                                   isBlocked ? Icons.lock_outline_rounded : Icons.cloud_off_outlined,
-                                  color: isBlocked ? EllaColors.error : EllaColors.warning,
+                                  color: isBlocked ? EllaColors.tealDeep : EllaColors.warning,
                                   size: 32,
                                 ),
                         ),

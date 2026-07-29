@@ -1,11 +1,83 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/pages/ella_voice_chat_page.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 
 void main() {
+  group('typed voice policy outcomes', () {
+    test('session issuance receipt distinguishes policy denial from provider failure', () {
+      const policyReceipt = V2VConnectionReceipt(
+        connected: false,
+        provider: 'grok-voice',
+        stage: V2VConnectionStage.session,
+        httpStatus: 429,
+        errorCode: 'quota_daily',
+      );
+      const technicalReceipt = V2VConnectionReceipt(
+        connected: false,
+        provider: 'grok-voice',
+        stage: V2VConnectionStage.session,
+        httpStatus: 503,
+        errorCode: 'provider_unavailable',
+      );
+
+      expect(policyReceipt.isPolicyDenial, isTrue);
+      expect(policyReceipt.policyReason, EllaVoicePolicyReason.quotaDaily);
+      expect(technicalReceipt.isPolicyDenial, isFalse);
+      expect(technicalReceipt.policyReason, isNull);
+    });
+
+    test('session close parses nested typed reason without using human message text', () {
+      expect(
+        V2VClient.policyReasonFromEvent({
+          'type': 'session_end',
+          'detail': {'termination_reason': 'quota_monthly'},
+          'message': 'Session finished',
+        }),
+        EllaVoicePolicyReason.quotaMonthly,
+      );
+      expect(
+        V2VClient.policyReasonFromEvent({'type': 'error', 'code': 'websocket_closed', 'message': 'quota_daily'}),
+        isNull,
+      );
+    });
+
+    test('quota_state frames preserve authoritative warning and boundary stop data', () {
+      final warning = V2VClient.quotaEventFromEvent({
+        'type': 'quota_state',
+        'state': 'soft_warning',
+        'quota': {
+          'daily_used_s': 2400,
+          'daily_limit_s': 2700,
+          'monthly_used_s': 2400,
+          'monthly_limit_s': 43200,
+          'max_session_s': 1200,
+          'resets_at': '2026-07-27T07:00:00Z',
+        },
+      });
+      final stop = V2VClient.quotaEventFromEvent({
+        'type': 'quota_state',
+        'state': 'quota_daily',
+        'turn_boundary': true,
+        'quota': {'resets_at': '2026-07-27T07:00:00Z'},
+      });
+
+      expect(warning?.quotaState, 'soft_warning');
+      expect(warning?.quota?.dailyUsedSeconds, 2400);
+      expect(warning?.policyReason, isNull);
+      expect(stop?.policyReason, EllaVoicePolicyReason.quotaDaily);
+      expect(stop?.turnBoundary, isTrue);
+      expect(stop?.resetsAt, isNotNull);
+      expect(V2VClient.quotaEventFromEvent({'type': 'transcript'}), isNull);
+    });
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -14,6 +86,27 @@ void main() {
   });
 
   group('V2VClient provider contract', () {
+    void grantCurrentConsent({String uid = 'uid-a', String profileBindingId = 'profile-binding-a'}) {
+      final preferences = SharedPreferencesUtil();
+      preferences.uid = uid;
+      preferences.verifiedPersonaId = 'persona-a';
+      preferences.acceptAiConsent(
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+        uid: uid,
+        profileBindingId: profileBindingId,
+        serverDecidedAt: '2026-07-27T00:00:00Z',
+      );
+      preferences.markAiConsentServerVerified(
+        uid: uid,
+        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
+        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
+        profileBindingId: profileBindingId,
+        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
+        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
+      );
+    }
+
     test('normalizes legacy provider ids and recognizes canonical session providers', () {
       expect(V2VClient.normalizeProvider('gemini-live'), 'gemini-native-live');
       expect(V2VClient.normalizeProvider('openai-realtime'), 'openai-native-realtime');
@@ -238,24 +331,8 @@ void main() {
       await client.disconnect();
     });
 
-    test('accepted server-verified v6 consent passes the mic gate before identity validation', () async {
-      final preferences = SharedPreferencesUtil();
-      preferences.uid = 'uid-a';
-      preferences.acceptAiConsent(
-        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-        uid: 'uid-a',
-        profileBindingId: 'profile-binding-a',
-        serverDecidedAt: '2026-07-27T00:00:00Z',
-      );
-      preferences.markAiConsentServerVerified(
-        uid: 'uid-a',
-        receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
-        policyVersion: SharedPreferencesUtil.currentAiConsentContractVersion,
-        processorSetHash: SharedPreferencesUtil.currentAiConsentProcessorSetHash,
-        profileBindingId: 'profile-binding-a',
-        scopeVersion: SharedPreferencesUtil.currentAiConsentScopeVersion,
-        scopeHash: SharedPreferencesUtil.currentAiConsentScopeHash,
-      );
+    test('accepted server-verified v8 consent passes the mic gate before identity validation', () async {
+      grantCurrentConsent();
       final client = V2VClient(onEvent: (_) {}, onConnectionChanged: (_) {});
 
       final receipt = await client.connect(provider: 'grok-voice');
@@ -275,6 +352,172 @@ void main() {
       expect(receipt.stage, V2VConnectionStage.providerRegistry);
       expect(receipt.errorCode, 'connection_cancelled');
       expect(client.isConnected, isFalse);
+      await client.disconnect();
+    });
+
+    test('revocation during delayed startup produces zero protected egress and zero microphone frames', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      final boundaryReached = Completer<void>();
+      final releaseBoundary = Completer<void>();
+      final protectedEgress = <V2VProtectedEgressBoundary>[];
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        beforeProtectedEgress: (boundary) async {
+          if (boundary != V2VProtectedEgressBoundary.providerRegistry) return;
+          boundaryReached.complete();
+          await releaseBoundary.future;
+        },
+        onProtectedEgress: protectedEgress.add,
+      );
+
+      final connectFuture = client.connect(provider: 'grok-voice');
+      await boundaryReached.future;
+      preferences.declineAiConsent();
+      releaseBoundary.complete();
+      final receipt = await connectFuture;
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.consent);
+      expect(receipt.errorCode, 'consent_authority_lost');
+      expect(protectedEgress, isEmpty);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('account drift during delayed startup produces zero protected egress and zero microphone frames', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      final boundaryReached = Completer<void>();
+      final releaseBoundary = Completer<void>();
+      final protectedEgress = <V2VProtectedEgressBoundary>[];
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        beforeProtectedEgress: (boundary) async {
+          if (boundary != V2VProtectedEgressBoundary.providerRegistry) return;
+          boundaryReached.complete();
+          await releaseBoundary.future;
+        },
+        onProtectedEgress: protectedEgress.add,
+      );
+
+      final connectFuture = client.connect(provider: 'grok-voice');
+      await boundaryReached.future;
+      preferences.uid = 'uid-b';
+      releaseBoundary.complete();
+      final receipt = await connectFuture;
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.consent);
+      expect(receipt.errorCode, 'consent_authority_lost');
+      expect(protectedEgress, isEmpty);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('profile drift during delayed startup produces zero protected egress and zero microphone frames', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      final boundaryReached = Completer<void>();
+      final releaseBoundary = Completer<void>();
+      final protectedEgress = <V2VProtectedEgressBoundary>[];
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        beforeProtectedEgress: (boundary) async {
+          if (boundary != V2VProtectedEgressBoundary.providerRegistry) return;
+          boundaryReached.complete();
+          await releaseBoundary.future;
+        },
+        onProtectedEgress: protectedEgress.add,
+      );
+
+      final connectFuture = client.connect(provider: 'grok-voice');
+      await boundaryReached.future;
+      preferences.verifiedPersonaId = 'persona-b';
+      releaseBoundary.complete();
+      final receipt = await connectFuture;
+
+      expect(receipt.connected, isFalse);
+      expect(receipt.stage, V2VConnectionStage.consent);
+      expect(receipt.errorCode, 'consent_authority_lost');
+      expect(protectedEgress, isEmpty);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('profile drift at the microphone boundary starts no recorder and sends no protected data', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+      expect(authority, isNotNull);
+
+      final boundaryReached = Completer<void>();
+      final releaseBoundary = Completer<void>();
+      final protectedEgress = <V2VProtectedEgressBoundary>[];
+      var microphoneStarts = 0;
+      final client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        beforeProtectedEgress: (boundary) async {
+          if (boundary != V2VProtectedEgressBoundary.microphoneCapture) return;
+          boundaryReached.complete();
+          await releaseBoundary.future;
+        },
+        onProtectedEgress: protectedEgress.add,
+        microphoneStarter: () async {
+          microphoneStarts++;
+          return true;
+        },
+      );
+
+      final startFuture = client.startAuthorizedMicrophoneForTesting(
+        authority: authority!,
+        shouldContinue: () => true,
+      );
+      await boundaryReached.future;
+      preferences.verifiedPersonaId = 'persona-b';
+      releaseBoundary.complete();
+
+      expect(await startFuture, isFalse);
+      expect(microphoneStarts, 0);
+      expect(protectedEgress, isEmpty);
+      expect(client.micChunksSentForTesting, 0);
+      expect(client.hasActiveConsentLeaseForTesting, isFalse);
+      await client.disconnect();
+    });
+
+    test('the exact current authority lease is active before microphone capture can start', () async {
+      grantCurrentConsent();
+      final preferences = SharedPreferencesUtil();
+      final authority = AiConsentAuthoritySnapshot.capture(preferences: preferences, expectedUid: 'uid-a');
+      expect(authority, isNotNull);
+
+      late final V2VClient client;
+      var microphoneStarts = 0;
+      client = V2VClient(
+        onEvent: (_) {},
+        onConnectionChanged: (_) {},
+        microphoneStarter: () async {
+          expect(client.hasActiveConsentLeaseForTesting, isTrue);
+          microphoneStarts++;
+          return true;
+        },
+      );
+
+      expect(
+        await client.startAuthorizedMicrophoneForTesting(
+          authority: authority!,
+          shouldContinue: () => true,
+        ),
+        isTrue,
+      );
+      expect(microphoneStarts, 1);
       await client.disconnect();
     });
   });

@@ -9,7 +9,10 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
+import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
+import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/home/page.dart';
@@ -19,11 +22,31 @@ import 'package:omi/pages/onboarding/ella/ella_emergency.dart';
 import 'package:omi/pages/onboarding/ella/ella_welcome.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/other/temp.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
+typedef EllaOnboardingAuthBuilder = Widget Function(BuildContext context, VoidCallback onSignIn);
+
 class EllaOnboarding extends StatefulWidget {
-  const EllaOnboarding({super.key});
+  const EllaOnboarding({
+    super.key,
+    this.pilotLocaleRestricted = isEllaInternalPilotEnabled,
+    this.entitlementGateEnabled = isEllaEntitlementGateEnabled,
+    this.provisioningGateEnabled = isHermesProvisioningGateEnabled,
+    this.authenticatedUidProvider,
+    this.isSignedInProvider,
+    this.consentServiceFactory,
+    this.authBuilder,
+  });
+
+  final bool pilotLocaleRestricted;
+  final bool entitlementGateEnabled;
+  final bool provisioningGateEnabled;
+  final String? Function()? authenticatedUidProvider;
+  final bool Function()? isSignedInProvider;
+  final EllaAiConsentService Function()? consentServiceFactory;
+  final EllaOnboardingAuthBuilder? authBuilder;
 
   @visibleForTesting
   static bool shouldPresentVoiceConsent({
@@ -36,6 +59,14 @@ class EllaOnboarding extends StatefulWidget {
   @visibleForTesting
   static bool shouldStartProvisioning({required bool hasCurrentConsent}) => hasCurrentConsent;
 
+  @visibleForTesting
+  static bool shouldStartProvisioningDirectly({
+    required bool provisioningGateEnabled,
+    required bool entitlementGateEnabled,
+    required bool hasCurrentConsent,
+  }) =>
+      provisioningGateEnabled && !entitlementGateEnabled && hasCurrentConsent;
+
   @override
   State<EllaOnboarding> createState() => _EllaOnboardingState();
 }
@@ -45,12 +76,14 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   int _currentPage = 0;
   bool _isSignedIn = false;
   bool _isCompletingOnboarding = false;
+  bool _signInRefreshInFlight = false;
+  String? _pendingPilotSignInUid;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (AuthService.instance.isSignedIn()) {
+      if (_isAuthenticated) {
         if (SharedPreferencesUtil().onboardingCompleted) {
           _routeToAuthenticatedHome();
         } else {
@@ -68,11 +101,46 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
 
   Future<void> _onSignedIn() async {
     setState(() => _isSignedIn = true);
+    final uid = _authenticatedUid;
+    if (uid == null || uid.isEmpty) return;
+    if (!_isPilotLocaleAllowed) {
+      _pendingPilotSignInUid = uid;
+      return;
+    }
+    await _refreshSignedInAuthority(uid);
+  }
+
+  Future<void> _resumePendingPilotSignIn() async {
+    final uid = _authenticatedUid;
+    if (uid == null || uid != _pendingPilotSignInUid || !_isPilotLocaleAllowed) return;
+    await _refreshSignedInAuthority(uid);
+  }
+
+  Future<void> _refreshSignedInAuthority(String uid) async {
+    if (_signInRefreshInFlight || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
+    _signInRefreshInFlight = true;
+    final preferences = SharedPreferencesUtil();
+    try {
+      await preferences.prepareEllaProvisioningAccount(uid);
+      if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
+      final hasCurrentConsent = await _createConsentService().refreshServerAuthority(uid: uid);
+      if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
+      _pendingPilotSignInUid = null;
+      if (EllaOnboarding.shouldStartProvisioningDirectly(
+        provisioningGateEnabled: widget.provisioningGateEnabled,
+        entitlementGateEnabled: widget.entitlementGateEnabled,
+        hasCurrentConsent: hasCurrentConsent,
+      )) {
+        unawaited(_startHermesProvisioning());
+      }
+    } finally {
+      _signInRefreshInFlight = false;
+    }
   }
 
   Future<void> _startHermesProvisioning() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null || !mounted) return;
+    final uid = _authenticatedUid;
+    if (uid == null || uid.isEmpty || !mounted || !_isPilotLocaleAllowed) return;
 
     String timezone;
     try {
@@ -80,16 +148,16 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     } catch (_) {
       timezone = DateTime.now().timeZoneName;
     }
-    if (!mounted) return;
+    if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
 
     final preferences = SharedPreferencesUtil();
     await context.read<EllaProvisioningProvider>().start(
-          uid: user.uid,
+          uid: uid,
           requestContext: EllaProvisioningRequestContext(
             appVersion: PlatformManager.instance.appVersion,
             locale: Localizations.localeOf(context).toLanguageTag(),
             timezone: timezone,
-            consentReceiptId: preferences.hasAccountBoundAiConsent(user.uid) ? preferences.aiConsentReceiptId : '',
+            consentReceiptId: preferences.hasAccountBoundAiConsent(uid) ? preferences.aiConsentReceiptId : '',
           ),
         );
   }
@@ -100,20 +168,20 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   }
 
   Future<void> _completeOnboarding() async {
-    if (_isCompletingOnboarding) return;
+    if (_isCompletingOnboarding || !_isPilotLocaleAllowed) return;
     setState(() => _isCompletingOnboarding = true);
 
     final preferences = SharedPreferencesUtil();
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    if (isHermesProvisioningGateEnabled && uid.isNotEmpty) {
+    final uid = _authenticatedUid ?? '';
+    if (widget.provisioningGateEnabled && uid.isNotEmpty) {
       await preferences.prepareEllaProvisioningAccount(uid);
     }
-    if (!mounted) return;
-    final consentService = EllaAiConsentService();
+    if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
+    final consentService = _createConsentService();
     if (uid.isNotEmpty && !preferences.aiConsentAccepted) {
       await consentService.refreshServerAuthority(uid: uid);
     }
-    if (!mounted) return;
+    if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
     final shouldPresentVoiceConsent = EllaOnboarding.shouldPresentVoiceConsent(
       hasCurrentConsent: preferences.hasAccountBoundAiConsent(uid),
       hasPriorAccountConsent: uid.isNotEmpty && preferences.hasPriorAccountBoundAiConsent(uid),
@@ -131,14 +199,17 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
         onDecline: () => consentService.declineCurrentConsent(uid: uid),
       );
     }
-    if (!mounted) return;
+    if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
 
     SharedPreferencesUtil().onboardingCompleted = true;
-    if (AuthService.instance.isSignedIn()) {
+    if (_isAuthenticated) {
       updateUserOnboardingState(completed: true);
       final hasCurrentConsent = preferences.hasAccountBoundAiConsent(uid);
-      if (isHermesProvisioningGateEnabled &&
-          EllaOnboarding.shouldStartProvisioning(hasCurrentConsent: hasCurrentConsent)) {
+      if (EllaOnboarding.shouldStartProvisioningDirectly(
+        provisioningGateEnabled: widget.provisioningGateEnabled,
+        entitlementGateEnabled: widget.entitlementGateEnabled,
+        hasCurrentConsent: hasCurrentConsent,
+      )) {
         unawaited(_startHermesProvisioning());
       }
     }
@@ -149,25 +220,41 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     routeToPage(context, const HomePageWrapper(), replace: true);
   }
 
+  String? get _authenticatedUid => widget.authenticatedUidProvider?.call() ?? FirebaseAuth.instance.currentUser?.uid;
+
+  bool get _isAuthenticated => widget.isSignedInProvider?.call() ?? AuthService.instance.isSignedIn();
+
+  EllaAiConsentService _createConsentService() => widget.consentServiceFactory?.call() ?? EllaAiConsentService();
+
+  bool get _isPilotLocaleAllowed {
+    if (!widget.pilotLocaleRestricted) return true;
+    final selectedLanguageCode = SharedPreferencesUtil().getString('app_locale');
+    if (selectedLanguageCode.isNotEmpty) {
+      return isEllaInternalPilotLocaleSupported(selectedLanguageCode);
+    }
+    final locale = Localizations.maybeLocaleOf(context);
+    return locale != null && isEllaInternalPilotLocaleSupported(locale.languageCode);
+  }
+
+  void _handleSignIn() {
+    if (SharedPreferencesUtil().onboardingCompleted) {
+      _routeToAuthenticatedHome();
+    } else {
+      unawaited(_onSignedIn());
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final publicMode = SharedPreferencesUtil().publicMode;
     if (!_isSignedIn) {
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,
-        body: AuthComponent(
-          onSignIn: () {
-            if (SharedPreferencesUtil().onboardingCompleted) {
-              _routeToAuthenticatedHome();
-            } else {
-              _onSignedIn();
-            }
-          },
-        ),
+        body: widget.authBuilder?.call(context, _handleSignIn) ?? AuthComponent(onSignIn: _handleSignIn),
       );
     }
 
-    return Scaffold(
+    final onboarding = Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       body: Stack(
         children: [
@@ -200,6 +287,14 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
         ],
       ),
     );
+    if (widget.entitlementGateEnabled) {
+      return EllaEntitlementGatePage(
+        pilotLocaleRestricted: widget.pilotLocaleRestricted,
+        onPilotLocaleAllowed: _resumePendingPilotSignIn,
+        readyChild: widget.provisioningGateEnabled ? EllaProvisioningGatePage(readyChild: onboarding) : onboarding,
+      );
+    }
+    return onboarding;
   }
 }
 

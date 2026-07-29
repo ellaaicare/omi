@@ -178,6 +178,7 @@ class TodayPageState extends State<TodayPage> {
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
     final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
+    final hasNecklace = device.presentationPairedDevice != null;
     final deviceType =
         device.presentationConnectedDevice?.type ?? device.presentationPairedDevice?.type ?? DeviceType.omi;
     final audioRoute = context.watch<AudioRouteProvider>();
@@ -217,6 +218,7 @@ class TodayPageState extends State<TodayPage> {
             _TodayHeader(now: now),
             const SizedBox(height: 14),
             TodayStatusStrip(
+              hasNecklace: hasNecklace,
               necklaceConnected: deviceConnected,
               necklaceConnecting: device.isConnecting,
               batteryLevel: device.presentationBatteryLevel,
@@ -225,9 +227,10 @@ class TodayPageState extends State<TodayPage> {
               audioOutputName: audioRoute.presentationOutputName,
               onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage())),
             ),
-            if (!deviceConnected || audioRoute.presentationUsesPhoneSpeaker) ...[
+            if ((hasNecklace && !deviceConnected) || audioRoute.presentationUsesPhoneSpeaker) ...[
               const SizedBox(height: EllaSizes.cardGap),
               TodayActionableDeviceCard(
+                hasNecklace: hasNecklace,
                 necklaceConnected: deviceConnected,
                 necklaceConnecting: device.isConnecting,
                 deviceType: deviceType,
@@ -472,7 +475,10 @@ class _WhisperPill extends StatelessWidget {
                       TextSpan(
                         style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink),
                         children: [
-                          TextSpan(text: lead, style: const TextStyle(fontWeight: FontWeight.w700)),
+                          TextSpan(
+                            text: lead,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
                           if (!enabled) TextSpan(text: rest),
                         ],
                       ),
@@ -571,6 +577,7 @@ class _SeeWhispersLink extends StatelessWidget {
 class TodayStatusStrip extends StatelessWidget {
   const TodayStatusStrip({
     super.key,
+    this.hasNecklace = true,
     required this.necklaceConnected,
     required this.necklaceConnecting,
     required this.batteryLevel,
@@ -580,6 +587,7 @@ class TodayStatusStrip extends StatelessWidget {
     required this.onTap,
   });
 
+  final bool hasNecklace;
   final bool necklaceConnected;
   final bool necklaceConnecting;
   final int batteryLevel;
@@ -595,6 +603,7 @@ class TodayStatusStrip extends StatelessWidget {
           : EllaColors.inkSoft;
 
   String _necklaceLabel(BuildContext context) {
+    if (!hasNecklace) return context.l10n.todayPhoneOnly;
     if (necklaceConnecting) return context.l10n.todayStripReconnecting;
     if (!necklaceConnected) return context.l10n.todayOff;
     return batteryLevel >= 0 ? '$batteryLevel%' : context.l10n.todayOn;
@@ -605,7 +614,7 @@ class TodayStatusStrip extends StatelessWidget {
     final scale = MediaQuery.textScalerOf(context).scale(1);
     final glyphSize = scale >= 1.45 ? 28.0 : 24.0;
     final dotSize = scale >= 1.45 ? 10.0 : 8.0;
-    final necklaceGlyph = EllaHardwareArtwork.glyphForDeviceType(deviceType);
+    final necklaceGlyph = hasNecklace ? EllaHardwareArtwork.glyphForDeviceType(deviceType) : null;
     final labelStyle = EllaTextStyles.caption.copyWith(fontWeight: FontWeight.w600);
     return EllaCardSurface(
       borderRadius: 14,
@@ -619,18 +628,18 @@ class TodayStatusStrip extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 14),
             child: Row(
               children: [
-                if (necklaceGlyph != null)
+                if (!hasNecklace)
+                  Icon(Icons.phone_iphone_rounded, size: glyphSize, color: EllaColors.tealDeep)
+                else if (necklaceGlyph != null)
                   Image.asset(necklaceGlyph, width: glyphSize, height: glyphSize)
                 else
                   Icon(Icons.circle_outlined, size: glyphSize, color: EllaColors.ink),
                 const SizedBox(width: 8),
-                _StatusDot(color: _necklaceDot, size: dotSize),
+                _StatusDot(color: hasNecklace ? _necklaceDot : EllaColors.teal, size: dotSize),
                 const SizedBox(width: 8),
                 Text(
                   _necklaceLabel(context),
-                  style: labelStyle.copyWith(
-                    color: necklaceConnecting ? EllaColors.warning : EllaColors.inkSoft,
-                  ),
+                  style: labelStyle.copyWith(color: necklaceConnecting ? EllaColors.warning : EllaColors.inkSoft),
                 ),
                 Container(
                   width: 1,
@@ -640,11 +649,7 @@ class TodayStatusStrip extends StatelessWidget {
                 ),
                 Opacity(
                   opacity: headsetConnected ? 1 : 0.55,
-                  child: Image.asset(
-                    EllaHardwareArtwork.whisperHeadsetGlyph,
-                    width: glyphSize,
-                    height: glyphSize,
-                  ),
+                  child: Image.asset(EllaHardwareArtwork.whisperHeadsetGlyph, width: glyphSize, height: glyphSize),
                 ),
                 const SizedBox(width: 8),
                 _StatusDot(color: headsetConnected ? EllaColors.teal : EllaColors.inkSoft, size: dotSize),
@@ -690,6 +695,7 @@ class _StatusDot extends StatelessWidget {
 class TodayActionableDeviceCard extends StatelessWidget {
   const TodayActionableDeviceCard({
     super.key,
+    this.hasNecklace = true,
     required this.necklaceConnected,
     required this.necklaceConnecting,
     required this.deviceType,
@@ -697,6 +703,7 @@ class TodayActionableDeviceCard extends StatelessWidget {
     required this.onReconnect,
   });
 
+  final bool hasNecklace;
   final bool necklaceConnected;
   final bool necklaceConnecting;
   final DeviceType deviceType;
@@ -705,7 +712,7 @@ class TodayActionableDeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final necklaceIssue = !necklaceConnected;
+    final necklaceIssue = hasNecklace && !necklaceConnected;
     // Runtime uses OFF artwork + the live breathing dot for reconnecting; the
     // baked-dot reconnecting asset is reserved for static contexts (goldens).
     final artwork = EllaHardwareArtwork.forDeviceType(deviceType, EllaHardwareArtworkState.off);
@@ -1020,9 +1027,7 @@ class _RecentMemories extends StatelessWidget {
   }
 
   void _openDetail(BuildContext context, ServerConversation conversation) {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConversationDetailPage(conversation: conversation)));
   }
 }
 
@@ -1129,10 +1134,7 @@ class _MemoryGridCard extends StatelessWidget {
                 style: EllaTextStyles.secondary.copyWith(color: EllaColors.ink, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 4),
-              Text(
-                _relativeTime(conversation.startedAt ?? conversation.createdAt),
-                style: EllaTextStyles.caption,
-              ),
+              Text(_relativeTime(conversation.startedAt ?? conversation.createdAt), style: EllaTextStyles.caption),
             ],
           ),
         ),

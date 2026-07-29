@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/pages/ella_access_demo_gallery_page.dart';
+import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class DemoScenario {
@@ -34,12 +36,8 @@ class DemoScenario {
 
 Future<List<DemoScenario>> _fetchDemoScenarios() async {
   try {
-    final response = await http
-        .get(
-          Uri.parse('https://ella-ai-care.com/api/demo/scenarios'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await http.get(Uri.parse('https://ella-ai-care.com/api/demo/scenarios'),
+        headers: {'Content-Type': 'application/json'}).timeout(const Duration(seconds: 10));
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
       final list = data is List ? data : (data['scenarios'] as List?) ?? [];
@@ -70,7 +68,12 @@ class _EllaDemoScenariosPageState extends State<EllaDemoScenariosPage> {
 
   Future<void> _load() async {
     final scenarios = await _fetchDemoScenarios();
-    if (mounted) setState(() { _scenarios = scenarios; _loading = false; });
+    if (mounted) {
+      setState(() {
+        _scenarios = scenarios;
+        _loading = false;
+      });
+    }
   }
 
   /// Returns scenarios grouped by category, preserving insertion order.
@@ -99,29 +102,45 @@ class _EllaDemoScenariosPageState extends State<EllaDemoScenariosPage> {
           style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: EllaColors.textPrimary),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator(color: EllaColors.primary))
-          : _scenarios.isEmpty
-              ? const Center(
-                  child: Text(
-                    'No demo scenarios available.',
-                    style: TextStyle(fontSize: 18, color: EllaColors.textSecondary),
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  color: EllaColors.primary,
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    children: [
-                      for (final entry in _grouped.entries) ...[
-                        _buildSectionHeader(entry.key),
-                        ...entry.value.map(_buildScenarioCard),
-                      ],
-                      const SizedBox(height: 32),
-                    ],
-                  ),
+      body: RefreshIndicator(
+        onRefresh: _load,
+        color: EllaColors.primary,
+        child: ListView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          children: [
+            const SizedBox(height: 10),
+            EllaCardSurface(
+              child: ListTile(
+                minTileHeight: 68,
+                leading: const Icon(Icons.fact_check_outlined, color: EllaColors.tealDeep),
+                title: Text(context.l10n.ellaDemoAccessTitle, style: EllaTextStyles.body),
+                subtitle: Text(context.l10n.ellaDemoAccessEntryBody, style: EllaTextStyles.caption),
+                trailing: const Icon(Icons.chevron_right_rounded, color: EllaColors.inkSoft),
+                onTap: () =>
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const EllaAccessDemoGalleryPage())),
+              ),
+            ),
+            if (_loading) ...[
+              const SizedBox(height: 28),
+              const Center(child: CircularProgressIndicator(color: EllaColors.primary)),
+            ] else if (_scenarios.isEmpty) ...[
+              const SizedBox(height: 28),
+              const Center(
+                child: Text(
+                  'No voice-response scenarios available.',
+                  style: TextStyle(fontSize: 18, color: EllaColors.textSecondary),
                 ),
+              ),
+            ] else ...[
+              for (final entry in _grouped.entries) ...[
+                _buildSectionHeader(entry.key),
+                ...entry.value.map(_buildScenarioCard),
+              ],
+            ],
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
     );
   }
 
@@ -154,17 +173,10 @@ class _EllaDemoScenariosPageState extends State<EllaDemoScenariosPage> {
           children: [
             Text(
               scenario.name,
-              style: const TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                color: EllaColors.textPrimary,
-              ),
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: EllaColors.textPrimary),
             ),
             const SizedBox(height: 6),
-            Text(
-              'Say: ${scenario.trigger}',
-              style: const TextStyle(fontSize: 15, color: EllaColors.primary),
-            ),
+            Text('Say: ${scenario.trigger}', style: const TextStyle(fontSize: 15, color: EllaColors.primary)),
             const SizedBox(height: 8),
             Text(
               scenario.ellaResponse,
@@ -174,11 +186,7 @@ class _EllaDemoScenariosPageState extends State<EllaDemoScenariosPage> {
               const SizedBox(height: 6),
               Text(
                 scenario.notes!,
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: EllaColors.textTertiary,
-                  fontStyle: FontStyle.italic,
-                ),
+                style: const TextStyle(fontSize: 14, color: EllaColors.textTertiary, fontStyle: FontStyle.italic),
               ),
             ],
           ],

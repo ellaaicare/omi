@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/providers/ella_entitlement_provider.dart';
 import 'package:omi/providers/memories_provider.dart';
 import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/people_provider.dart';
@@ -28,6 +29,9 @@ Future<void> signOutAndClearUserData(BuildContext context) async {
   } catch (_) {}
   try {
     context.read<MemoriesProvider>().reset();
+  } catch (_) {}
+  try {
+    context.read<EllaEntitlementProvider>().reset();
   } catch (_) {}
 
   // Explicitly clear conversation/message caches first (prevents cross-account data leak)
