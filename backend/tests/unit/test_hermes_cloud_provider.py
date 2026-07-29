@@ -70,6 +70,8 @@ def _binding():
     artifact_hash = "a" * 64
     return {
         "id": "binding-a",
+        "account_user_id": "11111111-1111-4111-8111-111111111111",
+        "profile_user_id": "11111111-1111-4111-8111-111111111111",
         "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
         "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",

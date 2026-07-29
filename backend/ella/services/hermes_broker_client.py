@@ -193,19 +193,35 @@ class HermesBrokerClient:
                 max_bytes=MAX_RESULT_BODY_BYTES,
                 invalid_code="hermes_broker_prototype_result_invalid",
             )
-            self._assert_owner(last, account_id=account_id, profile_id=profile_id)
-            if correlation_id and last.get("correlation_id") not in (None, correlation_id):
+            self._assert_terminal_envelope(
+                last,
+                request_id=request_id,
+                account_id=account_id,
+                profile_id=profile_id,
+                correlation_id=correlation_id,
+                require_terminal_identity=False,
+            )
+            status = str(last.get("status") or "").strip()
+            if not status:
                 raise ProvisioningError(
-                    "hermes_broker_prototype_correlation_mismatch",
+                    "hermes_broker_prototype_status_omitted",
                     retryable=False,
                 )
-            status = str(last.get("status") or "")
             if status in {
                 "completed",
                 "callback_verified",
                 "writeback_completed",
                 "success",
             }:
+                # Terminal success must carry full owner/request/correlation pins.
+                self._assert_terminal_envelope(
+                    last,
+                    request_id=request_id,
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    correlation_id=correlation_id,
+                    require_terminal_identity=True,
+                )
                 return last
             if status in {
                 "failed",
@@ -214,6 +230,14 @@ class HermesBrokerClient:
                 "blocked",
                 "expired",
             }:
+                self._assert_terminal_envelope(
+                    last,
+                    request_id=request_id,
+                    account_id=account_id,
+                    profile_id=profile_id,
+                    correlation_id=correlation_id,
+                    require_terminal_identity=True,
+                )
                 raise ProvisioningError(
                     f"hermes_broker_prototype_{status}",
                     retryable=False,
@@ -266,7 +290,7 @@ class HermesBrokerClient:
             )
         request_id = str(admission.get("request_id") or "").strip()
         correlation_id = str(admission.get("correlation_id") or "").strip()
-        if not request_id:
+        if not request_id or not correlation_id:
             raise ProvisioningError(
                 "hermes_broker_prototype_admit_invalid",
                 retryable=True,
@@ -275,7 +299,7 @@ class HermesBrokerClient:
             request_id=request_id,
             account_id=account_id,
             profile_id=profile_id,
-            correlation_id=correlation_id or None,
+            correlation_id=correlation_id,
         )
         return self._map_chat_result(
             terminal,
@@ -317,7 +341,7 @@ class HermesBrokerClient:
         )
         request_id = str(admission.get("request_id") or "").strip()
         correlation_id = str(admission.get("correlation_id") or "").strip()
-        if not request_id:
+        if not request_id or not correlation_id:
             raise ProvisioningError(
                 "hermes_broker_prototype_admit_invalid",
                 retryable=True,
@@ -326,7 +350,7 @@ class HermesBrokerClient:
             request_id=request_id,
             account_id=account_id,
             profile_id=profile_id,
-            correlation_id=correlation_id or None,
+            correlation_id=correlation_id,
         )
         return self._map_summary_result(
             terminal,
@@ -348,11 +372,21 @@ class HermesBrokerClient:
         source_event_id: str,
         admission_duplicate: bool,
     ) -> BrokerTerminalTurn:
-        outcome = str(terminal.get("outcome") or "success")
-        if outcome == "error":
+        outcome = terminal.get("outcome")
+        if outcome is None or str(outcome).strip() == "":
+            raise ProvisioningError(
+                "hermes_broker_prototype_outcome_omitted",
+                retryable=False,
+            )
+        if str(outcome) == "error":
             raise ProvisioningError(
                 "hermes_broker_prototype_provider_error",
                 retryable=True,
+            )
+        if str(outcome) != "success":
+            raise ProvisioningError(
+                "hermes_broker_prototype_outcome_invalid",
+                retryable=False,
             )
         result = terminal.get("result")
         if not isinstance(result, dict):
@@ -360,24 +394,29 @@ class HermesBrokerClient:
                 "hermes_broker_prototype_result_invalid",
                 retryable=True,
             )
-        # Fail closed on identity mismatch / cross-owner projection.
+        # Exact lane-result identity is required (no optional omission).
         for key, expected in (
             ("session_key", session_key),
             ("session_id", session_id),
             ("canonical_user_event_id", source_event_id),
         ):
-            observed = result.get(key)
-            if observed is not None and str(observed) != str(expected):
+            if key not in result or result.get(key) is None or str(result.get(key)).strip() == "":
+                raise ProvisioningError(
+                    "hermes_broker_prototype_result_identity_omitted",
+                    retryable=False,
+                )
+            if str(result.get(key)) != str(expected):
                 raise ProvisioningError(
                     "hermes_broker_prototype_result_identity_mismatch",
                     retryable=False,
                 )
-        answer = str(result.get("answer") or "").strip()
-        if not answer:
+        answer = result.get("answer")
+        if answer is None or str(answer).strip() == "":
             raise ProvisioningError(
                 "hermes_broker_prototype_empty_answer",
                 retryable=True,
             )
+        answer = str(answer).strip()
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         try:
             normalized_usage = {
@@ -412,14 +451,24 @@ class HermesBrokerClient:
         expected_model: str,
         admission_duplicate: bool,
     ) -> BrokerTerminalTurn:
-        outcome = str(terminal.get("outcome") or "success")
-        if outcome == "error":
+        outcome = terminal.get("outcome")
+        if outcome is None or str(outcome).strip() == "":
+            raise ProvisioningError(
+                "hermes_broker_prototype_outcome_omitted",
+                retryable=False,
+            )
+        if str(outcome) == "error":
             raise ProvisioningError(
                 "hermes_broker_prototype_provider_error",
                 retryable=True,
             )
+        if str(outcome) != "success":
+            raise ProvisioningError(
+                "hermes_broker_prototype_outcome_invalid",
+                retryable=False,
+            )
         result = terminal.get("result")
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or not result:
             raise ProvisioningError(
                 "hermes_broker_prototype_result_invalid",
                 retryable=True,
@@ -443,19 +492,91 @@ class HermesBrokerClient:
         )
 
     @staticmethod
-    def _assert_owner(body: Mapping[str, Any], *, account_id: str, profile_id: str) -> None:
-        observed_account = body.get("account_id")
-        observed_profile = body.get("profile_id")
-        if observed_account is not None and str(observed_account) != str(account_id):
-            raise ProvisioningError(
-                "hermes_broker_prototype_cross_account_result",
-                retryable=False,
+    def _require_exact_field(
+        body: Mapping[str, Any],
+        key: str,
+        expected: str,
+        *,
+        omitted_code: str,
+        mismatch_code: str,
+    ) -> None:
+        if key not in body or body.get(key) is None or str(body.get(key)).strip() == "":
+            raise ProvisioningError(omitted_code, retryable=False)
+        if str(body.get(key)) != str(expected):
+            raise ProvisioningError(mismatch_code, retryable=False)
+
+    @classmethod
+    def _assert_terminal_envelope(
+        cls,
+        body: Mapping[str, Any],
+        *,
+        request_id: str,
+        account_id: str,
+        profile_id: str,
+        correlation_id: Optional[str],
+        require_terminal_identity: bool,
+    ) -> None:
+        """Owner/request pins are mandatory; omissions fail closed."""
+        if require_terminal_identity:
+            cls._require_exact_field(
+                body,
+                "request_id",
+                request_id,
+                omitted_code="hermes_broker_prototype_request_id_omitted",
+                mismatch_code="hermes_broker_prototype_request_id_mismatch",
             )
-        if observed_profile is not None and str(observed_profile) != str(profile_id):
-            raise ProvisioningError(
-                "hermes_broker_prototype_cross_profile_result",
-                retryable=False,
+            cls._require_exact_field(
+                body,
+                "account_id",
+                account_id,
+                omitted_code="hermes_broker_prototype_account_omitted",
+                mismatch_code="hermes_broker_prototype_cross_account_result",
             )
+            cls._require_exact_field(
+                body,
+                "profile_id",
+                profile_id,
+                omitted_code="hermes_broker_prototype_profile_omitted",
+                mismatch_code="hermes_broker_prototype_cross_profile_result",
+            )
+            if not correlation_id:
+                raise ProvisioningError(
+                    "hermes_broker_prototype_correlation_required",
+                    retryable=False,
+                )
+            cls._require_exact_field(
+                body,
+                "correlation_id",
+                correlation_id,
+                omitted_code="hermes_broker_prototype_correlation_omitted",
+                mismatch_code="hermes_broker_prototype_correlation_mismatch",
+            )
+            return
+        # Non-terminal polls still reject cross-owner / wrong-request when present.
+        if "request_id" in body and body.get("request_id") is not None:
+            if str(body.get("request_id")).strip() and str(body.get("request_id")) != str(request_id):
+                raise ProvisioningError(
+                    "hermes_broker_prototype_request_id_mismatch",
+                    retryable=False,
+                )
+        if "account_id" in body and body.get("account_id") is not None:
+            if str(body.get("account_id")).strip() and str(body.get("account_id")) != str(account_id):
+                raise ProvisioningError(
+                    "hermes_broker_prototype_cross_account_result",
+                    retryable=False,
+                )
+        if "profile_id" in body and body.get("profile_id") is not None:
+            if str(body.get("profile_id")).strip() and str(body.get("profile_id")) != str(profile_id):
+                raise ProvisioningError(
+                    "hermes_broker_prototype_cross_profile_result",
+                    retryable=False,
+                )
+        if correlation_id and "correlation_id" in body and body.get("correlation_id") is not None:
+            if str(body.get("correlation_id")).strip() and str(body.get("correlation_id")) != str(correlation_id):
+                raise ProvisioningError(
+                    "hermes_broker_prototype_correlation_mismatch",
+                    retryable=False,
+                )
 
     @staticmethod
     def _parse_json(response: httpx.Response, *, max_bytes: int, invalid_code: str) -> dict[str, Any]:

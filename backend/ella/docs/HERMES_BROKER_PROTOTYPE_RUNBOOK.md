@@ -31,9 +31,10 @@ where required. **No** fallback to direct Hermes, Plato, Mini, or OpenClaw.
 # Master switch — must be the exact lowercase string "true"
 ELLA_HERMES_BROKER_PROTOTYPE_ENABLED=false
 
-# Exact allowlist (opaque ids)
+# Exact allowlist — canonical owner UUIDs (ella_runtime_bindings.account_user_id /
+# profile_user_id = users.id), NOT the auth omi_uid string.
 ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID=
-ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID=   # usually same as account/uid
+ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID=
 ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID=   # optional; when set must match runtime.binding_id
 
 # Private broker HTTPS endpoint (host must match allowlist)

@@ -85,6 +85,9 @@ class IsolatedRuntime:
     target_endpoint_ref: str = ""
     target_credential_ref: str = ""
     target_entitlement_revision: int = 0
+    # Canonical broker/authority owner coordinates (users.id UUIDs), not omi_uid.
+    account_user_id: str = ""
+    profile_user_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -266,6 +269,16 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
     if revision < 1:
         raise ProvisioningError("invalid_binding_revision", retryable=False)
 
+    # Broker and shared advisory-lock scopes use users.id UUIDs from the binding
+    # row (account_user_id/profile_user_id), not the OMI auth uid (omi_uid).
+    account_user_id = str(binding.get("account_user_id") or "").strip()
+    profile_user_id = str(binding.get("profile_user_id") or "").strip()
+    if provider == "hermes_cloud" and (not account_user_id or not profile_user_id):
+        raise ProvisioningError(
+            "hermes_cloud_owner_coordinates_missing",
+            retryable=False,
+        )
+
     return IsolatedRuntime(
         uid=uid,
         binding_id=str(binding.get("id") or ""),
@@ -301,6 +314,8 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         target_endpoint_ref=str(binding.get("target_endpoint_ref") or ""),
         target_credential_ref=str(binding.get("target_credential_ref") or ""),
         target_entitlement_revision=int(binding.get("target_entitlement_revision") or 0),
+        account_user_id=account_user_id,
+        profile_user_id=profile_user_id,
     )
 
 

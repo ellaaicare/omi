@@ -138,10 +138,15 @@ def runtime_uses_broker_prototype(
         return False
     if str(runtime.profile_class or "").lower() != "synthetic":
         return False
-    if not hmac.compare_digest(str(runtime.uid), cfg.account_id):
+    # Compare allowlist to canonical broker owner coordinates (users.id UUIDs),
+    # never to the auth uid / omi_uid string.
+    account_user_id = str(runtime.account_user_id or "").strip()
+    profile_user_id = str(runtime.profile_user_id or "").strip()
+    if not account_user_id or not profile_user_id:
         return False
-    # Prototype pins one exact profile id (typically equal to the synthetic uid).
-    if not hmac.compare_digest(str(runtime.uid), cfg.profile_id):
+    if not hmac.compare_digest(account_user_id, cfg.account_id):
+        return False
+    if not hmac.compare_digest(profile_user_id, cfg.profile_id):
         return False
     if cfg.binding_id and not hmac.compare_digest(str(runtime.binding_id), cfg.binding_id):
         return False

@@ -335,6 +335,13 @@ class HermesCloudRuntimeService:
 
         # Fail closed: broker path never falls back to direct Hermes or Plato.
         assert prototype_config is not None
+        account_user_id = str(runtime.account_user_id or "").strip()
+        profile_user_id = str(runtime.profile_user_id or "").strip()
+        if not account_user_id or not profile_user_id:
+            raise ProvisioningError(
+                "hermes_broker_prototype_owner_coordinates_missing",
+                retryable=False,
+            )
         await mark_provider_send_boundary()
         client = self.broker_client_factory(prototype_config)
         source_event_id = str(request.client_interaction_id or request.correlation_id)
@@ -342,8 +349,8 @@ class HermesCloudRuntimeService:
             # Enrichment instructions already embed transcript JSON; surface a
             # bounded segment list for the broker transcript lane.
             terminal = await client.run_transcript_user_summary(
-                account_id=str(runtime.uid),
-                profile_id=str(runtime.uid),
+                account_id=account_user_id,
+                profile_id=profile_user_id,
                 runtime_binding_ref=str(runtime.binding_id),
                 consent_epoch=str(grant_epoch),
                 source_event_id=source_event_id,
@@ -354,8 +361,8 @@ class HermesCloudRuntimeService:
             )
         else:
             terminal = await client.run_chat_turn(
-                account_id=str(runtime.uid),
-                profile_id=str(runtime.uid),
+                account_id=account_user_id,
+                profile_id=profile_user_id,
                 runtime_binding_ref=str(runtime.binding_id),
                 consent_epoch=str(grant_epoch),
                 message=request.user_input,

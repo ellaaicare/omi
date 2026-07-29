@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import pytest
 
 from ella.services import hermes_broker_client as client_mod
 from ella.services import hermes_broker_prototype as proto
-from ella.services import hermes_cloud_runtime as runtime_mod
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_cloud import HermesCloudTurn
 from ella.services.hermes_cloud_runtime import (
@@ -23,11 +23,19 @@ from ella.services.hermes_cloud_runtime import (
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
+# Distinct identities: auth uid != broker owner UUIDs.
+AUTH_UID = "omi-auth-uid-synth-01"
+ACCOUNT_UUID = "11111111-1111-4111-8111-111111111111"
+PROFILE_UUID = "22222222-2222-4222-8222-222222222222"
+BINDING_ID = "33333333-3333-4333-8333-333333333333"
+
 
 def _runtime(
     *,
-    uid: str = "synthetic-proto-01",
-    binding_id: str = "binding-proto-01",
+    uid: str = AUTH_UID,
+    account_user_id: str = ACCOUNT_UUID,
+    profile_user_id: str = PROFILE_UUID,
+    binding_id: str = BINDING_ID,
     profile_class: str = "synthetic",
     provider: str = "hermes_cloud",
     mode: str = HERMES_CLOUD_CHAT_MODE,
@@ -61,15 +69,17 @@ def _runtime(
         target_endpoint_ref="env:URL",
         target_credential_ref="env:KEY",
         target_entitlement_revision=1,
+        account_user_id=account_user_id,
+        profile_user_id=profile_user_id,
     )
 
 
 def _enable(monkeypatch, **overrides):
     env = {
         "ELLA_HERMES_BROKER_PROTOTYPE_ENABLED": "true",
-        "ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID": "synthetic-proto-01",
-        "ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID": "synthetic-proto-01",
-        "ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID": "binding-proto-01",
+        "ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID": ACCOUNT_UUID,
+        "ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID": PROFILE_UUID,
+        "ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID": BINDING_ID,
         "ELLA_HERMES_BROKER_BASE_URL": "https://broker.ella.internal",
         "ELLA_HERMES_BROKER_ALLOWED_HOST": "broker.ella.internal",
         "ELLA_HERMES_BROKER_SERVICE_TOKEN_REF": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN",
@@ -119,6 +129,42 @@ class FakeHttp:
         return _Client()
 
 
+async def _noop_sleep(_seconds):
+    return None
+
+
+def _completed_result(**overrides):
+    body = {
+        "status": "completed",
+        "request_id": "hwb_req1",
+        "correlation_id": "hwb:corr1",
+        "account_id": ACCOUNT_UUID,
+        "profile_id": PROFILE_UUID,
+        "outcome": "success",
+        "result": {
+            "answer": "proto answer",
+            "session_key": "sk",
+            "session_id": "sid",
+            "canonical_user_event_id": "evt-1",
+            "model": "gpt-test",
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+    }
+    body.update(overrides)
+    if "result" in overrides and isinstance(overrides["result"], dict):
+        merged = {
+            "answer": "proto answer",
+            "session_key": "sk",
+            "session_id": "sid",
+            "canonical_user_event_id": "evt-1",
+            "model": "gpt-test",
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        }
+        merged.update(overrides["result"])
+        body["result"] = merged
+    return body
+
+
 def test_default_off_does_not_select_broker(monkeypatch):
     monkeypatch.delenv("ELLA_HERMES_BROKER_PROTOTYPE_ENABLED", raising=False)
     assert proto.load_prototype_config() is None
@@ -130,13 +176,41 @@ def test_truthy_alias_not_enabled(monkeypatch):
     assert proto.load_prototype_config() is None
 
 
+def test_allowlist_uses_owner_uuids_not_auth_uid(monkeypatch):
+    _enable(monkeypatch)
+    # Same auth uid but wrong owner UUIDs → not selected.
+    assert (
+        proto.runtime_uses_broker_prototype(
+            _runtime(
+                uid=AUTH_UID,
+                account_user_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                profile_user_id=PROFILE_UUID,
+            )
+        )
+        is False
+    )
+    # Distinct uid vs owner UUIDs matching allowlist → selected.
+    assert proto.runtime_uses_broker_prototype(_runtime()) is True
+
+
+def test_missing_owner_coordinates_not_selected(monkeypatch):
+    _enable(monkeypatch)
+    assert proto.runtime_uses_broker_prototype(_runtime(account_user_id="", profile_user_id="")) is False
+
+
 def test_non_allowlisted_user_keeps_direct_path(monkeypatch):
     _enable(monkeypatch)
     other = _runtime(uid="realcryptoplato", profile_class="real")
     assert proto.runtime_uses_broker_prototype(other) is False
     assert (
         proto.runtime_uses_broker_prototype(
-            _runtime(uid="other-synth", profile_class="synthetic", binding_id="binding-proto-01")
+            _runtime(
+                uid="other-synth",
+                account_user_id="99999999-9999-4999-8999-999999999999",
+                profile_user_id="99999999-9999-4999-8999-999999999999",
+                profile_class="synthetic",
+                binding_id=BINDING_ID,
+            )
         )
         is False
     )
@@ -148,7 +222,7 @@ def test_binding_pin_required_when_set(monkeypatch):
     assert proto.runtime_uses_broker_prototype(_runtime()) is True
 
 
-def test_success_chat_maps_answer(monkeypatch):
+def test_success_chat_maps_answer_with_owner_uuids(monkeypatch):
     _enable(monkeypatch)
     cfg = proto.load_prototype_config()
     assert cfg is not None
@@ -157,7 +231,9 @@ def test_success_chat_maps_answer(monkeypatch):
         if method == "POST":
             body = kwargs["json"]
             assert body["lane"] == "chat_turn"
-            assert body["account_id"] == "synthetic-proto-01"
+            assert body["account_id"] == ACCOUNT_UUID
+            assert body["profile_id"] == PROFILE_UUID
+            assert body["account_id"] != AUTH_UID
             assert body["payload"]["message"] == "hello"
             assert "Authorization" in kwargs["headers"]
             return FakeResponse(
@@ -171,34 +247,17 @@ def test_success_chat_maps_answer(monkeypatch):
         assert method == "GET"
         assert "hwb_req1" in url
         params = kwargs.get("params") or {}
-        assert params["account_id"] == "synthetic-proto-01"
-        return FakeResponse(
-            200,
-            {
-                "status": "completed",
-                "request_id": "hwb_req1",
-                "correlation_id": "hwb:corr1",
-                "account_id": "synthetic-proto-01",
-                "profile_id": "synthetic-proto-01",
-                "outcome": "success",
-                "result": {
-                    "answer": "proto answer",
-                    "session_key": "sk",
-                    "session_id": "sid",
-                    "canonical_user_event_id": "evt-1",
-                    "model": "gpt-test",
-                    "usage": {"input_tokens": 3, "output_tokens": 2},
-                },
-            },
-        )
+        assert params["account_id"] == ACCOUNT_UUID
+        assert params["profile_id"] == PROFILE_UUID
+        return FakeResponse(200, _completed_result())
 
     fake = FakeHttp(handler)
     client = HermesBrokerClient(cfg, http_client_factory=fake.factory, sleep=_noop_sleep)
     turn = asyncio.run(
         client.run_chat_turn(
-            account_id="synthetic-proto-01",
-            profile_id="synthetic-proto-01",
-            runtime_binding_ref="binding-proto-01",
+            account_id=ACCOUNT_UUID,
+            profile_id=PROFILE_UUID,
+            runtime_binding_ref=BINDING_ID,
             consent_epoch="consent.v1",
             message="hello",
             session_key="sk",
@@ -210,12 +269,6 @@ def test_success_chat_maps_answer(monkeypatch):
     assert turn.text == "proto answer"
     assert turn.request_id == "hwb_req1"
     assert turn.usage["output_tokens"] == 2
-    assert any(c[0] == "POST" for c in fake.calls)
-    assert any(c[0] == "GET" for c in fake.calls)
-
-
-async def _noop_sleep(_seconds):
-    return None
 
 
 def test_correlation_mismatch_fails_closed(monkeypatch):
@@ -228,31 +281,15 @@ def test_correlation_mismatch_fails_closed(monkeypatch):
                 200,
                 {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
             )
-        return FakeResponse(
-            200,
-            {
-                "status": "completed",
-                "request_id": "hwb_req1",
-                "correlation_id": "hwb:OTHER",
-                "account_id": "synthetic-proto-01",
-                "profile_id": "synthetic-proto-01",
-                "outcome": "success",
-                "result": {
-                    "answer": "x",
-                    "session_key": "sk",
-                    "session_id": "sid",
-                    "canonical_user_event_id": "evt-1",
-                },
-            },
-        )
+        return FakeResponse(200, _completed_result(correlation_id="hwb:OTHER"))
 
     client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
     with pytest.raises(ProvisioningError) as exc:
         asyncio.run(
             client.run_chat_turn(
-                account_id="synthetic-proto-01",
-                profile_id="synthetic-proto-01",
-                runtime_binding_ref="binding-proto-01",
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
                 consent_epoch="consent.v1",
                 message="hello",
                 session_key="sk",
@@ -276,24 +313,16 @@ def test_cross_account_result_fails_closed(monkeypatch):
             )
         return FakeResponse(
             200,
-            {
-                "status": "completed",
-                "request_id": "hwb_req1",
-                "correlation_id": "hwb:corr1",
-                "account_id": "someone-else",
-                "profile_id": "synthetic-proto-01",
-                "outcome": "success",
-                "result": {"answer": "x"},
-            },
+            _completed_result(account_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         )
 
     client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
     with pytest.raises(ProvisioningError) as exc:
         asyncio.run(
             client.run_chat_turn(
-                account_id="synthetic-proto-01",
-                profile_id="synthetic-proto-01",
-                runtime_binding_ref="binding-proto-01",
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
                 consent_epoch="consent.v1",
                 message="hello",
                 session_key="sk",
@@ -305,6 +334,172 @@ def test_cross_account_result_fails_closed(monkeypatch):
     assert exc.value.code == "hermes_broker_prototype_cross_account_result"
 
 
+def test_omitted_account_on_terminal_fails_closed(monkeypatch):
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        body = _completed_result()
+        del body["account_id"]
+        return FakeResponse(200, body)
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_account_omitted"
+
+
+def test_omitted_request_id_on_terminal_fails_closed(monkeypatch):
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        body = _completed_result()
+        del body["request_id"]
+        return FakeResponse(200, body)
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_request_id_omitted"
+
+
+def test_cross_request_id_mismatch_fails_closed(monkeypatch):
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        return FakeResponse(200, _completed_result(request_id="hwb_OTHER"))
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_request_id_mismatch"
+
+
+def test_omitted_session_key_in_result_fails_closed(monkeypatch):
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        body = _completed_result(result={"answer": "x", "session_id": "sid", "canonical_user_event_id": "evt-1"})
+        # remove session_key from result
+        del body["result"]["session_key"]
+        return FakeResponse(200, body)
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_result_identity_omitted"
+
+
+def test_answer_only_projection_rejected(monkeypatch):
+    """Projection with only status+answer must fail (review P1-2)."""
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        return FakeResponse(
+            200,
+            {"status": "completed", "result": {"answer": "sneaky"}},
+        )
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code in {
+        "hermes_broker_prototype_request_id_omitted",
+        "hermes_broker_prototype_account_omitted",
+        "hermes_broker_prototype_profile_omitted",
+        "hermes_broker_prototype_correlation_omitted",
+    }
+
+
 def test_timeout_fails_closed(monkeypatch):
     _enable(monkeypatch, ELLA_HERMES_BROKER_POLL_TIMEOUT_SECONDS="1.0")
     cfg = proto.load_prototype_config()
@@ -314,7 +509,6 @@ def test_timeout_fails_closed(monkeypatch):
         return clock["t"]
 
     async def sleep(seconds):
-        # Jump past the wait budget immediately after one poll.
         clock["t"] += 2.0
 
     def handler(method, url, kwargs):
@@ -329,8 +523,8 @@ def test_timeout_fails_closed(monkeypatch):
                 "status": "awaiting_callback",
                 "request_id": "hwb_req1",
                 "correlation_id": "hwb:corr1",
-                "account_id": "synthetic-proto-01",
-                "profile_id": "synthetic-proto-01",
+                "account_id": ACCOUNT_UUID,
+                "profile_id": PROFILE_UUID,
             },
         )
 
@@ -343,9 +537,9 @@ def test_timeout_fails_closed(monkeypatch):
     with pytest.raises(ProvisioningError) as exc:
         asyncio.run(
             client.run_chat_turn(
-                account_id="synthetic-proto-01",
-                profile_id="synthetic-proto-01",
-                runtime_binding_ref="binding-proto-01",
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
                 consent_epoch="consent.v1",
                 message="hello",
                 session_key="sk",
@@ -374,29 +568,23 @@ def test_duplicate_replay_accepted(monkeypatch):
             )
         return FakeResponse(
             200,
-            {
-                "status": "completed",
-                "request_id": "hwb_req1",
-                "correlation_id": "hwb:corr1",
-                "account_id": "synthetic-proto-01",
-                "profile_id": "synthetic-proto-01",
-                "outcome": "success",
-                "duplicate": True,
-                "result": {
+            _completed_result(
+                duplicate=True,
+                result={
                     "answer": "replayed",
                     "session_key": "sk",
                     "session_id": "sid",
                     "canonical_user_event_id": "evt-1",
                 },
-            },
+            ),
         )
 
     client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
     turn = asyncio.run(
         client.run_chat_turn(
-            account_id="synthetic-proto-01",
-            profile_id="synthetic-proto-01",
-            runtime_binding_ref="binding-proto-01",
+            account_id=ACCOUNT_UUID,
+            profile_id=PROFILE_UUID,
+            runtime_binding_ref=BINDING_ID,
             consent_epoch="consent.v1",
             message="hello",
             session_key="sk",
@@ -425,9 +613,9 @@ def test_missing_result_endpoint_is_explicit_companion_blocker(monkeypatch):
     with pytest.raises(ProvisioningError) as exc:
         asyncio.run(
             client.run_chat_turn(
-                account_id="synthetic-proto-01",
-                profile_id="synthetic-proto-01",
-                runtime_binding_ref="binding-proto-01",
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
                 consent_epoch="consent.v1",
                 message="hello",
                 session_key="sk",
@@ -479,13 +667,13 @@ def test_provider_turn_uses_direct_when_not_allowlisted(monkeypatch):
         service._provider_turn(
             runtime=_runtime(),
             request=HermesCloudTurnRequest(
-                uid="synthetic-proto-01",
+                uid=AUTH_UID,
                 client_interaction_id="evt-1",
                 correlation_id="c1",
                 channel="ios_chat",
                 user_input="hi",
                 instructions="sys",
-                started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                started_at=datetime.now(timezone.utc),
                 client_metadata={},
             ),
             scope={"session_key": "sk"},
@@ -499,13 +687,12 @@ def test_provider_turn_uses_direct_when_not_allowlisted(monkeypatch):
     assert calls == ["direct"]
 
 
-def test_provider_turn_uses_broker_when_allowlisted(monkeypatch):
+def test_provider_turn_submits_owner_uuids_not_auth_uid(monkeypatch):
     _enable(monkeypatch)
-    calls = []
+    seen = {}
 
     class DirectClient:
         async def create_response(self, *args, **kwargs):
-            calls.append("direct")
             raise AssertionError("direct path must not run for allowlisted prototype")
 
     class FakeBroker(HermesBrokerClient):
@@ -513,7 +700,7 @@ def test_provider_turn_uses_broker_when_allowlisted(monkeypatch):
             super().__init__(config, sleep=_noop_sleep)
 
         async def run_chat_turn(self, **kwargs):
-            calls.append("broker")
+            seen.update(kwargs)
             return client_mod.BrokerTerminalTurn(
                 text="via-broker",
                 request_id="hwb_x",
@@ -532,20 +719,19 @@ def test_provider_turn_uses_broker_when_allowlisted(monkeypatch):
     service.broker_client_factory = FakeBroker
 
     async def boundary():
-        calls.append("boundary")
         return ("https://h", "t")
 
     turn = asyncio.run(
         service._provider_turn(
             runtime=_runtime(),
             request=HermesCloudTurnRequest(
-                uid="synthetic-proto-01",
+                uid=AUTH_UID,
                 client_interaction_id="evt-1",
                 correlation_id="c1",
                 channel="ios_chat",
                 user_input="hi",
                 instructions="sys",
-                started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                started_at=datetime.now(timezone.utc),
                 client_metadata={},
             ),
             scope={"session_key": "sk"},
@@ -556,9 +742,10 @@ def test_provider_turn_uses_broker_when_allowlisted(monkeypatch):
         )
     )
     assert turn.text == "via-broker"
-    assert "direct" not in calls
-    assert "broker" in calls
-    assert "boundary" in calls
+    assert seen["account_id"] == ACCOUNT_UUID
+    assert seen["profile_id"] == PROFILE_UUID
+    assert seen["account_id"] != AUTH_UID
+    assert seen["runtime_binding_ref"] == BINDING_ID
 
 
 def test_enrichment_channel_uses_transcript_lane(monkeypatch):
@@ -598,13 +785,13 @@ def test_enrichment_channel_uses_transcript_lane(monkeypatch):
         service._provider_turn(
             runtime=_runtime(mode=HERMES_CLOUD_ENRICHMENT_MODE),
             request=HermesCloudTurnRequest(
-                uid="synthetic-proto-01",
+                uid=AUTH_UID,
                 client_interaction_id="evt-enrich",
                 correlation_id="c-enrich",
                 channel=HERMES_CLOUD_ENRICHMENT_CHANNEL,
                 user_input="transcript text",
                 instructions="enrich",
-                started_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                started_at=datetime.now(timezone.utc),
                 client_metadata={},
             ),
             scope={"session_key": "sk"},
@@ -615,11 +802,11 @@ def test_enrichment_channel_uses_transcript_lane(monkeypatch):
         )
     )
     assert "title" in turn.text
+    assert seen["account_id"] == ACCOUNT_UUID
     assert seen["source_event_id"] == "evt-enrich"
 
 
 def test_sse_mapping_preserves_answer_text():
-    # Mirrors _stream_hermes_cloud_chat emission contract (data line + CRLF).
     answer = "line1\nline2"
     data_line = f"data: {answer.replace(chr(10), '__CRLF__')}\n\n"
     assert "__CRLF__" in data_line
