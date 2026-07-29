@@ -24,7 +24,7 @@ from ella.services.hermes_cloud import (
     estimate_max_turn_cost_microusd,
     estimate_turn_cost_microusd,
 )
-from ella.services.hermes_cloud_policy import assert_cloud_identity_gate
+from ella.services.hermes_cloud_policy import current_cloud_authority
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
 
@@ -39,7 +39,7 @@ INVALID_OUTPUT_ERROR = "hermes_cloud_enrichment_output_invalid"
 
 
 def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
-    return assert_cloud_identity_gate(
+    authority = current_cloud_authority(
         runtime.uid,
         profile_class=runtime.profile_class,
         profile_uid=runtime.uid,
@@ -48,6 +48,9 @@ def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
         memory_provider=MANAGED_CLOUD_MEMORY_PROVIDER,
         photon_scope=MANAGED_CLOUD_PHOTON_SCOPE,
     )
+    if not authority.grant_epoch:
+        raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
+    return authority.grant_epoch
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -538,6 +541,15 @@ class HermesCloudRuntimeService:
                 if current_profile_class != runtime.profile_class:
                     raise ProvisioningError(
                         "hermes_cloud_profile_class_changed",
+                        retryable=False,
+                    )
+                final_grant_epoch = assert_runtime_managed_consent(runtime)
+                if request.consent_grant_epoch and not hmac.compare_digest(
+                    request.consent_grant_epoch,
+                    final_grant_epoch,
+                ):
+                    raise ProvisioningError(
+                        "managed_cloud_consent_grant_changed",
                         retryable=False,
                     )
                 provider_started = True

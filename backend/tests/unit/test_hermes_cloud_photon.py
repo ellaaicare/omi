@@ -43,6 +43,12 @@ class SimulatedProcessCrash(BaseException):
 def synthetic_owner_gate(monkeypatch):
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-owner")
+    repository = ai_consent.InMemoryConsentRepository()
+    ai_consent.AiConsentService(repository).submit(
+        "synthetic-owner",
+        _consent_submission(request_id="photon-default-grant"),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", repository)
 
 
 def _opaque_key(namespace: str, raw_value: str) -> str:

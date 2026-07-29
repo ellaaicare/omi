@@ -20,12 +20,16 @@ def test_openapi_covers_every_reviewed_runtime_boundary_with_exact_targets():
         "/v1/ella/chat/stream": "hermes-cloud-chat",
         "/v1/ella/chat/history": "hermes-cloud-chat",
         "/v1/voice/session": "hermes-cloud-voice",
+        "/v1/voice/context": "hermes-cloud-voice",
+        "/v1/voice/tool": "hermes-cloud-voice",
+        "/v1/voice/search-omi": "hermes-cloud-voice",
+        "/v1/voice/search": "hermes-cloud-voice",
         "/v4/listen": "hermes-cloud-transcript",
         "/v4/web/listen": "hermes-cloud-transcript",
         "/v1/ella/conversation/{conversation_id}/summary": "hermes-cloud-transcript",
         "/v1/conversations/{conversation_id}/processing-retries": "hermes-cloud-transcript",
         "/v1/ella/observer/run": "hermes-cloud-guardian",
-        "/v1/ella/guardian/queue": "hermes-cloud-guardian",
+        "/v1/ella/guardian/next-audio": "hermes-cloud-guardian",
     }
     for path, mode in exact_modes.items():
         operation = next(iter(paths[path].values()))

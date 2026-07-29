@@ -191,6 +191,62 @@ paths:
           description: Voice claim, consent, entitlement, or target lineage is stale.
         "503":
           description: Exact Voice target or disclosed processor is unavailable.
+  /v1/voice/context:
+    post:
+      tags: [Voice]
+      summary: Assemble voice context only after resolving the exact Voice target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Profile-scoped context for the admitted voice session.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
+  /v1/voice/tool:
+    post:
+      tags: [Voice]
+      summary: Gate voice tool execution on the exact Voice target.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Retained-runtime tool result.
+        "409":
+          description: Cloud tools are disabled or exact runtime authority is stale.
+        "503":
+          description: Exact retained Voice target is unavailable.
+  /v1/voice/search-omi:
+    post:
+      tags: [Voice]
+      summary: Search profile-owned OMI conversations after exact Voice-target resolution.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Profile-scoped OMI conversation matches.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
+  /v1/voice/search:
+    post:
+      tags: [Voice]
+      summary: Search permitted profile sources after exact Voice-target resolution.
+      x-ella-runtime-target:
+        mode: hermes-cloud-voice
+        fallback: none
+      responses:
+        "200":
+          description: Role-filtered profile search results.
+        "409":
+          description: Voice claim, consent, entitlement, or target lineage is stale.
+        "503":
+          description: Exact Voice target is unavailable.
   /v1/entitlement:
     get:
       tags: [Voice]
@@ -314,17 +370,21 @@ paths:
           description: Observer token is invalid.
         "503":
           description: Token configuration or exact Guardian target is unavailable.
-  /v1/ella/guardian/queue:
+  /v1/ella/guardian/next-audio:
     get:
       tags: [Observer and Guardian]
-      summary: Return Guardian queue state without Mini history fallback.
+      summary: Consolidate and consume Guardian audio through the exact Guardian target.
       x-ella-runtime-target:
         mode: hermes-cloud-guardian
         fallback: none
-        sends-user-data: false
+        sends-user-data: true
       responses:
         "200":
-          description: Profile-scoped Guardian queue state.
+          description: Next profile-scoped Guardian audio item, or an empty queue result.
+        "409":
+          description: Consent, entitlement, or stored Guardian target lineage is stale.
+        "503":
+          description: Exact Guardian target is missing or unready.
 components:
   securitySchemes:
     bearerAuth:

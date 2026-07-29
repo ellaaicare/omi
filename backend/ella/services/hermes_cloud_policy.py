@@ -35,6 +35,7 @@ class CurrentCloudAuthority:
     consent_receipt_id: str
     profile_binding_id: str
     lineage: RuntimeTargetLineage
+    grant_epoch: str = ""
 
 
 def _stable_json(value: Any) -> str:
@@ -97,7 +98,7 @@ def current_cloud_authority(
     photon_scope: str,
 ) -> CurrentCloudAuthority:
     """Recheck the exact current consent receipt for one Cloud account/profile."""
-    assert_cloud_identity_gate(
+    grant_epoch = assert_cloud_identity_gate(
         uid,
         profile_class=profile_class,
         profile_uid=profile_uid,
@@ -141,6 +142,7 @@ def current_cloud_authority(
         consent_receipt_id=str(consent["receipt_id"]),
         profile_binding_id=expected_profile_binding,
         lineage=lineage.validate(),
+        grant_epoch=grant_epoch,
     )
 
 

@@ -14,6 +14,8 @@ Audio files: /var/www/ella-ai-care.com/audio/{uid}/*.mp3
 
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -33,7 +35,12 @@ from ella.routers.resolve import resolve_user_routing
 from database import app_settings as app_settings_db
 from ella.services.app_settings import TTS_PROVIDERS, build_effective_voice_settings
 from ella.services.ai_consent import assert_current_ai_consent
-from ella.services.runtime_resolver import runtime_authority_enabled
+from ella.services.hermes_cloud import HermesCloudClient
+from ella.services.runtime_errors import ProvisioningError
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+)
 from ella.services.escalation_policy import (
     CaregiverPolicyContext,
     EscalationEvent,
@@ -87,6 +94,7 @@ _OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 _LLM_API_KEY = _OPENROUTER_KEY or os.getenv("XAI_API_KEY", "")
 _LLM_API_BASE = "https://openrouter.ai/api/v1" if _OPENROUTER_KEY else "https://api.x.ai/v1"
 _LLM_MODEL = "x-ai/grok-4.1-fast" if _OPENROUTER_KEY else "grok-4-1-fast-non-reasoning"
+_GUARDIAN_CLOUD_TARGET_MODE = "hermes-cloud-guardian"
 
 # Database connection pool (lazy-initialized)
 _pool: Optional[asyncpg.Pool] = None
@@ -1115,6 +1123,12 @@ async def _consolidate_queue(
         None — all items are resolved/irrelevant, nothing to say
     """
     assert_current_ai_consent(uid)
+    runtime = None
+    if runtime_authority_enabled(uid):
+        runtime = await resolve_isolated_runtime(
+            uid,
+            target_mode=_GUARDIAN_CLOUD_TARGET_MODE,
+        )
 
     pending_text = "\n".join(
         f"- [{i+1}] ({item.get('trigger_type', '?')} at {item.get('created_at', '?')}): {item.get('message', '')}"
@@ -1163,6 +1177,78 @@ Rules:
         f"{echo_instruction}"
         "\n\nOutput the consolidated spoken message, or NULL if nothing needs to be said:"
     )
+
+    if runtime is not None and runtime.provider == "hermes_cloud":
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "pending": pending,
+                    "recently_consumed": recently_consumed,
+                    "chat_turns": chat_turns,
+                    "echo_risk": echo_risk,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        session_key = "guardian-" + hashlib.sha256(f"{uid}\x1f{runtime.binding_id}".encode("utf-8")).hexdigest()
+
+        async def revalidate_guardian_target() -> None:
+            current = await resolve_isolated_runtime(
+                uid,
+                target_mode=_GUARDIAN_CLOUD_TARGET_MODE,
+            )
+            if current is None or current.provider != "hermes_cloud":
+                raise ProvisioningError(
+                    "hermes_cloud_guardian_runtime_required",
+                    retryable=False,
+                )
+            stable_fields = (
+                "uid",
+                "binding_id",
+                "runtime_instance_id",
+                "gateway_url",
+                "expected_model",
+                "model_context_window_tokens",
+                "revision",
+                "profile_class",
+                "policy_commit_sha",
+                "approval_manifest_sha256",
+            )
+            if any(
+                getattr(current, field) != getattr(runtime, field) for field in stable_fields
+            ) or not hmac.compare_digest(
+                current.gateway_token,
+                runtime.gateway_token,
+            ):
+                raise ProvisioningError(
+                    "hermes_cloud_guardian_runtime_changed",
+                    retryable=False,
+                )
+
+        turn = await HermesCloudClient().create_response(
+            {
+                "expected_model": runtime.expected_model,
+                "model_context_window_tokens": runtime.model_context_window_tokens,
+                "allowed_tools": [],
+            },
+            session_key=session_key,
+            hermes_session_id=f"guardian-{digest[:32]}",
+            idempotency_key=f"guardian-{digest}",
+            user_input=user_prompt,
+            instructions=system_prompt,
+            base_url=runtime.gateway_url,
+            token=runtime.gateway_token,
+            max_output_tokens=100,
+            max_tool_calls=0,
+            before_provider_send=revalidate_guardian_target,
+        )
+        content = turn.text.strip()
+        print(f"[CONSOLIDATOR] uid={uid} pending={len(pending)} runtime=hermes_cloud", flush=True)
+        if content.upper() == "NULL" or not content:
+            return None
+        return content
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -1300,13 +1386,19 @@ async def next_audio(uid: str):
 
             chat_turns = await _get_recent_chat_turns(uid, limit=5)
 
-            consolidated_msg = await _consolidate_queue(
-                uid=uid,
-                pending=[dict(r) for r in pending_rows],
-                recently_consumed=[dict(r) for r in consumed_rows],
-                chat_turns=chat_turns,
-                echo_risk=echo_risk,
-            )
+            try:
+                consolidated_msg = await _consolidate_queue(
+                    uid=uid,
+                    pending=[dict(r) for r in pending_rows],
+                    recently_consumed=[dict(r) for r in consumed_rows],
+                    chat_turns=chat_turns,
+                    echo_risk=echo_risk,
+                )
+            except ProvisioningError as exc:
+                raise HTTPException(
+                    status_code=503 if exc.retryable else 409,
+                    detail={"code": exc.code},
+                ) from exc
 
             # Mark ALL pending items consumed
             pending_ids = [r["id"] for r in pending_rows]

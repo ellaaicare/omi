@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ella.services import hermes_cloud_runtime
+from ella.services import ai_consent, hermes_cloud_runtime
 from ella.routers.canonical_events import InMemoryCanonicalEventStore
 from ella.services.hermes_cloud import HermesCloudTurn
 from ella.services.hermes_cloud_runtime import (
@@ -18,7 +18,24 @@ from ella.services.runtime_resolver import IsolatedRuntime
 
 @pytest.fixture(autouse=True)
 def cloud_synthetic_identity(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
     monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    repository = ai_consent.InMemoryConsentRepository()
+    ai_consent.AiConsentService(repository).submit(
+        "synthetic-user",
+        ai_consent.ConsentSubmission(
+            decision="granted",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="runtime-default-grant",
+            app_version="1.0.0",
+            build_number="804",
+            locale="en-US",
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", repository)
 
 
 def _runtime(**updates) -> IsolatedRuntime:
@@ -37,7 +54,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         observed_peer="user-a",
         observer_peer="companion-a",
         prompt_pack_version="prompt-v1",
-        expected_model="model-a",
+        expected_model="gpt-5.6-terra",
         model_context_window_tokens=16384,
         allowed_tools=(),
         required_capabilities=("responses_api", "session_key_header"),
@@ -214,7 +231,7 @@ class FakeCloudClient:
             response_id="response-a",
             text="Synthetic acknowledgement.",
             usage=self.usage,
-            model="model-a",
+            model="gpt-5.6-terra",
             tool_calls=self.tool_calls,
         )
 
@@ -280,7 +297,7 @@ class SequencedCloudClient(FakeCloudClient):
             response_id=f"response-{len(self.calls)}",
             text=next(self.responses),
             usage=self.usage,
-            model="model-a",
+            model="gpt-5.6-terra",
             tool_calls=0,
         )
 
@@ -309,7 +326,7 @@ def test_cloud_turn_writes_once_and_same_interaction_replays():
     assert len(repository.receipts) == 2
     assert all(receipt["status"] == "written" for receipt in repository.receipts.values())
     assert policy.accepted[0]["provider"] == "hermes_cloud"
-    assert policy.accepted[0]["model"] == "model-a"
+    assert policy.accepted[0]["model"] == "gpt-5.6-terra"
     assert policy.updated[0]["estimated_cost_microusd"] == 7
     assert policy.reserved[0]["reservation_microusd"] == 20
     assert policy.settled[0]["actual_cost_microusd"] == 7
@@ -539,7 +556,13 @@ def test_provider_boundary_callback_runs_after_final_checks_and_before_cloud(
         )
     )
 
-    assert events == ["consent", "consent", "provider_started", "provider"]
+    assert events == [
+        "consent",
+        "consent",
+        "provider_started",
+        "consent",
+        "provider",
+    ]
 
 
 def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
@@ -583,6 +606,85 @@ def test_consent_revoked_after_reservation_blocks_provider_call(monkeypatch):
     assert checks == 2
     assert cloud.calls == []
     assert provider_marked is False
+    assert policy.reserved
+    assert policy.released
+
+
+def test_synthetic_consent_revoked_at_provider_boundary_hook_blocks_send(monkeypatch):
+    consent_repository = ai_consent.InMemoryConsentRepository()
+    consent_service = ai_consent.AiConsentService(consent_repository)
+    consent_service.submit(
+        "synthetic-user",
+        ai_consent.ConsentSubmission(
+            decision="granted",
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            request_id="runtime-boundary-grant",
+            app_version="1.0.0",
+            build_number="804",
+            locale="en-US",
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        ),
+    )
+    monkeypatch.setattr(ai_consent, "_repository", consent_repository)
+
+    class SendTrackingCloud(FakeCloudClient):
+        def __init__(self):
+            super().__init__()
+            self.provider_posts = 0
+
+        async def create_response(self, binding, **kwargs):
+            await kwargs["before_provider_send"]()
+            self.provider_posts += 1
+            return HermesCloudTurn(
+                response_id="response-a",
+                text="must not send",
+                usage=self.usage,
+                model="gpt-5.6-terra",
+                tool_calls=0,
+            )
+
+    repository = FakeRepository()
+    policy = FakePolicy()
+    cloud = SendTrackingCloud()
+    service = HermesCloudRuntimeService(
+        repository=repository,
+        event_store=InMemoryCanonicalEventStore(),
+        cloud_client=cloud,
+        voice_policy=policy,
+        cost_estimator=lambda usage: 0,
+        max_cost_estimator=lambda **kwargs: 1,
+    )
+
+    async def revoke_after_earlier_checks():
+        consent_service.submit(
+            "synthetic-user",
+            ai_consent.ConsentSubmission(
+                decision="revoked",
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                request_id="runtime-boundary-revoke",
+                app_version="1.0.0",
+                build_number="804",
+                locale="en-US",
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+        )
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service.run_turn(
+                _runtime(),
+                _request(),
+                before_provider_call=revoke_after_earlier_checks,
+            )
+        )
+
+    assert error.value.code == "managed_cloud_consent_stale"
+    assert cloud.provider_posts == 0
+    assert cloud.calls == []
     assert policy.reserved
     assert policy.released
 
@@ -980,7 +1082,7 @@ def test_profile_reclassification_during_send_boundary_prevents_provider_egress(
                 response_id="response-a",
                 text="Synthetic acknowledgement.",
                 usage=self.usage,
-                model="model-a",
+                model="gpt-5.6-terra",
                 tool_calls=self.tool_calls,
             )
 
