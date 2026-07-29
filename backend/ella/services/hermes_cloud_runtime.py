@@ -10,7 +10,7 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from database import voice_canary as voice_canary_db
 from database.ella_provisioning import EllaProvisioningRepository, RuntimePoolClaimError
@@ -19,8 +19,14 @@ from ella.services.ai_consent import (
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
+from ella.services.hermes_broker_client import HermesBrokerClient
+from ella.services.hermes_broker_prototype import (
+    load_prototype_config,
+    runtime_uses_broker_prototype,
+)
 from ella.services.hermes_cloud import (
     HermesCloudClient,
+    HermesCloudTurn,
     estimate_max_turn_cost_microusd,
     estimate_turn_cost_microusd,
 )
@@ -291,6 +297,81 @@ class HermesCloudRuntimeService:
         self.max_cost_estimator = max_cost_estimator
         self.allow_shadow = allow_shadow
         self.runtime_revalidator = runtime_revalidator or revalidate_cloud_runtime_authority
+        self.broker_client_factory = HermesBrokerClient
+
+    async def _provider_turn(
+        self,
+        *,
+        runtime: IsolatedRuntime,
+        request: HermesCloudTurnRequest,
+        scope: Mapping[str, Any],
+        claimed: Mapping[str, Any],
+        budget: Mapping[str, int],
+        grant_epoch: str,
+        mark_provider_send_boundary: Callable[[], Awaitable[tuple[str, str]]],
+    ) -> HermesCloudTurn:
+        """Direct `/v1/responses` or allowlisted broker prototype transport."""
+        prototype_config = load_prototype_config()
+        use_broker = runtime_uses_broker_prototype(runtime, config=prototype_config)
+        if not use_broker:
+            return await self.cloud_client.create_response(
+                {
+                    "expected_model": runtime.expected_model,
+                    "model_context_window_tokens": runtime.model_context_window_tokens,
+                    "allowed_tools": list(runtime.allowed_tools),
+                },
+                session_key=str(scope["session_key"]),
+                hermes_session_id=str(claimed["hermes_session_id"]),
+                idempotency_key=str(claimed["idempotency_key"]),
+                user_input=request.user_input,
+                instructions=request.instructions,
+                previous_response_id=claimed.get("previous_response_id"),
+                base_url=runtime.gateway_url,
+                token=runtime.gateway_token,
+                max_output_tokens=budget["max_output_tokens"],
+                max_tool_calls=budget["max_tool_calls"],
+                before_provider_send=mark_provider_send_boundary,
+            )
+
+        # Fail closed: broker path never falls back to direct Hermes or Plato.
+        assert prototype_config is not None
+        await mark_provider_send_boundary()
+        client = self.broker_client_factory(prototype_config)
+        source_event_id = str(request.client_interaction_id or request.correlation_id)
+        if request.channel == HERMES_CLOUD_ENRICHMENT_CHANNEL:
+            # Enrichment instructions already embed transcript JSON; surface a
+            # bounded segment list for the broker transcript lane.
+            terminal = await client.run_transcript_user_summary(
+                account_id=str(runtime.uid),
+                profile_id=str(runtime.uid),
+                runtime_binding_ref=str(runtime.binding_id),
+                consent_epoch=str(grant_epoch),
+                source_event_id=source_event_id,
+                transcript_segments=[
+                    {"speaker": "user", "text": request.user_input[:8000]},
+                ],
+                expected_model=runtime.expected_model,
+            )
+        else:
+            terminal = await client.run_chat_turn(
+                account_id=str(runtime.uid),
+                profile_id=str(runtime.uid),
+                runtime_binding_ref=str(runtime.binding_id),
+                consent_epoch=str(grant_epoch),
+                message=request.user_input,
+                session_key=str(scope["session_key"]),
+                session_id=str(claimed["hermes_session_id"]),
+                source_event_id=source_event_id,
+                expected_model=runtime.expected_model,
+                context={"instructions": request.instructions[:4000]},
+            )
+        return HermesCloudTurn(
+            response_id=terminal.response_id,
+            text=terminal.text,
+            usage=dict(terminal.usage),
+            model=terminal.model,
+            tool_calls=0,
+        )
 
     async def run_turn(
         self,
@@ -574,23 +655,14 @@ class HermesCloudRuntimeService:
                 provider_started = True
                 return current_runtime.gateway_url, current_runtime.gateway_token
 
-            turn = await self.cloud_client.create_response(
-                {
-                    "expected_model": runtime.expected_model,
-                    "model_context_window_tokens": runtime.model_context_window_tokens,
-                    "allowed_tools": list(runtime.allowed_tools),
-                },
-                session_key=str(scope["session_key"]),
-                hermes_session_id=str(claimed["hermes_session_id"]),
-                idempotency_key=str(claimed["idempotency_key"]),
-                user_input=request.user_input,
-                instructions=request.instructions,
-                previous_response_id=claimed.get("previous_response_id"),
-                base_url=runtime.gateway_url,
-                token=runtime.gateway_token,
-                max_output_tokens=budget["max_output_tokens"],
-                max_tool_calls=budget["max_tool_calls"],
-                before_provider_send=mark_provider_send_boundary,
+            turn = await self._provider_turn(
+                runtime=runtime,
+                request=request,
+                scope=scope,
+                claimed=claimed,
+                budget=budget,
+                grant_epoch=current_grant_epoch,
+                mark_provider_send_boundary=mark_provider_send_boundary,
             )
             provider_response_ids = [turn.response_id]
             actual_tool_calls = turn.tool_calls
