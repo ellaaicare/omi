@@ -1,0 +1,178 @@
+name: Ella iOS Source CI
+
+on:
+  pull_request:
+    branches:
+      - feature/phase-a-testflight
+      - main
+    paths:
+      - app/**
+      - .github/workflows/ella-ios-source-ci.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ella-ios-source-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flutter-source:
+    name: Flutter source, guards, and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify credential-free source CI scope
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          workflow=".github/workflows/ella-ios-source-ci.yml"
+          forbidden_ci_terms='(ASC_|KEYCHAIN|TestFlight|appstore|app-store|build-and-upload|xcodebuild|fastlane|codesign|mobileprovision|\.p8|\.p12)'
+          if grep -Ev 'forbidden_ci_terms|forbidden_artifact_paths|secret_patterns|Credentialed iOS build/upload terms|grep -EIn|workflow=' "$workflow" \
+            | grep -EIn "$forbidden_ci_terms"; then
+            echo "Credentialed iOS build/upload terms are not allowed in this hosted source CI workflow." >&2
+            exit 1
+          fi
+
+      - name: Diff and signing artifact scan
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            base_ref="origin/${GITHUB_BASE_REF}"
+            git fetch --no-tags --prune origin "${GITHUB_BASE_REF}"
+          else
+            base_ref="HEAD~1"
+          fi
+
+          git diff --check "${base_ref}...HEAD"
+          git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
+
+          forbidden_artifact_paths='(^|/)(AuthKey_[^/]*\.p8|[^/]*\.(p8|p12|cer|mobileprovision|provisionprofile|xcarchive|ipa))$'
+          if grep -EIn "$forbidden_artifact_paths" /tmp/ella-ios-source-ci-changed-files.txt; then
+            echo "Signing certificates, provisioning profiles, archives, and IPA artifacts must not be committed." >&2
+            exit 1
+          fi
+
+      - name: Diff secret scan
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            base_ref="origin/${GITHUB_BASE_REF}"
+          else
+            base_ref="HEAD~1"
+          fi
+
+          git diff --unified=0 "${base_ref}...HEAD" > /tmp/ella-ios-source-ci.diff
+          secret_patterns='(-----BEGIN ((RSA|DSA|EC|OPENSSH) )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[pousr]_[A-Za-z0-9_]{36,}|sk-(live|test)-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,})'
+          if grep -EIn "$secret_patterns" /tmp/ella-ios-source-ci.diff; then
+            echo "Potential secret found in PR diff." >&2
+            exit 1
+          fi
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.24.1
+          channel: stable
+          cache: true
+          cache-dependency-path: app/pubspec.lock
+
+      - name: Verify pinned Flutter version
+        run: |
+          set -euo pipefail
+
+          expected_flutter_version="3.24.1"
+          actual_flutter_version="$(python3 -c 'import json, pathlib; print(json.loads(pathlib.Path(".fvmrc").read_text())["flutter"])')"
+          if [[ "$actual_flutter_version" != "$expected_flutter_version" ]]; then
+            echo "app/.fvmrc must pin Flutter $expected_flutter_version, found $actual_flutter_version." >&2
+            exit 1
+          fi
+
+          flutter --version
+          dart --version
+
+      - name: Resolve pinned Dart dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Enforce focused test collection counts
+        run: |
+          set -euo pipefail
+
+          mapfile -t issue_tests < <(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort)
+          expected_issue_test_count=31
+          if [[ "${#issue_tests[@]}" -ne "$expected_issue_test_count" ]]; then
+            printf '%s\n' "${issue_tests[@]}"
+            echo "Expected $expected_issue_test_count Ella/backend/onboarding source tests, found ${#issue_tests[@]}." >&2
+            exit 1
+          fi
+
+          mapfile -t all_app_tests < <(find test -type f -name '*_test.dart' | sort)
+          expected_app_test_count=52
+          if [[ "${#all_app_tests[@]}" -ne "$expected_app_test_count" ]]; then
+            printf '%s\n' "${all_app_tests[@]}"
+            echo "Expected $expected_app_test_count Flutter test files, found ${#all_app_tests[@]}." >&2
+            exit 1
+          fi
+
+      - name: Analyze Flutter source
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Run focused invite, entitlement, quota, consent, and routing tests
+        run: |
+          set -euo pipefail
+
+          focused_tests=(
+            test/backend/audio_consent_guard_test.dart
+            test/backend/preferences_public_mode_test.dart
+            test/pages/onboarding/ella/ella_onboarding_consent_test.dart
+            test/ella/widgets/ai_consent_sheet_test.dart
+            test/ella/services/ai_consent_policy_test.dart
+            test/ella/services/ai_consent_coordinator_test.dart
+            test/ella/services/ai_consent_active_session_lease_test.dart
+            test/ella/services/protected_egress_consent_test.dart
+            test/ella/services/ella_chat_consent_test.dart
+            test/ella/services/ella_invite_link_controller_test.dart
+            test/ella/services/ella_entitlement_service_test.dart
+            test/ella/services/ella_entitlement_provider_test.dart
+            test/ella/pages/ella_entitlement_gate_page_test.dart
+            test/ella/pages/ella_provisioning_gate_page_test.dart
+            test/ella/pages/home_provisioning_gate_test.dart
+            test/ella/services/ella_provisioning_service_test.dart
+            test/ella/pages/ella_voice_quota_states_test.dart
+            test/ella/services/v2v_client_test.dart
+            test/ella/services/voice_session_startup_guard_test.dart
+            test/ella/widgets/v2v_fallback_dialog_test.dart
+          )
+
+          expected_focused_test_count=20
+          if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
+            echo "Focused source test manifest count drifted." >&2
+            exit 1
+          fi
+          for test_file in "${focused_tests[@]}"; do
+            [[ -f "$test_file" ]] || { echo "Missing focused test: $test_file" >&2; exit 1; }
+          done
+
+          flutter test "${focused_tests[@]}"
+
+      - name: Run full Flutter tests
+        run: flutter test
+
+      - name: Run app/test.sh
+        run: ./test.sh
