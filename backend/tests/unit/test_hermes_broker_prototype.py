@@ -96,6 +96,11 @@ def _enable(monkeypatch, **overrides):
 class FakeResponse:
     def __init__(self, status_code: int, body: Any, *, content: Optional[bytes] = None):
         self.status_code = status_code
+        if isinstance(body, dict) and body.get("request_id"):
+            body.setdefault("callback_contract", "stock_best_effort_v1")
+            body.setdefault("terminal_proof", False)
+            body.setdefault("delivery_platform", "ella_callback_stock")
+            body.setdefault("callback_source", "hermes_stock_0_19_quiet_window")
         self._body = body
         self.content = content if content is not None else json.dumps(body).encode()
 
@@ -135,12 +140,14 @@ async def _noop_sleep(_seconds):
 
 def _completed_result(**overrides):
     body = {
-        "status": "completed",
+        "status": "writeback_completed",
         "request_id": "hwb_req1",
         "correlation_id": "hwb:corr1",
         "account_id": ACCOUNT_UUID,
         "profile_id": PROFILE_UUID,
         "lane": "chat_turn",
+        "callback_contract": "stock_best_effort_v1",
+        "terminal_proof": False,
         "outcome": "success",
         "result": {
             "answer": "proto answer",
@@ -236,6 +243,10 @@ def test_success_chat_maps_answer_with_owner_uuids(monkeypatch):
             assert body["profile_id"] == PROFILE_UUID
             assert body["account_id"] != AUTH_UID
             assert body["payload"]["message"] == "hello"
+            assert body["delivery_platform"] == "ella_callback_stock"
+            assert body["callback_source"] == "hermes_stock_0_19_quiet_window"
+            assert body["webhook_route"] == "ella-stock-synthetic"
+            assert url.endswith("/stock-canary/admit")
             assert "Authorization" in kwargs["headers"]
             return FakeResponse(
                 200,
@@ -246,7 +257,7 @@ def test_success_chat_maps_answer_with_owner_uuids(monkeypatch):
                 },
             )
         assert method == "GET"
-        assert "hwb_req1" in url
+        assert url.endswith("/stock-canary/requests/hwb_req1")
         params = kwargs.get("params") or {}
         assert params["account_id"] == ACCOUNT_UUID
         assert params["profile_id"] == PROFILE_UUID
@@ -300,6 +311,36 @@ def test_correlation_mismatch_fails_closed(monkeypatch):
             )
         )
     assert exc.value.code == "hermes_broker_prototype_correlation_mismatch"
+
+
+def test_stock_result_requires_best_effort_nonterminal_proof(monkeypatch):
+    _enable(monkeypatch)
+    cfg = proto.load_prototype_config()
+
+    def handler(method, url, kwargs):
+        if method == "POST":
+            return FakeResponse(
+                200,
+                {"status": "pending", "request_id": "hwb_req1", "correlation_id": "hwb:corr1"},
+            )
+        return FakeResponse(200, _completed_result(terminal_proof=True))
+
+    client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
+    with pytest.raises(ProvisioningError) as exc:
+        asyncio.run(
+            client.run_chat_turn(
+                account_id=ACCOUNT_UUID,
+                profile_id=PROFILE_UUID,
+                runtime_binding_ref=BINDING_ID,
+                consent_epoch="consent.v1",
+                message="hello",
+                session_key="sk",
+                session_id="sid",
+                source_event_id="evt-1",
+                expected_model="gpt-test",
+            )
+        )
+    assert exc.value.code == "hermes_broker_prototype_stock_semantics_mismatch"
 
 
 def test_cross_account_result_fails_closed(monkeypatch):
@@ -475,7 +516,12 @@ def test_answer_only_projection_rejected(monkeypatch):
             )
         return FakeResponse(
             200,
-            {"status": "completed", "result": {"answer": "sneaky"}},
+            {
+                "status": "writeback_completed",
+                "callback_contract": "stock_best_effort_v1",
+                "terminal_proof": False,
+                "result": {"answer": "sneaky"},
+            },
         )
 
     client = HermesBrokerClient(cfg, http_client_factory=FakeHttp(handler).factory, sleep=_noop_sleep)
@@ -706,6 +752,57 @@ def test_disallowed_host_rejected(monkeypatch):
     with pytest.raises(ProvisioningError) as exc:
         proto.load_prototype_config()
     assert exc.value.code == "hermes_broker_prototype_url_not_allowlisted"
+
+
+def test_exact_synthetic_loopback_transport_is_allowed(monkeypatch):
+    _enable(
+        monkeypatch,
+        ELLA_HERMES_BROKER_BASE_URL="http://127.0.0.1:18097",
+        ELLA_HERMES_BROKER_ALLOWED_HOST="127.0.0.1",
+    )
+    config = proto.load_prototype_config()
+    assert config is not None
+    assert config.base_url == "http://127.0.0.1:18097"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "allowed_host"),
+    (
+        ("http://localhost:18097", "localhost"),
+        ("http://127.0.0.1:8097", "127.0.0.1"),
+        ("http://127.0.0.1:18098", "127.0.0.1"),
+        ("http://127.0.0.2:18097", "127.0.0.2"),
+        ("http://127.0.0.1:18097/path", "127.0.0.1"),
+        ("http://127.0.0.1:18097?target=evil", "127.0.0.1"),
+        ("http://user@127.0.0.1:18097", "127.0.0.1"),
+    ),
+)
+def test_loopback_transport_adversarial_urls_fail_closed(monkeypatch, base_url, allowed_host):
+    _enable(
+        monkeypatch,
+        ELLA_HERMES_BROKER_BASE_URL=base_url,
+        ELLA_HERMES_BROKER_ALLOWED_HOST=allowed_host,
+    )
+    with pytest.raises(ProvisioningError) as exc:
+        proto.load_prototype_config()
+    assert exc.value.code == "hermes_broker_prototype_url_not_allowlisted"
+
+
+def test_default_http_client_disables_environment_and_redirects(monkeypatch):
+    captured = {}
+
+    def fake_async_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(client_mod.httpx, "AsyncClient", fake_async_client)
+    _enable(monkeypatch)
+    config = proto.load_prototype_config()
+    assert config is not None
+    client = HermesBrokerClient(config)
+    client.http_client_factory(timeout=1)
+    assert captured["follow_redirects"] is False
+    assert captured["trust_env"] is False
 
 
 def test_provider_turn_uses_direct_when_not_allowlisted(monkeypatch):

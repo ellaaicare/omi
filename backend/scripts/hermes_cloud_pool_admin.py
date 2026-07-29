@@ -46,6 +46,22 @@ async def list_pool() -> dict:
     }
 
 
+async def cleanup(*, binding_id: str, runtime_instance_id: str) -> dict:
+    repository = await EllaProvisioningRepository.create()
+    await repository.assert_cloud_schema_ready()
+    removed = await repository.cleanup_cloud_pool_binding(
+        binding_id=binding_id,
+        runtime_instance_id=runtime_instance_id,
+    )
+    return {
+        "action": "cleanup_pool_binding",
+        "binding_id": str(removed["id"]),
+        "runtime_instance_id": str(removed["runtime_instance_id"]),
+        "status": "removed",
+        "content_free": True,
+    }
+
+
 async def promote(
     *,
     uid: str,
@@ -102,6 +118,9 @@ def main() -> None:
     register_parser = subparsers.add_parser("register")
     register_parser.add_argument("--candidate", required=True)
     subparsers.add_parser("list")
+    cleanup_parser = subparsers.add_parser("cleanup")
+    cleanup_parser.add_argument("--binding-id", required=True)
+    cleanup_parser.add_argument("--runtime-instance-id", required=True)
     promote_parser = subparsers.add_parser("promote")
     promote_parser.add_argument("--uid", required=True)
     promote_parser.add_argument("--binding-id", required=True)
@@ -114,6 +133,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "register":
         result = asyncio.run(register(args.candidate))
+    elif args.command == "cleanup":
+        result = asyncio.run(
+            cleanup(
+                binding_id=args.binding_id,
+                runtime_instance_id=args.runtime_instance_id,
+            )
+        )
     elif args.command == "promote":
         result = asyncio.run(
             promote(

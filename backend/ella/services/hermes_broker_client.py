@@ -18,7 +18,11 @@ import httpx
 
 from ella.services.hermes_broker_prototype import (
     ADMIT_PATH,
+    LOOPBACK_BROKER_BASE_URL,
     RESULT_PATH_PREFIX,
+    STOCK_CALLBACK_SOURCE,
+    STOCK_DELIVERY_PLATFORM,
+    STOCK_WEBHOOK_ROUTE,
     HermesBrokerPrototypeConfig,
     resolve_service_token,
 )
@@ -42,7 +46,7 @@ class BrokerTerminalTurn:
 
 
 class HermesBrokerClient:
-    """HTTPS client pinned to the allowlisted private broker host."""
+    """Client pinned to HTTPS:443 or the one synthetic host-loopback route."""
 
     def __init__(
         self,
@@ -74,14 +78,22 @@ class HermesBrokerClient:
 
     def _assert_url(self, url: str, *, expected_path_prefix: str) -> None:
         parsed = urlparse(url)
+        secure_remote = (
+            parsed.scheme == "https" and parsed.hostname == self.config.allowed_host and parsed.port in (None, 443)
+        )
+        pinned_loopback = (
+            self.config.base_url == LOOPBACK_BROKER_BASE_URL
+            and self.config.allowed_host == "127.0.0.1"
+            and parsed.scheme == "http"
+            and parsed.hostname == "127.0.0.1"
+            and parsed.port == 18097
+        )
         if (
-            parsed.scheme != "https"
-            or parsed.hostname != self.config.allowed_host
-            or parsed.username
+            parsed.username
             or parsed.password
             or parsed.query
             or parsed.fragment
-            or (parsed.port not in (None, 443))
+            or not (secure_remote or pinned_loopback)
             or not parsed.path.startswith(expected_path_prefix)
         ):
             raise ProvisioningError(
@@ -111,6 +123,9 @@ class HermesBrokerClient:
             "consent_epoch": consent_epoch,
             "payload": dict(payload),
             "deadline_at": int(deadline_at),
+            "delivery_platform": STOCK_DELIVERY_PLATFORM,
+            "callback_source": STOCK_CALLBACK_SOURCE,
+            "webhook_route": STOCK_WEBHOOK_ROUTE,
         }
         if pass_kind is not None:
             body["pass_kind"] = pass_kind
@@ -129,11 +144,21 @@ class HermesBrokerClient:
                 "hermes_broker_prototype_unavailable",
                 retryable=True,
             ) from exc
-        return self._parse_json(
+        admission = self._parse_json(
             response,
             max_bytes=MAX_ADMISSION_BODY_BYTES,
             invalid_code="hermes_broker_prototype_admit_invalid",
         )
+        if (
+            admission.get("delivery_platform") != STOCK_DELIVERY_PLATFORM
+            or admission.get("callback_source") != STOCK_CALLBACK_SOURCE
+            or admission.get("terminal_proof") is not False
+        ):
+            raise ProvisioningError(
+                "hermes_broker_prototype_stock_semantics_mismatch",
+                retryable=False,
+            )
+        return admission
 
     async def wait_for_terminal(
         self,
@@ -188,10 +213,10 @@ class HermesBrokerClient:
                     retryable=False,
                     detail={
                         "companion": (
-                            "GET /v1/ella/internal/hermes-webhook-broker/requests/"
+                            "GET /v1/ella/internal/hermes-webhook-broker/stock-canary/requests/"
                             "{request_id}?account_id=&profile_id= "
-                            "must return owner-pinned terminal status + bounded result "
-                            "from broker_writeback_outbox.result_json (service auth)."
+                            "must return owner-pinned stock_best_effort_v1 state "
+                            "with terminal_proof=false (service auth)."
                         ),
                     },
                 )
@@ -209,18 +234,18 @@ class HermesBrokerClient:
                 lane=expected_lane,
                 require_terminal_identity=False,
             )
+            if last.get("callback_contract") != "stock_best_effort_v1" or last.get("terminal_proof") is not False:
+                raise ProvisioningError(
+                    "hermes_broker_prototype_stock_semantics_mismatch",
+                    retryable=False,
+                )
             status = str(last.get("status") or "").strip()
             if not status:
                 raise ProvisioningError(
                     "hermes_broker_prototype_status_omitted",
                     retryable=False,
                 )
-            if status in {
-                "completed",
-                "callback_verified",
-                "writeback_completed",
-                "success",
-            }:
+            if status == "writeback_completed":
                 # Terminal success must carry full owner/request/correlation/lane pins.
                 self._assert_terminal_envelope(
                     last,
@@ -233,11 +258,10 @@ class HermesBrokerClient:
                 )
                 return last
             if status in {
-                "failed",
-                "error",
                 "quarantined",
                 "blocked",
                 "expired",
+                "writeback_blocked",
             }:
                 self._assert_terminal_envelope(
                     last,
@@ -252,7 +276,18 @@ class HermesBrokerClient:
                     f"hermes_broker_prototype_{status}",
                     retryable=False,
                 )
-            # pending / dispatching / awaiting_callback
+            if status not in {
+                "pending",
+                "dispatching",
+                "awaiting_callback",
+                "callback_accepted",
+                "writeback_pending",
+                "writeback_retryable",
+            }:
+                raise ProvisioningError(
+                    "hermes_broker_prototype_stock_status_invalid",
+                    retryable=False,
+                )
             await self.sleep(self.config.poll_interval_seconds)
         raise ProvisioningError(
             "hermes_broker_prototype_wait_timeout",

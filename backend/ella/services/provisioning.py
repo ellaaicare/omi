@@ -32,12 +32,14 @@ from ella.services.ai_consent import (
 )
 from ella.services.hermes_cloud import (
     HermesCloudClient,
+    HermesCloudPreflight,
     RuntimePoolAlertPublisher,
 )
 from ella.services.hermes_cloud_policy import (
     cloud_synthetic_only,
     current_cloud_authority,
 )
+from ella.services.hermes_cloud_staged_attestation import StagedAttestationVerifier
 from ella.services.runtime_errors import ProvisioningError
 
 DEFAULT_TARGET_SCHEMA_VERSION = "hermes-user-v1"
@@ -411,6 +413,7 @@ class ProvisioningCoordinator:
         honcho_client: Any = None,
         alert_publisher: Any = None,
         runtime_admission: Any = None,
+        staged_attestation_verifier: Any = None,
     ):
         self.repository = repository
         self.client = client or HermesProvisionClient()
@@ -418,6 +421,7 @@ class ProvisioningCoordinator:
         self.honcho_client = honcho_client
         self.alert_publisher = alert_publisher
         self.runtime_admission = runtime_admission
+        self.staged_attestation_verifier = staged_attestation_verifier
 
     async def ensure_job(
         self,
@@ -682,7 +686,35 @@ class ProvisioningCoordinator:
                 )
 
             await current_authority()
-            preflight = await cloud_client.preflight(binding)
+            registration_health = binding.get("health_receipt") or {}
+            if isinstance(registration_health, str):
+                try:
+                    registration_health = json.loads(registration_health)
+                except json.JSONDecodeError:
+                    registration_health = {}
+            staged_marker = (
+                registration_health.get("staged_attestation") if isinstance(registration_health, dict) else None
+            )
+            if isinstance(staged_marker, dict):
+                staged_verifier = self.staged_attestation_verifier or StagedAttestationVerifier()
+                staged_receipt = staged_verifier.preflight(
+                    binding,
+                    receipt_ref=str(staged_marker.get("receipt_ref") or ""),
+                    uid=identity.uid,
+                    account_id=str(binding.get("user_id") or ""),
+                    profile_id=str(binding.get("user_id") or ""),
+                    profile_class=str(binding.get("profile_class") or ""),
+                    phase="claim_finalization",
+                    prior_marker=staged_marker,
+                )
+                preflight = HermesCloudPreflight(
+                    model=str(staged_receipt["model"]),
+                    tools=tuple(staged_receipt["tools"]),
+                    capabilities=tuple(staged_receipt["capabilities"]),
+                    receipt=staged_receipt,
+                )
+            else:
+                preflight = await cloud_client.preflight(binding)
             final_authority = await current_authority()
             health_receipt = {
                 **preflight.receipt,

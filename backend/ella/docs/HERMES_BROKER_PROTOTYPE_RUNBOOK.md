@@ -20,7 +20,7 @@ only; no global switch; no Plato/Mini fallback).
 |---|---|
 | Flag off (default) | Existing direct Hermes Cloud `/v1/responses` |
 | Flag on, not exact allowlist | Existing direct path unchanged |
-| Flag on + exact synthetic account/profile (+ optional binding) | Broker `POST .../admit` then bounded poll for terminal result |
+| Flag on + exact synthetic account/profile (+ optional binding) | Broker stock-canary admission then bounded stock-result poll |
 
 On broker failure/timeout/mismatch: **explicit `ProvisioningError`**, content-free
 where required. **No** fallback to direct Hermes, Plato, Mini, or OpenClaw.
@@ -37,9 +37,9 @@ ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID=
 ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID=
 ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID=   # optional; when set must match runtime.binding_id
 
-# Private broker HTTPS endpoint (host must match allowlist)
-ELLA_HERMES_BROKER_BASE_URL=https://broker.example.internal
-ELLA_HERMES_BROKER_ALLOWED_HOST=broker.example.internal
+# HTTPS:443 normally. The only HTTP exception is the exact host-local mapping:
+ELLA_HERMES_BROKER_BASE_URL=http://127.0.0.1:18097
+ELLA_HERMES_BROKER_ALLOWED_HOST=127.0.0.1
 
 # Service auth — reference only
 ELLA_HERMES_BROKER_SERVICE_TOKEN_REF=env:ELLA_HERMES_BROKER_SERVICE_TOKEN
@@ -56,47 +56,22 @@ ELLA_HERMES_BROKER_CALLBACK_DEADLINE_SECONDS=90
 Set `ELLA_HERMES_BROKER_PROTOTYPE_ENABLED` to any value other than exact `true`
 (or unset). All traffic returns to the pre-prototype direct path.
 
-## Companion change required on ella-ai (blocker for live smoke)
-
-Merged broker routes include admit, callback, and workers only — **no owner-pinned
-result read/wait API**. Canonical writeback stores a **content-free**
-`result_sha256`; the answer lives in `broker_writeback_outbox.result_json`.
-
-Minimal companion (ella-ai):
+## Stock contract
 
 ```http
-GET /v1/ella/internal/hermes-webhook-broker/requests/{request_id}
+POST /v1/ella/internal/hermes-webhook-broker/stock-canary/admit
+GET /v1/ella/internal/hermes-webhook-broker/stock-canary/requests/{request_id}
   ?account_id=<uuid-or-opaque>&profile_id=<uuid-or-opaque>
 Authorization: Bearer <ELLA_HERMES_BROKER_SERVICE_TOKEN>
 ```
 
-Requirements:
-
-1. Service auth identical to admit.
-2. Re-prove request owner (`account_id`/`profile_id`) under the shared authority
-   key before returning anything.
-3. Return bounded JSON, for example:
-
-```json
-{
-  "status": "pending|awaiting_callback|completed|failed|quarantined|...",
-  "request_id": "hwb_...",
-  "correlation_id": "hwb:...",
-  "account_id": "...",
-  "profile_id": "...",
-  "lane": "chat_turn",
-  "outcome": "success|error|null",
-  "duplicate": false,
-  "result": { "answer": "...", "session_key": "...", "session_id": "...", "canonical_user_event_id": "..." }
-}
-```
-
-4. Until completed/failed, `result` may be null. Never return another owner's row.
-5. Cap body size (≤256KiB) and apply read timeouts.
-
-Until that endpoint exists, the OMI prototype returns
-`hermes_broker_prototype_result_endpoint_missing` after a successful admit when
-GET yields HTTP 404 — fail closed, no direct-path bypass.
+Admission always supplies server-owned `delivery_platform=ella_callback_stock`,
+`callback_source=hermes_stock_0_19_quiet_window`, and
+`webhook_route=ella-stock-synthetic`. Results must be the owner-, request-,
+correlation-, and lane-pinned `stock_best_effort_v1` projection with
+`terminal_proof=false`. OMI accepts success only at `writeback_completed`.
+HTTP 404, generic broker projections, terminal-proof claims, or unknown states
+fail closed with no direct/Plato fallback.
 
 ## Out of scope (see ella-ai#1157)
 

@@ -19,11 +19,13 @@ from ella.services.runtime_resolver import IsolatedRuntime
 # Exact lowercase only — no permissive truthy aliases.
 _TRUE = "true"
 
-# Fixed private broker path prefixes on the allowlisted host.
-ADMIT_PATH = "/v1/ella/internal/hermes-webhook-broker/admit"
-# Companion contract (not yet on merged ella-ai main): bounded result wait.
-# Documented in backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md.
-RESULT_PATH_PREFIX = "/v1/ella/internal/hermes-webhook-broker/requests/"
+# Fixed stock-canary broker paths on the allowlisted host.
+ADMIT_PATH = "/v1/ella/internal/hermes-webhook-broker/stock-canary/admit"
+RESULT_PATH_PREFIX = "/v1/ella/internal/hermes-webhook-broker/stock-canary/requests/"
+LOOPBACK_BROKER_BASE_URL = "http://127.0.0.1:18097"
+STOCK_DELIVERY_PLATFORM = "ella_callback_stock"
+STOCK_CALLBACK_SOURCE = "hermes_stock_0_19_quiet_window"
+STOCK_WEBHOOK_ROUTE = "ella-stock-synthetic"
 
 CHAT_LANE = "chat_turn"
 TRANSCRIPT_LANE = "transcript_summary_enrichment"
@@ -79,14 +81,21 @@ def load_prototype_config() -> Optional[HermesBrokerPrototypeConfig]:
             retryable=False,
         )
     parsed = urlparse(base_url)
+    secure_remote = parsed.scheme == "https" and parsed.hostname == allowed_host and parsed.port in (None, 443)
+    pinned_loopback = (
+        base_url == LOOPBACK_BROKER_BASE_URL
+        and allowed_host == "127.0.0.1"
+        and parsed.scheme == "http"
+        and parsed.hostname == "127.0.0.1"
+        and parsed.port == 18097
+    )
     if (
-        parsed.scheme != "https"
-        or parsed.username
+        parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or (parsed.port not in (None, 443))
-        or parsed.hostname != allowed_host
+        or parsed.path not in {"", "/"}
+        or not (secure_remote or pinned_loopback)
     ):
         raise ProvisioningError(
             "hermes_broker_prototype_url_not_allowlisted",

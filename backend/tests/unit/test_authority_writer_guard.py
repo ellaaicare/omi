@@ -25,6 +25,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "activate_runtime_binding"),
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "claim_cloud_pool_binding"),
+    ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"),
     ("database/ella_provisioning.py", "promote_cloud_binding"),
@@ -43,6 +44,7 @@ EXPECTED_WRITERS = {
 }
 
 DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
+    ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
@@ -212,6 +214,7 @@ def test_global_users_writer_inventory_is_closed_and_authority_scoped():
 
 def test_every_owner_bound_writer_is_pinned_to_real_postgres_contention_coverage():
     assert set(REAL_POSTGRES_WRITER_COVERAGE) == EXPECTED_WRITERS - {
+        ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
         ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     }
     for key, (relative_path, marker_spec) in REAL_POSTGRES_WRITER_COVERAGE.items():

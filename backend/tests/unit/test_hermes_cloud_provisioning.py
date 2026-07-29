@@ -247,6 +247,64 @@ def test_cloud_claim_preflights_vendor_without_honcho_before_atomic_publish(monk
     assert repository.delivered_alerts == ["alert-a"]
 
 
+def test_cloud_claim_finalization_revalidates_staged_receipt_without_direct_preflight(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    staged_marker = {
+        "attestation_id": "attestation-canary",
+        "receipt_ref": "/var/lib/ella/hermes-cloud-attestations/canary.json",
+        "receipt_sha256": "d" * 64,
+        "phase": "pool_registration",
+    }
+
+    class StagedRepository(FakeRepository):
+        async def claim_cloud_pool_binding(self, **kwargs):
+            binding = await super().claim_cloud_pool_binding(**kwargs)
+            binding.update(
+                {
+                    "user_id": "11111111-1111-4111-8111-111111111111",
+                    "runtime_instance_id": "instance-a",
+                    "health_receipt": {"staged_attestation": staged_marker},
+                }
+            )
+            return binding
+
+    class NoDirectCloud:
+        async def preflight(self, binding):
+            raise AssertionError("direct Nous preflight must not run for staged finalization")
+
+    class Verifier:
+        def preflight(self, binding, **kwargs):
+            assert kwargs["phase"] == "claim_finalization"
+            assert kwargs["prior_marker"] == staged_marker
+            return {
+                "model": "model-a",
+                "tools": [],
+                "capabilities": ["responses_api", "session_key_header"],
+                "preflight_source": "server_staged_attestation",
+                "staged_attestation": {**staged_marker, "phase": "claim_finalization"},
+                "content_free": True,
+            }
+
+    repository = StagedRepository()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=NoDirectCloud(),
+        honcho_client=FakeHoncho(),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+        staged_attestation_verifier=Verifier(),
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(repository.finalized) == 1
+    health = repository.finalized[0]["health_receipt"]
+    assert health["preflight_source"] == "server_staged_attestation"
+    assert health["staged_attestation"]["phase"] == "claim_finalization"
+
+
 def test_allowlisted_real_profile_is_denied_before_claim_or_vendor_side_effect(
     monkeypatch,
 ):

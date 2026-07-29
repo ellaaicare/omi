@@ -26,7 +26,10 @@ on:
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
+      - "backend/ella/services/hermes_broker_client.py"
+      - "backend/ella/services/hermes_broker_prototype.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/hermes_cloud_staged_attestation.py"
       - "backend/ella/services/hermes_cloud_enrichment.py"
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
@@ -54,6 +57,7 @@ on:
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
+      - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -105,7 +109,10 @@ on:
       - "backend/ella/routers/photon.py"
       - "backend/ella/routers/resolve.py"
       - "backend/ella/routers/voice.py"
+      - "backend/ella/services/hermes_broker_client.py"
+      - "backend/ella/services/hermes_broker_prototype.py"
       - "backend/ella/services/hermes_cloud.py"
+      - "backend/ella/services/hermes_cloud_staged_attestation.py"
       - "backend/ella/services/hermes_cloud_enrichment.py"
       - "backend/ella/services/hermes_cloud_enrichment_outbox.py"
       - "backend/ella/services/hermes_cloud_enrichment_dependencies.py"
@@ -133,6 +140,7 @@ on:
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
+      - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
@@ -233,7 +241,10 @@ jobs:
           ella/routers/observer.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
+          ella/services/hermes_broker_client.py
+          ella/services/hermes_broker_prototype.py
           ella/services/hermes_cloud.py
+          ella/services/hermes_cloud_staged_attestation.py
           ella/services/hermes_cloud_enrichment.py
           ella/services/hermes_cloud_enrichment_outbox.py
           ella/services/hermes_cloud_enrichment_dependencies.py
@@ -267,7 +278,10 @@ jobs:
           ella/routers/ai_consent.py ella/routers/chat.py
           ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
+          ella/services/hermes_broker_client.py
+          ella/services/hermes_broker_prototype.py
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
+          ella/services/hermes_cloud_staged_attestation.py
           ella/services/hermes_cloud_runtime.py
           ella/services/consent_authority.py ella/services/invitation_authority.py
           ella/services/memory_reinterpretation.py
@@ -287,8 +301,10 @@ jobs:
           tests/unit/test_hermes_cloud_openapi.py
           tests/unit/test_hermes_cloud_enrichment.py
           tests/unit/test_hermes_cloud_photon.py
+          tests/unit/test_hermes_broker_prototype.py
           tests/unit/test_hermes_cloud_provider.py
           tests/unit/test_hermes_cloud_runtime.py
+          tests/unit/test_hermes_cloud_staged_attestation.py
           tests/unit/test_memory_reinterpretation_outbox.py
           tests/unit/test_scanner_keyterms.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
@@ -307,10 +323,12 @@ jobs:
               tests/unit/test_hermes_cloud_migration.py \
               tests/unit/test_hermes_cloud_openapi.py \
               tests/unit/test_hermes_cloud_policy.py \
+              tests/unit/test_hermes_broker_prototype.py \
               tests/unit/test_hermes_cloud_photon.py \
               tests/unit/test_hermes_cloud_provider.py \
               tests/unit/test_hermes_cloud_provisioning.py \
               tests/unit/test_hermes_cloud_runtime.py \
+              tests/unit/test_hermes_cloud_staged_attestation.py \
               tests/unit/test_hermes_cloud_enrichment.py \
               tests/unit/test_hermes_cloud_enrichment_outbox.py \
               tests/unit/test_hermes_cloud_enrichment_router.py \
@@ -325,17 +343,19 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 355
+          test "$collected" -eq 396
           pytest \
             tests/unit/test_ella_ai_consent.py \
             tests/unit/test_ella_ai_consent_route_gates.py \
             tests/unit/test_hermes_cloud_migration.py \
             tests/unit/test_hermes_cloud_openapi.py \
             tests/unit/test_hermes_cloud_policy.py \
+            tests/unit/test_hermes_broker_prototype.py \
             tests/unit/test_hermes_cloud_photon.py \
             tests/unit/test_hermes_cloud_provider.py \
             tests/unit/test_hermes_cloud_provisioning.py \
             tests/unit/test_hermes_cloud_runtime.py \
+            tests/unit/test_hermes_cloud_staged_attestation.py \
             tests/unit/test_hermes_cloud_enrichment.py \
             tests/unit/test_hermes_cloud_enrichment_outbox.py \
             tests/unit/test_hermes_cloud_enrichment_router.py \
