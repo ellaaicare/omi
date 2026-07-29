@@ -19,12 +19,14 @@ class EllaEntitlementGatePage extends StatefulWidget {
     this.startOnMount = true,
     this.onSignOutOverride,
     this.pilotLocaleRestricted = isEllaInternalPilotEnabled,
+    this.onPilotLocaleAllowed,
   });
 
   final Widget readyChild;
   final bool startOnMount;
   final VoidCallback? onSignOutOverride;
   final bool pilotLocaleRestricted;
+  final Future<void> Function()? onPilotLocaleAllowed;
 
   @override
   State<EllaEntitlementGatePage> createState() => _EllaEntitlementGatePageState();
@@ -111,6 +113,8 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
 
   Future<void> _continueInEnglish() async {
     await context.read<LocaleProvider>().setLocale(const Locale('en'));
+    if (!mounted) return;
+    await widget.onPilotLocaleAllowed?.call();
     if (!mounted) return;
     final pendingCode = EllaInviteLinkController.instance.pendingCode;
     if (pendingCode.isNotEmpty) _setCode(pendingCode);
