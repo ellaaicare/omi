@@ -1309,28 +1309,45 @@ async def _issue_operator_invitation(
     code_file_path: str | None = None,
     environment: str = "postgres_test",
     operator: str = "pytest",
+    recovery_receipt_valid: bool = True,
 ) -> dict:
     if expected_database is None:
         async with pool.acquire() as conn:
             expected_database = str(await conn.fetchval("SELECT current_database()"))
+    identity = invitation_operator.SyntheticInvitationIdentity(
+        uid=uid,
+        account_uid=uid,
+        profile_uid=uid,
+    )
+    context = invitation_operator.SyntheticInvitationContext(
+        environment=environment,
+        expected_database=expected_database,
+        operator=operator,
+    )
+    admission = _admission(uid)
+    code_file_ref_hmac = invitations.invitation_code_file_ref(
+        OPERATOR_CONFIG,
+        code_file_path or f"/root/ella-invites/{uid}.code",
+    )
+    recovery_binding_hmac = invitation_operator.synthetic_invitation_recovery_binding_hmac(
+        identity=identity,
+        context=context,
+        admission=admission,
+        code=code,
+        code_file_ref_hmac=code_file_ref_hmac,
+        expires_at=expires_at,
+        config=OPERATOR_CONFIG,
+    )
+    if not recovery_receipt_valid:
+        recovery_binding_hmac = "0" * 64
     return await invitation_operator.issue_synthetic_invitation(
-        identity=invitation_operator.SyntheticInvitationIdentity(
-            uid=uid,
-            account_uid=uid,
-            profile_uid=uid,
-        ),
-        context=invitation_operator.SyntheticInvitationContext(
-            environment=environment,
-            expected_database=expected_database,
-            operator=operator,
-        ),
-        admission=_admission(uid),
+        identity=identity,
+        context=context,
+        admission=admission,
         code=code,
         code_file_existed=code_file_existed,
-        code_file_ref_hmac=invitations.invitation_code_file_ref(
-            OPERATOR_CONFIG,
-            code_file_path or f"/root/ella-invites/{uid}.code",
-        ),
+        code_file_ref_hmac=code_file_ref_hmac,
+        recovery_binding_hmac=recovery_binding_hmac,
         expires_at=expires_at,
         config=OPERATOR_CONFIG,
     )
@@ -1339,9 +1356,14 @@ async def _issue_operator_invitation(
 def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "synthetic-operator-redeem"
+        precommit_uid = "synthetic-operator-precommit-recovery"
+        postcommit_uid = "synthetic-operator-postcommit-recovery"
         expiry = datetime.now(timezone.utc) + timedelta(hours=1)
         async with pool.acquire() as conn:
-            await _ensure_users(conn, [uid])
+            await _ensure_users(
+                conn,
+                [uid, precommit_uid, postcommit_uid],
+            )
 
         issued = await _issue_operator_invitation(
             pool,
@@ -1397,6 +1419,80 @@ def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
                 config=OPERATOR_CONFIG,
             )
 
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE FUNCTION fail_operator_issue_audit() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'injected operator precommit failure';
+                END;
+                $$;
+                CREATE TRIGGER fail_operator_issue_audit
+                BEFORE INSERT ON ella_invitation_audit_receipts
+                FOR EACH ROW
+                WHEN (NEW.event_type = 'operator_issued')
+                EXECUTE FUNCTION fail_operator_issue_audit();
+                """
+            )
+        with pytest.raises(
+            asyncpg.PostgresError,
+            match="injected operator precommit failure",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=precommit_uid,
+                code="BCDE-2345",
+                expires_at=expiry,
+            )
+        async with pool.acquire() as conn:
+            assert not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM ella_invitations WHERE code_hmac = $1)",
+                invitations.code_hmac(OPERATOR_CONFIG, "BCDE2345"),
+            )
+            await conn.execute(
+                """
+                DROP TRIGGER fail_operator_issue_audit
+                    ON ella_invitation_audit_receipts;
+                DROP FUNCTION fail_operator_issue_audit();
+                """
+            )
+        precommit_recovered = await _issue_operator_invitation(
+            pool,
+            uid=precommit_uid,
+            code="BCDE-2345",
+            expires_at=expiry,
+            code_file_existed=True,
+        )
+        assert precommit_recovered["idempotent"] is False
+
+        postcommit_receipt = {}
+
+        async def issue_then_lose_commit_result() -> None:
+            committed = await _issue_operator_invitation(
+                pool,
+                uid=postcommit_uid,
+                code="DEFG-2345",
+                expires_at=expiry,
+            )
+            postcommit_receipt.update(committed)
+            raise ConnectionError("injected postcommit outcome ambiguity")
+
+        with pytest.raises(
+            ConnectionError,
+            match="injected postcommit outcome ambiguity",
+        ):
+            await issue_then_lose_commit_result()
+        postcommit_recovered = await _issue_operator_invitation(
+            pool,
+            uid=postcommit_uid,
+            code="DEFG-2345",
+            expires_at=expiry,
+            code_file_existed=True,
+        )
+        assert postcommit_recovered["receipt_id"] == postcommit_receipt["receipt_id"]
+        assert postcommit_recovered["idempotent"] is True
+
         first = await _redeem(
             uid,
             "ABCD-2345",
@@ -1439,7 +1535,7 @@ def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
                     SELECT
                         (
                             SELECT COUNT(*) FROM ella_invitations
-                            WHERE cohort = $2
+                            WHERE cohort = $2 AND id = $1::uuid
                         ) AS invitations,
                         (
                             SELECT COUNT(*) FROM ella_invitation_redemptions
@@ -1744,6 +1840,7 @@ def test_operator_refuses_real_existing_collision_wrong_database_and_expiry():
                 code="PQRS-2345",
                 expires_at=expiry,
                 code_file_existed=True,
+                recovery_receipt_valid=False,
             )
 
         await _seed_invitation(

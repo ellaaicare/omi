@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
 import stat
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from google.cloud import firestore
 
@@ -30,13 +32,22 @@ CODE_FILE_CREATE_MODE = 0o600
 CODE_FILE_FINAL_MODE = 0o400
 CODE_FILE_ALLOWED_MODES = {CODE_FILE_CREATE_MODE, CODE_FILE_FINAL_MODE}
 MAX_CODE_FILE_BYTES = 32
+MAX_RECOVERY_RECEIPT_BYTES = 512
 SAFE_CODE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+RECOVERY_RECEIPT_VERSION = invitation_operator.RECOVERY_BINDING_VERSION
 
 
 class ProtectedCodeFileError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+@dataclass(frozen=True)
+class PreparedProtectedCode:
+    code: str
+    existed: bool
+    recovery_binding_hmac: str
 
 
 def _print_receipt(action: str, receipt: dict[str, Any], *, code_output_file: str = "") -> None:
@@ -87,6 +98,8 @@ def _read_existing_code(
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(filename, flags, dir_fd=root_descriptor)
+    except FileNotFoundError:
+        raise
     except OSError as exc:
         raise ProtectedCodeFileError("code_output_file_unavailable") from exc
     try:
@@ -116,12 +129,107 @@ def _read_existing_code(
         os.close(descriptor)
 
 
+def _recovery_receipt_filename(code_filename: str) -> str:
+    filename_ref = hashlib.sha256(code_filename.encode("utf-8")).hexdigest()
+    return f".synthetic-invite-recovery-{filename_ref}.json"
+
+
+def _write_exclusive_protected_file(
+    root_descriptor: int,
+    filename: str,
+    payload: bytes,
+    *,
+    expected_owner_uid: int,
+    create_error: str,
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(
+            filename,
+            flags,
+            CODE_FILE_CREATE_MODE,
+            dir_fd=root_descriptor,
+        )
+    except OSError as exc:
+        raise ProtectedCodeFileError(create_error) from exc
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise ProtectedCodeFileError("code_output_file_write_failed")
+            offset += written
+        os.fchmod(descriptor, CODE_FILE_FINAL_MODE)
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != expected_owner_uid
+            or stat.S_IMODE(metadata.st_mode) != CODE_FILE_FINAL_MODE
+            or metadata.st_nlink != 1
+            or metadata.st_size != len(payload)
+        ):
+            raise ProtectedCodeFileError("code_output_file_insecure")
+    finally:
+        os.close(descriptor)
+    try:
+        os.fsync(root_descriptor)
+    except OSError as exc:
+        raise ProtectedCodeFileError("code_output_parent_sync_failed") from exc
+
+
+def _read_recovery_receipt(
+    root_descriptor: int,
+    filename: str,
+    *,
+    expected_owner_uid: int,
+    expected_binding_hmac: str,
+) -> None:
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(filename, flags, dir_fd=root_descriptor)
+    except OSError as exc:
+        raise ProtectedCodeFileError("code_recovery_receipt_unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != expected_owner_uid
+            or stat.S_IMODE(metadata.st_mode) != CODE_FILE_FINAL_MODE
+            or metadata.st_nlink != 1
+            or metadata.st_size < 1
+            or metadata.st_size > MAX_RECOVERY_RECEIPT_BYTES
+        ):
+            raise ProtectedCodeFileError("code_recovery_receipt_insecure")
+        content = os.read(descriptor, MAX_RECOVERY_RECEIPT_BYTES + 1)
+        if len(content) > MAX_RECOVERY_RECEIPT_BYTES:
+            raise ProtectedCodeFileError("code_recovery_receipt_insecure")
+    finally:
+        os.close(descriptor)
+    try:
+        receipt = json.loads(content.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProtectedCodeFileError("code_recovery_receipt_invalid") from exc
+    expected = {
+        "binding_hmac": expected_binding_hmac,
+        "content_free": True,
+        "version": RECOVERY_RECEIPT_VERSION,
+    }
+    if receipt != expected:
+        raise ProtectedCodeFileError("code_recovery_receipt_mismatch")
+
+
 def prepare_protected_code_file(
     *,
     approved_root: str,
     code_output_file: str,
+    recovery_binding_for_code: Callable[[str], str],
     expected_owner_uid: int = ROOT_UID,
-) -> tuple[str, bool]:
+) -> PreparedProtectedCode:
     """Create the code once or securely recover it for an idempotent retry."""
     root = _lexical_absolute_path(
         approved_root,
@@ -137,53 +245,68 @@ def prepare_protected_code_file(
         root,
         expected_owner_uid=expected_owner_uid,
     )
-    generated_code = invitations.generate_invite_code()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    generated_code = ""
     try:
         try:
-            descriptor = os.open(
+            existing_code = _read_existing_code(
+                root_descriptor,
                 output.name,
-                flags,
-                CODE_FILE_CREATE_MODE,
-                dir_fd=root_descriptor,
+                expected_owner_uid=expected_owner_uid,
             )
-        except FileExistsError:
-            generated_code = ""
-            return (
-                _read_existing_code(
-                    root_descriptor,
-                    output.name,
-                    expected_owner_uid=expected_owner_uid,
-                ),
-                True,
+        except FileNotFoundError:
+            generated_code = invitations.generate_invite_code()
+            recovery_binding_hmac = recovery_binding_for_code(generated_code)
+            if not re.fullmatch(r"[0-9a-f]{64}", recovery_binding_hmac):
+                raise ProtectedCodeFileError("code_recovery_binding_invalid")
+            recovery_receipt = json.dumps(
+                {
+                    "binding_hmac": recovery_binding_hmac,
+                    "content_free": True,
+                    "version": RECOVERY_RECEIPT_VERSION,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            _write_exclusive_protected_file(
+                root_descriptor,
+                _recovery_receipt_filename(output.name),
+                recovery_receipt,
+                expected_owner_uid=expected_owner_uid,
+                create_error="code_recovery_receipt_create_failed",
             )
-        except OSError as exc:
-            generated_code = ""
-            raise ProtectedCodeFileError("code_output_file_create_failed") from exc
+            _write_exclusive_protected_file(
+                root_descriptor,
+                output.name,
+                (generated_code + "\n").encode("ascii"),
+                expected_owner_uid=expected_owner_uid,
+                create_error="code_output_file_create_failed",
+            )
+            return PreparedProtectedCode(
+                code=generated_code,
+                existed=False,
+                recovery_binding_hmac=recovery_binding_hmac,
+            )
 
-        try:
-            payload = (generated_code + "\n").encode("ascii")
-            offset = 0
-            while offset < len(payload):
-                written = os.write(descriptor, payload[offset:])
-                if written <= 0:
-                    raise ProtectedCodeFileError("code_output_file_write_failed")
-                offset += written
-            os.fsync(descriptor)
-            os.fchmod(descriptor, CODE_FILE_FINAL_MODE)
-            metadata = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != expected_owner_uid
-                or stat.S_IMODE(metadata.st_mode) != CODE_FILE_FINAL_MODE
-                or metadata.st_nlink != 1
-            ):
-                raise ProtectedCodeFileError("code_output_file_insecure")
-        finally:
-            os.close(descriptor)
-        return generated_code, False
+        recovery_binding_hmac = recovery_binding_for_code(existing_code)
+        if not re.fullmatch(r"[0-9a-f]{64}", recovery_binding_hmac):
+            raise ProtectedCodeFileError("code_recovery_binding_invalid")
+        _read_recovery_receipt(
+            root_descriptor,
+            _recovery_receipt_filename(output.name),
+            expected_owner_uid=expected_owner_uid,
+            expected_binding_hmac=recovery_binding_hmac,
+        )
+        return PreparedProtectedCode(
+            code=existing_code,
+            existed=True,
+            recovery_binding_hmac=recovery_binding_hmac,
+        )
+    except ProtectedCodeFileError:
+        raise
+    except OSError as exc:
+        if generated_code:
+            generated_code = ""
+        raise ProtectedCodeFileError("code_output_file_create_failed") from exc
     finally:
         os.close(root_descriptor)
 
@@ -282,22 +405,36 @@ async def _issue(args: argparse.Namespace) -> None:
     )
     expires_at = _parse_expiry(args.expires_at)
     try:
-        code, existed = prepare_protected_code_file(
-            approved_root=args.approved_code_output_root,
-            code_output_file=args.code_output_file,
-            expected_owner_uid=ROOT_UID,
-        )
         code_file_ref_hmac = invitations.invitation_code_file_ref(
             config,
             args.code_output_file,
+        )
+
+        def recovery_binding_for_code(code: str) -> str:
+            return invitation_operator.synthetic_invitation_recovery_binding_hmac(
+                identity=identity,
+                context=context,
+                admission=admission,
+                code=code,
+                code_file_ref_hmac=code_file_ref_hmac,
+                expires_at=expires_at,
+                config=config,
+            )
+
+        prepared = prepare_protected_code_file(
+            approved_root=args.approved_code_output_root,
+            code_output_file=args.code_output_file,
+            recovery_binding_for_code=recovery_binding_for_code,
+            expected_owner_uid=ROOT_UID,
         )
         receipt = await invitation_operator.issue_synthetic_invitation(
             identity=identity,
             context=context,
             admission=admission,
-            code=code,
-            code_file_existed=existed,
+            code=prepared.code,
+            code_file_existed=prepared.existed,
             code_file_ref_hmac=code_file_ref_hmac,
+            recovery_binding_hmac=prepared.recovery_binding_hmac,
             expires_at=expires_at,
             config=config,
         )
@@ -305,9 +442,11 @@ async def _issue(args: argparse.Namespace) -> None:
         raise SystemExit(f"operator_refused:{exc.code}") from exc
     except invitation_operator.SyntheticInvitationOperatorError as exc:
         raise SystemExit(f"operator_refused:{exc.code}") from exc
+    except Exception:
+        raise SystemExit("operator_refused:invitation_outcome_ambiguous") from None
     finally:
-        if "code" in locals():
-            code = ""
+        if "prepared" in locals():
+            prepared = None
     _print_receipt(
         "issue",
         {

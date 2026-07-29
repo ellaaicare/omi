@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import hashlib
 import os
 import stat
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,12 @@ def _admission(uid: str = "synthetic-iris") -> invitations.InvitationPilotAdmiss
     )
 
 
-def _issue_args(root, output) -> argparse.Namespace:
+def _issue_args(
+    root,
+    output,
+    *,
+    expires_at: datetime | None = None,
+) -> argparse.Namespace:
     return argparse.Namespace(
         uid="synthetic-iris",
         account_uid="synthetic-iris",
@@ -40,10 +46,14 @@ def _issue_args(root, output) -> argparse.Namespace:
         expected_database="ella_ai",
         expected_firestore_project="ella-ai-care",
         operator="iris",
-        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        expires_at=(expires_at or datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         approved_code_output_root=str(root),
         code_output_file=str(output),
     )
+
+
+def _file_recovery_binding(code: str) -> str:
+    return hashlib.sha256(f"unit-recovery:{code}".encode("ascii")).hexdigest()
 
 
 def test_identity_requires_one_exact_non_plato_subject():
@@ -65,31 +75,51 @@ def test_identity_requires_one_exact_non_plato_subject():
             _identity(forbidden).validate()
 
 
-def test_protected_code_file_is_exclusive_root_scoped_and_owner_read_only(tmp_path):
+def test_protected_code_file_is_exclusive_root_scoped_and_owner_read_only(tmp_path, monkeypatch):
     approved = tmp_path / "approved"
     approved.mkdir(mode=0o700)
     output = approved / "invite-code"
     owner_uid = os.geteuid()
+    directory_fsyncs = []
+    original_fsync = os.fsync
 
-    code, existed = synthetic_invite_admin.prepare_protected_code_file(
+    def tracking_fsync(descriptor):
+        directory_fsyncs.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(synthetic_invite_admin.os, "fsync", tracking_fsync)
+
+    prepared = synthetic_invite_admin.prepare_protected_code_file(
         approved_root=str(approved),
         code_output_file=str(output),
+        recovery_binding_for_code=_file_recovery_binding,
         expected_owner_uid=owner_uid,
     )
-    retry_code, retry_existed = synthetic_invite_admin.prepare_protected_code_file(
+    retried = synthetic_invite_admin.prepare_protected_code_file(
         approved_root=str(approved),
         code_output_file=str(output),
+        recovery_binding_for_code=_file_recovery_binding,
         expected_owner_uid=owner_uid,
     )
 
-    assert not existed
-    assert retry_existed
-    assert retry_code == code
-    assert invitations.normalize_invite_code(code)
+    assert not prepared.existed
+    assert retried.existed
+    assert retried.code == prepared.code
+    assert retried.recovery_binding_hmac == prepared.recovery_binding_hmac
+    assert invitations.normalize_invite_code(prepared.code)
     metadata = output.stat()
     assert stat.S_IMODE(metadata.st_mode) == 0o400
     assert metadata.st_uid == owner_uid
     assert metadata.st_nlink == 1
+    recovery_receipt_path = approved / synthetic_invite_admin._recovery_receipt_filename(output.name)
+    recovery_metadata = recovery_receipt_path.stat()
+    assert stat.S_IMODE(recovery_metadata.st_mode) == 0o400
+    assert recovery_metadata.st_uid == owner_uid
+    assert recovery_metadata.st_nlink == 1
+    recovery_receipt = recovery_receipt_path.read_text(encoding="ascii")
+    assert prepared.code not in recovery_receipt
+    assert prepared.recovery_binding_hmac in recovery_receipt
+    assert directory_fsyncs.count(True) == 2
 
 
 @pytest.mark.parametrize(
@@ -109,6 +139,7 @@ def test_protected_code_file_rejects_unapproved_paths(
         synthetic_invite_admin.prepare_protected_code_file(
             approved_root=root_value,
             code_output_file=output_value,
+            recovery_binding_for_code=_file_recovery_binding,
             expected_owner_uid=os.geteuid(),
         )
     assert error.value.code == expected_code
@@ -122,6 +153,7 @@ def test_protected_code_file_rejects_insecure_root_and_symlink(tmp_path):
         synthetic_invite_admin.prepare_protected_code_file(
             approved_root=str(insecure),
             code_output_file=str(insecure / "invite"),
+            recovery_binding_for_code=_file_recovery_binding,
             expected_owner_uid=os.geteuid(),
         )
     assert error.value.code == "code_output_root_insecure"
@@ -137,6 +169,7 @@ def test_protected_code_file_rejects_insecure_root_and_symlink(tmp_path):
         synthetic_invite_admin.prepare_protected_code_file(
             approved_root=str(approved),
             code_output_file=str(output),
+            recovery_binding_for_code=_file_recovery_binding,
             expected_owner_uid=os.geteuid(),
         )
     assert error.value.code == "code_output_file_unavailable"
@@ -151,6 +184,11 @@ def test_issue_receipt_and_failures_never_emit_the_code(
     approved.mkdir(mode=0o700)
     output = approved / "invite"
     captured_code = {}
+    issue_args = _issue_args(
+        approved,
+        output,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
 
     async def fake_issue(**kwargs):
         captured_code["value"] = kwargs["code"]
@@ -178,7 +216,7 @@ def test_issue_receipt_and_failures_never_emit_the_code(
     monkeypatch.setenv("ELLA_INVITE_APP_REVIEW_ENABLED", "false")
     monkeypatch.setenv("ELLA_INVITE_HMAC_PEPPER", "p" * 32)
 
-    asyncio.run(synthetic_invite_admin._issue(_issue_args(approved, output)))
+    asyncio.run(synthetic_invite_admin._issue(issue_args))
 
     emitted = capsys.readouterr()
     secret = captured_code["value"]
@@ -207,11 +245,69 @@ def test_issue_receipt_and_failures_never_emit_the_code(
         fake_failure,
     )
     with pytest.raises(SystemExit) as error:
-        asyncio.run(synthetic_invite_admin._issue(_issue_args(approved, output)))
+        asyncio.run(synthetic_invite_admin._issue(issue_args))
     failed_emitted = capsys.readouterr()
     assert secret not in str(error.value)
     assert secret not in failed_emitted.out
     assert secret not in failed_emitted.err
+
+    ambiguous_output = approved / "ambiguous-invite"
+    ambiguous_attempts = []
+    ambiguous_args = _issue_args(
+        approved,
+        ambiguous_output,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+    async def fake_ambiguous_issue(**kwargs):
+        ambiguous_attempts.append(dict(kwargs))
+        if len(ambiguous_attempts) == 1:
+            raise ConnectionError("injected transaction outcome ambiguity")
+        return {
+            "receipt_id": "22222222-2222-2222-2222-222222222222",
+            "state": "sent",
+            "version": 1,
+            "content_free": True,
+        }
+
+    monkeypatch.setattr(
+        synthetic_invite_admin.invitation_operator,
+        "issue_synthetic_invitation",
+        fake_ambiguous_issue,
+    )
+    with pytest.raises(
+        SystemExit,
+        match="operator_refused:invitation_outcome_ambiguous",
+    ):
+        asyncio.run(
+            synthetic_invite_admin._issue(
+                ambiguous_args,
+            )
+        )
+    ambiguous_failure = capsys.readouterr()
+    ambiguous_code = ambiguous_attempts[0]["code"]
+    assert ambiguous_output.exists()
+    assert ambiguous_code not in ambiguous_failure.out
+    assert ambiguous_code not in ambiguous_failure.err
+
+    asyncio.run(
+        synthetic_invite_admin._issue(
+            ambiguous_args,
+        )
+    )
+    ambiguous_retry = capsys.readouterr()
+    assert ambiguous_attempts[0]["code_file_existed"] is False
+    assert ambiguous_attempts[1]["code_file_existed"] is True
+    assert ambiguous_attempts[0]["code"] == ambiguous_attempts[1]["code"]
+    assert ambiguous_attempts[0]["recovery_binding_hmac"] == ambiguous_attempts[1]["recovery_binding_hmac"]
+    assert ambiguous_code not in ambiguous_retry.out
+    assert ambiguous_code not in ambiguous_retry.err
+    recovery_receipt_path = approved / synthetic_invite_admin._recovery_receipt_filename(
+        ambiguous_output.name,
+    )
+    recovery_receipt = recovery_receipt_path.read_text(encoding="ascii")
+    assert ambiguous_code not in recovery_receipt
+    assert '"content_free":true' in recovery_receipt
 
 
 def test_environment_and_flag_drift_fail_before_file_creation(monkeypatch, tmp_path):

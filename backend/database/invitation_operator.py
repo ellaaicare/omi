@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import re
@@ -28,6 +29,7 @@ FORBIDDEN_IDENTITIES = {
 MIN_EXPIRY = timedelta(minutes=5)
 MAX_EXPIRY = timedelta(hours=24)
 OPERATOR_POLICY = invitations.SYNTHETIC_OPERATOR_ENTITLEMENT_POLICY
+RECOVERY_BINDING_VERSION = "synthetic-invitation-recovery-v1"
 
 
 class SyntheticInvitationOperatorError(RuntimeError):
@@ -76,6 +78,60 @@ def _utc(value: datetime) -> datetime:
 
 def _operator_source(context: SyntheticInvitationContext) -> str:
     return f"synthetic-invite-operator:{context.environment}:{context.operator}"
+
+
+def synthetic_invitation_recovery_binding_hmac(
+    *,
+    identity: SyntheticInvitationIdentity,
+    context: SyntheticInvitationContext,
+    admission: invitations.InvitationPilotAdmission,
+    code: str,
+    code_file_ref_hmac: str,
+    expires_at: datetime,
+    config: invitations.InvitationConfig,
+) -> str:
+    """Bind a protected-file recovery receipt to the complete issuance intent."""
+    identity.validate()
+    context.validate()
+    normalized_code = invitations.normalize_invite_code(code)
+    expiry = _utc(expires_at)
+    if (
+        not normalized_code
+        or not isinstance(admission, invitations.InvitationPilotAdmission)
+        or admission.account_uid != identity.account_uid
+        or admission.profile_uid != identity.profile_uid
+        or not re.fullmatch(r"[0-9a-f]{64}", code_file_ref_hmac)
+    ):
+        raise SyntheticInvitationOperatorError("operator_issue_contract_invalid")
+    payload = json.dumps(
+        {
+            "account_uid": identity.account_uid,
+            "code_file_ref_hmac": code_file_ref_hmac,
+            "code_hmac": invitations.code_hmac(config, normalized_code),
+            "consent_policy_version": admission.policy_version,
+            "consent_processor_set_hash": admission.processor_set_hash,
+            "consent_receipt_id": admission.consent_receipt_id,
+            "consent_scope_hash": admission.scope_hash,
+            "consent_scope_version": admission.scope_version,
+            "environment": context.environment,
+            "expected_database": context.expected_database,
+            "expires_at": expiry.isoformat(),
+            "operator": context.operator,
+            "policy_revision": OPERATOR_POLICY_REVISION,
+            "profile_binding_id": admission.profile_binding_id,
+            "profile_uid": identity.profile_uid,
+            "purpose": OPERATOR_PURPOSE,
+            "uid": identity.uid,
+            "version": RECOVERY_BINDING_VERSION,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hmac.new(
+        config.hmac_pepper,
+        b"synthetic-invitation-recovery-v1\x1f" + payload,
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -399,6 +455,7 @@ async def issue_synthetic_invitation(
     code: str,
     code_file_existed: bool,
     code_file_ref_hmac: str,
+    recovery_binding_hmac: str,
     expires_at: datetime,
     config: invitations.InvitationConfig,
 ) -> dict[str, Any]:
@@ -416,12 +473,24 @@ async def issue_synthetic_invitation(
         or expiry <= now
         or expiry > now + MAX_EXPIRY
         or not re.fullmatch(r"[0-9a-f]{64}", code_file_ref_hmac)
+        or not re.fullmatch(r"[0-9a-f]{64}", recovery_binding_hmac)
     ):
         raise SyntheticInvitationOperatorError("operator_issue_contract_invalid")
     if not config.redemption_enabled or config.ordinary_enabled or config.app_review_enabled:
         raise SyntheticInvitationOperatorError("operator_invite_flags_invalid")
 
     invitation_code_hmac = invitations.code_hmac(config, normalized_code)
+    expected_recovery_binding_hmac = synthetic_invitation_recovery_binding_hmac(
+        identity=identity,
+        context=context,
+        admission=admission,
+        code=code,
+        code_file_ref_hmac=code_file_ref_hmac,
+        expires_at=expiry,
+        config=config,
+    )
+    if not hmac.compare_digest(recovery_binding_hmac, expected_recovery_binding_hmac):
+        raise SyntheticInvitationOperatorError("operator_stale_code_receipt")
     account_ref_hmac, profile_ref_hmac = invitations.invitation_target_refs(
         config,
         account_uid=identity.account_uid,
@@ -489,8 +558,6 @@ async def issue_synthetic_invitation(
                     profile_class=str(user["profile_class"]),
                     idempotent=True,
                 )
-            if code_file_existed:
-                raise SyntheticInvitationOperatorError("operator_stale_code_receipt")
             if expiry < now + MIN_EXPIRY:
                 raise SyntheticInvitationOperatorError("operator_expiry_too_soon")
 
@@ -572,6 +639,7 @@ async def issue_synthetic_invitation(
                     "profile_class": "synthetic",
                     "expires_at": expiry.isoformat(),
                     "code_file_ref_hmac": code_file_ref_hmac,
+                    "reconciled_from_protected_file": code_file_existed,
                     "content_free": True,
                 },
             )

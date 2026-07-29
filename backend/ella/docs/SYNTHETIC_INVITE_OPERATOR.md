@@ -70,8 +70,17 @@ install -d -o root -g root -m 0700 /var/lib/ella/invite-codes
 The CLI accepts an immediate child of that directory only. It opens the
 directory and file with no-follow semantics, creates the file exclusively, and
 finishes with root ownership and mode `0400`. An existing secure file is read
-internally only to recover an interrupted, already-committed issuance; it is
-never printed.
+internally only to reconcile an interrupted issuance; it is never printed.
+
+Before creating the code file, the CLI creates and fsyncs an immutable,
+content-free recovery receipt in the same root-only directory, then fsyncs the
+parent after each durable file creation. The receipt HMAC binds the exact code,
+path, UID/account/profile, consent lineage, expiry, database, environment, and
+operator. If a transaction rolls back or its commit result is lost, rerun the
+exact command and path: a matching receipt may safely finish a row-absent
+issuance or converge to the committed row. A missing or mismatched receipt
+fails closed. Never delete or replace the protected code to resolve an
+ambiguous result.
 
 Enter the approved root session with the server environment and ADC already
 loaded. Do not preserve an untrusted caller environment or `PYTHONPATH`. From
