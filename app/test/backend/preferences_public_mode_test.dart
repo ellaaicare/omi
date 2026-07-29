@@ -221,6 +221,26 @@ void main() {
     expect(SharedPreferencesUtil().aiConsentReceiptId, 'aicr_receipt-a');
   });
 
+  test('internal pilot authority is English-only without changing normal locale authority', () async {
+    SharedPreferences.setMockInitialValues({'app_locale': 'es'});
+    await SharedPreferencesUtil.init();
+    final preferences = SharedPreferencesUtil();
+    preferences.uid = 'uid-a';
+    preferences.acceptAiConsent(
+      receiptId: '${SharedPreferencesUtil.currentAiConsentReceiptPrefix}receipt-a',
+      uid: 'uid-a',
+      profileBindingId: 'profile-binding-a',
+      serverDecidedAt: '2026-07-27T00:00:00Z',
+    );
+    _markServerVerified(preferences, uid: 'uid-a', receiptId: 'aicr_receipt-a');
+
+    expect(preferences.aiConsentAccepted, isTrue);
+    expect(preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: true), isFalse);
+
+    await preferences.saveString('app_locale', 'en');
+    expect(preferences.hasCurrentAiConsentAuthority(enforceEnglishPilotLocale: true), isTrue);
+  });
+
   test('profile selection change invalidates ephemeral authority until the server re-verifies it', () {
     final preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';

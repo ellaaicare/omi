@@ -7,7 +7,9 @@ import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_invite_link_controller.dart';
 import 'package:omi/providers/ella_entitlement_provider.dart';
+import 'package:omi/providers/locale_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 class EllaEntitlementGatePage extends StatefulWidget {
@@ -16,11 +18,13 @@ class EllaEntitlementGatePage extends StatefulWidget {
     required this.readyChild,
     this.startOnMount = true,
     this.onSignOutOverride,
+    this.pilotLocaleRestricted = isEllaInternalPilotEnabled,
   });
 
   final Widget readyChild;
   final bool startOnMount;
   final VoidCallback? onSignOutOverride;
+  final bool pilotLocaleRestricted;
 
   @override
   State<EllaEntitlementGatePage> createState() => _EllaEntitlementGatePageState();
@@ -35,7 +39,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     super.initState();
     EllaInviteLinkController.instance.addListener(_acceptPendingLink);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || !_isPilotLocaleAllowed) return;
       final pendingCode = EllaInviteLinkController.instance.pendingCode;
       if (pendingCode.isNotEmpty) {
         _setCode(pendingCode);
@@ -56,8 +60,14 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     super.dispose();
   }
 
+  bool get _isPilotLocaleAllowed {
+    if (!widget.pilotLocaleRestricted) return true;
+    final locale = Localizations.maybeLocaleOf(context);
+    return locale != null && isEllaInternalPilotLocaleSupported(locale.languageCode);
+  }
+
   void _acceptPendingLink() {
-    if (!mounted) return;
+    if (!mounted || !_isPilotLocaleAllowed) return;
     final code = EllaInviteLinkController.instance.pendingCode;
     if (code.isEmpty) return;
     _setCode(code);
@@ -73,6 +83,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
   }
 
   Future<void> _pasteCode() async {
+    if (!_isPilotLocaleAllowed) return;
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final code = normalizeEllaInviteCode(data?.text ?? '');
     if (code.isEmpty || !mounted) return;
@@ -81,6 +92,7 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
   }
 
   Future<void> _redeem() async {
+    if (!_isPilotLocaleAllowed) return;
     FocusScope.of(context).unfocus();
     final provider = context.read<EllaEntitlementProvider>();
     await provider.redeem(_codeController.text);
@@ -97,6 +109,14 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
     setState(() => _showCodeEntry = false);
   }
 
+  Future<void> _continueInEnglish() async {
+    await context.read<LocaleProvider>().setLocale(const Locale('en'));
+    if (!mounted) return;
+    final pendingCode = EllaInviteLinkController.instance.pendingCode;
+    if (pendingCode.isNotEmpty) _setCode(pendingCode);
+    await context.read<EllaEntitlementProvider>().load(prefilledCode: pendingCode);
+  }
+
   Future<void> _signOut() async {
     if (widget.onSignOutOverride != null) {
       widget.onSignOutOverride!();
@@ -108,6 +128,16 @@ class _EllaEntitlementGatePageState extends State<EllaEntitlementGatePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_isPilotLocaleAllowed) {
+      return _AccessShell(
+        icon: const Icon(Icons.language_rounded, color: EllaColors.tealDeep, size: 36),
+        title: context.l10n.selectLanguage,
+        body: context.l10n.featureComingSoon,
+        primaryLabel: LocaleProvider.getDisplayName(const Locale('en')),
+        onPrimary: _continueInEnglish,
+        onSignOut: _signOut,
+      );
+    }
     return Consumer<EllaEntitlementProvider>(
       builder: (context, provider, _) {
         if (provider.canProvision) return widget.readyChild;

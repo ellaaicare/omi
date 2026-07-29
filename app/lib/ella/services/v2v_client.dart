@@ -145,6 +145,8 @@ class V2VEvent {
 
 enum V2VConnectionStage { consent, identity, providerRegistry, session, audioSession, websocket, microphone, connected }
 
+enum V2VProtectedEgressBoundary { providerRegistry, session, websocket, microphoneCapture, microphoneFrame }
+
 /// Redacted connection result safe to show in UI and persist in debug logs.
 /// It intentionally excludes session tokens, endpoint URLs, and response bodies.
 class V2VConnectionReceipt {
@@ -216,6 +218,9 @@ class V2VClient {
   StreamSubscription? _micSub;
   StreamSubscription? _wsSub;
   AiConsentActiveSessionLease? _aiConsentLease;
+  AiConsentAuthoritySnapshot? _activeConsentAuthority;
+  bool Function()? _sessionShouldContinue;
+  bool _handlingAuthorityLoss = false;
   bool _isConnected = false;
   bool _connectionAnnounced = false;
   bool _isPlaying = false;
@@ -244,13 +249,53 @@ class V2VClient {
   /// Callback for connection state changes.
   final void Function(bool connected)? onConnectionChanged;
 
-  V2VClient({this.onEvent, this.onConnectionChanged});
+  final Future<void> Function(V2VProtectedEgressBoundary boundary)? _beforeProtectedEgress;
+  final void Function(V2VProtectedEgressBoundary boundary)? _onProtectedEgress;
+  final Future<bool> Function()? _microphoneStarter;
+
+  V2VClient({
+    this.onEvent,
+    this.onConnectionChanged,
+    @visibleForTesting Future<void> Function(V2VProtectedEgressBoundary boundary)? beforeProtectedEgress,
+    @visibleForTesting void Function(V2VProtectedEgressBoundary boundary)? onProtectedEgress,
+    @visibleForTesting Future<bool> Function()? microphoneStarter,
+  })  : _beforeProtectedEgress = beforeProtectedEgress,
+        _onProtectedEgress = onProtectedEgress,
+        _microphoneStarter = microphoneStarter;
 
   bool get isConnected => _isConnected;
+
+  @visibleForTesting
+  int get micChunksSentForTesting => _micChunksSent;
+
+  @visibleForTesting
+  bool get hasActiveConsentLeaseForTesting => _aiConsentLease?.isActive == true;
 
   V2VConnectionReceipt? get lastConnectionReceipt => _lastConnectionReceipt;
 
   V2VConnectionReceipt? _lastConnectionReceipt;
+
+  bool _hasCurrentSessionAuthority() {
+    final authority = _activeConsentAuthority;
+    return authority != null &&
+        authority.isCurrent() &&
+        (_sessionShouldContinue == null || _sessionShouldContinue!.call());
+  }
+
+  Future<bool> _authorizeProtectedEgress(V2VProtectedEgressBoundary boundary) async {
+    await _beforeProtectedEgress?.call(boundary);
+    if (!_hasCurrentSessionAuthority()) return false;
+    _onProtectedEgress?.call(boundary);
+    return true;
+  }
+
+  Future<void> _handleRuntimeAuthorityLoss() async {
+    if (_handlingAuthorityLoss) return;
+    _handlingAuthorityLoss = true;
+    onEvent?.call(const V2VEvent(type: 'consent_authority_lost'));
+    await disconnect();
+    _handlingAuthorityLoss = false;
+  }
 
   static String normalizeProvider(String provider) => switch (provider) {
         // Legacy values may remain in SharedPreferences after TestFlight upgrades.
@@ -465,21 +510,72 @@ class V2VClient {
       );
     }
 
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: uid);
+    if (authority == null) {
+      if (_activeClient == this) _activeClient = null;
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          stage: V2VConnectionStage.consent,
+          errorCode: 'ai_consent_required',
+        ),
+      );
+    }
+    _activeConsentAuthority = authority;
+    _sessionShouldContinue = () => (shouldContinue == null || shouldContinue()) && authority.isCurrent();
+
+    Future<V2VConnectionReceipt> stopForAuthorityLoss({String voiceMode = ''}) async {
+      await disconnect();
+      return _completeReceipt(
+        V2VConnectionReceipt(
+          connected: false,
+          provider: provider,
+          voiceMode: voiceMode,
+          stage: V2VConnectionStage.consent,
+          errorCode: 'consent_authority_lost',
+        ),
+      );
+    }
+
+    Future<V2VConnectionReceipt?> stopIfStartupInvalid(
+      V2VConnectionStage stage, {
+      String voiceMode = '',
+    }) async {
+      final cancellation = await cancelIfRequested(stage, voiceMode: voiceMode);
+      if (cancellation != null) return cancellation;
+      if (!authority.isCurrent()) return stopForAuthorityLoss(voiceMode: voiceMode);
+      return null;
+    }
+
+    if (!await _authorizeProtectedEgress(V2VProtectedEgressBoundary.providerRegistry)) {
+      final invalid = await stopIfStartupInvalid(V2VConnectionStage.providerRegistry);
+      if (invalid != null) return invalid;
+      return stopForAuthorityLoss();
+    }
     final registryFailure = await _validateProviderRegistry(provider);
-    final registryCancellation = await cancelIfRequested(V2VConnectionStage.providerRegistry);
-    if (registryCancellation != null) return registryCancellation;
+    final registryInvalid = await stopIfStartupInvalid(V2VConnectionStage.providerRegistry);
+    if (registryInvalid != null) return registryInvalid;
     if (registryFailure != null) {
       if (_activeClient == this) _activeClient = null;
       return _completeReceipt(registryFailure);
     }
 
     // 1. Get session token from backend
+    if (!await _authorizeProtectedEgress(V2VProtectedEgressBoundary.session)) {
+      final invalid = await stopIfStartupInvalid(
+        V2VConnectionStage.session,
+        voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
+      );
+      if (invalid != null) return invalid;
+      return stopForAuthorityLoss();
+    }
     final sessionResult = await _createSession(uid, provider, sessionScope);
-    final sessionCancellation = await cancelIfRequested(
+    final sessionInvalid = await stopIfStartupInvalid(
       V2VConnectionStage.session,
       voiceMode: sessionVoiceMode(provider, memoryScoped: sessionScope != null) ?? '',
     );
-    if (sessionCancellation != null) return sessionCancellation;
+    if (sessionInvalid != null) return sessionInvalid;
     final sessionData = sessionResult.data;
     if (sessionData == null) {
       if (_activeClient == this) _activeClient = null;
@@ -538,8 +634,11 @@ class V2VClient {
     // 2. Configure iOS audio session for playAndRecord with Bluetooth + speaker routing
     try {
       await _configureAudioSession();
-      final cancellation = await cancelIfRequested(V2VConnectionStage.audioSession, voiceMode: confirmedVoiceMode);
-      if (cancellation != null) return cancellation;
+      final invalid = await stopIfStartupInvalid(
+        V2VConnectionStage.audioSession,
+        voiceMode: confirmedVoiceMode,
+      );
+      if (invalid != null) return invalid;
     } catch (error) {
       Logger.error('[V2V] Audio session setup failed for provider=$provider');
       if (_activeClient == this) _activeClient = null;
@@ -559,14 +658,22 @@ class V2VClient {
     Logger.debug('[V2V] Connecting to WebSocket for provider=$provider...');
 
     try {
+      if (!await _authorizeProtectedEgress(V2VProtectedEgressBoundary.websocket)) {
+        final invalid = await stopIfStartupInvalid(
+          V2VConnectionStage.websocket,
+          voiceMode: confirmedVoiceMode,
+        );
+        if (invalid != null) return invalid;
+        return stopForAuthorityLoss(voiceMode: confirmedVoiceMode);
+      }
       _channel = IOWebSocketChannel.connect(Uri.parse(wsUrl), pingInterval: const Duration(seconds: 30));
 
       await _channel!.ready.timeout(const Duration(seconds: 12));
-      final websocketCancellation = await cancelIfRequested(
+      final websocketInvalid = await stopIfStartupInvalid(
         V2VConnectionStage.websocket,
         voiceMode: confirmedVoiceMode,
       );
-      if (websocketCancellation != null) return websocketCancellation;
+      if (websocketInvalid != null) return websocketInvalid;
 
       // 3. Listen for messages from proxy
       _isConnected = true;
@@ -587,12 +694,15 @@ class V2VClient {
       );
 
       // 4. Start recording mic audio and streaming to WebSocket
-      final micStarted = await _startMicStream();
-      final microphoneCancellation = await cancelIfRequested(
+      final micStarted = await _startAuthorizedMicrophone(
+        authority: authority,
+        shouldContinue: _sessionShouldContinue!,
+      );
+      final microphoneInvalid = await stopIfStartupInvalid(
         V2VConnectionStage.microphone,
         voiceMode: confirmedVoiceMode,
       );
-      if (microphoneCancellation != null) return microphoneCancellation;
+      if (microphoneInvalid != null) return microphoneInvalid;
       if (!micStarted || !_isConnected) {
         await disconnect();
         return _completeReceipt(
@@ -605,13 +715,6 @@ class V2VClient {
           ),
         );
       }
-      _aiConsentLease = AiConsentActiveSessionLease(
-        uid: uid,
-        onAuthorityLost: () async {
-          onEvent?.call(const V2VEvent(type: 'consent_authority_lost'));
-          await disconnect();
-        },
-      )..start();
       _connectionAnnounced = true;
       onConnectionChanged?.call(true);
 
@@ -645,6 +748,8 @@ class V2VClient {
     final consentLease = _aiConsentLease;
     _aiConsentLease = null;
     consentLease?.stop();
+    _activeConsentAuthority = null;
+    _sessionShouldContinue = null;
     final shouldAnnounceDisconnect = _connectionAnnounced;
     _isConnected = false;
     _connectionAnnounced = false;
@@ -991,8 +1096,47 @@ class V2VClient {
 
   // --- Mic recording (PCM16, 24kHz, mono) using `record` package ---
 
+  @visibleForTesting
+  Future<bool> startAuthorizedMicrophoneForTesting({
+    required AiConsentAuthoritySnapshot authority,
+    required bool Function() shouldContinue,
+  }) =>
+      _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
+
+  Future<bool> _startAuthorizedMicrophone({
+    required AiConsentAuthoritySnapshot authority,
+    required bool Function() shouldContinue,
+  }) async {
+    _activeConsentAuthority = authority;
+    _sessionShouldContinue = shouldContinue;
+    _aiConsentLease ??= AiConsentActiveSessionLease(
+      uid: authority.uid,
+      authority: authority,
+      onAuthorityLost: _handleRuntimeAuthorityLoss,
+    )..start();
+
+    if (_aiConsentLease?.isActive != true ||
+        !await _authorizeProtectedEgress(V2VProtectedEgressBoundary.microphoneCapture)) {
+      _aiConsentLease?.stop();
+      _aiConsentLease = null;
+      return false;
+    }
+
+    final started = await (_microphoneStarter?.call() ?? _startMicStream());
+    if (!started || !_hasCurrentSessionAuthority()) {
+      await _stopMicStream(reason: 'consent_authority_lost_during_start');
+      _aiConsentLease?.stop();
+      _aiConsentLease = null;
+      return false;
+    }
+    return true;
+  }
+
   Future<bool> _startMicStream() async {
     try {
+      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+        return false;
+      }
       if (_recorder != null || _micSub != null) {
         Logger.debug('[V2V] Mic stream already active, not starting duplicate recorder');
         return true;
@@ -1008,6 +1152,11 @@ class V2VClient {
         _recorder = null;
         return false;
       }
+      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+        await _recorder?.dispose();
+        _recorder = null;
+        return false;
+      }
 
       final stream = await _recorder!.startStream(
         const RecordConfig(
@@ -1019,16 +1168,22 @@ class V2VClient {
           noiseSuppress: true,
         ),
       );
+      if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+        await _recorder?.stop();
+        await _recorder?.dispose();
+        _recorder = null;
+        return false;
+      }
 
       _micChunksSent = 0;
       _micBytesSent = 0;
       _micSub = stream.listen((data) {
-        if (_isConnected &&
-            _channel != null &&
-            !_micMuted &&
-            !_isPlaying &&
-            !_micSuspendedForPlayback &&
-            SharedPreferencesUtil().aiConsentAccepted) {
+        if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+          unawaited(_handleRuntimeAuthorityLoss());
+          return;
+        }
+        if (_isConnected && _channel != null && !_micMuted && !_isPlaying && !_micSuspendedForPlayback) {
+          _onProtectedEgress?.call(V2VProtectedEgressBoundary.microphoneFrame);
           _channel!.sink.add(data);
           _micChunksSent++;
           _micBytesSent += data.length;
@@ -1086,6 +1241,10 @@ class V2VClient {
       _micMuted = false;
       return;
     }
+    if (!_hasCurrentSessionAuthority() || _aiConsentLease?.isActive != true) {
+      await _handleRuntimeAuthorityLoss();
+      return;
+    }
 
     if (_isPlaying || _streamPlaybackStarted) {
       Logger.debug('[V2V] Mic gate remains closed: playback still active');
@@ -1093,7 +1252,13 @@ class V2VClient {
     }
 
     Logger.debug('[V2V] Mic gate reopening after playback cooldown');
-    await _startMicStream();
+    final authority = _activeConsentAuthority;
+    final shouldContinue = _sessionShouldContinue;
+    if (authority == null || shouldContinue == null) {
+      await _handleRuntimeAuthorityLoss();
+      return;
+    }
+    await _startAuthorizedMicrophone(authority: authority, shouldContinue: shouldContinue);
   }
 
   // --- Low-latency PCM streaming playback ---

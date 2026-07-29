@@ -11,6 +11,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/backend/schema/person.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/models/stt_provider.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 import 'package:omi/utils/logger.dart';
 
 class SharedPreferencesUtil {
@@ -220,7 +221,14 @@ class SharedPreferencesUtil {
 
   set aiConsentAccepted(bool value) => saveBool('aiConsentAccepted', value);
 
-  bool get aiConsentAccepted {
+  bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
+
+  bool hasCurrentAiConsentAuthority({
+    bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled,
+  }) {
+    if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
+      return false;
+    }
     final accepted = getBool('aiConsentAccepted', defaultValue: false) &&
         aiConsentContractVersion == currentAiConsentContractVersion &&
         aiConsentProcessorSetHash == currentAiConsentProcessorSetHash;

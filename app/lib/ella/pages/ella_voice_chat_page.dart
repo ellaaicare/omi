@@ -647,7 +647,9 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   Future<void> _startV2V(String provider, {required int startupGeneration, bool allowScopeRefresh = true}) async {
-    if (!SharedPreferencesUtil().aiConsentAccepted || !_isCurrentV2VStartup(startupGeneration)) return;
+    final authority = AiConsentAuthoritySnapshot.capture(expectedUid: SharedPreferencesUtil().uid);
+    bool hasCurrentStartupAuthority() => _isCurrentV2VStartup(startupGeneration) && authority?.isCurrent() == true;
+    if (!hasCurrentStartupAuthority()) return;
     provider = V2VClient.normalizeProvider(provider);
     final providerName = localizedV2VProviderName(context, provider);
     debugPrint('[VoiceChat] Starting V2V mode with provider: $provider');
@@ -657,7 +659,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     if (captureProvider.recordingState == RecordingState.record) {
       debugPrint('[VoiceChat] Pausing capture recording for V2V');
       await captureProvider.stopStreamRecording();
-      if (!_isCurrentV2VStartup(startupGeneration)) return;
+      if (!hasCurrentStartupAuthority()) return;
     }
 
     setState(() {
@@ -670,7 +672,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     try {
       await _audioPlayer.stop();
     } catch (_) {}
-    if (!_isCurrentV2VStartup(startupGeneration)) return;
+    if (!hasCurrentStartupAuthority()) return;
 
     late final V2VClient client;
     client = V2VClient(
@@ -696,7 +698,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         }
       },
     );
-    if (!_isCurrentV2VStartup(startupGeneration)) {
+    if (!hasCurrentStartupAuthority()) {
       await client.disconnect();
       return;
     }
@@ -705,7 +707,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     final receipt = await client.connect(
       provider: provider,
       sessionScope: _sessionScope,
-      shouldContinue: () => _isCurrentV2VStartup(startupGeneration) && identical(_v2vClient, client),
+      shouldContinue: () => hasCurrentStartupAuthority() && identical(_v2vClient, client),
     );
     if (!_isCurrentV2VStartup(startupGeneration) || !identical(_v2vClient, client)) {
       await client.disconnect();

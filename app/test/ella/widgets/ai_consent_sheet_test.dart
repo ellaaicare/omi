@@ -64,6 +64,34 @@ void main() {
     expect(find.text('Not now').hitTestable(), findsOneWidget);
   });
 
+  testWidgets('non-English internal pilot cannot open the English-only consent disclosure', (tester) async {
+    bool? result = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('es'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await AiConsentSheet.show(context, pilotLocaleRestricted: true);
+              },
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    expect(result, isNull);
+    expect(find.byType(AiConsentSheet), findsNothing);
+    expect(find.text('Allow and continue'), findsNothing);
+  });
+
   testWidgets('names managed-cloud recipients, data, purpose, and narrow scope before acceptance', (tester) async {
     await tester.pumpWidget(buildApp());
     await tester.pumpAndSettle();

@@ -142,4 +142,59 @@ void main() {
     expect(find.text('SUP-4F2A'), findsOneWidget);
     expect(find.byType(TextField), findsNothing);
   });
+
+  testWidgets('non-English internal pilot performs no claim request and exposes no English-only claim UI',
+      (tester) async {
+    final transport = _CountingEntitlementTransport();
+    final provider = EllaEntitlementProvider(
+      transport: transport,
+      authenticatedUidChanges: const Stream.empty(),
+      initialAuthenticatedUid: 'uid-a',
+    );
+    addTearDown(provider.dispose);
+
+    await tester.pumpWidget(
+      ChangeNotifierProvider.value(
+        value: provider,
+        child: const MaterialApp(
+          locale: Locale('es'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: EllaEntitlementGatePage(
+            pilotLocaleRestricted: true,
+            onSignOutOverride: _noop,
+            readyChild: Text('ONBOARDING READY'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(transport.fetchCalls, 0);
+    expect(transport.redeemCalls, 0);
+    expect(find.text('Seleccionar idioma'), findsOneWidget);
+    expect(find.text('¡Esta función estará disponible pronto!'), findsOneWidget);
+    expect(find.text('ONBOARDING READY'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('Allow and continue'), findsNothing);
+  });
+}
+
+void _noop() {}
+
+class _CountingEntitlementTransport implements EllaEntitlementTransport {
+  int fetchCalls = 0;
+  int redeemCalls = 0;
+
+  @override
+  Future<EllaEntitlement> fetch() async {
+    fetchCalls++;
+    return EllaAccessDemoFixtures.invited;
+  }
+
+  @override
+  Future<EllaEntitlement> redeem(String code) async {
+    redeemCalls++;
+    return EllaAccessDemoFixtures.active;
+  }
 }

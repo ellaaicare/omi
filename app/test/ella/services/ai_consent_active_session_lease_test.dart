@@ -14,6 +14,7 @@ void main() {
     await SharedPreferencesUtil.init();
     preferences = SharedPreferencesUtil();
     preferences.uid = 'uid-a';
+    preferences.verifiedPersonaId = 'persona-a';
     preferences.acceptAiConsent(
       receiptId: 'aicr_receipt-a',
       uid: 'uid-a',
