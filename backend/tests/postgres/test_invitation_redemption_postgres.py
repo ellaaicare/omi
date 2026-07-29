@@ -11,6 +11,7 @@ import pytest
 
 from database import (
     authority_advisory_lock,
+    invitation_operator,
     invitations,
     managed_cloud_consent,
     voice_canary,
@@ -32,6 +33,13 @@ CONFIG = invitations.InvitationConfig(
     redemption_enabled=True,
     ordinary_enabled=True,
     app_review_enabled=True,
+    progressive_backoff_enabled=False,
+)
+OPERATOR_CONFIG = invitations.InvitationConfig(
+    hmac_pepper=CONFIG.hmac_pepper,
+    redemption_enabled=True,
+    ordinary_enabled=False,
+    app_review_enabled=False,
     progressive_backoff_enabled=False,
 )
 POLICY = {
@@ -175,10 +183,10 @@ async def _run_with_database(
                 "011_create_invitation_redemption.sql",
                 "012_create_account_profile_runtime_targets.sql",
                 "013_create_managed_cloud_consent_authority.sql",
+                "014_add_synthetic_invitation_operator_audit.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            assert await conn.fetchval(
-                """
+            assert await conn.fetchval("""
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.columns
@@ -187,8 +195,7 @@ async def _run_with_database(
                       AND column_name = 'profile_class'
                       AND is_nullable = 'NO'
                 )
-                """
-            )
+                """)
             assert await conn.fetchval("SELECT to_regclass('ella_invitation_targets') IS NOT NULL")
         await scenario(pool)
     finally:
@@ -355,6 +362,15 @@ def _grant_v7(repository: ai_consent.InMemoryConsentRepository, uid: str) -> Non
             scope_hash=ai_consent.CURRENT_SCOPE_HASH,
         ),
     )
+
+
+def _set_pilot_rollout(monkeypatch, uids: Iterable[str]) -> None:
+    value = ",".join(uids)
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    for name in invitation_authority.PILOT_UID_ALLOWLISTS:
+        monkeypatch.setenv(name, value)
+    for name in invitation_authority.PILOT_GLOBAL_FLAGS_REQUIRED_FALSE:
+        monkeypatch.setenv(name, "false")
 
 
 def test_same_uid_retry_is_idempotent_and_privacy_safe():
@@ -735,9 +751,7 @@ def test_consent_revocation_at_insert_boundary_rolls_back_all_redemption_mutatio
         uid = "synthetic-consent-race"
         repository = ai_consent.InMemoryConsentRepository()
         monkeypatch.setattr(ai_consent, "_repository", repository)
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+        _set_pilot_rollout(monkeypatch, [uid])
         _grant_v7(repository, uid)
         invitation_id, reservation_id = await _seed_invitation(
             pool,
@@ -806,9 +820,7 @@ def test_revocation_started_after_revalidation_is_serialized_and_quarantines_gra
         uid = "synthetic-consent-serialized"
         repository = ai_consent.InMemoryConsentRepository()
         monkeypatch.setattr(ai_consent, "_repository", repository)
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", uid)
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", uid)
+        _set_pilot_rollout(monkeypatch, [uid])
         _grant_v7(repository, uid)
         invitation_id, reservation_id = await _seed_invitation(
             pool,
@@ -1046,8 +1058,7 @@ def test_revocation_transaction_error_rolls_back_epoch_and_quarantine():
                 """,
                 uid,
             )
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE FUNCTION fail_consent_quarantine() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
@@ -1059,8 +1070,7 @@ def test_revocation_transaction_error_rolls_back_epoch_and_quarantine():
                 FOR EACH ROW
                 WHEN (NEW.status = 'revoked')
                 EXECUTE FUNCTION fail_consent_quarantine();
-                """
-            )
+                """)
 
         with pytest.raises(managed_cloud_consent.ManagedCloudAuthorityUnavailable):
             await managed_cloud_consent.synchronize_denial(
@@ -1240,15 +1250,10 @@ def test_rate_limit_uses_hmac_refs_and_emits_authoritative_retry():
         assert error.value.retry_after_s and error.value.retry_after_s <= 900
 
         async with pool.acquire() as conn:
-            stored = [
-                dict(row)
-                for row in await conn.fetch(
-                    """
+            stored = [dict(row) for row in await conn.fetch("""
                     SELECT uid_ref_hmac, source_ref_hmac
                     FROM ella_invitation_rate_limit_events
-                    """
-                )
-            ]
+                    """)]
         assert len(stored) == 5
         serialized = json.dumps(stored)
         assert uid not in serialized
@@ -1280,6 +1285,508 @@ def test_ordinary_feature_gate_cannot_create_entitlement_or_consume_code():
             reservation_id=reservation_id,
             uid=uid,
         )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+async def _issue_operator_invitation(
+    pool: asyncpg.Pool,
+    *,
+    uid: str,
+    code: str,
+    expires_at: datetime,
+    code_file_existed: bool = False,
+    expected_database: str | None = None,
+    code_file_path: str | None = None,
+    environment: str = "postgres_test",
+    operator: str = "pytest",
+) -> dict:
+    if expected_database is None:
+        async with pool.acquire() as conn:
+            expected_database = str(await conn.fetchval("SELECT current_database()"))
+    return await invitation_operator.issue_synthetic_invitation(
+        identity=invitation_operator.SyntheticInvitationIdentity(
+            uid=uid,
+            account_uid=uid,
+            profile_uid=uid,
+        ),
+        context=invitation_operator.SyntheticInvitationContext(
+            environment=environment,
+            expected_database=expected_database,
+            operator=operator,
+        ),
+        admission=_admission(uid),
+        code=code,
+        code_file_existed=code_file_existed,
+        code_file_ref_hmac=invitations.invitation_code_file_ref(
+            OPERATOR_CONFIG,
+            code_file_path or f"/root/ella-invites/{uid}.code",
+        ),
+        expires_at=expires_at,
+        config=OPERATOR_CONFIG,
+    )
+
+
+def test_operator_issue_redeem_is_hmac_only_single_use_and_idempotent():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-operator-redeem"
+        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, [uid])
+
+        issued = await _issue_operator_invitation(
+            pool,
+            uid=uid,
+            code="ABCD-2345",
+            expires_at=expiry,
+        )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_stale_code_receipt",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=uid,
+                code="ABCD-2345",
+                expires_at=expiry,
+                code_file_existed=True,
+                code_file_path="/root/ella-invites/copied.code",
+            )
+        retried = await _issue_operator_invitation(
+            pool,
+            uid=uid,
+            code="ABCD-2345",
+            expires_at=expiry,
+            code_file_existed=True,
+        )
+        assert issued["receipt_id"] == retried["receipt_id"]
+        assert retried["idempotent"] is True
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_receipt_context_mismatch",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=uid,
+                code="ABCD-2345",
+                expires_at=expiry,
+                code_file_existed=True,
+                environment="other_environment",
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_receipt_context_mismatch",
+        ):
+            await invitation_operator.show_synthetic_invitation(
+                receipt_id=issued["receipt_id"],
+                identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+                context=invitation_operator.SyntheticInvitationContext(
+                    "postgres_test",
+                    await _current_database(pool),
+                    "other_operator",
+                ),
+                config=OPERATOR_CONFIG,
+            )
+
+        first = await _redeem(
+            uid,
+            "ABCD-2345",
+            config=OPERATOR_CONFIG,
+        )
+        second = await _redeem(
+            uid,
+            "abcd 2345",
+            config=OPERATOR_CONFIG,
+        )
+        assert first["status"] == second["status"] == "invited"
+        assert first["revision"] == second["revision"] == 1
+
+        async with pool.acquire() as conn:
+            invitation = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT code_hmac, display_hint, state, redemption_count,
+                           cohort, exclude_from_product_analytics
+                    FROM ella_invitations
+                    WHERE id = $1::uuid
+                    """,
+                    issued["receipt_id"],
+                )
+            )
+            target = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT account_ref_hmac, profile_ref_hmac,
+                           required_profile_class, consumed_at
+                    FROM ella_invitation_targets
+                    WHERE invitation_id = $1::uuid
+                    """,
+                    issued["receipt_id"],
+                )
+            )
+            counts = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT
+                        (
+                            SELECT COUNT(*) FROM ella_invitations
+                            WHERE cohort = $2
+                        ) AS invitations,
+                        (
+                            SELECT COUNT(*) FROM ella_invitation_redemptions
+                            WHERE invitation_id = $1::uuid
+                        ) AS redemptions,
+                        (
+                            SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                            WHERE invitation_id = $1::uuid
+                              AND event_type = 'operator_issued'
+                        ) AS issued_audits,
+                        (
+                            SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                            WHERE invitation_id = $1::uuid
+                              AND event_type = 'operator_idempotent_retry'
+                        ) AS retry_audits
+                    """,
+                    issued["receipt_id"],
+                    invitations.SYNTHETIC_OPERATOR_COHORT,
+                )
+            )
+        serialized = json.dumps(
+            {"invitation": invitation, "target": target},
+            default=str,
+        )
+        assert "ABCD-2345" not in serialized
+        assert "ABCD2345" not in serialized
+        assert uid not in serialized
+        assert invitation["display_hint"] is None
+        assert invitation["state"] == "redeemed"
+        assert invitation["redemption_count"] == 1
+        assert invitation["cohort"] == invitations.SYNTHETIC_OPERATOR_COHORT
+        assert invitation["exclude_from_product_analytics"] is True
+        assert target["required_profile_class"] == "synthetic"
+        assert target["consumed_at"] is not None
+        assert counts == {
+            "invitations": 1,
+            "redemptions": 1,
+            "issued_audits": 1,
+            "retry_audits": 1,
+        }
+
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_revoke_refused",
+        ):
+            await invitation_operator.revoke_synthetic_invitation(
+                receipt_id=issued["receipt_id"],
+                expected_version=2,
+                identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+                context=invitation_operator.SyntheticInvitationContext(
+                    "postgres_test",
+                    await _current_database(pool),
+                    "pytest",
+                ),
+                config=OPERATOR_CONFIG,
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_operator_policy_drift_cannot_bypass_disabled_ordinary_gate():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-operator-policy-drift"
+        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, [uid])
+        issued = await _issue_operator_invitation(
+            pool,
+            uid=uid,
+            code="CDEF-2345",
+            expires_at=expiry,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_invitations
+                SET entitlement_policy = jsonb_set(
+                    entitlement_policy,
+                    '{daily_limit_s}',
+                    '999999'::jsonb
+                )
+                WHERE id = $1::uuid
+                """,
+                issued["receipt_id"],
+            )
+
+        with pytest.raises(invitations.InviteRedemptionFailure) as error:
+            await _redeem(
+                uid,
+                "CDEF-2345",
+                config=OPERATOR_CONFIG,
+            )
+        assert error.value.code == "invalid"
+        async with pool.acquire() as conn:
+            state = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT i.redemption_count, t.consumed_at,
+                           r.state AS reservation_state
+                    FROM ella_invitations i
+                    JOIN ella_invitation_targets t
+                      ON t.invitation_id = i.id
+                    JOIN ella_invitation_capacity_reservations r
+                      ON r.id = i.capacity_reservation_id
+                    WHERE i.id = $1::uuid
+                    """,
+                    issued["receipt_id"],
+                )
+            )
+        assert state == {
+            "redemption_count": 0,
+            "consumed_at": None,
+            "reservation_state": "reserved",
+        }
+
+    asyncio.run(_run_with_database(scenario))
+
+
+async def _current_database(pool: asyncpg.Pool) -> str:
+    async with pool.acquire() as conn:
+        return str(await conn.fetchval("SELECT current_database()"))
+
+
+def test_operator_revoke_cleanup_is_exact_and_real_user_safe():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "synthetic-operator-cleanup"
+        other_uid = "synthetic-operator-other"
+        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, [uid, other_uid])
+        issued = await _issue_operator_invitation(
+            pool,
+            uid=uid,
+            code="EFGH-2345",
+            expires_at=expiry,
+        )
+        context = invitation_operator.SyntheticInvitationContext(
+            "postgres_test",
+            await _current_database(pool),
+            "pytest",
+        )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_receipt_binding_mismatch",
+        ):
+            await invitation_operator.show_synthetic_invitation(
+                receipt_id=issued["receipt_id"],
+                identity=invitation_operator.SyntheticInvitationIdentity(
+                    other_uid,
+                    other_uid,
+                    other_uid,
+                ),
+                context=context,
+                config=OPERATOR_CONFIG,
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_stale_receipt",
+        ):
+            await invitation_operator.revoke_synthetic_invitation(
+                receipt_id=issued["receipt_id"],
+                expected_version=99,
+                identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+                context=context,
+                config=OPERATOR_CONFIG,
+            )
+
+        revoked = await invitation_operator.revoke_synthetic_invitation(
+            receipt_id=issued["receipt_id"],
+            expected_version=1,
+            identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+            context=context,
+            config=OPERATOR_CONFIG,
+        )
+        assert revoked["state"] == "revoked"
+        assert revoked["version"] == 2
+        assert revoked["current_profile_class"] == "synthetic"
+
+        cleaned = await invitation_operator.cleanup_synthetic_invitation(
+            receipt_id=issued["receipt_id"],
+            expected_version=2,
+            identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+            context=context,
+            config=OPERATOR_CONFIG,
+        )
+        assert cleaned["state"] == "revoked"
+        assert cleaned["version"] == 3
+        assert cleaned["current_profile_class"] == "real"
+        shown = await invitation_operator.show_synthetic_invitation(
+            receipt_id=issued["receipt_id"],
+            identity=invitation_operator.SyntheticInvitationIdentity(uid, uid, uid),
+            context=context,
+            config=OPERATOR_CONFIG,
+        )
+        assert shown["current_profile_class"] == "real"
+
+        async with pool.acquire() as conn:
+            state = dict(
+                await conn.fetchrow(
+                    """
+                    SELECT i.state, i.delivery_state, r.state AS reservation_state,
+                           u.profile_class,
+                           (
+                               SELECT COUNT(*)
+                               FROM ella_invitation_audit_receipts a
+                               WHERE a.invitation_id = i.id
+                                 AND a.event_type IN (
+                                     'operator_revoked', 'operator_cleanup'
+                                 )
+                           ) AS lifecycle_audits
+                    FROM ella_invitations i
+                    JOIN ella_invitation_capacity_reservations r
+                      ON r.id = i.capacity_reservation_id
+                    JOIN ella_invitation_targets t
+                      ON t.invitation_id = i.id
+                    JOIN users u ON u.omi_uid = $2
+                    WHERE i.id = $1::uuid
+                    """,
+                    issued["receipt_id"],
+                    uid,
+                )
+            )
+        assert state == {
+            "state": "revoked",
+            "delivery_state": "suppressed",
+            "reservation_state": "released",
+            "profile_class": "real",
+            "lifecycle_audits": 2,
+        }
+
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_real_profile_refused|operator_stale_code_receipt",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=uid,
+                code="JKMN-2345",
+                expires_at=expiry,
+            )
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_operator_refuses_real_existing_collision_wrong_database_and_expiry():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        real_uid = "synthetic-operator-real-refusal"
+        collision_uid = "synthetic-operator-collision"
+        existing_uid = "synthetic-existing-code-owner"
+        expiry_uid = "synthetic-operator-expired"
+        artifact_uid = "synthetic-operator-existing-artifact"
+        stale_uid = "synthetic-operator-stale-file"
+        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        async with pool.acquire() as conn:
+            await _ensure_users(conn, [real_uid], profile_class="real")
+            await _ensure_users(
+                conn,
+                [collision_uid, expiry_uid, artifact_uid, stale_uid],
+            )
+            await conn.execute(
+                "INSERT INTO voice_entitlements (uid) VALUES ($1)",
+                artifact_uid,
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_real_profile_refused",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=real_uid,
+                code="JKMN-2345",
+                expires_at=expiry,
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_database_mismatch",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=collision_uid,
+                code="MNPQ-2345",
+                expires_at=expiry,
+                expected_database="wrong_database",
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_existing_profile_artifacts",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=artifact_uid,
+                code="NPQR-2345",
+                expires_at=expiry,
+            )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_stale_code_receipt",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=stale_uid,
+                code="PQRS-2345",
+                expires_at=expiry,
+                code_file_existed=True,
+            )
+
+        await _seed_invitation(
+            pool,
+            code="RSTU-2345",
+            target_uids=[existing_uid],
+        )
+        with pytest.raises(
+            invitation_operator.SyntheticInvitationOperatorError,
+            match="operator_code_collision",
+        ):
+            await _issue_operator_invitation(
+                pool,
+                uid=collision_uid,
+                code="RSTU-2345",
+                expires_at=expiry,
+            )
+
+        issued = await _issue_operator_invitation(
+            pool,
+            uid=expiry_uid,
+            code="VWXY-2345",
+            expires_at=expiry,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE ella_invitations
+                SET expires_at = NOW() - INTERVAL '1 minute'
+                WHERE id = $1::uuid
+                """,
+                issued["receipt_id"],
+            )
+        with pytest.raises(invitations.InviteRedemptionFailure) as error:
+            await _redeem(
+                expiry_uid,
+                "VWXY-2345",
+                config=OPERATOR_CONFIG,
+            )
+        assert error.value.code == "expired"
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    """
+                    SELECT redemption_count
+                    FROM ella_invitations
+                    WHERE id = $1::uuid
+                    """,
+                    issued["receipt_id"],
+                )
+                == 0
+            )
 
     asyncio.run(_run_with_database(scenario))
 
@@ -1332,7 +1839,7 @@ def test_app_review_code_remains_capped_and_requires_prebound_targets():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_default_gate_requires_v7_exact_allowlists_and_synthetic_profile(
+def test_default_gate_requires_v8_exact_allowlists_and_synthetic_profile(
     monkeypatch,
 ):
     async def scenario(pool: asyncpg.Pool) -> None:
@@ -1344,14 +1851,9 @@ def test_default_gate_requires_v7_exact_allowlists_and_synthetic_profile(
         monkeypatch.setattr(ai_consent, "_repository", repository)
         for uid in (allowed, no_allowlist, real_profile):
             _grant_v7(repository, uid)
-        monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
-        monkeypatch.setenv(
-            "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
-            ",".join((allowed, no_consent, real_profile)),
-        )
-        monkeypatch.setenv(
-            "ELLA_HERMES_CLOUD_SYNTHETIC_UIDS",
-            ",".join((allowed, no_consent, real_profile)),
+        _set_pilot_rollout(
+            monkeypatch,
+            [allowed, no_consent, real_profile],
         )
 
         allowed_id, _ = await _seed_invitation(
@@ -1657,15 +2159,11 @@ def test_kill_switch_after_invite_blocks_claim_and_preserves_pool(monkeypatch):
             )
         assert error.value.code == "runtime_admission_provider_disabled"
         async with pool.acquire() as conn:
-            binding = dict(
-                await conn.fetchrow(
-                    """
+            binding = dict(await conn.fetchrow("""
                     SELECT status, user_id, claim_job_id, claim_token
                     FROM ella_runtime_bindings
                     WHERE runtime_instance_id = 'kill-switch-a'
-                    """
-                )
-            )
+                    """))
         assert binding == {
             "status": "pool_available",
             "user_id": None,

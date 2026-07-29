@@ -18,19 +18,48 @@ from ella.services.hermes_cloud_policy import (
     current_cloud_authority,
 )
 
+PILOT_UID_ALLOWLISTS = (
+    "ELLA_RUNTIME_BINDINGS_ENABLED_UIDS",
+    "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
+    "ELLA_HERMES_CLOUD_SYNTHETIC_UIDS",
+    "ELLA_AI_CONSENT_ENFORCEMENT_UIDS",
+)
+PILOT_GLOBAL_FLAGS_REQUIRED_FALSE = (
+    "ELLA_RUNTIME_BINDINGS_ENABLED",
+    "ELLA_HERMES_PROVISIONING_ENABLED",
+    "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED",
+    "ELLA_AI_CONSENT_ENFORCEMENT_ENABLED",
+    "ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED",
+    "ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED",
+    "ELLA_ISOLATED_VOICE_ROUTING_ENABLED",
+    "ELLA_INVITE_ORDINARY_SELF_SERVICE_ENABLED",
+    "ELLA_INVITE_APP_REVIEW_ENABLED",
+)
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
 
 def _exact_allowlist(name: str) -> set[str]:
     return {value.strip() for value in os.getenv(name, "").split(",") if value.strip()}
 
 
-def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
-    """Authorize the exact synthetic profile before redemption can mutate SQL."""
+def _global_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in TRUE_VALUES
+
+
+def assert_invitation_pilot_rollout(uid: str) -> None:
+    """Require the exact synthetic canary while every global rollout remains off."""
     if (
-        not cloud_synthetic_only()
-        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS")
-        or uid not in _exact_allowlist("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS")
+        not uid
+        or not cloud_synthetic_only()
+        or any(_global_flag_enabled(name) for name in PILOT_GLOBAL_FLAGS_REQUIRED_FALSE)
+        or any(uid not in _exact_allowlist(name) for name in PILOT_UID_ALLOWLISTS)
     ):
         raise InvitePilotGateDenied("invite_pilot_identity_not_allowed")
+
+
+def authorize_invitation_pilot(uid: str) -> InvitationPilotAdmission:
+    """Authorize the exact synthetic profile before redemption can mutate SQL."""
+    assert_invitation_pilot_rollout(uid)
     try:
         authority = current_cloud_authority(
             uid,

@@ -5,6 +5,7 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -19,8 +20,12 @@ on:
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
+      - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_synthetic_invite_admin.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - ".github/workflows/invite-redemption-tests.yml"
@@ -29,6 +34,7 @@ on:
     paths:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/database/authority_advisory_lock.py"
+      - "backend/database/invitation_operator.py"
       - "backend/database/invitations.py"
       - "backend/database/managed_cloud_consent.py"
       - "backend/database/runtime_targets.py"
@@ -43,8 +49,12 @@ on:
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
+      - "backend/migrations/014_add_synthetic_invitation_operator_audit.sql"
+      - "backend/scripts/synthetic_invite_admin.py"
       - "backend/ella/docs/INVITE_REDEMPTION_CONTROL_PLANE.md"
+      - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
+      - "backend/tests/unit/test_synthetic_invite_admin.py"
       - "backend/tests/postgres/test_invitation_redemption_postgres.py"
       - "backend/tests/postgres/test_runtime_migration_atomicity_postgres.py"
       - ".github/workflows/invite-redemption-tests.yml"
@@ -99,6 +109,7 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
+          database/invitation_operator.py
           database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py
@@ -108,20 +119,23 @@ jobs:
           ella/services/consent_authority.py
           ella/services/invitation_authority.py
           ella/services/hermes_cloud_policy.py
+          scripts/synthetic_invite_admin.py
 
       - name: Run unit and PostgreSQL security tests
         run: |
           collected="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
+              tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_voice_canary.py \
               tests/postgres/test_invitation_redemption_postgres.py \
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 44
+          test "$collected" -eq 59
           pytest \
             tests/unit/test_invitation_redemption.py \
+            tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_voice_canary.py \
             tests/postgres/test_invitation_redemption_postgres.py \
             tests/postgres/test_runtime_migration_atomicity_postgres.py \
