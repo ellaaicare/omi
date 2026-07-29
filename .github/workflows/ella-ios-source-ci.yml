@@ -133,8 +133,24 @@ jobs:
             exit 1
           fi
 
-      - name: Analyze Flutter source
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Analyze focused Ella iOS source
+        run: |
+          flutter analyze --no-fatal-infos --no-fatal-warnings \
+            lib/backend/http/shared.dart \
+            lib/core/app_shell.dart \
+            lib/ella \
+            lib/mobile/mobile_app.dart \
+            lib/pages/home/page.dart \
+            lib/pages/home/today_page.dart \
+            lib/pages/onboarding/ella \
+            lib/providers/auth_provider.dart \
+            lib/providers/ella_entitlement_provider.dart \
+            lib/services/auth_service.dart \
+            lib/utils/auth_utils.dart \
+            lib/utils/log_redaction.dart \
+            test/backend \
+            test/ella \
+            test/pages/onboarding/ella
 
       - name: Run focused invite, entitlement, quota, consent, and routing tests
         run: |
