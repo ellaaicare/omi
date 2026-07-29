@@ -113,6 +113,9 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Run app/test.sh setup and smoke tests
+        run: ./test.sh
+
       - name: Enforce focused test collection counts
         run: |
           set -euo pipefail
@@ -192,6 +195,3 @@ jobs:
 
       - name: Run full Flutter tests
         run: flutter test
-
-      - name: Run app/test.sh
-        run: ./test.sh
