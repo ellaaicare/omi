@@ -20,8 +20,8 @@ permissions:
 jobs:
   flutter-source:
     name: Flutter source, guards, and tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: macos-latest
+    timeout-minutes: 60
     env:
       ELLA_CI_FLUTTER_VERSION: 3.41.1
     defaults:
