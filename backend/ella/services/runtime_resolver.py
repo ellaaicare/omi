@@ -150,6 +150,21 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
     )
 
 
+def _cloud_json_string_list(value, *, code: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ProvisioningError(code, retryable=False) from exc
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item or item.strip() != item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise ProvisioningError(code, retryable=False)
+    return tuple(sorted(value))
+
+
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
     if binding.get("omi_uid") != uid:
         raise ProvisioningError("runtime_ownership_mismatch", retryable=False)
@@ -195,6 +210,14 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         if str(binding.get("runtime_target_mode") or "") not in CLOUD_RUNTIME_TARGET_MODES:
             raise ProvisioningError("cloud_runtime_target_mode_missing", retryable=False)
         prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
+        allowed_tools = _cloud_json_string_list(
+            binding.get("allowed_tools"),
+            code="cloud_runtime_allowed_tools_invalid",
+        )
+        required_capabilities = _cloud_json_string_list(
+            binding.get("required_capabilities"),
+            code="cloud_runtime_required_capabilities_invalid",
+        )
         workspace_root = ""
         runtime_instance_id = str(binding.get("runtime_instance_id") or "")
         expected_model = str(binding.get("expected_model") or "")
@@ -242,6 +265,8 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
             raise ProvisioningError("cloud_runtime_target_lineage_stale", retryable=False)
         gateway_url, gateway_token = HermesCloudClient.credentials(binding)
     else:
+        allowed_tools = tuple(sorted(str(item) for item in (binding.get("allowed_tools") or [])))
+        required_capabilities = tuple(sorted(str(item) for item in (binding.get("required_capabilities") or [])))
         workspace_root = str(binding.get("workspace_root") or "")
         profiles_root = os.getenv("ELLA_HERMES_PROFILES_ROOT", "/Users/ellaai/.hermes/profiles")
         expected_workspace = posixpath.normpath(f"{profiles_root.rstrip('/')}/{profile_name}/workspace")
@@ -296,8 +321,8 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         prompt_pack_version=str(binding.get("prompt_pack_version") or binding.get("template_version") or ""),
         expected_model=expected_model,
         model_context_window_tokens=model_context_window_tokens,
-        allowed_tools=tuple(sorted(str(item) for item in (binding.get("allowed_tools") or []))),
-        required_capabilities=tuple(sorted(str(item) for item in (binding.get("required_capabilities") or []))),
+        allowed_tools=allowed_tools,
+        required_capabilities=required_capabilities,
         model_policy_version=str(binding.get("model_policy_version") or ""),
         voice_policy_version=str(binding.get("voice_policy_version") or ""),
         revision=revision,

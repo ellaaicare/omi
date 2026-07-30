@@ -95,6 +95,11 @@ def validate_honcho_base_url(value: str) -> str:
 def validate_prompt_artifact_receipt(binding: dict[str, Any]) -> dict[str, Any]:
     """Validate the persisted server-issued approval receipt."""
     receipt = binding.get("prompt_artifact_receipt")
+    if isinstance(receipt, str):
+        try:
+            receipt = json.loads(receipt)
+        except json.JSONDecodeError:
+            receipt = None
     if not isinstance(receipt, dict):
         raise ProvisioningError("prompt_artifact_receipt_missing", retryable=False)
     prompt_pack_version = str(binding.get("prompt_pack_version") or "").strip()
