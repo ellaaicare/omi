@@ -324,6 +324,7 @@ jobs:
 
       - name: Run Hermes Cloud and isolation failure-path tests
         run: |
+          set -euo pipefail
           collected="$(
             pytest --collect-only -q \
               tests/unit/test_ella_ai_consent.py \
