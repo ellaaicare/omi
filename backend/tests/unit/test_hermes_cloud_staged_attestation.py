@@ -106,8 +106,11 @@ def test_protected_receipt_covers_registration_and_exact_finalization(staged_env
         profile_class="synthetic",
         phase="pool_registration",
     )
+    database_binding = _binding()
+    database_binding["allowed_tools"] = json.dumps(database_binding["allowed_tools"])
+    database_binding["required_capabilities"] = json.dumps(database_binding["required_capabilities"])
     finalization = verifier.preflight(
-        _binding(),
+        database_binding,
         receipt_ref=str(path),
         uid=UID,
         account_id=OWNER_ID,
@@ -119,7 +122,66 @@ def test_protected_receipt_covers_registration_and_exact_finalization(staged_env
 
     assert registration["preflight_source"] == "server_staged_attestation"
     assert finalization["staged_attestation"]["phase"] == "claim_finalization"
+    assert finalization["tools"] == []
+    assert finalization["capabilities"] == ["responses_api", "session_key_header"]
     assert finalization["content_free"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("allowed_tools", "not-json"),
+        ("allowed_tools", json.dumps({"tool": "wrong-shape"})),
+        ("allowed_tools", json.dumps([1])),
+        ("required_capabilities", json.dumps("responses_api")),
+        ("required_capabilities", json.dumps(["responses_api", " "])),
+    ),
+)
+def test_staged_receipt_rejects_malformed_database_string_lists(staged_env, tmp_path, field, value):
+    verifier, path = _protected_receipt(tmp_path)
+    binding = _binding()
+    binding[field] = value
+
+    with pytest.raises(ProvisioningError) as exc:
+        verifier.preflight(
+            binding,
+            receipt_ref=str(path),
+            uid=UID,
+            account_id=OWNER_ID,
+            profile_id=OWNER_ID,
+            profile_class="synthetic",
+            phase="claim_finalization",
+        )
+
+    assert exc.value.code == "hermes_cloud_staged_attestation_pin_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("allowed_tools", "[]"),
+        ("allowed_tools", ["tool-b", "tool-a"]),
+        ("required_capabilities", ["responses_api", "responses_api"]),
+        ("required_capabilities", ["responses_api", 1]),
+    ),
+)
+def test_staged_receipt_rejects_noncanonical_pin_arrays(staged_env, tmp_path, field, value):
+    receipt = _receipt()
+    receipt[field] = value
+    verifier, path = _protected_receipt(tmp_path, receipt)
+
+    with pytest.raises(ProvisioningError) as exc:
+        verifier.preflight(
+            _binding(),
+            receipt_ref=str(path),
+            uid=UID,
+            account_id=OWNER_ID,
+            profile_id=OWNER_ID,
+            profile_class="synthetic",
+            phase="pool_registration",
+        )
+
+    assert exc.value.code == "hermes_cloud_staged_attestation_pin_mismatch"
 
 
 @pytest.mark.parametrize(
