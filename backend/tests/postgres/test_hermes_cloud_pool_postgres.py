@@ -144,7 +144,8 @@ async def _run_with_database(scenario):
                 "013_create_managed_cloud_consent_authority.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
-            assert await conn.fetchval("""
+            assert await conn.fetchval(
+                """
                 SELECT EXISTS (
                     SELECT 1
                     FROM information_schema.columns
@@ -154,15 +155,18 @@ async def _run_with_database(scenario):
                       AND is_nullable = 'NO'
                       AND column_default = '''real''::text'
                 )
-                """)
-            assert await conn.fetchval("""
+                """
+            )
+            assert await conn.fetchval(
+                """
                 SELECT EXISTS (
                     SELECT 1
                     FROM pg_constraint
                     WHERE connamespace = current_schema()::regnamespace
                       AND conname = 'users_profile_class_check'
                 )
-                """)
+                """
+            )
         await scenario(pool)
     finally:
         voice_canary._pool = previous_voice_pool
@@ -245,11 +249,15 @@ def test_revoke_between_admission_and_claim_consumes_no_pool_row():
 
         assert error.value.code == "runtime_admission_revoked"
         async with pool.acquire() as conn:
-            pool_row = dict(await conn.fetchrow("""
+            pool_row = dict(
+                await conn.fetchrow(
+                    """
                     SELECT status, user_id, claim_job_id, claim_token
                     FROM ella_runtime_bindings
                     WHERE runtime_instance_id = 'synthetic-instance-a'
-                    """))
+                    """
+                )
+            )
         assert pool_row == {
             "status": "pool_available",
             "user_id": None,
@@ -798,12 +806,16 @@ def test_plato_retained_binding_never_claims_hermes_cloud_pool():
 
         assert claimed["provider"] == "hermes_cloud"
         async with pool.acquire() as conn:
-            plato = dict(await conn.fetchrow("""
+            plato = dict(
+                await conn.fetchrow(
+                    """
                     SELECT provider, profile_name, active, workspace_root, internal_gateway_url,
                            credential_ref, honcho_workspace, observed_peer, observer_peer
                     FROM ella_runtime_bindings
                     WHERE profile_name = 'plato-eval'
-                    """))
+                    """
+                )
+            )
         assert plato == {
             "provider": "hermes",
             "profile_name": "plato-eval",
@@ -1045,11 +1057,15 @@ def test_post_publication_rollback_revokes_cloud_targets_and_preserves_retained_
                 """,
                 claimed["id"],
             )
-            retained = dict(await conn.fetchrow("""
+            retained = dict(
+                await conn.fetchrow(
+                    """
                     SELECT provider, status, active, profile_name
                     FROM ella_runtime_bindings
                     WHERE profile_name = 'plato-retained-rollback'
-                    """))
+                    """
+                )
+            )
         assert [dict(row) for row in target_states] == [{"status": "revoked", "count": 5}]
         assert retained == {
             "provider": "hermes",
