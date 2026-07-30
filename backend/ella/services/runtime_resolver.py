@@ -10,6 +10,7 @@ import posixpath
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
+from uuid import UUID
 
 from database.ella_provisioning import (
     EllaProvisioningRepository,
@@ -86,6 +87,7 @@ class IsolatedRuntime:
     target_endpoint_ref: str = ""
     target_credential_ref: str = ""
     target_entitlement_revision: int = 0
+    consent_authority_epoch: str = ""
     # Canonical broker/authority owner coordinates (users.id UUIDs), not omi_uid.
     account_user_id: str = ""
     profile_user_id: str = ""
@@ -110,6 +112,7 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
         or not runtime.target_endpoint_ref
         or not runtime.target_credential_ref
         or runtime.target_entitlement_revision < 1
+        or not runtime.consent_authority_epoch
     ):
         raise ProvisioningError("hermes_cloud_runtime_target_identity_missing", retryable=False)
     material = {
@@ -123,6 +126,7 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
         "target_endpoint_ref": runtime.target_endpoint_ref,
         "target_credential_ref": runtime.target_credential_ref,
         "target_entitlement_revision": runtime.target_entitlement_revision,
+        "consent_authority_epoch": runtime.consent_authority_epoch,
         "endpoint_sha256": hashlib.sha256(runtime.gateway_url.encode("utf-8")).hexdigest(),
         "credential_sha256": hashlib.sha256(runtime.gateway_token.encode("utf-8")).hexdigest(),
         "profile_class": runtime.profile_class,
@@ -249,6 +253,13 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         )
         if stored_lineage.validate() != authority.lineage:
             raise ProvisioningError("cloud_runtime_target_lineage_stale", retryable=False)
+        try:
+            consent_authority_epoch = str(UUID(str(binding.get("consent_authority_epoch") or "").strip()))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ProvisioningError(
+                "cloud_runtime_consent_authority_epoch_invalid",
+                retryable=False,
+            ) from exc
         gateway_url, gateway_token = HermesCloudClient.credentials(binding)
     else:
         allowed_tools = tuple(sorted(str(item) for item in (binding.get("allowed_tools") or [])))
@@ -270,6 +281,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         runtime_instance_id = ""
         expected_model = str(binding.get("agent_id") or "")
         model_context_window_tokens = 0
+        consent_authority_epoch = ""
 
     honcho_workspace = str(binding.get("honcho_workspace") or "")
     observed_peer = str(binding.get("observed_peer") or "")
@@ -325,6 +337,7 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         target_endpoint_ref=str(binding.get("target_endpoint_ref") or ""),
         target_credential_ref=str(binding.get("target_credential_ref") or ""),
         target_entitlement_revision=int(binding.get("target_entitlement_revision") or 0),
+        consent_authority_epoch=consent_authority_epoch,
         account_user_id=account_user_id,
         profile_user_id=profile_user_id,
     )

@@ -74,6 +74,7 @@ def _binding():
         "id": "binding-a",
         "account_user_id": "11111111-1111-4111-8111-111111111111",
         "profile_user_id": "11111111-1111-4111-8111-111111111111",
+        "consent_authority_epoch": "44444444-4444-4444-8444-444444444444",
         "api_base_url_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         "api_key_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
         "honcho_api_key_ref": "env:ELLA_HONCHO_CLOUD_API_KEY_SYNTHETIC",
@@ -810,6 +811,7 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     assert runtime.gateway_url == "https://cloud.example.test"
     assert runtime.workspace_root == ""
     assert runtime.model_context_window_tokens == 16384
+    assert runtime.consent_authority_epoch == "44444444-4444-4444-8444-444444444444"
 
     binding["workspace_root"] = "/Users/ellaai/.hermes/profiles/legacy"
     with pytest.raises(ProvisioningError) as error:
@@ -821,6 +823,42 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     with pytest.raises(ProvisioningError) as profile:
         runtime_from_binding(binding, "synthetic-user")
     assert profile.value.code == "hermes_cloud_synthetic_profile_required"
+
+
+def test_cloud_runtime_resolver_requires_persisted_consent_authority_epoch(cloud_env):
+    binding = {
+        **_binding(),
+        "id": "binding-missing-consent-authority",
+        "omi_uid": "synthetic-user",
+        "provider": "hermes_cloud",
+        "status": "internal_canary",
+        "profile_class": "synthetic",
+        "active": True,
+        "health_state": "healthy",
+        "profile_name": "synthetic-profile",
+        "agent_id": "hermes-cloud",
+        "runtime_instance_id": "instance-missing-consent-authority",
+        "honcho_api_key_ref": None,
+        "honcho_workspace": None,
+        "observed_peer": None,
+        "observer_peer": None,
+        "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "runtime_target_mode": "hermes-cloud-chat",
+        "voice_policy_version": "voice-v1",
+        "revision": 2,
+        "workspace_root": None,
+        "internal_gateway_url": None,
+        "gateway_port": None,
+        "service_label": None,
+        "credential_ref": None,
+        "consent_authority_epoch": None,
+    }
+
+    with pytest.raises(ProvisioningError) as error:
+        runtime_from_binding(binding, "synthetic-user")
+
+    assert error.value.code == "cloud_runtime_consent_authority_epoch_invalid"
 
 
 def test_cloud_runtime_resolver_normalizes_real_postgres_jsonb_projection(cloud_env):

@@ -2702,6 +2702,9 @@ class EllaProvisioningRepository:
                         or str(entitlement.get("consent_scope_hash") or "") != lineage.scope_hash
                     ):
                         raise RuntimePoolClaimError("runtime_cloud_entitlement_lineage_stale")
+                    consent_authority_epoch = str(entitlement.get("consent_authority_epoch") or "").strip()
+                    if not consent_authority_epoch:
+                        raise RuntimePoolClaimError("runtime_cloud_consent_authority_epoch_missing")
                     result = dict(row)
                     result["runtime_target_id"] = str(row["resolved_target_id"])
                     result["runtime_target_mode"] = str(row["resolved_target_mode"])
@@ -2709,6 +2712,7 @@ class EllaProvisioningRepository:
                     result["target_credential_ref"] = str(row["resolved_target_credential_ref"])
                     result["target_entitlement_revision"] = int(row["target_entitlement_revision"])
                     result["runtime_target_updated_at"] = str(row["resolved_target_updated_at"])
+                    result["consent_authority_epoch"] = consent_authority_epoch
                     return result
         if required_provider not in {None, "hermes"}:
             raise ValueError("invalid_runtime_provider")

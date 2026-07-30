@@ -307,7 +307,6 @@ class HermesCloudRuntimeService:
         scope: Mapping[str, Any],
         claimed: Mapping[str, Any],
         budget: Mapping[str, int],
-        grant_epoch: str,
         mark_provider_send_boundary: Callable[[], Awaitable[tuple[str, str]]],
     ) -> HermesCloudTurn:
         """Direct `/v1/responses` or allowlisted broker prototype transport."""
@@ -342,6 +341,12 @@ class HermesCloudRuntimeService:
                 "hermes_broker_prototype_owner_coordinates_missing",
                 retryable=False,
             )
+        consent_authority_epoch = str(runtime.consent_authority_epoch or "").strip()
+        if not consent_authority_epoch:
+            raise ProvisioningError(
+                "hermes_broker_prototype_consent_authority_epoch_missing",
+                retryable=False,
+            )
         await mark_provider_send_boundary()
         client = self.broker_client_factory(prototype_config)
         source_event_id = str(request.client_interaction_id or request.correlation_id)
@@ -352,7 +357,7 @@ class HermesCloudRuntimeService:
                 account_id=account_user_id,
                 profile_id=profile_user_id,
                 runtime_binding_ref=str(runtime.binding_id),
-                consent_epoch=str(grant_epoch),
+                consent_epoch=consent_authority_epoch,
                 source_event_id=source_event_id,
                 transcript_segments=[
                     {"speaker": "user", "text": request.user_input[:8000]},
@@ -364,7 +369,7 @@ class HermesCloudRuntimeService:
                 account_id=account_user_id,
                 profile_id=profile_user_id,
                 runtime_binding_ref=str(runtime.binding_id),
-                consent_epoch=str(grant_epoch),
+                consent_epoch=consent_authority_epoch,
                 message=request.user_input,
                 session_key=str(scope["session_key"]),
                 session_id=str(claimed["hermes_session_id"]),
@@ -668,7 +673,6 @@ class HermesCloudRuntimeService:
                 scope=scope,
                 claimed=claimed,
                 budget=budget,
-                grant_epoch=current_grant_epoch,
                 mark_provider_send_boundary=mark_provider_send_boundary,
             )
             provider_response_ids = [turn.response_id]

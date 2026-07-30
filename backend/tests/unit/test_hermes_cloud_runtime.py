@@ -79,6 +79,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         target_endpoint_ref="env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         target_credential_ref="env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
         target_entitlement_revision=3,
+        consent_authority_epoch="44444444-4444-4444-8444-444444444444",
     )
     values.update(updates)
     return IsolatedRuntime(**values)
@@ -744,6 +745,7 @@ def test_synthetic_consent_revoked_at_provider_boundary_hook_blocks_send(monkeyp
         ("endpoint", "hermes_cloud_runtime_authority_changed"),
         ("credential", "hermes_cloud_runtime_authority_changed"),
         ("entitlement_revision", "hermes_cloud_runtime_authority_changed"),
+        ("consent_authority_epoch", "hermes_cloud_runtime_authority_changed"),
     ),
 )
 def test_runtime_authority_change_at_provider_boundary_blocks_send(
@@ -797,6 +799,7 @@ def test_runtime_authority_change_at_provider_boundary_blocks_send(
             "endpoint": {"gateway_url": "https://replacement.example.test"},
             "credential": {"gateway_token": "replacement-secret"},
             "entitlement_revision": {"target_entitlement_revision": 4},
+            "consent_authority_epoch": {"consent_authority_epoch": "55555555-5555-4555-8555-555555555555"},
         }
         if change in updates:
             current = _runtime(**updates[change])
