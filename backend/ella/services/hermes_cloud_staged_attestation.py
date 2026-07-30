@@ -91,6 +91,21 @@ def _json_object(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _normalized_string_list(value: Any, *, allow_json_string: bool) -> Optional[list[str]]:
+    if isinstance(value, str):
+        if not allow_json_string:
+            return None
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    if any(not isinstance(item, str) or not item or item.strip() != item for item in value):
+        return None
+    return sorted(set(value))
+
+
 class StagedAttestationVerifier:
     """Read and pin one root-owned content-free receipt without network access."""
 
@@ -210,6 +225,22 @@ class StagedAttestationVerifier:
         expected_artifacts = {
             name: str(prompt_receipt.get(f"{name}_sha256") or "") for name in ("soul", "agents", "model_policy")
         }
+        binding_allowed_tools = _normalized_string_list(
+            binding.get("allowed_tools"),
+            allow_json_string=True,
+        )
+        binding_required_capabilities = _normalized_string_list(
+            binding.get("required_capabilities"),
+            allow_json_string=True,
+        )
+        receipt_allowed_tools = _normalized_string_list(
+            receipt.get("allowed_tools"),
+            allow_json_string=False,
+        )
+        receipt_required_capabilities = _normalized_string_list(
+            receipt.get("required_capabilities"),
+            allow_json_string=False,
+        )
         if (
             receipt.get("schema_version") != SCHEMA_VERSION
             or receipt.get("content_free") is not True
@@ -222,8 +253,14 @@ class StagedAttestationVerifier:
             or receipt.get("template_version") != str(binding.get("template_version") or "")
             or receipt.get("voice_policy_version") != str(binding.get("voice_policy_version") or "")
             or receipt.get("expected_model") != str(binding.get("expected_model") or "")
-            or receipt.get("allowed_tools") != sorted(set(binding.get("allowed_tools") or []))
-            or receipt.get("required_capabilities") != sorted(set(binding.get("required_capabilities") or []))
+            or binding_allowed_tools is None
+            or binding_required_capabilities is None
+            or receipt_allowed_tools is None
+            or receipt_required_capabilities is None
+            or receipt.get("allowed_tools") != receipt_allowed_tools
+            or receipt.get("required_capabilities") != receipt_required_capabilities
+            or receipt_allowed_tools != binding_allowed_tools
+            or receipt_required_capabilities != binding_required_capabilities
             or receipt.get("prompt_pack_version") != str(binding.get("prompt_pack_version") or "")
             or receipt.get("model_policy_version") != str(binding.get("model_policy_version") or "")
             or receipt.get("model_context_window_tokens")
@@ -257,11 +294,13 @@ class StagedAttestationVerifier:
             expected_prior = {**marker, "phase": "pool_registration"}
             if prior_marker != expected_prior:
                 _fail("hermes_cloud_staged_attestation_replay_or_drift")
+        assert binding_allowed_tools is not None
+        assert binding_required_capabilities is not None
         return {
             "status": "ok",
             "model": str(binding["expected_model"]),
-            "tools": sorted(set(binding.get("allowed_tools") or [])),
-            "capabilities": sorted(set(binding.get("required_capabilities") or [])),
+            "tools": binding_allowed_tools,
+            "capabilities": binding_required_capabilities,
             "prompt_artifacts": prompt_receipt,
             "preflight_source": "server_staged_attestation",
             "staged_attestation": marker,

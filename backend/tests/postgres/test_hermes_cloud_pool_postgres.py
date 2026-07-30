@@ -1,7 +1,8 @@
 import asyncio
+import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import asyncpg
@@ -13,6 +14,11 @@ from database.ella_provisioning import (
     RuntimePoolClaimError,
 )
 from database.runtime_targets import RuntimeTargetLineage
+from ella.services.hermes_cloud_staged_attestation import (
+    GLOBAL_FLAGS_REQUIRED_FALSE,
+    UID_SELECTORS,
+    StagedAttestationVerifier,
+)
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -329,6 +335,118 @@ async def _seed_claim(
     )
     assert admitted.allowed
     return repository, str(job_id), model, int(admitted.entitlement["revision"])
+
+
+def test_real_postgres_claim_revalidates_jsonb_string_pins(tmp_path, monkeypatch):
+    uid = "synthetic-staged-jsonb-revalidation"
+    instance = "synthetic-instance-staged-jsonb"
+    model = "gpt-5.6-terra"
+    now = datetime(2026, 7, 30, 1, 0, tzinfo=timezone.utc)
+    root = tmp_path / "attestations"
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+    receipt_path = root / "staged-jsonb.receipt.json"
+    verifier = StagedAttestationVerifier(
+        approved_root=str(root),
+        expected_owner_uid=os.geteuid(),
+        clock=lambda: now,
+    )
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_STAGED_ATTESTATION_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    for name in UID_SELECTORS:
+        monkeypatch.setenv(name, uid)
+    for name in GLOBAL_FLAGS_REQUIRED_FALSE:
+        monkeypatch.setenv(name, "false")
+
+    async def scenario(pool):
+        repository, job_id, claimed_model, revision = await _seed_claim(
+            pool,
+            uid=uid,
+            runtime_instance_id=instance,
+        )
+        assert claimed_model == model
+        async with pool.acquire() as conn:
+            user_id = await conn.fetchval("SELECT id FROM users WHERE omi_uid = $1", uid)
+
+        receipt = {
+            "schema_version": "ella-hermes-cloud-staged-attestation-v1",
+            "attestation_id": "attestation-staged-jsonb-01",
+            "issued_at": (now - timedelta(minutes=1)).isoformat(),
+            "expires_at": (now + timedelta(hours=1)).isoformat(),
+            "uid": uid,
+            "account_id": str(user_id),
+            "profile_id": str(user_id),
+            "runtime_instance_id": instance,
+            "template_version": "template-v1",
+            "voice_policy_version": "voice-policy-v1",
+            "expected_model": model,
+            "allowed_tools": [],
+            "required_capabilities": ["responses_api"],
+            "prompt_pack_version": "prompt-v1",
+            "model_policy_version": "model-policy-v1",
+            "model_context_window_tokens": 16384,
+            "policy_commit_sha": "a" * 40,
+            "approval_manifest_sha256": "b" * 64,
+            "artifact_sha256": {
+                "soul": "c" * 64,
+                "agents": "d" * 64,
+                "model_policy": "e" * 64,
+            },
+            "stage": "pool_registration_and_claim_finalization",
+            "content_free": True,
+        }
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        receipt_path.chmod(0o400)
+        registration = verifier.preflight(
+            {
+                "runtime_instance_id": instance,
+                "template_version": "template-v1",
+                "voice_policy_version": "voice-policy-v1",
+                "expected_model": model,
+                "allowed_tools": [],
+                "required_capabilities": ["responses_api"],
+                "prompt_pack_version": "prompt-v1",
+                "model_policy_version": "model-policy-v1",
+                "prompt_artifact_receipt": _prompt_receipt(model=model),
+            },
+            receipt_ref=str(receipt_path),
+            uid=uid,
+            account_id=str(user_id),
+            profile_id=str(user_id),
+            profile_class="synthetic",
+            phase="pool_registration",
+        )
+
+        claimed = await repository.claim_cloud_pool_binding(
+            uid=uid,
+            job_id=job_id,
+            lease_seconds=120,
+            admitted_entitlement_revision=revision,
+            provider="hermes_cloud",
+            model=model,
+            required_profile_class="synthetic",
+        )
+        assert isinstance(claimed["allowed_tools"], str)
+        assert isinstance(claimed["required_capabilities"], str)
+        assert json.loads(claimed["allowed_tools"]) == []
+        assert json.loads(claimed["required_capabilities"]) == ["responses_api"]
+
+        finalization = verifier.preflight(
+            claimed,
+            receipt_ref=str(receipt_path),
+            uid=uid,
+            account_id=str(user_id),
+            profile_id=str(user_id),
+            profile_class="synthetic",
+            phase="claim_finalization",
+            prior_marker=registration["staged_attestation"],
+        )
+
+        assert finalization["tools"] == []
+        assert finalization["capabilities"] == ["responses_api"]
+        assert finalization["staged_attestation"]["phase"] == "claim_finalization"
+
+    asyncio.run(_run_with_database(scenario))
 
 
 async def _assert_pool_available(pool, runtime_instance_id: str):
