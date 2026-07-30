@@ -15,6 +15,8 @@ from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 ENVELOPE_PATH = FIXTURES / "hermes_binding_envelope_v1.json"
 SCHEMA_PATH = FIXTURES / "hermes_binding_envelope_v1.schema.json"
+ENVELOPE_SHA256 = "6638880666600f0ec5c8fbc17d504fae574e8ecad9c7a54ef6dccb8aef2cad44"
+SCHEMA_SHA256 = "61a2912501041a808f81a3715ccd24edcf7180900fbec9d26b63c22bc2521fc8"
 
 
 class _Response:
@@ -65,6 +67,8 @@ def _load_contract():
 
 
 def test_hermes_binding_envelope_v1_identity_and_content_free_shape():
+    assert hashlib.sha256(ENVELOPE_PATH.read_bytes()).hexdigest() == ENVELOPE_SHA256
+    assert hashlib.sha256(SCHEMA_PATH.read_bytes()).hexdigest() == SCHEMA_SHA256
     envelope = _load_contract()
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(
