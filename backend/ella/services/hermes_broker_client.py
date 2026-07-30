@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
@@ -30,6 +31,15 @@ from ella.services.runtime_errors import ProvisioningError
 
 MAX_ADMISSION_BODY_BYTES = 65_536
 MAX_RESULT_BODY_BYTES = 262_144
+DIAGNOSTIC_STAGES = frozenset(
+    {
+        "broker_request",
+        "broker_dispatch",
+        "broker_callback",
+        "broker_writeback",
+    }
+)
+DIAGNOSTIC_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,119}$")
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,7 @@ class BrokerTerminalTurn:
     usage: dict[str, int]
     model: str
     duplicate: bool
+    diagnostic: Optional[dict[str, Any]] = None
 
 
 class HermesBrokerClient:
@@ -239,6 +250,7 @@ class HermesBrokerClient:
                     "hermes_broker_prototype_stock_semantics_mismatch",
                     retryable=False,
                 )
+            self._validated_diagnostic(last)
             status = str(last.get("status") or "").strip()
             if not status:
                 raise ProvisioningError(
@@ -487,6 +499,7 @@ class HermesBrokerClient:
             usage=normalized_usage,
             model=model,
             duplicate=bool(terminal.get("duplicate")) or admission_duplicate,
+            diagnostic=self._validated_diagnostic(terminal),
         )
 
     def _map_summary_result(
@@ -536,7 +549,41 @@ class HermesBrokerClient:
             usage={"input_tokens": 0, "output_tokens": 0},
             model=expected_model,
             duplicate=bool(terminal.get("duplicate")) or admission_duplicate,
+            diagnostic=self._validated_diagnostic(terminal),
         )
+
+    @staticmethod
+    def _validated_diagnostic(body: Mapping[str, Any]) -> dict[str, Any]:
+        diagnostic = body.get("diagnostic")
+        if not isinstance(diagnostic, dict) or set(diagnostic) != {
+            "stage",
+            "reason",
+            "generation",
+        }:
+            raise ProvisioningError(
+                "hermes_broker_prototype_diagnostic_invalid",
+                retryable=False,
+            )
+        stage = diagnostic.get("stage")
+        reason = diagnostic.get("reason")
+        generation = diagnostic.get("generation")
+        if (
+            stage not in DIAGNOSTIC_STAGES
+            or not isinstance(reason, str)
+            or DIAGNOSTIC_REASON_RE.fullmatch(reason) is None
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise ProvisioningError(
+                "hermes_broker_prototype_diagnostic_invalid",
+                retryable=False,
+            )
+        return {
+            "stage": stage,
+            "reason": reason,
+            "generation": generation,
+        }
 
     @staticmethod
     def _require_exact_field(

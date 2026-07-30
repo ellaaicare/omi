@@ -289,6 +289,7 @@ class HermesCloudTurn:
     usage: dict[str, Any]
     model: str
     tool_calls: int
+    diagnostic: Optional[dict[str, Any]] = None
 
 
 class HermesCloudClient:

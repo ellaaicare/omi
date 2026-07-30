@@ -47,6 +47,7 @@ DEFAULT_MAX_INPUT_TOKENS = 8192
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_MAX_TOOL_CALLS = 2
 INVALID_OUTPUT_ERROR = "hermes_cloud_enrichment_output_invalid"
+BROKER_SESSION_ID_DOMAIN = "ella-hermes-broker-session-v1"
 
 
 def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
@@ -62,6 +63,32 @@ def assert_runtime_managed_consent(runtime: IsolatedRuntime) -> str:
     if not authority.grant_epoch:
         raise ProvisioningError("managed_cloud_consent_stale", retryable=False)
     return authority.grant_epoch
+
+
+def broker_session_id_for_scope(
+    *,
+    account_id: str,
+    profile_id: str,
+    runtime_binding_ref: str,
+    channel: str,
+    session_key: str,
+) -> str:
+    """Derive one opaque broker-only session id for a persisted runtime scope."""
+    values = (
+        BROKER_SESSION_ID_DOMAIN,
+        account_id,
+        profile_id,
+        runtime_binding_ref,
+        channel,
+        session_key,
+    )
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ProvisioningError(
+            "hermes_broker_prototype_session_identity_invalid",
+            retryable=False,
+        )
+    digest = hashlib.sha256("\x1f".join(values).encode("utf-8")).hexdigest()
+    return f"ella:broker-session:v1:{digest[:48]}"
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -241,6 +268,7 @@ def _event(
     role: str,
     text: str,
     provider_response_id: Optional[str] = None,
+    provider_diagnostic: Optional[Mapping[str, Any]] = None,
 ) -> CanonicalEventIn:
     now = datetime.now(timezone.utc)
     started_at = request.started_at if role == "user" else now
@@ -267,6 +295,7 @@ def _event(
             "correlation_id": request.correlation_id,
             "client": request.client_metadata,
             "event_revision": 1,
+            **({"broker_diagnostic": dict(provider_diagnostic)} if provider_diagnostic else {}),
         },
     )
 
@@ -365,6 +394,13 @@ class HermesCloudRuntimeService:
                 expected_model=runtime.expected_model,
             )
         else:
+            broker_session_id = broker_session_id_for_scope(
+                account_id=account_user_id,
+                profile_id=profile_user_id,
+                runtime_binding_ref=str(runtime.binding_id),
+                channel=str(request.channel),
+                session_key=str(scope["session_key"]),
+            )
             terminal = await client.run_chat_turn(
                 account_id=account_user_id,
                 profile_id=profile_user_id,
@@ -372,7 +408,7 @@ class HermesCloudRuntimeService:
                 consent_epoch=consent_authority_epoch,
                 message=request.user_input,
                 session_key=str(scope["session_key"]),
-                session_id=str(claimed["hermes_session_id"]),
+                session_id=broker_session_id,
                 source_event_id=source_event_id,
                 expected_model=runtime.expected_model,
                 context={"instructions": request.instructions[:4000]},
@@ -383,6 +419,7 @@ class HermesCloudRuntimeService:
             usage=dict(terminal.usage),
             model=terminal.model,
             tool_calls=0,
+            diagnostic=terminal.diagnostic,
         )
 
     async def run_turn(
@@ -729,6 +766,7 @@ class HermesCloudRuntimeService:
                 role="assistant",
                 text=turn.text,
                 provider_response_id=turn.response_id,
+                provider_diagnostic=turn.diagnostic,
             )
             assistant_write = await self.event_store.write_batch([assistant_event])
             assistant_receipt = await self.repository.claim_runtime_ingestion(

@@ -19,6 +19,7 @@ from ella.services.hermes_cloud_runtime import (
     HERMES_CLOUD_ENRICHMENT_MODE,
     HermesCloudRuntimeService,
     HermesCloudTurnRequest,
+    broker_session_id_for_scope,
 )
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import IsolatedRuntime
@@ -104,6 +105,14 @@ class FakeResponse:
             body.setdefault("terminal_proof", False)
             body.setdefault("delivery_platform", "ella_callback_stock")
             body.setdefault("callback_source", "hermes_stock_0_19_quiet_window")
+            body.setdefault(
+                "diagnostic",
+                {
+                    "stage": ("broker_writeback" if body.get("status") == "writeback_completed" else "broker_request"),
+                    "reason": str(body.get("status") or "pending"),
+                    "generation": 1,
+                },
+            )
         self._body = body
         self.content = content if content is not None else json.dumps(body).encode()
 
@@ -152,6 +161,11 @@ def _completed_result(**overrides):
         "callback_contract": "stock_best_effort_v1",
         "terminal_proof": False,
         "outcome": "success",
+        "diagnostic": {
+            "stage": "broker_writeback",
+            "reason": "writeback_completed",
+            "generation": 1,
+        },
         "result": {
             "answer": "proto answer",
             "session_key": "sk",
@@ -548,6 +562,7 @@ def test_answer_only_projection_rejected(monkeypatch):
         "hermes_broker_prototype_profile_omitted",
         "hermes_broker_prototype_correlation_omitted",
         "hermes_broker_prototype_lane_omitted",
+        "hermes_broker_prototype_diagnostic_invalid",
     }
 
 
@@ -914,6 +929,80 @@ def test_provider_turn_submits_owner_uuids_not_auth_uid(monkeypatch):
     assert seen["account_id"] != AUTH_UID
     assert seen["runtime_binding_ref"] == BINDING_ID
     assert seen["consent_epoch"] == CONSENT_AUTHORITY_EPOCH
+
+
+def test_three_broker_turns_keep_one_scope_session_identity(monkeypatch):
+    _enable(
+        monkeypatch,
+        ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID=("11111111-1111-4111-8111-111111111111"),
+    )
+    seen = []
+
+    class FakeBroker(HermesBrokerClient):
+        def __init__(self, config):
+            super().__init__(config, sleep=_noop_sleep)
+
+        async def run_chat_turn(self, **kwargs):
+            seen.append(kwargs)
+            return client_mod.BrokerTerminalTurn(
+                text="via-broker",
+                request_id=f"hwb_{len(seen)}",
+                correlation_id=f"hwb:{len(seen)}",
+                response_id=f"resp-{len(seen)}",
+                usage={"input_tokens": 1, "output_tokens": 1},
+                model="gpt-test",
+                duplicate=False,
+            )
+
+    service = HermesCloudRuntimeService(
+        repository=object(),  # type: ignore[arg-type]
+        event_store=object(),  # type: ignore[arg-type]
+    )
+    service.broker_client_factory = FakeBroker
+
+    async def boundary():
+        return ("https://h", "t")
+
+    scope = {"session_key": "ella:scope:22222222-2222-4222-8222-222222222222"}
+    for turn in range(1, 4):
+        asyncio.run(
+            service._provider_turn(
+                runtime=_runtime(
+                    account_user_id="11111111-1111-4111-8111-111111111111",
+                    profile_user_id="11111111-1111-4111-8111-111111111111",
+                ),
+                request=HermesCloudTurnRequest(
+                    uid=AUTH_UID,
+                    client_interaction_id=f"evt-{turn}",
+                    correlation_id=f"c-{turn}",
+                    channel="chat",
+                    user_input=f"synthetic-{turn}",
+                    instructions="sys",
+                    started_at=datetime.now(timezone.utc),
+                    client_metadata={},
+                ),
+                scope=scope,
+                claimed={
+                    "hermes_session_id": f"rotating-interaction-{turn}",
+                    "idempotency_key": f"ik-{turn}",
+                },
+                budget={"max_output_tokens": 64, "max_tool_calls": 0},
+                mark_provider_send_boundary=boundary,
+            )
+        )
+
+    assert {call["session_key"] for call in seen} == {scope["session_key"]}
+    assert {call["session_id"] for call in seen} == {
+        "ella:broker-session:v1:" "df513ec5261a4cd673e5fda22a46dec18ac5606b589a98b3"
+    }
+    assert all(call["session_id"] != f"rotating-interaction-{index}" for index, call in enumerate(seen, start=1))
+    assert seen[0]["session_id"] == broker_session_id_for_scope(
+        account_id="11111111-1111-4111-8111-111111111111",
+        profile_id="11111111-1111-4111-8111-111111111111",
+        runtime_binding_ref=BINDING_ID,
+        channel="chat",
+        session_key=scope["session_key"],
+    )
 
 
 def test_provider_turn_rejects_missing_persisted_consent_authority_epoch(monkeypatch):

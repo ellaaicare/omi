@@ -60,6 +60,11 @@
       "observed_model_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }
   },
+  "broker_session": {
+    "channel": "chat",
+    "session_key": "ella:scope:22222222-2222-4222-8222-222222222222",
+    "session_id": "ella:broker-session:v1:df513ec5261a4cd673e5fda22a46dec18ac5606b589a98b3"
+  },
   "request": {
     "lane": "chat_turn",
     "consent_epoch": "55555555-5555-4555-8555-555555555555",
@@ -71,6 +76,16 @@
     "webhook_route": "ella-stock-synthetic",
     "callback_contract": "stock_best_effort_v1",
     "terminal_proof": false
+  },
+  "result_contract": {
+    "success_status": "writeback_completed",
+    "callback_contract": "stock_best_effort_v1",
+    "terminal_proof": false,
+    "diagnostic_fields": [
+      "stage",
+      "reason",
+      "generation"
+    ]
   },
   "secret_references": {
     "broker_service_token": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN",
