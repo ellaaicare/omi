@@ -504,7 +504,6 @@ def test_real_profile_cannot_consume_synthetic_pool_capacity():
             pool,
             uid=uid,
             runtime_instance_id=instance,
-            allowed_tools=contract["binding"]["allowed_tools"],
             profile_class="real",
         )
 
@@ -679,6 +678,7 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monk
             pool,
             uid=uid,
             runtime_instance_id=instance,
+            allowed_tools=contract["binding"]["allowed_tools"],
         )
         claimed = await repository.claim_cloud_pool_binding(
             uid=uid,
