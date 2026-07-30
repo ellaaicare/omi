@@ -24,6 +24,7 @@ from ella.services.hermes_cloud_policy import CurrentCloudAuthority
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 LINEAGE = RuntimeTargetLineage(
     policy_version="ai-data-processors-v8",
     processor_set_hash="sha256:" + ("1" * 64),
@@ -113,6 +114,10 @@ def _prompt_receipt(*, model: str = "gpt-5.6-terra") -> dict:
         "model_policy_sha256": "e" * 64,
         "observed_model_policy_sha256": "e" * 64,
     }
+
+
+def _binding_contract() -> dict:
+    return json.loads((FIXTURES / "hermes_binding_envelope_v1.json").read_text(encoding="utf-8"))
 
 
 async def _run_with_database(scenario):
@@ -646,6 +651,7 @@ def test_completed_usage_interleaving_consumes_no_pool_row():
 
 
 def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monkeypatch):
+    contract = _binding_contract()
     monkeypatch.setenv(
         "ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
         "https://cloud.example.test",
@@ -659,14 +665,14 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monk
         "current_cloud_authority",
         lambda uid, **_kwargs: CurrentCloudAuthority(
             consent_receipt_id=f"receipt-{uid}",
-            profile_binding_id=f"profile-{uid}",
+            profile_binding_id=contract["binding"]["profile_binding_id"],
             lineage=LINEAGE,
         ),
     )
 
     async def scenario(pool):
-        uid = "synthetic-target-owner"
-        instance = "synthetic-instance-target-owner"
+        uid = contract["uid"]
+        instance = contract["binding"]["runtime_instance_id"]
         repository, job_id, model, revision = await _seed_claim(
             pool,
             uid=uid,
@@ -733,7 +739,19 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monk
         assert isinstance(photon["prompt_artifact_receipt"], str)
         assert isinstance(photon["allowed_tools"], str)
         assert isinstance(photon["required_capabilities"], str)
+        assert isinstance(photon["id"], uuid.UUID)
+        assert isinstance(photon["user_id"], uuid.UUID)
+        assert isinstance(photon["account_user_id"], uuid.UUID)
+        assert isinstance(photon["profile_user_id"], uuid.UUID)
         runtime = runtime_resolver.runtime_from_binding(photon, uid)
+        assert runtime.provider == contract["binding"]["provider"]
+        assert runtime.status == contract["binding"]["status"]
+        assert runtime.profile_class == contract["binding"]["profile_class"]
+        assert runtime.runtime_instance_id == instance
+        assert runtime.expected_model == contract["binding"]["expected_model"]
+        assert runtime.account_user_id == str(photon["account_user_id"])
+        assert runtime.profile_user_id == str(photon["profile_user_id"])
+        assert runtime.consent_authority_epoch == str(uuid.UUID(runtime.consent_authority_epoch))
         assert runtime.model_context_window_tokens == 16384
         assert runtime.allowed_tools == ()
         assert runtime.required_capabilities == ("responses_api",)
