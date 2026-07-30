@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ella-ai-care.com/contracts/hermes-binding-envelope-v1.schema.json",
+  "title": "HermesBindingEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "uid",
+    "account_id",
+    "profile_id",
+    "binding",
+    "authority",
+    "request",
+    "secret_references"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ella-hermes-binding-envelope-v1"
+    },
+    "uid": {
+      "type": "string",
+      "pattern": "^staging-synthetic-[a-z0-9-]+$"
+    },
+    "account_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "profile_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "status",
+        "active",
+        "profile_class",
+        "profile_binding_id",
+        "runtime_instance_id",
+        "runtime_target_id",
+        "runtime_target_mode",
+        "expected_model",
+        "prompt_artifact_receipt",
+        "allowed_tools",
+        "required_capabilities"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "provider": {
+          "const": "hermes_cloud"
+        },
+        "status": {
+          "const": "internal_canary"
+        },
+        "active": {
+          "const": true
+        },
+        "profile_class": {
+          "const": "synthetic"
+        },
+        "profile_binding_id": {
+          "type": "string",
+          "pattern": "^aipb_[0-9a-f]{32}$"
+        },
+        "runtime_instance_id": {
+          "type": "string",
+          "minLength": 8
+        },
+        "runtime_target_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "runtime_target_mode": {
+          "const": "hermes-cloud-chat"
+        },
+        "expected_model": {
+          "const": "gpt-5.6-terra"
+        },
+        "prompt_artifact_receipt": {
+          "$ref": "#/$defs/contentFreeReceipt"
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "consent_epoch",
+        "grant_epoch",
+        "entitlement_revision",
+        "content_free_receipt"
+      ],
+      "properties": {
+        "consent_epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "grant_epoch": {
+          "type": "string",
+          "pattern": "^synthetic:[0-9a-f]{64}$"
+        },
+        "entitlement_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_free_receipt": {
+          "$ref": "#/$defs/contentFreeReceipt"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lane",
+        "consent_epoch",
+        "source_event_id",
+        "canonical_user_event_id",
+        "correlation_id",
+        "delivery_platform",
+        "callback_source",
+        "webhook_route",
+        "callback_contract",
+        "terminal_proof"
+      ],
+      "properties": {
+        "lane": {
+          "const": "chat_turn"
+        },
+        "consent_epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_event_id": {
+          "type": "string",
+          "pattern": "^aipb_event_[0-9a-f]{24}$"
+        },
+        "canonical_user_event_id": {
+          "type": "string",
+          "pattern": "^aipb_event_[0-9a-f]{24}$"
+        },
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^aipb_corr_[0-9a-f]{24}$"
+        },
+        "delivery_platform": {
+          "const": "ella_callback_stock"
+        },
+        "callback_source": {
+          "const": "hermes_stock_0_19_quiet_window"
+        },
+        "webhook_route": {
+          "const": "ella-stock-synthetic"
+        },
+        "callback_contract": {
+          "const": "stock_best_effort_v1"
+        },
+        "terminal_proof": {
+          "const": false
+        }
+      }
+    },
+    "secret_references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "broker_service_token",
+        "broker_ingress_hmac",
+        "stock_callback_hmac"
+      ],
+      "properties": {
+        "broker_service_token": {
+          "const": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN"
+        },
+        "broker_ingress_hmac": {
+          "const": "env:ELLA_HERMES_WEBHOOK_INGRESS_HMAC_SECRET"
+        },
+        "stock_callback_hmac": {
+          "const": "env:ELLA_HERMES_STOCK_CALLBACK_HMAC_SECRET"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "contentFreeReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_commit_sha",
+        "lane_s_review_url",
+        "prompt_pack_version",
+        "model_policy_version",
+        "expected_model",
+        "model_context_window_tokens",
+        "approval_manifest_sha256",
+        "content_free",
+        "soul_sha256",
+        "observed_soul_sha256",
+        "agents_sha256",
+        "observed_agents_sha256",
+        "model_policy_sha256",
+        "observed_model_policy_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "ella-hermes-cloud-approval-v1"
+        },
+        "policy_commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "lane_s_review_url": {
+          "type": "string",
+          "pattern": "^https://github.com/ellaaicare/ella-ai/"
+        },
+        "prompt_pack_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_policy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_model": {
+          "const": "gpt-5.6-terra"
+        },
+        "model_context_window_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approval_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_free": {
+          "const": true
+        },
+        "soul_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_soul_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "agents_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_agents_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "model_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "observed_model_policy_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

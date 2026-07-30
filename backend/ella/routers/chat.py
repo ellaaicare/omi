@@ -990,7 +990,24 @@ async def _stream_hermes_cloud_chat(
             exc.code,
             exc.retryable,
         )
-        yield "data: Ella is temporarily unavailable. Please try again.\n\n"
+        error_text = "Ella is temporarily unavailable. Please try again."
+        yield f"data: {error_text}\n\n"
+        # OMI's SSE parser requires one terminal frame for every HTTP 200
+        # stream, including fail-closed provider admission failures.
+        message = {
+            "id": f"hermes-error:{turn_id}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": error_text,
+            "sender": "ai",
+            "type": "text",
+            "plugin_id": None,
+            "from_integration": False,
+            "memories": [],
+            "files": [],
+            "ask_for_nps": False,
+        }
+        encoded = base64.b64encode(json.dumps(message).encode()).decode()
+        yield f"done: {encoded}\n\n"
 
 
 @router.post("/chat/stream")

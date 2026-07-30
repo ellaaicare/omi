@@ -1,0 +1,80 @@
+{
+  "schema_version": "ella-hermes-binding-envelope-v1",
+  "uid": "staging-synthetic-contract-v1",
+  "account_id": "11111111-1111-4111-8111-111111111111",
+  "profile_id": "11111111-1111-4111-8111-111111111111",
+  "binding": {
+    "id": "33333333-3333-4333-8333-333333333333",
+    "provider": "hermes_cloud",
+    "status": "internal_canary",
+    "active": true,
+    "profile_class": "synthetic",
+    "profile_binding_id": "aipb_5b348159cda2e56e494e83eef28394a9",
+    "runtime_instance_id": "synthetic-contract-instance-v1",
+    "runtime_target_id": "44444444-4444-4444-8444-444444444444",
+    "runtime_target_mode": "hermes-cloud-chat",
+    "expected_model": "gpt-5.6-terra",
+    "prompt_artifact_receipt": {
+      "schema_version": "ella-hermes-cloud-approval-v1",
+      "policy_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/pull/1138",
+      "prompt_pack_version": "ella-hermes-cloud-v1c-canary",
+      "model_policy_version": "ella-hermes-cloud-v1c-canary",
+      "expected_model": "gpt-5.6-terra",
+      "model_context_window_tokens": 16384,
+      "approval_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content_free": true,
+      "soul_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "observed_soul_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "agents_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "observed_agents_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "model_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "observed_model_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "allowed_tools": [
+      "memory"
+    ],
+    "required_capabilities": [
+      "responses_api"
+    ]
+  },
+  "authority": {
+    "consent_epoch": "55555555-5555-4555-8555-555555555555",
+    "grant_epoch": "synthetic:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "entitlement_revision": 1,
+    "content_free_receipt": {
+      "schema_version": "ella-hermes-cloud-approval-v1",
+      "policy_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/pull/1138",
+      "prompt_pack_version": "ella-hermes-cloud-v1c-canary",
+      "model_policy_version": "ella-hermes-cloud-v1c-canary",
+      "expected_model": "gpt-5.6-terra",
+      "model_context_window_tokens": 16384,
+      "approval_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content_free": true,
+      "soul_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "observed_soul_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "agents_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "observed_agents_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "model_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "observed_model_policy_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  },
+  "request": {
+    "lane": "chat_turn",
+    "consent_epoch": "55555555-5555-4555-8555-555555555555",
+    "source_event_id": "aipb_event_111111111111111111111111",
+    "canonical_user_event_id": "aipb_event_111111111111111111111111",
+    "correlation_id": "aipb_corr_333333333333333333333333",
+    "delivery_platform": "ella_callback_stock",
+    "callback_source": "hermes_stock_0_19_quiet_window",
+    "webhook_route": "ella-stock-synthetic",
+    "callback_contract": "stock_best_effort_v1",
+    "terminal_proof": false
+  },
+  "secret_references": {
+    "broker_service_token": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN",
+    "broker_ingress_hmac": "env:ELLA_HERMES_WEBHOOK_INGRESS_HMAC_SECRET",
+    "stock_callback_hmac": "env:ELLA_HERMES_STOCK_CALLBACK_HMAC_SECRET"
+  }
+}

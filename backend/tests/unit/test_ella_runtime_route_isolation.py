@@ -650,3 +650,49 @@ def test_cloud_chat_path_does_not_call_openclaw_or_mini(monkeypatch):
     output = asyncio.run(collect())
     assert output[0] == "data: Cloud response\n\n"
     assert output[1].startswith("done: ")
+
+
+def test_cloud_chat_failure_still_emits_one_terminal_marker(monkeypatch):
+    class Repository:
+        @classmethod
+        async def create(cls):
+            return object()
+
+    class Service:
+        def __init__(self, **kwargs):
+            pass
+
+        async def run_turn(self, runtime, request):
+            raise ProvisioningError(
+                "hermes_broker_prototype_auth_failed",
+                retryable=False,
+            )
+
+    async def no_context(*args, **kwargs):
+        return []
+
+    async def no_temporal(*args, **kwargs):
+        return ("requested window", [])
+
+    runtime = SimpleNamespace(provider="hermes_cloud", binding_id="binding-a")
+    monkeypatch.setattr(chat, "EllaProvisioningRepository", Repository)
+    monkeypatch.setattr(chat, "HermesCloudRuntimeService", Service)
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_context)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+
+    async def collect():
+        return [
+            item
+            async for item in chat._stream_hermes_cloud_chat(
+                "Synthetic hello",
+                "user-a",
+                {"synthetic": True},
+                turn_id="turn-error-a",
+                client_sent_at=chat.datetime.now(chat.timezone.utc),
+                runtime=runtime,
+            )
+        ]
+
+    output = asyncio.run(collect())
+    assert output[0] == ("data: Ella is temporarily unavailable. Please try again.\n\n")
+    assert len([item for item in output if item.startswith("done: ")]) == 1
