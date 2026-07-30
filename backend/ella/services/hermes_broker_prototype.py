@@ -10,11 +10,13 @@ from __future__ import annotations
 import hmac
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import IsolatedRuntime
+
+if TYPE_CHECKING:
+    from ella.services.runtime_resolver import IsolatedRuntime
 
 # Exact lowercase only — no permissive truthy aliases.
 _TRUE = "true"

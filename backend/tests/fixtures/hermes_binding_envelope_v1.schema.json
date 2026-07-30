@@ -11,7 +11,9 @@
     "profile_id",
     "binding",
     "authority",
+    "broker_session",
     "request",
+    "result_contract",
     "secret_references"
   ],
   "properties": {
@@ -129,6 +131,28 @@
         }
       }
     },
+    "broker_session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "session_key",
+        "session_id"
+      ],
+      "properties": {
+        "channel": {
+          "const": "chat"
+        },
+        "session_key": {
+          "type": "string",
+          "pattern": "^ella:scope:[0-9a-f-]{36}$"
+        },
+        "session_id": {
+          "type": "string",
+          "pattern": "^ella:broker-session:v1:[0-9a-f]{48}$"
+        }
+      }
+    },
     "request": {
       "type": "object",
       "additionalProperties": false,
@@ -178,6 +202,44 @@
         },
         "terminal_proof": {
           "const": false
+        }
+      }
+    },
+    "result_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success_status",
+        "callback_contract",
+        "terminal_proof",
+        "diagnostic_fields"
+      ],
+      "properties": {
+        "success_status": {
+          "const": "writeback_completed"
+        },
+        "callback_contract": {
+          "const": "stock_best_effort_v1"
+        },
+        "terminal_proof": {
+          "const": false
+        },
+        "diagnostic_fields": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "stage"
+            },
+            {
+              "const": "reason"
+            },
+            {
+              "const": "generation"
+            }
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
         }
       }
     },

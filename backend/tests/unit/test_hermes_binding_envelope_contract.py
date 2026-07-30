@@ -11,12 +11,13 @@ import jsonschema
 
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
+from ella.services.hermes_cloud_runtime import broker_session_id_for_scope
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 ENVELOPE_PATH = FIXTURES / "hermes_binding_envelope_v1.json"
 SCHEMA_PATH = FIXTURES / "hermes_binding_envelope_v1.schema.json"
-ENVELOPE_SHA256 = "6638880666600f0ec5c8fbc17d504fae574e8ecad9c7a54ef6dccb8aef2cad44"
-SCHEMA_SHA256 = "61a2912501041a808f81a3715ccd24edcf7180900fbec9d26b63c22bc2521fc8"
+ENVELOPE_SHA256 = "e4140b26a9ea0b9e7110fd092884913fa10556d63e689eb44c95e55171f577b3"
+SCHEMA_SHA256 = "b57c94b6a2a116f166b7662afa83fc5b8b75f984c7c29802ec1b45f35d0ecfeb"
 
 
 class _Response:
@@ -88,6 +89,20 @@ def test_hermes_binding_envelope_v1_identity_and_content_free_shape():
     assert envelope["request"]["canonical_user_event_id"] == envelope["request"]["source_event_id"]
     assert envelope["request"]["callback_contract"] == "stock_best_effort_v1"
     assert envelope["request"]["terminal_proof"] is False
+    assert envelope["result_contract"] == {
+        "success_status": "writeback_completed",
+        "callback_contract": "stock_best_effort_v1",
+        "terminal_proof": False,
+        "diagnostic_fields": ["stage", "reason", "generation"],
+    }
+    broker_session = envelope["broker_session"]
+    assert broker_session["session_id"] == broker_session_id_for_scope(
+        account_id=envelope["account_id"],
+        profile_id=envelope["profile_id"],
+        runtime_binding_ref=envelope["binding"]["id"],
+        channel=broker_session["channel"],
+        session_key=broker_session["session_key"],
+    )
     assert envelope["secret_references"] == {
         "broker_service_token": "env:ELLA_HERMES_BROKER_SERVICE_TOKEN",
         "broker_ingress_hmac": "env:ELLA_HERMES_WEBHOOK_INGRESS_HMAC_SECRET",
@@ -126,8 +141,8 @@ def test_omi_request_uses_exact_stock_contract_from_shared_envelope(monkeypatch)
             consent_epoch=request["consent_epoch"],
             payload={
                 "message": "synthetic-contract-payload",
-                "session_key": "synthetic-contract-session",
-                "session_id": "synthetic-contract-session-1",
+                "session_key": envelope["broker_session"]["session_key"],
+                "session_id": envelope["broker_session"]["session_id"],
                 "canonical_user_event_id": request["canonical_user_event_id"],
             },
             deadline_at=1_900_000_000,
