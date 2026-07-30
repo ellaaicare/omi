@@ -287,13 +287,31 @@ async def _seed_claim(
             """,
             user_id,
         )
+        consent_authority_epoch = await conn.fetchval(
+            """
+            INSERT INTO ella_managed_cloud_consent_authority (
+                user_id, decision, consent_receipt_ref, profile_binding_id,
+                policy_version, processor_set_hash, scope_version, scope_hash
+            ) VALUES (
+                $1, 'granted', $2, $3, $4, $5, $6, $7
+            )
+            RETURNING authority_epoch
+            """,
+            user_id,
+            "sha256:" + ("f" * 64),
+            uid,
+            LINEAGE.policy_version,
+            LINEAGE.processor_set_hash,
+            LINEAGE.scope_version,
+            LINEAGE.scope_hash,
+        )
         await conn.execute(
             """
             INSERT INTO voice_entitlements (
                 uid, status, provider_allowlist, model_allowlist, mode_allowlist,
                 daily_limit_s, consent_policy_version,
                 consent_processor_set_hash, consent_scope_version,
-                consent_scope_hash
+                consent_scope_hash, consent_authority_epoch
             ) VALUES (
                 $1, 'active', ARRAY['hermes_cloud'], ARRAY[$2],
                 ARRAY[
@@ -301,7 +319,7 @@ async def _seed_claim(
                     'hermes-cloud-transcript', 'hermes-cloud-guardian',
                     'hermes-cloud-photon'
                 ],
-                $3, $4, $5, $6, $7
+                $3, $4, $5, $6, $7, $8
             )
             """,
             uid,
@@ -311,6 +329,7 @@ async def _seed_claim(
             LINEAGE.processor_set_hash,
             LINEAGE.scope_version,
             LINEAGE.scope_hash,
+            consent_authority_epoch,
         )
     repository = EllaProvisioningRepository(pool)
     await repository.register_cloud_pool_binding(
@@ -1083,6 +1102,16 @@ def test_resolution_rechecks_kill_switch_and_never_returns_retained_binding():
         assert resolved["target_endpoint_ref"] == resolved["api_base_url_ref"]
         assert resolved["target_credential_ref"] == resolved["api_key_ref"]
         assert resolved["target_entitlement_revision"] == revision
+        async with pool.acquire() as conn:
+            consent_authority_epoch = await conn.fetchval(
+                """
+                SELECT consent_authority_epoch
+                FROM voice_entitlements
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        assert resolved["consent_authority_epoch"] == str(consent_authority_epoch)
 
         async with pool.acquire() as conn:
             await voice_canary.set_kill_switch_on_connection(

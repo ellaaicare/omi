@@ -157,6 +157,7 @@ def _runtime(**updates) -> IsolatedRuntime:
         target_endpoint_ref="secret://hermes-cloud/api-base",
         target_credential_ref="secret://hermes-cloud/api-key",
         target_entitlement_revision=1,
+        consent_authority_epoch="44444444-4444-4444-8444-444444444444",
     )
     values.update(updates)
     return IsolatedRuntime(**values)

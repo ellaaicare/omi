@@ -28,6 +28,7 @@ AUTH_UID = "omi-auth-uid-synth-01"
 ACCOUNT_UUID = "11111111-1111-4111-8111-111111111111"
 PROFILE_UUID = "22222222-2222-4222-8222-222222222222"
 BINDING_ID = "33333333-3333-4333-8333-333333333333"
+CONSENT_AUTHORITY_EPOCH = "44444444-4444-4444-8444-444444444444"
 
 
 def _runtime(
@@ -36,6 +37,7 @@ def _runtime(
     account_user_id: str = ACCOUNT_UUID,
     profile_user_id: str = PROFILE_UUID,
     binding_id: str = BINDING_ID,
+    consent_authority_epoch: str = CONSENT_AUTHORITY_EPOCH,
     profile_class: str = "synthetic",
     provider: str = "hermes_cloud",
     mode: str = HERMES_CLOUD_CHAT_MODE,
@@ -69,6 +71,7 @@ def _runtime(
         target_endpoint_ref="env:URL",
         target_credential_ref="env:KEY",
         target_entitlement_revision=1,
+        consent_authority_epoch=consent_authority_epoch,
         account_user_id=account_user_id,
         profile_user_id=profile_user_id,
     )
@@ -845,7 +848,6 @@ def test_provider_turn_uses_direct_when_not_allowlisted(monkeypatch):
             scope={"session_key": "sk"},
             claimed={"hermes_session_id": "sid", "idempotency_key": "ik"},
             budget={"max_output_tokens": 64, "max_tool_calls": 0},
-            grant_epoch="ge",
             mark_provider_send_boundary=boundary,
         )
     )
@@ -903,7 +905,6 @@ def test_provider_turn_submits_owner_uuids_not_auth_uid(monkeypatch):
             scope={"session_key": "sk"},
             claimed={"hermes_session_id": "sid", "idempotency_key": "ik"},
             budget={"max_output_tokens": 64, "max_tool_calls": 0},
-            grant_epoch="ge",
             mark_provider_send_boundary=boundary,
         )
     )
@@ -912,6 +913,41 @@ def test_provider_turn_submits_owner_uuids_not_auth_uid(monkeypatch):
     assert seen["profile_id"] == PROFILE_UUID
     assert seen["account_id"] != AUTH_UID
     assert seen["runtime_binding_ref"] == BINDING_ID
+    assert seen["consent_epoch"] == CONSENT_AUTHORITY_EPOCH
+
+
+def test_provider_turn_rejects_missing_persisted_consent_authority_epoch(monkeypatch):
+    _enable(monkeypatch)
+    service = HermesCloudRuntimeService(
+        repository=object(),  # type: ignore[arg-type]
+        event_store=object(),  # type: ignore[arg-type]
+    )
+
+    async def boundary():
+        raise AssertionError("provider boundary must not run")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            service._provider_turn(
+                runtime=_runtime(consent_authority_epoch=""),
+                request=HermesCloudTurnRequest(
+                    uid=AUTH_UID,
+                    client_interaction_id="evt-1",
+                    correlation_id="c1",
+                    channel="ios_chat",
+                    user_input="hi",
+                    instructions="sys",
+                    started_at=datetime.now(timezone.utc),
+                    client_metadata={},
+                ),
+                scope={"session_key": "sk"},
+                claimed={"hermes_session_id": "sid", "idempotency_key": "ik"},
+                budget={"max_output_tokens": 64, "max_tool_calls": 0},
+                mark_provider_send_boundary=boundary,
+            )
+        )
+
+    assert error.value.code == "hermes_broker_prototype_consent_authority_epoch_missing"
 
 
 def test_enrichment_channel_uses_transcript_lane(monkeypatch):
@@ -963,7 +999,6 @@ def test_enrichment_channel_uses_transcript_lane(monkeypatch):
             scope={"session_key": "sk"},
             claimed={"hermes_session_id": "sid", "idempotency_key": "ik"},
             budget={"max_output_tokens": 64, "max_tool_calls": 0},
-            grant_epoch="ge",
             mark_provider_send_boundary=boundary,
         )
     )
