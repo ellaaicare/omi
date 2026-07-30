@@ -13,7 +13,7 @@ from database.ella_provisioning import RuntimePoolClaimError
 from ella.routers.photon import create_photon_router
 from ella.routers.canonical_events import CanonicalEventIn, InMemoryCanonicalEventStore
 from ella.services import ai_consent, hermes_cloud_photon
-from ella.services.hermes_cloud import HermesCloudPreflight
+from ella.services.hermes_cloud import HermesCloudClient, HermesCloudPreflight
 from ella.services.hermes_cloud_photon import (
     PHOTON_ALLOWED_REGULAR_COMMANDS,
     PHOTON_ALLOWED_TOOLS,
@@ -632,6 +632,93 @@ def test_default_resolver_uses_exact_published_photon_target_for_preflight_and_i
         HERMES_CLOUD_PHOTON_MODE,
         HERMES_CLOUD_PHOTON_MODE,
     ]
+
+
+def test_photon_preflight_accepts_real_postgres_jsonb_projection():
+    artifact_hash = "a" * 64
+
+    class Response:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class PreflightHttpClient:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            bodies = {
+                "https://cloud.example.test/health/detailed": {
+                    "status": "ok",
+                    "readiness": {"status": "ok"},
+                },
+                "https://cloud.example.test/v1/capabilities": {
+                    "session_key_header": "X-Hermes-Session-Key",
+                    "features": {"responses_api": True},
+                },
+                "https://cloud.example.test/v1/models": {
+                    "data": [{"id": "gpt-5.6-terra"}],
+                },
+                "https://cloud.example.test/v1/toolsets": [
+                    {
+                        "enabled": True,
+                        "tools": list(PHOTON_ALLOWED_TOOLS),
+                    }
+                ],
+            }
+            return Response(bodies[url])
+
+    class PreflightCloudClient(HermesCloudClient):
+        @staticmethod
+        def credentials(_binding):
+            return "https://cloud.example.test", "synthetic-test-token"
+
+    http_client = PreflightHttpClient()
+    cloud_client = PreflightCloudClient(http_client_factory=lambda **_kwargs: http_client)
+    adapter, repository, _runtime_service = _adapter(cloud=cloud_client)
+    repository.binding.update(
+        {
+            "prompt_pack_version": "prompt-v1",
+            "model_policy_version": "ella-hermes-cloud-v1",
+            "allowed_tools": json.dumps(list(PHOTON_ALLOWED_TOOLS)),
+            "required_capabilities": json.dumps(["responses_api", "session_key_header"]),
+            "prompt_artifact_receipt": json.dumps(
+                {
+                    "schema_version": "ella-hermes-cloud-approval-v1",
+                    "prompt_pack_version": "prompt-v1",
+                    "model_policy_version": "ella-hermes-cloud-v1",
+                    "expected_model": "gpt-5.6-terra",
+                    "model_context_window_tokens": 262144,
+                    "policy_commit_sha": POLICY_SHA,
+                    "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/issues/1124",
+                    "approval_manifest_sha256": MANIFEST_SHA,
+                    "soul_sha256": artifact_hash,
+                    "observed_soul_sha256": artifact_hash,
+                    "agents_sha256": artifact_hash,
+                    "observed_agents_sha256": artifact_hash,
+                    "model_policy_sha256": artifact_hash,
+                    "observed_model_policy_sha256": artifact_hash,
+                },
+                sort_keys=True,
+            ),
+        }
+    )
+
+    result = asyncio.run(adapter.preflight(_preflight()))
+
+    assert result["status"] == "ok"
+    assert result["tools"] == list(PHOTON_ALLOWED_TOOLS)
+    assert len(http_client.calls) == 4
 
 
 def test_sidecar_preflight_turn_replay_and_delivery_ack_are_idempotent_and_opaque():

@@ -1,4 +1,6 @@
 import asyncio
+import json
+
 import pytest
 
 from database.runtime_targets import RuntimeTargetLineage
@@ -100,6 +102,13 @@ def _binding():
     }
 
 
+def _postgres_jsonb_binding():
+    binding = _binding()
+    for field in ("prompt_artifact_receipt", "allowed_tools", "required_capabilities"):
+        binding[field] = json.dumps(binding[field], sort_keys=True)
+    return binding
+
+
 def _preflight_responses(toolsets=None):
     base = "https://cloud.example.test"
     return {
@@ -135,6 +144,51 @@ def test_preflight_requires_exact_model_capabilities_and_tools(cloud_env):
     assert all(call[2]["headers"]["Authorization"] == "Bearer cloud-secret" for call in fake.calls)
 
 
+def test_preflight_normalizes_real_postgres_jsonb_projection(cloud_env):
+    fake = FakeClient(_preflight_responses())
+
+    receipt = asyncio.run(
+        HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_postgres_jsonb_binding())
+    )
+
+    assert receipt.model == "model-a"
+    assert receipt.tools == ()
+    assert receipt.capabilities == ("responses_api", "session_key_header")
+    assert len(fake.calls) == 4
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        (field, value, f"cloud_{field}_policy_invalid")
+        for field in ("allowed_tools", "required_capabilities")
+        for value in (
+            "not-json",
+            json.dumps({"wrong": "shape"}),
+            json.dumps([1]),
+            json.dumps([""]),
+            json.dumps([" untrimmed"]),
+            json.dumps(["duplicate", "duplicate"]),
+        )
+    ],
+)
+def test_preflight_rejects_invalid_postgres_jsonb_policy_lists(
+    cloud_env,
+    field,
+    value,
+    code,
+):
+    binding = _postgres_jsonb_binding()
+    binding[field] = value
+    fake = FakeClient(_preflight_responses())
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(binding))
+
+    assert error.value.code == code
+    assert fake.calls == []
+
+
 def test_preflight_rejects_unexpected_enabled_tool(cloud_env):
     fake = FakeClient(_preflight_responses([{"enabled": True, "tools": ["shell"]}]))
     with pytest.raises(ProvisioningError) as error:
@@ -164,6 +218,26 @@ def test_preflight_rejects_missing_or_mismatched_prompt_artifacts(cloud_env):
         asyncio.run(
             HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
                 missing
+            )
+        )
+    assert error.value.code == "prompt_artifact_receipt_missing"
+
+    malformed = _binding()
+    malformed["prompt_artifact_receipt"] = "not-json"
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                malformed
+            )
+        )
+    assert error.value.code == "prompt_artifact_receipt_missing"
+
+    wrong_shape = _binding()
+    wrong_shape["prompt_artifact_receipt"] = json.dumps([])
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(http_client_factory=lambda **kwargs: FakeClient(_preflight_responses())).preflight(
+                wrong_shape
             )
         )
     assert error.value.code == "prompt_artifact_receipt_missing"
@@ -244,9 +318,11 @@ def test_responses_api_uses_distinct_session_headers_and_idempotency(cloud_env):
             )
         }
     )
+    binding = _binding()
+    binding["allowed_tools"] = json.dumps(binding["allowed_tools"])
     turn = asyncio.run(
         HermesCloudClient(http_client_factory=lambda **kwargs: fake).create_response(
-            _binding(),
+            binding,
             session_key="stable-memory-key",
             hermes_session_id="single-interaction-id",
             idempotency_key="request-id",
@@ -292,6 +368,35 @@ def test_responses_api_validation_failure_does_not_cross_provider_boundary(cloud
         )
 
     assert error.value.code == "hermes_cloud_turn_budget_invalid"
+    assert boundary == []
+
+
+def test_responses_api_rejects_invalid_jsonb_tool_policy_before_provider_boundary(cloud_env):
+    boundary = []
+    binding = _binding()
+    binding["allowed_tools"] = json.dumps([" untrimmed"])
+
+    async def mark_boundary():
+        boundary.append("provider_send")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **_kwargs: pytest.fail("client must not be created for invalid tool policy")
+            ).create_response(
+                binding,
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+                before_provider_send=mark_boundary,
+            )
+        )
+
+    assert error.value.code == "cloud_allowed_tools_policy_invalid"
     assert boundary == []
 
 
@@ -716,6 +821,100 @@ def test_cloud_runtime_resolver_is_fail_closed_and_contains_no_local_route(cloud
     with pytest.raises(ProvisioningError) as profile:
         runtime_from_binding(binding, "synthetic-user")
     assert profile.value.code == "hermes_cloud_synthetic_profile_required"
+
+
+def test_cloud_runtime_resolver_normalizes_real_postgres_jsonb_projection(cloud_env):
+    binding = {
+        **_binding(),
+        "id": "binding-postgres-jsonb",
+        "omi_uid": "synthetic-user",
+        "provider": "hermes_cloud",
+        "status": "internal_canary",
+        "profile_class": "synthetic",
+        "active": True,
+        "health_state": "healthy",
+        "profile_name": "synthetic-profile",
+        "agent_id": "hermes-cloud",
+        "runtime_instance_id": "instance-postgres-jsonb",
+        "honcho_api_key_ref": None,
+        "honcho_workspace": None,
+        "observed_peer": None,
+        "observer_peer": None,
+        "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "runtime_target_mode": "hermes-cloud-chat",
+        "voice_policy_version": "voice-v1",
+        "revision": 2,
+        "workspace_root": None,
+        "internal_gateway_url": None,
+        "gateway_port": None,
+        "service_label": None,
+        "credential_ref": None,
+    }
+    binding["prompt_artifact_receipt"] = json.dumps(binding["prompt_artifact_receipt"])
+    binding["allowed_tools"] = json.dumps(binding["allowed_tools"])
+    binding["required_capabilities"] = json.dumps(binding["required_capabilities"])
+
+    runtime = runtime_from_binding(binding, "synthetic-user")
+
+    assert runtime.allowed_tools == ()
+    assert runtime.required_capabilities == ("responses_api", "session_key_header")
+    assert runtime.model_context_window_tokens == 16384
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    (
+        ("allowed_tools", "not-json", "cloud_runtime_allowed_tools_invalid"),
+        ("allowed_tools", json.dumps({"tool": "wrong"}), "cloud_runtime_allowed_tools_invalid"),
+        ("allowed_tools", json.dumps(["tool", "tool"]), "cloud_runtime_allowed_tools_invalid"),
+        ("allowed_tools", json.dumps([" tool"]), "cloud_runtime_allowed_tools_invalid"),
+        (
+            "required_capabilities",
+            json.dumps([1]),
+            "cloud_runtime_required_capabilities_invalid",
+        ),
+    ),
+)
+def test_cloud_runtime_resolver_rejects_invalid_postgres_jsonb_lists(
+    cloud_env,
+    field,
+    value,
+    code,
+):
+    binding = {
+        **_binding(),
+        "id": "binding-invalid-postgres-jsonb",
+        "omi_uid": "synthetic-user",
+        "provider": "hermes_cloud",
+        "status": "internal_canary",
+        "profile_class": "synthetic",
+        "active": True,
+        "health_state": "healthy",
+        "profile_name": "synthetic-profile",
+        "agent_id": "hermes-cloud",
+        "runtime_instance_id": "instance-invalid-postgres-jsonb",
+        "honcho_api_key_ref": None,
+        "honcho_workspace": None,
+        "observed_peer": None,
+        "observer_peer": None,
+        "target_endpoint_ref": "env:ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "target_credential_ref": "env:ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "runtime_target_mode": "hermes-cloud-chat",
+        "voice_policy_version": "voice-v1",
+        "revision": 2,
+        "workspace_root": None,
+        "internal_gateway_url": None,
+        "gateway_port": None,
+        "service_label": None,
+        "credential_ref": None,
+        field: value,
+    }
+
+    with pytest.raises(ProvisioningError) as error:
+        runtime_from_binding(binding, "synthetic-user")
+
+    assert error.value.code == code
 
 
 def test_cloud_runtime_resolver_checks_consent_before_loading_credentials(cloud_env, monkeypatch):

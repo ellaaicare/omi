@@ -19,6 +19,8 @@ from ella.services.hermes_cloud_staged_attestation import (
     UID_SELECTORS,
     StagedAttestationVerifier,
 )
+from ella.services import runtime_resolver
+from ella.services.hermes_cloud_policy import CurrentCloudAuthority
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -624,7 +626,25 @@ def test_completed_usage_interleaving_consumes_no_pool_row():
     asyncio.run(_run_with_database(scenario))
 
 
-def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets():
+def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monkeypatch):
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_API_URL_SYNTHETIC",
+        "https://cloud.example.test",
+    )
+    monkeypatch.setenv(
+        "ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC",
+        "synthetic-test-token",
+    )
+    monkeypatch.setattr(
+        runtime_resolver,
+        "current_cloud_authority",
+        lambda uid, **_kwargs: CurrentCloudAuthority(
+            consent_receipt_id=f"receipt-{uid}",
+            profile_binding_id=f"profile-{uid}",
+            lineage=LINEAGE,
+        ),
+    )
+
     async def scenario(pool):
         uid = "synthetic-target-owner"
         instance = "synthetic-instance-target-owner"
@@ -691,6 +711,13 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets():
         assert photon["runtime_instance_id"] == instance
         assert photon["target_endpoint_ref"] == photon["api_base_url_ref"]
         assert photon["target_credential_ref"] == photon["api_key_ref"]
+        assert isinstance(photon["prompt_artifact_receipt"], str)
+        assert isinstance(photon["allowed_tools"], str)
+        assert isinstance(photon["required_capabilities"], str)
+        runtime = runtime_resolver.runtime_from_binding(photon, uid)
+        assert runtime.model_context_window_tokens == 16384
+        assert runtime.allowed_tools == ()
+        assert runtime.required_capabilities == ("responses_api",)
 
     asyncio.run(_run_with_database(scenario))
 
