@@ -27,6 +27,7 @@ from ella.services.ai_consent import (
 )
 from ella.services.hermes_cloud import (
     HermesCloudClient,
+    normalize_cloud_json_string_list,
     validate_prompt_artifact_receipt,
 )
 from ella.services.hermes_cloud_policy import current_cloud_authority
@@ -150,21 +151,6 @@ def cloud_runtime_authority_identity(runtime: IsolatedRuntime) -> CloudRuntimeAu
     )
 
 
-def _cloud_json_string_list(value, *, code: str) -> tuple[str, ...]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ProvisioningError(code, retryable=False) from exc
-    if (
-        not isinstance(value, list)
-        or any(not isinstance(item, str) or not item or item.strip() != item for item in value)
-        or len(value) != len(set(value))
-    ):
-        raise ProvisioningError(code, retryable=False)
-    return tuple(sorted(value))
-
-
 def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False) -> IsolatedRuntime:
     if binding.get("omi_uid") != uid:
         raise ProvisioningError("runtime_ownership_mismatch", retryable=False)
@@ -210,11 +196,11 @@ def runtime_from_binding(binding: dict, uid: str, *, allow_shadow: bool = False)
         if str(binding.get("runtime_target_mode") or "") not in CLOUD_RUNTIME_TARGET_MODES:
             raise ProvisioningError("cloud_runtime_target_mode_missing", retryable=False)
         prompt_artifact_receipt = validate_prompt_artifact_receipt(binding)
-        allowed_tools = _cloud_json_string_list(
+        allowed_tools = normalize_cloud_json_string_list(
             binding.get("allowed_tools"),
             code="cloud_runtime_allowed_tools_invalid",
         )
-        required_capabilities = _cloud_json_string_list(
+        required_capabilities = normalize_cloud_json_string_list(
             binding.get("required_capabilities"),
             code="cloud_runtime_required_capabilities_invalid",
         )

@@ -45,6 +45,21 @@ def _content_hash(value: Any) -> str:
     return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
 
 
+def normalize_cloud_json_string_list(value: Any, *, code: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ProvisioningError(code, retryable=False) from exc
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item or item.strip() != item for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise ProvisioningError(code, retryable=False)
+    return tuple(sorted(value))
+
+
 def validate_cloud_secret_ref(reference: Optional[str]) -> str:
     reference = str(reference or "").strip()
     if not CLOUD_SECRET_REF_RE.fullmatch(reference):
@@ -294,10 +309,18 @@ class HermesCloudClient:
         prompt_artifacts = validate_prompt_artifact_receipt(binding)
         base_url, token = self.credentials(binding)
         expected_model = str(binding.get("expected_model") or "").strip()
-        allowed_tools = {str(value) for value in (binding.get("allowed_tools") or []) if str(value).strip()}
-        required_capabilities = {
-            str(value) for value in (binding.get("required_capabilities") or []) if str(value).strip()
-        }
+        allowed_tools = set(
+            normalize_cloud_json_string_list(
+                binding.get("allowed_tools"),
+                code="cloud_allowed_tools_policy_invalid",
+            )
+        )
+        required_capabilities = set(
+            normalize_cloud_json_string_list(
+                binding.get("required_capabilities"),
+                code="cloud_required_capabilities_policy_invalid",
+            )
+        )
         if not expected_model:
             raise ProvisioningError("cloud_model_policy_missing", retryable=False)
         if "responses_api" not in required_capabilities or "session_key_header" not in required_capabilities:
@@ -443,6 +466,12 @@ class HermesCloudClient:
                 raise ProvisioningError("cloud_secret_unavailable", retryable=True)
         expected_model = str(binding.get("expected_model") or "").strip()
         model_context_window_tokens = _model_context_window_tokens(binding)
+        allowed_tools = set(
+            normalize_cloud_json_string_list(
+                binding.get("allowed_tools"),
+                code="cloud_allowed_tools_policy_invalid",
+            )
+        )
         if not expected_model:
             raise ProvisioningError("cloud_model_policy_missing", retryable=False)
         if not 1 <= int(max_output_tokens) <= 32768 or not 0 <= int(max_tool_calls) <= 32:
@@ -518,7 +547,6 @@ class HermesCloudClient:
             for item in body.get("output") or []
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
-        allowed_tools = set(binding.get("allowed_tools") or [])
         if any(name not in allowed_tools for name in unexpected_calls):
             raise ProvisioningError("hermes_cloud_unapproved_tool_call", retryable=False)
         if len(unexpected_calls) > int(max_tool_calls):

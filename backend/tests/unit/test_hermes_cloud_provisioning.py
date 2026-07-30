@@ -1,11 +1,12 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from database.runtime_targets import RuntimeTargetLineage
 from ella.services import provisioning
-from ella.services.hermes_cloud import HermesCloudPreflight
+from ella.services.hermes_cloud import HermesCloudClient, HermesCloudPreflight
 from ella.services.hermes_cloud_policy import CurrentCloudAuthority
 from ella.services.provisioning import (
     HermesProvisionClient,
@@ -245,6 +246,98 @@ def test_cloud_claim_preflights_vendor_without_honcho_before_atomic_publish(monk
     assert repository.jobs[-1]["state"] == "ready"
     assert alert.calls[0]["available"] == 1
     assert repository.delivered_alerts == ["alert-a"]
+
+
+def test_nonstaged_finalization_accepts_real_postgres_jsonb_projection(monkeypatch):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_UIDS", "synthetic-user")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_API_URL_SYNTHETIC", "https://cloud.example.test")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_API_KEY_SYNTHETIC", "synthetic-test-token")
+    artifact_hash = "a" * 64
+
+    class AsyncpgProjectionRepository(FakeRepository):
+        async def claim_cloud_pool_binding(self, **kwargs):
+            binding = await super().claim_cloud_pool_binding(**kwargs)
+            binding.update(
+                {
+                    "prompt_pack_version": "prompt-v1",
+                    "model_policy_version": "models-v1",
+                    "allowed_tools": json.dumps([]),
+                    "required_capabilities": json.dumps(["responses_api", "session_key_header"]),
+                    "prompt_artifact_receipt": json.dumps(
+                        {
+                            "schema_version": "ella-hermes-cloud-approval-v1",
+                            "prompt_pack_version": "prompt-v1",
+                            "model_policy_version": "models-v1",
+                            "expected_model": "model-a",
+                            "model_context_window_tokens": 16384,
+                            "policy_commit_sha": "b" * 40,
+                            "lane_s_review_url": "https://github.com/ellaaicare/ella-ai/issues/1124",
+                            "approval_manifest_sha256": "c" * 64,
+                            "soul_sha256": artifact_hash,
+                            "observed_soul_sha256": artifact_hash,
+                            "agents_sha256": artifact_hash,
+                            "observed_agents_sha256": artifact_hash,
+                            "model_policy_sha256": artifact_hash,
+                            "observed_model_policy_sha256": artifact_hash,
+                        },
+                        sort_keys=True,
+                    ),
+                }
+            )
+            return binding
+
+    class Response:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class PreflightHttpClient:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            bodies = {
+                "https://cloud.example.test/health/detailed": {
+                    "status": "ok",
+                    "readiness": {"status": "ok"},
+                },
+                "https://cloud.example.test/v1/capabilities": {
+                    "session_key_header": "X-Hermes-Session-Key",
+                    "features": {"responses_api": True},
+                },
+                "https://cloud.example.test/v1/models": {"data": [{"id": "model-a"}]},
+                "https://cloud.example.test/v1/toolsets": [],
+            }
+            return Response(bodies[url])
+
+    repository = AsyncpgProjectionRepository()
+    http_client = PreflightHttpClient()
+    coordinator = ProvisioningCoordinator(
+        repository,
+        ForbiddenLocalClient(),
+        cloud_client=HermesCloudClient(http_client_factory=lambda **_kwargs: http_client),
+        honcho_client=FakeHoncho(),
+        alert_publisher=FakeAlert(),
+        runtime_admission=allow_runtime,
+    )
+
+    asyncio.run(coordinator.process_claimed_job(job=_job(), identity=_identity()))
+
+    assert len(http_client.calls) == 4
+    assert len(repository.finalized) == 1
+    assert repository.jobs[-1]["state"] == "ready"
+    assert repository.quarantined == []
 
 
 def test_cloud_claim_finalization_revalidates_staged_receipt_without_direct_preflight(monkeypatch):

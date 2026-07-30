@@ -102,6 +102,13 @@ def _binding():
     }
 
 
+def _postgres_jsonb_binding():
+    binding = _binding()
+    for field in ("prompt_artifact_receipt", "allowed_tools", "required_capabilities"):
+        binding[field] = json.dumps(binding[field], sort_keys=True)
+    return binding
+
+
 def _preflight_responses(toolsets=None):
     base = "https://cloud.example.test"
     return {
@@ -135,6 +142,51 @@ def test_preflight_requires_exact_model_capabilities_and_tools(cloud_env):
     assert receipt.capabilities == ("responses_api", "session_key_header")
     assert receipt.receipt["content_free"] is True
     assert all(call[2]["headers"]["Authorization"] == "Bearer cloud-secret" for call in fake.calls)
+
+
+def test_preflight_normalizes_real_postgres_jsonb_projection(cloud_env):
+    fake = FakeClient(_preflight_responses())
+
+    receipt = asyncio.run(
+        HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(_postgres_jsonb_binding())
+    )
+
+    assert receipt.model == "model-a"
+    assert receipt.tools == ()
+    assert receipt.capabilities == ("responses_api", "session_key_header")
+    assert len(fake.calls) == 4
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        (field, value, f"cloud_{field}_policy_invalid")
+        for field in ("allowed_tools", "required_capabilities")
+        for value in (
+            "not-json",
+            json.dumps({"wrong": "shape"}),
+            json.dumps([1]),
+            json.dumps([""]),
+            json.dumps([" untrimmed"]),
+            json.dumps(["duplicate", "duplicate"]),
+        )
+    ],
+)
+def test_preflight_rejects_invalid_postgres_jsonb_policy_lists(
+    cloud_env,
+    field,
+    value,
+    code,
+):
+    binding = _postgres_jsonb_binding()
+    binding[field] = value
+    fake = FakeClient(_preflight_responses())
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(HermesCloudClient(http_client_factory=lambda **kwargs: fake).preflight(binding))
+
+    assert error.value.code == code
+    assert fake.calls == []
 
 
 def test_preflight_rejects_unexpected_enabled_tool(cloud_env):
@@ -266,9 +318,11 @@ def test_responses_api_uses_distinct_session_headers_and_idempotency(cloud_env):
             )
         }
     )
+    binding = _binding()
+    binding["allowed_tools"] = json.dumps(binding["allowed_tools"])
     turn = asyncio.run(
         HermesCloudClient(http_client_factory=lambda **kwargs: fake).create_response(
-            _binding(),
+            binding,
             session_key="stable-memory-key",
             hermes_session_id="single-interaction-id",
             idempotency_key="request-id",
@@ -314,6 +368,35 @@ def test_responses_api_validation_failure_does_not_cross_provider_boundary(cloud
         )
 
     assert error.value.code == "hermes_cloud_turn_budget_invalid"
+    assert boundary == []
+
+
+def test_responses_api_rejects_invalid_jsonb_tool_policy_before_provider_boundary(cloud_env):
+    boundary = []
+    binding = _binding()
+    binding["allowed_tools"] = json.dumps([" untrimmed"])
+
+    async def mark_boundary():
+        boundary.append("provider_send")
+
+    with pytest.raises(ProvisioningError) as error:
+        asyncio.run(
+            HermesCloudClient(
+                http_client_factory=lambda **_kwargs: pytest.fail("client must not be created for invalid tool policy")
+            ).create_response(
+                binding,
+                session_key="scope",
+                hermes_session_id="interaction",
+                idempotency_key="request",
+                user_input="Synthetic",
+                instructions="Synthetic",
+                max_output_tokens=128,
+                max_tool_calls=0,
+                before_provider_send=mark_boundary,
+            )
+        )
+
+    assert error.value.code == "cloud_allowed_tools_policy_invalid"
     assert boundary == []
 
 
