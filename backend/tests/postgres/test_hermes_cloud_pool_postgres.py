@@ -275,6 +275,7 @@ async def _seed_claim(
     runtime_instance_id: str,
     daily_limit_s: int = 2700,
     profile_class: str = "synthetic",
+    profile_binding_id: str | None = None,
     allowed_tools: list[str] | None = None,
 ):
     model = "gpt-5.6-terra"
@@ -305,7 +306,7 @@ async def _seed_claim(
             """,
             user_id,
             "sha256:" + ("f" * 64),
-            uid,
+            profile_binding_id if profile_binding_id is not None else uid,
             LINEAGE.policy_version,
             LINEAGE.processor_set_hash,
             LINEAGE.scope_version,
@@ -678,6 +679,7 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monk
             pool,
             uid=uid,
             runtime_instance_id=instance,
+            profile_binding_id=contract["binding"]["profile_binding_id"],
             allowed_tools=contract["binding"]["allowed_tools"],
         )
         claimed = await repository.claim_cloud_pool_binding(
@@ -716,6 +718,15 @@ def test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets(monk
                 """,
                 finalized["id"],
             )
+            persisted_profile_binding_id = await conn.fetchval(
+                """
+                SELECT profile_binding_id
+                FROM ella_managed_cloud_consent_authority
+                WHERE user_id = $1
+                """,
+                finalized["user_id"],
+            )
+        assert persisted_profile_binding_id == contract["binding"]["profile_binding_id"]
         assert [row["mode"] for row in targets] == [
             "hermes-cloud-chat",
             "hermes-cloud-guardian",
