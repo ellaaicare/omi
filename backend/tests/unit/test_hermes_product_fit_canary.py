@@ -1,12 +1,17 @@
 import asyncio
 import base64
+import copy
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
+
+os.environ.setdefault("FIRESTORE_EMULATOR_HOST", "localhost:9999")
+os.environ.setdefault("GOOGLE_CLOUD_PROJECT", "test-project")
 
 from ella.routers.hermes_cloud_enrichment import (
     create_hermes_cloud_enrichment_router,
@@ -60,6 +65,147 @@ def _config_mapping():
 
 def _config():
     return canary.CanaryConfig.from_mapping(_config_mapping())
+
+
+def _fixture_config():
+    raw = _config_mapping()
+    raw["selectors"]["profile_id"] = raw["selectors"]["account_id"]
+    raw["enrichment"]["conversation_id"] = raw["voice_memory"]["conversation_id"]
+    return canary.CanaryConfig.from_mapping(raw)
+
+
+def _token_for(uid):
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": uid}).encode()).decode().rstrip("=")
+    return f"header.{payload}.signature-padding-for-content-safe-test"
+
+
+def _off_receipt(config):
+    return {
+        "schema_version": "ella-hermes-canary-off-receipt-v1",
+        "uid_sha256": canary._sha256(config.uid),
+        "flags_off": True,
+        "selectors_empty": True,
+        "workflows_off": True,
+        "content_free": True,
+    }
+
+
+def _fixture_environment(monkeypatch, config):
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "true")
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(config.uid))
+    for name in canary.FIXTURE_GLOBAL_FLAGS_REQUIRED_FALSE:
+        monkeypatch.delenv(name, raising=False)
+    for name in canary.FIXTURE_SELECTORS_REQUIRED_EMPTY:
+        monkeypatch.delenv(name, raising=False)
+
+
+class FakeFixtureBackend:
+    def __init__(self, config):
+        self.config = config
+        self.conversation = None
+        self.put_calls = 0
+        self.summary_calls = 0
+        self.vector_ids = {config.voice_conversation_id}
+        self.deleted_conversations = []
+        self.deleted_vectors = []
+        self.runtime_calls = 0
+        self.authority_value = {
+            "user": {
+                "id": config.account_id,
+                "omi_uid": config.uid,
+                "status": "ACTIVE",
+                "profile_class": "synthetic",
+            },
+            "binding": {
+                "id": config.binding_id,
+                "user_id": config.account_id,
+                "account_user_id": config.account_id,
+                "profile_user_id": config.profile_id,
+                "omi_uid": config.uid,
+                "provider": "hermes_cloud",
+                "profile_class": "synthetic",
+                "active": True,
+                "status": "internal_canary",
+                "health_state": "healthy",
+            },
+            "entitlement": {
+                "uid": config.uid,
+                "consent_authority_epoch": config.consent_epoch,
+                "consent_policy_version": "ai-data-processors-v8",
+                "status": "invited",
+            },
+            "consent": {
+                "subject_uid": config.uid,
+                "authorized": True,
+                "consent": {
+                    "decision": "granted",
+                    "policy_version": "ai-data-processors-v8",
+                    "receipt_id": "aicr_content_free_fixture",
+                    "profile_binding_id": canary.ai_consent.derive_profile_binding_id(
+                        account_uid=config.uid,
+                        profile_uid=config.uid,
+                    ),
+                },
+            },
+        }
+
+    async def authority(self, config):
+        assert config == self.config
+        return copy.deepcopy(self.authority_value)
+
+    def get_conversation(self, uid, conversation_id):
+        assert uid == self.config.uid
+        assert conversation_id == self.config.voice_conversation_id
+        return copy.deepcopy(self.conversation)
+
+    def put_conversation(self, uid, conversation):
+        assert uid == self.config.uid
+        self.put_calls += 1
+        self.conversation = conversation.model_dump()
+
+    def ensure_summary_version(self, uid, conversation_id):
+        assert uid == self.config.uid
+        assert conversation_id == self.config.voice_conversation_id
+        self.summary_calls += 1
+        if not self.conversation.get("summary_versions"):
+            summary_version = {
+                "id": "synthetic-legacy-summary-version",
+                "created_at": self.conversation["created_at"],
+                "source": "legacy",
+                "kind": "legacy_current",
+                "title": self.conversation["structured"]["title"],
+                "overview": self.conversation["structured"]["overview"],
+                "emoji": self.conversation["structured"]["emoji"],
+                "category": self.conversation["structured"]["category"],
+                "correction_id": None,
+                "based_on_version_id": None,
+                "is_active": True,
+            }
+            self.conversation.update(
+                {
+                    "summary_versions": [summary_version],
+                    "active_summary_version_id": summary_version["id"],
+                }
+            )
+        return {
+            "status": "ready",
+            "active_summary_version_id": self.conversation["active_summary_version_id"],
+            "conversation": copy.deepcopy(self.conversation),
+        }
+
+    def delete_conversation(self, uid, conversation_id):
+        assert uid == self.config.uid
+        self.deleted_conversations.append(conversation_id)
+        self.conversation = None
+
+    def delete_vector(self, uid, conversation_id):
+        assert uid == self.config.uid
+        self.deleted_vectors.append(conversation_id)
+        self.vector_ids.discard(conversation_id)
+
+    def vector_exists(self, uid, conversation_id):
+        assert uid == self.config.uid
+        return conversation_id in self.vector_ids
 
 
 class FakeAdapter:
@@ -468,3 +614,242 @@ def test_missing_optional_live_surface_reports_not_tested_not_pass():
     assert memory.status == "NOT TESTED"
     assert report.verdicts["profile memory pack"] == "NOT TESTED"
     assert canary._exit_code(report) == 2
+
+
+def test_fixture_prepare_creates_one_synthetic_conversation_and_production_identities(monkeypatch, tmp_path):
+    config = _fixture_config()
+    _fixture_environment(monkeypatch, config)
+    backend = FakeFixtureBackend(config)
+    protected_root = tmp_path / "fixture"
+    protected_root.mkdir(mode=0o700)
+    receipt_path = protected_root / "fixture-receipt.json"
+
+    result = asyncio.run(
+        canary.fixture_prepare(
+            config,
+            off_receipt=_off_receipt(config),
+            receipt_path=receipt_path,
+            backend=backend,
+            approved_roots=(tmp_path,),
+            expected_owner_uid=os.geteuid(),
+        )
+    )
+
+    assert backend.put_calls == 1
+    assert backend.summary_calls == 1
+    conversation = backend.conversation
+    assert conversation["discarded"] is False
+    assert conversation["visibility"] == canary.ConversationVisibility.private
+    assert conversation["status"] == canary.ConversationStatus.completed
+    assert conversation["source"] == canary.ConversationSource.external_integration
+    assert conversation["structured"]["title"]
+    assert conversation["structured"]["overview"]
+    assert len(conversation["summary_versions"]) == 1
+    assert conversation["summary_versions"][0]["source"] == "legacy"
+    assert conversation["summary_versions"][0]["kind"] == "legacy_current"
+    assert conversation["summary_versions"][0]["is_active"] is True
+    assert "enrichment_state" not in conversation
+    assert "canonical_events" not in conversation
+    assert "import_jobs" not in conversation
+    identity = canary.build_enrichment_identity(
+        uid=config.uid,
+        conversation_id=config.voice_conversation_id,
+        conversation=conversation,
+    )
+    assert result["client_interaction_id"] == identity.client_interaction_id
+    assert result["job_id"] == identity.job_id
+    assert result["transcript_sha256"] == identity.transcript_sha256
+    assert result["content_free"] is True
+    assert result["status"] == "prepared"
+    assert receipt_path.stat().st_mode & 0o777 == 0o400
+    stored = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert stored["fixture_shape_sha256"] == result["fixture_shape_sha256"]
+    assert not any("Synthetic profile-memory marker" in str(value) for value in stored.values())
+
+
+def test_fixture_prepare_refuses_real_stale_or_mismatched_owner_without_writes(monkeypatch, tmp_path):
+    config = _fixture_config()
+    protected_root = tmp_path / "fixture"
+    protected_root.mkdir(mode=0o700)
+
+    real_config = replace(config, uid="real-user")
+    real_backend = FakeFixtureBackend(real_config)
+    _fixture_environment(monkeypatch, real_config)
+    with pytest.raises(canary.HarnessRefusal, match="firebase_token_subject_mismatch"):
+        asyncio.run(
+            canary.fixture_prepare(
+                real_config,
+                off_receipt=_off_receipt(real_config),
+                receipt_path=protected_root / "real.json",
+                backend=real_backend,
+                approved_roots=(tmp_path,),
+                expected_owner_uid=os.geteuid(),
+            )
+        )
+    assert real_backend.put_calls == 0
+
+    _fixture_environment(monkeypatch, config)
+    stale_backend = FakeFixtureBackend(config)
+    stale_backend.authority_value["consent"]["consent"]["policy_version"] = "ai-data-processors-v7"
+    with pytest.raises(canary.HarnessRefusal, match="fixture_consent_mismatch"):
+        asyncio.run(
+            canary.fixture_prepare(
+                config,
+                off_receipt=_off_receipt(config),
+                receipt_path=protected_root / "stale.json",
+                backend=stale_backend,
+                approved_roots=(tmp_path,),
+                expected_owner_uid=os.geteuid(),
+            )
+        )
+    assert stale_backend.put_calls == 0
+
+    owner_backend = FakeFixtureBackend(config)
+    owner_backend.authority_value["user"]["profile_class"] = "real"
+    with pytest.raises(canary.HarnessRefusal, match="fixture_owner_mismatch"):
+        asyncio.run(
+            canary.fixture_prepare(
+                config,
+                off_receipt=_off_receipt(config),
+                receipt_path=protected_root / "owner.json",
+                backend=owner_backend,
+                approved_roots=(tmp_path,),
+                expected_owner_uid=os.geteuid(),
+            )
+        )
+    assert owner_backend.put_calls == 0
+
+    selector_backend = FakeFixtureBackend(config)
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED_UIDS", config.uid)
+    with pytest.raises(canary.HarnessRefusal, match="fixture_selector_active"):
+        asyncio.run(
+            canary.fixture_prepare(
+                config,
+                off_receipt=_off_receipt(config),
+                receipt_path=protected_root / "selector.json",
+                backend=selector_backend,
+                approved_roots=(tmp_path,),
+                expected_owner_uid=os.geteuid(),
+            )
+        )
+    assert selector_backend.put_calls == 0
+
+    _fixture_environment(monkeypatch, config)
+    flag_backend = FakeFixtureBackend(config)
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED", "true")
+    with pytest.raises(canary.HarnessRefusal, match="fixture_global_flag_active"):
+        asyncio.run(
+            canary.fixture_prepare(
+                config,
+                off_receipt=_off_receipt(config),
+                receipt_path=protected_root / "flag.json",
+                backend=flag_backend,
+                approved_roots=(tmp_path,),
+                expected_owner_uid=os.geteuid(),
+            )
+        )
+    assert flag_backend.put_calls == 0
+
+
+def test_fixture_prepare_retry_is_idempotent_and_never_invokes_runtime(monkeypatch, tmp_path):
+    config = _fixture_config()
+    _fixture_environment(monkeypatch, config)
+    backend = FakeFixtureBackend(config)
+
+    def runtime_forbidden(*_args, **_kwargs):
+        backend.runtime_calls += 1
+        raise AssertionError("fixture preparation invoked runtime")
+
+    monkeypatch.setattr(canary, "LiveCanaryAdapter", runtime_forbidden)
+    protected_root = tmp_path / "fixture"
+    protected_root.mkdir(mode=0o700)
+    receipt_path = protected_root / "fixture-receipt.json"
+    kwargs = {
+        "off_receipt": _off_receipt(config),
+        "receipt_path": receipt_path,
+        "backend": backend,
+        "approved_roots": (tmp_path,),
+        "expected_owner_uid": os.geteuid(),
+    }
+
+    first = asyncio.run(canary.fixture_prepare(config, **kwargs))
+    second = asyncio.run(canary.fixture_prepare(config, **kwargs))
+
+    assert first["receipt_id"] == second["receipt_id"]
+    assert second["idempotent"] is True
+    assert backend.put_calls == 1
+    assert backend.runtime_calls == 0
+    assert len(backend.conversation["summary_versions"]) == 1
+    assert list(protected_root.iterdir()) == [receipt_path]
+
+
+def test_fixture_show_and_cleanup_are_content_free_and_exact_id_only(monkeypatch, tmp_path, capsys):
+    config = _fixture_config()
+    _fixture_environment(monkeypatch, config)
+    backend = FakeFixtureBackend(config)
+    protected_root = tmp_path / "fixture"
+    protected_root.mkdir(mode=0o700)
+    receipt_path = protected_root / "fixture-receipt.json"
+    common = {
+        "off_receipt": _off_receipt(config),
+        "receipt_path": receipt_path,
+        "backend": backend,
+        "approved_roots": (tmp_path,),
+        "expected_owner_uid": os.geteuid(),
+    }
+    asyncio.run(canary.fixture_prepare(config, **common))
+
+    shown = asyncio.run(canary.fixture_show(config, **common))
+    assert shown["status"] == "ready"
+    assert shown["content_free"] is True
+    assert "transcript_segments" not in shown
+    assert "structured" not in shown
+    enriched_version = {
+        **backend.conversation["summary_versions"][0],
+        "id": "synthetic-hermes-summary-version",
+        "source": "hermes_cloud",
+        "kind": "hermes_enriched",
+    }
+    backend.conversation["summary_versions"][0]["is_active"] = False
+    backend.conversation["summary_versions"].append(enriched_version)
+    backend.conversation["active_summary_version_id"] = enriched_version["id"]
+    backend.conversation["enrichment_state"] = {"status": "writeback_applied"}
+    used = asyncio.run(canary.fixture_show(config, **common))
+    assert used["status"] == "used"
+    assert used["receipt_id"] == shown["receipt_id"]
+    with pytest.raises(canary.HarnessRefusal, match="fixture_cleanup_confirmation_mismatch"):
+        asyncio.run(
+            canary.fixture_cleanup(
+                config,
+                confirm_conversation_id="wrong-conversation",
+                **common,
+            )
+        )
+    assert backend.conversation is not None
+    assert backend.deleted_vectors == []
+
+    cleaned = asyncio.run(
+        canary.fixture_cleanup(
+            config,
+            confirm_conversation_id=config.voice_conversation_id,
+            **common,
+        )
+    )
+
+    assert cleaned == {
+        "schema_version": canary.FIXTURE_RECEIPT_SCHEMA,
+        "receipt_id": shown["receipt_id"],
+        "status": "cleaned",
+        "content_free": True,
+        "conversation_id": config.voice_conversation_id,
+        "conversation_absent": True,
+        "vector_absent": True,
+        "receipt_absent": True,
+    }
+    assert backend.deleted_vectors == [config.voice_conversation_id]
+    assert backend.deleted_conversations == [config.voice_conversation_id]
+    assert backend.conversation is None
+    assert not receipt_path.exists()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

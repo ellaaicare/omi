@@ -15,6 +15,7 @@ import stat
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
@@ -22,13 +23,33 @@ from urllib.parse import urlparse
 import httpx
 
 from database import voice_canary as voice_canary_db
+from database.ella_provisioning import EllaProvisioningRepository
+from ella.services import ai_consent
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
 from ella.services.hermes_cloud_enrichment import (
     _interaction_identity as production_enrichment_interaction_identity,
 )
+from ella.services.hermes_cloud_enrichment import build_enrichment_identity
 from ella.services.hermes_cloud_runtime import broker_session_id_for_scope
 from ella.services.runtime_errors import ProvisioningError
+from models.conversation import (
+    CategoryEnum,
+    Conversation,
+    ConversationSource,
+    ConversationStatus,
+    ConversationVisibility,
+    EllaSignal,
+    Structured,
+)
+from models.transcript_segment import TranscriptSegment
+
+if __name__ == "__main__" and os.geteuid() == 0:
+    from database import conversations as conversations_db
+    from database import vector_db
+else:
+    conversations_db = None
+    vector_db = None
 
 CONFIG_SCHEMA = "ella-hermes-product-fit-canary-v1"
 CALLBACK_SCHEMA = "ella.hermes.callback.v1"
@@ -50,6 +71,36 @@ ENRICHMENT_CHAT_IDENTITY_FIELDS = frozenset(
         "broker_session_id",
     }
 )
+FIXTURE_RECEIPT_SCHEMA = "ella-hermes-product-fit-fixture-receipt-v1"
+FIXTURE_MARKER_SCHEMA = "ella-hermes-product-fit-fixture-v1"
+FIXTURE_GLOBAL_FLAGS_REQUIRED_FALSE = (
+    "ELLA_RUNTIME_BINDINGS_ENABLED",
+    "ELLA_HERMES_PROVISIONING_ENABLED",
+    "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED",
+    "ELLA_AI_CONSENT_ENFORCEMENT_ENABLED",
+    "ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED",
+    "ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED",
+    "ELLA_ISOLATED_VOICE_ROUTING_ENABLED",
+    "ELLA_HERMES_BROKER_PROTOTYPE_ENABLED",
+    "ELLA_HERMES_BROKER_STOCK_CANARY_ENABLED",
+    "ELLA_HERMES_CLOUD_STAGED_ATTESTATION_ENABLED",
+    "ELLA_HERMES_CLOUD_PHOTON_ENABLED",
+    "ELLA_VOICE_CANARY_ENFORCEMENT_ENABLED",
+)
+FIXTURE_SELECTORS_REQUIRED_EMPTY = (
+    "ELLA_RUNTIME_BINDINGS_ENABLED_UIDS",
+    "ELLA_HERMES_PROVISIONING_ENABLED_UIDS",
+    "ELLA_HERMES_CLOUD_PROVISIONING_ENABLED_UIDS",
+    "ELLA_HERMES_CLOUD_SYNTHETIC_UIDS",
+    "ELLA_AI_CONSENT_ENFORCEMENT_UIDS",
+    "ELLA_MANAGED_CLOUD_REAL_DATA_ENABLED_UIDS",
+    "ELLA_HERMES_CLOUD_ENRICHMENT_ENABLED_UIDS",
+    "ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS",
+    "ELLA_HERMES_BROKER_PROTOTYPE_ACCOUNT_ID",
+    "ELLA_HERMES_BROKER_PROTOTYPE_PROFILE_ID",
+    "ELLA_HERMES_BROKER_PROTOTYPE_BINDING_ID",
+)
+TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 class HarnessRefusal(RuntimeError):
@@ -1228,6 +1279,667 @@ def load_off_receipt(path: str) -> dict[str, Any]:
     return value
 
 
+class FixtureBackend(Protocol):
+    async def authority(self, config: CanaryConfig) -> dict[str, Any]: ...
+
+    def get_conversation(self, uid: str, conversation_id: str) -> dict[str, Any] | None: ...
+
+    def put_conversation(self, uid: str, conversation: Conversation) -> None: ...
+
+    def ensure_summary_version(self, uid: str, conversation_id: str) -> dict[str, Any]: ...
+
+    def delete_conversation(self, uid: str, conversation_id: str) -> None: ...
+
+    def delete_vector(self, uid: str, conversation_id: str) -> None: ...
+
+    def vector_exists(self, uid: str, conversation_id: str) -> bool: ...
+
+
+class LiveFixtureBackend:
+    async def authority(self, config: CanaryConfig) -> dict[str, Any]:
+        try:
+            repository = await EllaProvisioningRepository.create()
+            user, binding, entitlement = await asyncio.gather(
+                repository.get_user_identity(config.uid),
+                repository.get_cloud_binding_for_owner(uid=config.uid, binding_id=config.binding_id),
+                voice_canary_db.get_entitlement(config.uid),
+            )
+            consent = ai_consent.get_ai_consent_service().status(config.uid)
+        except Exception as exc:
+            raise HarnessRefusal("fixture_authority_unavailable") from exc
+        return {
+            "user": user,
+            "binding": binding,
+            "entitlement": entitlement,
+            "consent": consent,
+        }
+
+    def get_conversation(self, uid: str, conversation_id: str) -> dict[str, Any] | None:
+        return conversations_db.get_conversation(uid, conversation_id)
+
+    def put_conversation(self, uid: str, conversation: Conversation) -> None:
+        conversations_db.upsert_conversation(uid, conversation.model_dump())
+
+    def ensure_summary_version(self, uid: str, conversation_id: str) -> dict[str, Any]:
+        return conversations_db.ensure_voice_memory_summary_version(uid, conversation_id)
+
+    def delete_conversation(self, uid: str, conversation_id: str) -> None:
+        conversations_db.delete_conversation(uid, conversation_id)
+
+    def delete_vector(self, uid: str, conversation_id: str) -> None:
+        vector_db.delete_vector(uid, conversation_id)
+
+    def vector_exists(self, uid: str, conversation_id: str) -> bool:
+        return conversation_id in vector_db.fetch_existing_conversation_vector_ids(uid, [conversation_id])
+
+
+def _assert_fixture_environment_off() -> None:
+    if os.getenv("ELLA_HERMES_CLOUD_SYNTHETIC_ONLY", "").strip().lower() != "true":
+        raise HarnessRefusal("fixture_synthetic_only_required")
+    if any(os.getenv(name, "false").strip().lower() in TRUE_VALUES for name in FIXTURE_GLOBAL_FLAGS_REQUIRED_FALSE):
+        raise HarnessRefusal("fixture_global_flag_active")
+    if any(os.getenv(name, "").strip() for name in FIXTURE_SELECTORS_REQUIRED_EMPTY):
+        raise HarnessRefusal("fixture_selector_active")
+
+
+def _fixture_conversation_id(config: CanaryConfig) -> str:
+    if config.voice_conversation_id != config.enrichment_conversation_id:
+        raise HarnessRefusal("fixture_conversation_id_mismatch")
+    if not config.voice_conversation_id.startswith(SYNTHETIC_PREFIXES):
+        raise HarnessRefusal("fixture_synthetic_conversation_id_required")
+    return config.voice_conversation_id
+
+
+def _fixture_marker(config: CanaryConfig) -> dict[str, Any]:
+    conversation_id = _fixture_conversation_id(config)
+    selector_digest = _sha256(
+        _canonical_json(
+            {
+                "uid": config.uid,
+                "account_id": config.account_id,
+                "profile_id": config.profile_id,
+                "binding_id": config.binding_id,
+                "consent_epoch": config.consent_epoch,
+                "conversation_id": conversation_id,
+            }
+        )
+    )
+    return {
+        "schema_version": FIXTURE_MARKER_SCHEMA,
+        "fixture_id": f"hpff_{_sha256(f'{config.run_id}|{selector_digest}')[:32]}",
+        "selector_sha256": selector_digest,
+        "content_class": "synthetic",
+        "fixture_stage": "raw",
+    }
+
+
+def _build_fixture_conversation(config: CanaryConfig) -> Conversation:
+    conversation_id = _fixture_conversation_id(config)
+    marker = _fixture_marker(config)
+    nonce = _sha256(f"{marker['fixture_id']}|transcript")[:32]
+    started_at = datetime.now(timezone.utc)
+    return Conversation(
+        id=conversation_id,
+        created_at=started_at,
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=4),
+        source=ConversationSource.external_integration,
+        language="en",
+        structured=Structured(
+            title=f"Synthetic product-fit fixture {nonce[:8]}",
+            overview=f"Synthetic profile-memory fixture marker {nonce}.",
+            emoji="🧪",
+            category=CategoryEnum.other,
+            action_items=[],
+            events=[],
+        ),
+        transcript_segments=[
+            TranscriptSegment(
+                id=f"fixture-user-{nonce[:16]}",
+                text=f"Synthetic profile-memory marker {nonce}.",
+                speaker="SPEAKER_00",
+                is_user=True,
+                start=0.0,
+                end=1.5,
+            ),
+            TranscriptSegment(
+                id=f"fixture-assistant-{nonce[:16]}",
+                text=f"Synthetic marker acknowledgement {nonce}.",
+                speaker="SPEAKER_01",
+                is_user=False,
+                start=2.0,
+                end=4.0,
+            ),
+        ],
+        summary_versions=[],
+        active_summary_version_id=None,
+        ella_tags=["synthetic", "hermes-product-fit-fixture"],
+        ella_signal=EllaSignal(
+            salience="low",
+            memory_promotion="candidate",
+            noise_level="none",
+            contains_media=False,
+            contains_user_speech=True,
+            guardian_relevant=False,
+            metadata={"product_fit_fixture": marker},
+        ),
+        external_data={"ella_product_fit_fixture": marker},
+        discarded=False,
+        visibility=ConversationVisibility.private,
+        status=ConversationStatus.completed,
+        private_cloud_sync_enabled=False,
+    )
+
+
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _conversation_fixture_marker(conversation: Mapping[str, Any]) -> dict[str, Any]:
+    external_data = conversation.get("external_data")
+    if not isinstance(external_data, dict):
+        return {}
+    marker = external_data.get("ella_product_fit_fixture")
+    return dict(marker) if isinstance(marker, dict) else {}
+
+
+def _validate_fixture_ownership(config: CanaryConfig, conversation: Mapping[str, Any]) -> None:
+    conversation_id = _fixture_conversation_id(config)
+    expected_marker = _fixture_marker(config)
+    structured = conversation.get("structured")
+    segments = conversation.get("transcript_segments")
+    if (
+        str(conversation.get("id") or "") != conversation_id
+        or _conversation_fixture_marker(conversation) != expected_marker
+        or _enum_value(conversation.get("source")) != ConversationSource.external_integration.value
+        or _enum_value(conversation.get("visibility")) != ConversationVisibility.private.value
+        or _enum_value(conversation.get("status")) != ConversationStatus.completed.value
+        or conversation.get("discarded") is not False
+        or not isinstance(structured, dict)
+        or not str(structured.get("title") or "").strip()
+        or not str(structured.get("overview") or "").strip()
+        or not isinstance(segments, list)
+        or len(segments) != 2
+    ):
+        raise HarnessRefusal("fixture_conversation_mismatch")
+
+
+def _validate_fixture_conversation(config: CanaryConfig, conversation: Mapping[str, Any]) -> str:
+    _validate_fixture_ownership(config, conversation)
+    versions = conversation.get("summary_versions") or []
+    if "enrichment_state" in conversation or "import_jobs" in conversation:
+        raise HarnessRefusal("fixture_conversation_mismatch")
+    active_summary_version_id = str(conversation.get("active_summary_version_id") or "")
+    if versions:
+        active = [version for version in versions if isinstance(version, dict) and version.get("is_active") is True]
+        if (
+            len(versions) != 1
+            or len(active) != 1
+            or str(active[0].get("id") or "") != active_summary_version_id
+            or active[0].get("source") != "legacy"
+            or active[0].get("kind") != "legacy_current"
+        ):
+            raise HarnessRefusal("fixture_summary_version_mismatch")
+    return active_summary_version_id
+
+
+def _assert_fixture_authority(config: CanaryConfig, authority: Mapping[str, Any]) -> None:
+    user = authority.get("user")
+    binding = authority.get("binding")
+    entitlement = authority.get("entitlement")
+    consent = authority.get("consent")
+    if not all(isinstance(value, dict) for value in (user, binding, entitlement, consent)):
+        raise HarnessRefusal("fixture_authority_mismatch")
+    owner_id = str(user.get("id") or "")
+    if (
+        str(user.get("omi_uid") or "") != config.uid
+        or owner_id != config.account_id
+        or owner_id != config.profile_id
+        or str(user.get("status") or "").upper() != "ACTIVE"
+        or str(user.get("profile_class") or "").lower() != "synthetic"
+    ):
+        raise HarnessRefusal("fixture_owner_mismatch")
+    if (
+        str(binding.get("id") or "") != config.binding_id
+        or str(binding.get("user_id") or "") != owner_id
+        or str(binding.get("account_user_id") or "") != config.account_id
+        or str(binding.get("profile_user_id") or "") != config.profile_id
+        or str(binding.get("omi_uid") or "") != config.uid
+        or str(binding.get("provider") or "") != "hermes_cloud"
+        or str(binding.get("profile_class") or "").lower() != "synthetic"
+        or binding.get("active") is not True
+        or str(binding.get("status") or "") not in {"internal_canary", "active"}
+        or str(binding.get("health_state") or "") != "healthy"
+    ):
+        raise HarnessRefusal("fixture_binding_mismatch")
+    if (
+        str(entitlement.get("uid") or "") != config.uid
+        or str(entitlement.get("consent_authority_epoch") or "") != config.consent_epoch
+        or str(entitlement.get("consent_policy_version") or "") != ai_consent.CURRENT_POLICY_VERSION
+        or str(entitlement.get("status") or "") not in {"invited", "active"}
+    ):
+        raise HarnessRefusal("fixture_consent_epoch_mismatch")
+    consent_state = consent.get("consent")
+    if (
+        consent.get("subject_uid") != config.uid
+        or consent.get("authorized") is not True
+        or not isinstance(consent_state, dict)
+        or consent_state.get("decision") != "granted"
+        or consent_state.get("policy_version") != ai_consent.CURRENT_POLICY_VERSION
+        or ai_consent.CURRENT_POLICY_VERSION != "ai-data-processors-v8"
+        or not consent_state.get("receipt_id")
+        or consent_state.get("profile_binding_id")
+        != ai_consent.derive_profile_binding_id(account_uid=config.uid, profile_uid=config.uid)
+    ):
+        raise HarnessRefusal("fixture_consent_mismatch")
+
+
+def _fixture_shape_sha256(conversation: Mapping[str, Any]) -> str:
+    structured = conversation.get("structured") or {}
+    projection = {
+        "id": str(conversation.get("id") or ""),
+        "source": _enum_value(conversation.get("source")),
+        "visibility": _enum_value(conversation.get("visibility")),
+        "status": _enum_value(conversation.get("status")),
+        "discarded": conversation.get("discarded"),
+        "marker": _conversation_fixture_marker(conversation),
+        "structured_sha256": _sha256(_canonical_json(structured)),
+        "summary_versions": [
+            {
+                "id": str(version.get("id") or ""),
+                "source": version.get("source"),
+                "kind": version.get("kind"),
+                "is_active": version.get("is_active"),
+            }
+            for version in (conversation.get("summary_versions") or [])
+            if isinstance(version, dict)
+        ],
+    }
+    return _sha256(_canonical_json(projection))
+
+
+def _fixture_receipt(config: CanaryConfig, conversation: Mapping[str, Any]) -> dict[str, Any]:
+    active_summary_version_id = _validate_fixture_conversation(config, conversation)
+    if not active_summary_version_id:
+        raise HarnessRefusal("fixture_summary_version_missing")
+    identity = build_enrichment_identity(
+        uid=config.uid,
+        conversation_id=_fixture_conversation_id(config),
+        conversation=dict(conversation),
+    )
+    marker = _fixture_marker(config)
+    receipt_id = (
+        "hpffr_" + _sha256(f"{marker['fixture_id']}|{active_summary_version_id}|{identity.client_interaction_id}")[:32]
+    )
+    return {
+        "schema_version": FIXTURE_RECEIPT_SCHEMA,
+        "receipt_id": receipt_id,
+        "status": "prepared",
+        "content_free": True,
+        "uid_sha256": _sha256(config.uid),
+        "account_id": config.account_id,
+        "profile_id": config.profile_id,
+        "binding_id": config.binding_id,
+        "consent_epoch": config.consent_epoch,
+        "consent_policy_version": ai_consent.CURRENT_POLICY_VERSION,
+        "profile_class": "synthetic",
+        "conversation_id": _fixture_conversation_id(config),
+        "active_summary_version_id": active_summary_version_id,
+        "client_interaction_id": identity.client_interaction_id,
+        "job_id": identity.job_id,
+        "trace_id": identity.trace_id,
+        "transcript_sha256": identity.transcript_sha256,
+        "fixture_marker_sha256": _sha256(_canonical_json(marker)),
+        "fixture_shape_sha256": _fixture_shape_sha256(conversation),
+        "flags_off": True,
+        "selectors_empty": True,
+        "workflows_off": True,
+    }
+
+
+def _validate_fixture_receipt(
+    receipt: Mapping[str, Any],
+    config: CanaryConfig,
+    conversation: Mapping[str, Any] | None = None,
+) -> None:
+    expected_keys = (
+        set(_fixture_receipt(config, conversation).keys())
+        if conversation is not None
+        else {
+            "schema_version",
+            "receipt_id",
+            "status",
+            "content_free",
+            "uid_sha256",
+            "account_id",
+            "profile_id",
+            "binding_id",
+            "consent_epoch",
+            "consent_policy_version",
+            "profile_class",
+            "conversation_id",
+            "active_summary_version_id",
+            "client_interaction_id",
+            "job_id",
+            "trace_id",
+            "transcript_sha256",
+            "fixture_marker_sha256",
+            "fixture_shape_sha256",
+            "flags_off",
+            "selectors_empty",
+            "workflows_off",
+        }
+    )
+    if set(receipt) != expected_keys:
+        raise HarnessRefusal("fixture_receipt_shape_invalid")
+    if (
+        receipt.get("schema_version") != FIXTURE_RECEIPT_SCHEMA
+        or receipt.get("status") != "prepared"
+        or receipt.get("content_free") is not True
+        or receipt.get("uid_sha256") != _sha256(config.uid)
+        or receipt.get("account_id") != config.account_id
+        or receipt.get("profile_id") != config.profile_id
+        or receipt.get("binding_id") != config.binding_id
+        or receipt.get("consent_epoch") != config.consent_epoch
+        or receipt.get("consent_policy_version") != ai_consent.CURRENT_POLICY_VERSION
+        or receipt.get("profile_class") != "synthetic"
+        or receipt.get("conversation_id") != _fixture_conversation_id(config)
+        or receipt.get("flags_off") is not True
+        or receipt.get("selectors_empty") is not True
+        or receipt.get("workflows_off") is not True
+    ):
+        raise HarnessRefusal("fixture_receipt_invalid")
+    if conversation is not None and dict(receipt) != _fixture_receipt(config, conversation):
+        raise HarnessRefusal("fixture_receipt_stale")
+
+
+def _assert_protected_parent_for_new_file(
+    path: Path,
+    *,
+    approved_roots: tuple[Path, ...],
+    expected_owner_uid: int,
+) -> tuple[Path, str]:
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise HarnessRefusal("fixture_receipt_path_invalid")
+    try:
+        parent = path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise HarnessRefusal("fixture_receipt_parent_invalid") from exc
+    if path.parent.is_symlink() or not parent.is_dir():
+        raise HarnessRefusal("fixture_receipt_parent_invalid")
+    if not any(parent.is_relative_to(root.resolve()) for root in approved_roots):
+        raise HarnessRefusal("fixture_receipt_root_refused")
+    metadata = parent.stat()
+    if metadata.st_uid != expected_owner_uid or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise HarnessRefusal("fixture_receipt_parent_metadata_refused")
+    if os.geteuid() != expected_owner_uid:
+        raise HarnessRefusal("root_required")
+    return parent, path.name
+
+
+def _write_fixture_receipt(
+    path: Path,
+    receipt: Mapping[str, Any],
+    *,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> None:
+    parent, filename = _assert_protected_parent_for_new_file(
+        path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    directory_fd = os.open(parent, directory_flags)
+    try:
+        try:
+            file_fd = os.open(filename, file_flags, 0o400, dir_fd=directory_fd)
+        except FileExistsError as exc:
+            raise HarnessRefusal("fixture_receipt_exists") from exc
+        try:
+            os.fchmod(file_fd, 0o400)
+            payload = _canonical_json(dict(receipt)) + b"\n"
+            with os.fdopen(file_fd, "wb", closefd=False) as output:
+                output.write(payload)
+                output.flush()
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    _assert_protected_file(path, approved_roots=approved_roots, expected_owner_uid=expected_owner_uid)
+
+
+def _load_fixture_receipt(
+    path: Path,
+    *,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    protected = _assert_protected_file(
+        path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    try:
+        value = json.loads(protected.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HarnessRefusal("fixture_receipt_invalid") from exc
+    if not isinstance(value, dict):
+        raise HarnessRefusal("fixture_receipt_invalid")
+    return value
+
+
+def _remove_fixture_receipt(
+    path: Path,
+    *,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> None:
+    protected = _assert_protected_file(
+        path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    parent, filename = _assert_protected_parent_for_new_file(
+        protected,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(parent, flags)
+    try:
+        os.unlink(filename, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+async def _fixture_preflight(
+    config: CanaryConfig,
+    off_receipt: Mapping[str, Any],
+    backend: FixtureBackend,
+) -> None:
+    _validate_off_receipt(off_receipt, config)
+    _assert_fixture_environment_off()
+    _require_firebase_subject(_resolve_env_secret(config.backend_auth_ref), config.uid)
+    authority = await backend.authority(config)
+    _assert_fixture_authority(config, authority)
+
+
+def _fixture_public_result(receipt: Mapping[str, Any], *, status: str, idempotent: bool) -> dict[str, Any]:
+    return {
+        "schema_version": FIXTURE_RECEIPT_SCHEMA,
+        "receipt_id": receipt["receipt_id"],
+        "status": status,
+        "content_free": True,
+        "idempotent": idempotent,
+        "conversation_id": receipt["conversation_id"],
+        "active_summary_version_id": receipt["active_summary_version_id"],
+        "client_interaction_id": receipt["client_interaction_id"],
+        "job_id": receipt["job_id"],
+        "transcript_sha256": receipt["transcript_sha256"],
+        "fixture_shape_sha256": receipt["fixture_shape_sha256"],
+    }
+
+
+async def fixture_prepare(
+    config: CanaryConfig,
+    *,
+    off_receipt: Mapping[str, Any],
+    receipt_path: Path,
+    backend: FixtureBackend,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    await _fixture_preflight(config, off_receipt, backend)
+    conversation_id = _fixture_conversation_id(config)
+    try:
+        conversation = backend.get_conversation(config.uid, conversation_id)
+    except Exception as exc:
+        raise HarnessRefusal("fixture_conversation_read_failed") from exc
+    existed = conversation is not None
+    if conversation is None:
+        try:
+            backend.put_conversation(config.uid, _build_fixture_conversation(config))
+            conversation = backend.get_conversation(config.uid, conversation_id)
+        except Exception as exc:
+            raise HarnessRefusal("fixture_conversation_write_failed") from exc
+    if not isinstance(conversation, dict):
+        raise HarnessRefusal("fixture_conversation_write_unconfirmed")
+    _validate_fixture_conversation(config, conversation)
+    try:
+        summary_result = backend.ensure_summary_version(config.uid, conversation_id)
+    except Exception as exc:
+        raise HarnessRefusal("fixture_summary_version_failed") from exc
+    if summary_result.get("status") != "ready":
+        raise HarnessRefusal("fixture_summary_version_failed")
+    try:
+        conversation = backend.get_conversation(config.uid, conversation_id)
+    except Exception as exc:
+        raise HarnessRefusal("fixture_conversation_read_failed") from exc
+    if not isinstance(conversation, dict):
+        raise HarnessRefusal("fixture_conversation_write_unconfirmed")
+    receipt = _fixture_receipt(config, conversation)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        stored = _load_fixture_receipt(
+            receipt_path,
+            approved_roots=approved_roots,
+            expected_owner_uid=expected_owner_uid,
+        )
+        _validate_fixture_receipt(stored, config, conversation)
+        return _fixture_public_result(stored, status="prepared", idempotent=True)
+    _write_fixture_receipt(
+        receipt_path,
+        receipt,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    return _fixture_public_result(receipt, status="prepared", idempotent=existed)
+
+
+async def fixture_show(
+    config: CanaryConfig,
+    *,
+    off_receipt: Mapping[str, Any],
+    receipt_path: Path,
+    backend: FixtureBackend,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    await _fixture_preflight(config, off_receipt, backend)
+    receipt = _load_fixture_receipt(
+        receipt_path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    try:
+        conversation = backend.get_conversation(config.uid, _fixture_conversation_id(config))
+    except Exception as exc:
+        raise HarnessRefusal("fixture_conversation_read_failed") from exc
+    if not isinstance(conversation, dict):
+        raise HarnessRefusal("fixture_conversation_missing")
+    _validate_fixture_ownership(config, conversation)
+    current_identity = build_enrichment_identity(
+        uid=config.uid,
+        conversation_id=_fixture_conversation_id(config),
+        conversation=conversation,
+    )
+    if current_identity.transcript_sha256 != receipt.get("transcript_sha256"):
+        raise HarnessRefusal("fixture_transcript_drift")
+    try:
+        _validate_fixture_receipt(receipt, config, conversation)
+    except HarnessRefusal as exc:
+        if exc.code not in {
+            "fixture_conversation_mismatch",
+            "fixture_summary_version_mismatch",
+            "fixture_receipt_stale",
+        }:
+            raise
+        _validate_fixture_receipt(receipt, config)
+        return _fixture_public_result(receipt, status="used", idempotent=True)
+    return _fixture_public_result(receipt, status="ready", idempotent=True)
+
+
+async def fixture_cleanup(
+    config: CanaryConfig,
+    *,
+    off_receipt: Mapping[str, Any],
+    receipt_path: Path,
+    confirm_conversation_id: str,
+    backend: FixtureBackend,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    await _fixture_preflight(config, off_receipt, backend)
+    conversation_id = _fixture_conversation_id(config)
+    if confirm_conversation_id != conversation_id:
+        raise HarnessRefusal("fixture_cleanup_confirmation_mismatch")
+    receipt = _load_fixture_receipt(
+        receipt_path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    _validate_fixture_receipt(receipt, config)
+    try:
+        conversation = backend.get_conversation(config.uid, conversation_id)
+    except Exception as exc:
+        raise HarnessRefusal("fixture_conversation_read_failed") from exc
+    if conversation is not None:
+        if not isinstance(conversation, dict):
+            raise HarnessRefusal("fixture_conversation_mismatch")
+        _validate_fixture_ownership(config, conversation)
+    try:
+        backend.delete_vector(config.uid, conversation_id)
+        if backend.vector_exists(config.uid, conversation_id):
+            raise HarnessRefusal("fixture_vector_delete_unconfirmed")
+        if conversation is not None:
+            backend.delete_conversation(config.uid, conversation_id)
+        if backend.get_conversation(config.uid, conversation_id) is not None:
+            raise HarnessRefusal("fixture_conversation_delete_unconfirmed")
+    except HarnessRefusal:
+        raise
+    except Exception as exc:
+        raise HarnessRefusal("fixture_cleanup_failed") from exc
+    _remove_fixture_receipt(
+        receipt_path,
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
+    return {
+        "schema_version": FIXTURE_RECEIPT_SCHEMA,
+        "receipt_id": receipt["receipt_id"],
+        "status": "cleaned",
+        "content_free": True,
+        "conversation_id": conversation_id,
+        "conversation_absent": True,
+        "vector_absent": True,
+        "receipt_absent": not receipt_path.exists(),
+    }
+
+
 def _exit_code(report: HarnessReport) -> int:
     values = set(report.verdicts.values())
     if "FAIL" in values:
@@ -1246,9 +1958,41 @@ async def _main() -> int:
     cleanup_parser.add_argument("--config", required=True)
     cleanup_parser.add_argument("--off-receipt", required=True)
     cleanup_parser.add_argument("--confirm-uid", required=True)
+    fixture_prepare_parser = subparsers.add_parser("fixture-prepare")
+    fixture_prepare_parser.add_argument("--config", required=True)
+    fixture_prepare_parser.add_argument("--off-receipt", required=True)
+    fixture_prepare_parser.add_argument("--receipt-file", required=True)
+    fixture_show_parser = subparsers.add_parser("fixture-show")
+    fixture_show_parser.add_argument("--config", required=True)
+    fixture_show_parser.add_argument("--off-receipt", required=True)
+    fixture_show_parser.add_argument("--receipt-file", required=True)
+    fixture_cleanup_parser = subparsers.add_parser("fixture-cleanup")
+    fixture_cleanup_parser.add_argument("--config", required=True)
+    fixture_cleanup_parser.add_argument("--off-receipt", required=True)
+    fixture_cleanup_parser.add_argument("--receipt-file", required=True)
+    fixture_cleanup_parser.add_argument("--confirm-conversation-id", required=True)
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.command.startswith("fixture-"):
+        fixture_backend = LiveFixtureBackend()
+        fixture_args = {
+            "off_receipt": load_off_receipt(args.off_receipt),
+            "receipt_path": Path(args.receipt_file),
+            "backend": fixture_backend,
+        }
+        if args.command == "fixture-prepare":
+            result = await fixture_prepare(config, **fixture_args)
+        elif args.command == "fixture-show":
+            result = await fixture_show(config, **fixture_args)
+        else:
+            result = await fixture_cleanup(
+                config,
+                confirm_conversation_id=args.confirm_conversation_id,
+                **fixture_args,
+            )
+        print(json.dumps(result, sort_keys=True))
+        return 0
     adapter = LiveCanaryAdapter(config)
     if args.command == "run":
         report = await run_harness(config, adapter)
