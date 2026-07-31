@@ -62,6 +62,118 @@ def _config():
     return canary.CanaryConfig.from_mapping(_config_mapping())
 
 
+def _fixture_config():
+    raw = _config_mapping()
+    raw["selectors"]["profile_id"] = raw["selectors"]["account_id"]
+    return canary.CanaryConfig.from_mapping(raw)
+
+
+def _token_for(uid):
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": uid}).encode()).decode().rstrip("=")
+    return f"header.{payload}.signature-padding-that-keeps-the-token-long"
+
+
+def _fixture_authority(config):
+    return {
+        "user_id": config.account_id,
+        "omi_uid": config.uid,
+        "user_status": "ACTIVE",
+        "profile_class": "synthetic",
+        "binding_id": config.binding_id,
+        "binding_user_id": config.account_id,
+        "account_user_id": config.account_id,
+        "profile_user_id": config.profile_id,
+        "provider": "hermes_cloud",
+        "binding_status": "internal_canary",
+        "health_state": "healthy",
+        "active": True,
+        "expected_model": config.expected_model,
+        "decision": "granted",
+        "consent_profile_binding_id": canary.ai_consent.derive_profile_binding_id(
+            account_uid=config.uid,
+            profile_uid=config.uid,
+        ),
+        "policy_version": canary.ai_consent.CURRENT_POLICY_VERSION,
+        "processor_set_hash": canary.ai_consent.CURRENT_PROCESSOR_SET_HASH,
+        "scope_version": canary.ai_consent.CURRENT_SCOPE_VERSION,
+        "scope_hash": canary.ai_consent.CURRENT_SCOPE_HASH,
+        "authority_epoch": config.consent_epoch,
+        "entitlement_status": "active",
+        "entitlement_authority_epoch": config.consent_epoch,
+        "transcript_target_ready": True,
+    }
+
+
+class FakeFixtureStore:
+    def __init__(self, *, authority=None, authority_error=None):
+        self.authority = authority
+        self.authority_error = authority_error
+        self.conversations = {}
+        self.vectors = set()
+        self.authority_checks = 0
+        self.create_calls = 0
+        self.summary_calls = 0
+        self.delete_calls = 0
+        self.vector_delete_calls = 0
+
+    async def assert_prepare_authority(self, config):
+        self.authority_checks += 1
+        if self.authority_error:
+            raise canary.HarnessRefusal(self.authority_error)
+        if self.authority is not None:
+            canary._validate_fixture_authority(config, self.authority)
+
+    async def get_conversation(self, uid, conversation_id):
+        value = self.conversations.get((uid, conversation_id))
+        return json.loads(json.dumps(value, default=str)) if value is not None else None
+
+    async def create_conversation(self, uid, conversation):
+        self.create_calls += 1
+        self.conversations[(uid, conversation.id)] = conversation.model_dump()
+
+    async def ensure_summary_version(self, uid, conversation_id):
+        self.summary_calls += 1
+        conversation = self.conversations[(uid, conversation_id)]
+        if not conversation.get("active_summary_version_id"):
+            version_id = "fixture-summary-version"
+            conversation.update(
+                {
+                    "summary_versions": [
+                        {
+                            "id": version_id,
+                            "created_at": conversation["created_at"],
+                            "source": "legacy",
+                            "kind": "legacy_current",
+                            "title": conversation["structured"]["title"],
+                            "overview": conversation["structured"]["overview"],
+                            "emoji": conversation["structured"]["emoji"],
+                            "category": conversation["structured"]["category"],
+                            "correction_id": None,
+                            "based_on_version_id": None,
+                            "is_active": True,
+                        }
+                    ],
+                    "active_summary_version_id": version_id,
+                }
+            )
+        return {
+            "status": "ready",
+            "active_summary_version_id": conversation["active_summary_version_id"],
+            "conversation": conversation,
+        }
+
+    async def delete_conversation(self, uid, conversation_id):
+        self.delete_calls += 1
+        self.conversations.pop((uid, conversation_id), None)
+
+    async def delete_vector(self, uid, conversation_id):
+        self.vector_delete_calls += 1
+        self.vectors.discard((uid, conversation_id))
+
+    async def vector_exists(self, uid, conversation_id):
+        return (uid, conversation_id) in self.vectors
+
+
 class FakeAdapter:
     def __init__(self, config):
         self.config = config
@@ -363,9 +475,8 @@ def test_callback_fixture_matches_ella_callback_v1_and_requires_outcome():
     }
 
 
-@pytest.mark.parametrize(
-    ("mutator", "code"),
-    (
+def test_config_rejects_real_identity_session_drift_urls_and_literal_secrets():
+    cases = (
         (
             lambda raw: raw["selectors"].update(uid="realcryptoplato"),
             "synthetic_uid_required",
@@ -388,14 +499,13 @@ def test_callback_fixture_matches_ella_callback_v1_and_requires_outcome():
             lambda raw: raw["broker"].update(service_token_ref="literal-secret"),
             "broker_service_token_ref_invalid",
         ),
-    ),
-)
-def test_config_rejects_real_identity_session_drift_urls_and_literal_secrets(mutator, code):
-    raw = _config_mapping()
-    mutator(raw)
+    )
 
-    with pytest.raises((canary.HarnessRefusal, canary.ProvisioningError), match=code):
-        canary.CanaryConfig.from_mapping(raw)
+    for mutator, code in cases:
+        raw = _config_mapping()
+        mutator(raw)
+        with pytest.raises((canary.HarnessRefusal, canary.ProvisioningError), match=code):
+            canary.CanaryConfig.from_mapping(raw)
 
 
 def test_protected_config_and_off_receipt_require_exact_owner_modes(tmp_path):
@@ -468,3 +578,128 @@ def test_missing_optional_live_surface_reports_not_tested_not_pass():
     assert memory.status == "NOT TESTED"
     assert report.verdicts["profile memory pack"] == "NOT TESTED"
     assert canary._exit_code(report) == 2
+
+
+def test_fixture_prepare_creates_one_synthetic_conversation_and_production_identities(monkeypatch):
+    config = _fixture_config()
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(config.uid))
+    store = FakeFixtureStore()
+
+    receipt = asyncio.run(canary.prepare_fixture(config, store))
+    conversation = store.conversations[(config.uid, receipt["conversation_id"])]
+    production_identity = canary.build_enrichment_identity(
+        uid=config.uid,
+        conversation_id=receipt["conversation_id"],
+        conversation=conversation,
+    )
+
+    assert store.authority_checks == 1
+    assert store.create_calls == 1
+    assert len(store.conversations) == 1
+    assert conversation["source"].value == "external_integration"
+    assert conversation["visibility"].value == "private"
+    assert conversation["status"].value == "completed"
+    assert conversation["discarded"] is False
+    assert conversation.get("enrichment_state") is None
+    assert receipt["active_summary_version_id"] == conversation["active_summary_version_id"]
+    assert receipt["transcript_sha256"] == production_identity.transcript_sha256
+    assert receipt["enrichment_client_interaction_id"] == production_identity.client_interaction_id
+    assert receipt["enrichment_job_id"] == production_identity.job_id
+    assert receipt["provider_calls"] == 0
+    assert receipt["enrichment_success_preseeded"] is False
+
+
+def test_fixture_prepare_refuses_real_stale_or_mismatched_owner_without_writes(monkeypatch):
+    config = _fixture_config()
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(config.uid))
+
+    mutations = (
+        lambda value: value.update(profile_class="real"),
+        lambda value: value.update(policy_version="ai-data-processors-stale"),
+        lambda value: value.update(account_user_id="99999999-9999-4999-8999-999999999999"),
+    )
+    for mutate in mutations:
+        authority = _fixture_authority(config)
+        mutate(authority)
+        store = FakeFixtureStore(authority=authority)
+        with pytest.raises(canary.HarnessRefusal, match="fixture_authority_mismatch"):
+            asyncio.run(canary.prepare_fixture(config, store))
+        assert store.create_calls == 0
+        assert store.summary_calls == 0
+        assert store.conversations == {}
+
+    real_config = canary.CanaryConfig(**{**config.__dict__, "uid": "real-user"})
+    real_store = FakeFixtureStore()
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(real_config.uid))
+    with pytest.raises(canary.HarnessRefusal, match="firebase_token_subject_mismatch"):
+        asyncio.run(canary.prepare_fixture(real_config, real_store))
+    assert real_store.authority_checks == 0
+    assert real_store.create_calls == 0
+
+
+def test_fixture_prepare_retry_is_idempotent_and_never_invokes_runtime(monkeypatch):
+    config = _fixture_config()
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(config.uid))
+    store = FakeFixtureStore()
+
+    class RefuseRuntimeConstruction:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("runtime must not be constructed")
+
+    monkeypatch.setattr(canary, "LiveCanaryAdapter", RefuseRuntimeConstruction)
+    first = asyncio.run(canary.prepare_fixture(config, store))
+    second = asyncio.run(canary.prepare_fixture(config, store))
+
+    assert first == second
+    assert store.create_calls == 1
+    assert store.summary_calls == 2
+    assert len(store.conversations) == 1
+
+
+def test_fixture_show_and_cleanup_are_content_free_and_exact_id_only(monkeypatch):
+    config = _fixture_config()
+    monkeypatch.setenv("ELLA_CANARY_FIREBASE_ID_TOKEN", _token_for(config.uid))
+    store = FakeFixtureStore()
+    receipt = asyncio.run(canary.prepare_fixture(config, store))
+    key = (config.uid, receipt["conversation_id"])
+    store.vectors.add(key)
+
+    shown = asyncio.run(canary.show_fixture(config, receipt, store))
+    assert shown == receipt
+    rendered = json.dumps(shown, sort_keys=True)
+    assert "Synthetic product-fit fixture turn" not in rendered
+    assert "Synthetic data for" not in rendered
+
+    with pytest.raises(canary.HarnessRefusal, match="fixture_cleanup_confirmation_mismatch"):
+        asyncio.run(
+            canary.cleanup_fixture(
+                config,
+                receipt,
+                store,
+                confirm_conversation_id="wrong-conversation",
+            )
+        )
+    assert store.delete_calls == 0
+    assert store.vector_delete_calls == 0
+
+    cleaned = asyncio.run(
+        canary.cleanup_fixture(
+            config,
+            receipt,
+            store,
+            confirm_conversation_id=receipt["conversation_id"],
+        )
+    )
+    assert cleaned == {
+        "schema_version": canary.FIXTURE_SCHEMA,
+        "status": "cleaned",
+        "uid_sha256": canary._sha256(config.uid),
+        "conversation_id_sha256": canary._sha256(receipt["conversation_id"]),
+        "conversation_absent": True,
+        "vector_absent": True,
+        "content_free": True,
+    }
+    assert key not in store.conversations
+    assert key not in store.vectors
+    assert store.delete_calls == 1
+    assert store.vector_delete_calls == 1
