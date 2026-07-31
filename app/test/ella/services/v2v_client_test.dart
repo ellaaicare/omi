@@ -184,6 +184,29 @@ void main() {
       );
     });
 
+    test('daily card scope sends only the approved identifier and integer version', () {
+      const scope = V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3);
+
+      final body = V2VClient.buildSessionRequestBody(
+        uid: 'firebase-user-1',
+        provider: 'gemini-native-live',
+        includeUid: false,
+        sessionScope: scope,
+      );
+
+      expect(body['session_scope'], {
+        'kind': 'daily_card',
+        'card_id': 'today-card-42',
+        'expected_version': 3,
+      });
+      expect(body, isNot(contains('uid')));
+      expect(body, isNot(contains('headline')));
+      expect(body, isNot(contains('body')));
+      expect(body, isNot(contains('spoken_text')));
+      expect(body, isNot(contains('source_refs')));
+      expect(body, isNot(contains('system_prompt')));
+    });
+
     test('accepts only a matching identifier-only resolved scope', () {
       const requested = V2VSessionScope.memory(
         conversationId: 'conversation-42',
@@ -258,6 +281,12 @@ void main() {
       expect(EllaVoiceChatPage.shouldInjectVoiceTurns(null), isTrue);
       expect(
         EllaVoiceChatPage.shouldInjectVoiceTurns(const V2VSessionScope.memory(conversationId: 'conversation-42')),
+        isFalse,
+      );
+      expect(
+        EllaVoiceChatPage.shouldInjectVoiceTurns(
+          const V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3),
+        ),
         isFalse,
       );
     });

@@ -17078,6 +17078,54 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Demo preview — voice is not active'**
   String get ellaVoiceDemoPreview;
+
+  /// Neutral eyebrow for a Today card that is not ready yet
+  ///
+  /// In en, this message translates to:
+  /// **'FOR YOU TODAY'**
+  String get todayCardPreparingEyebrow;
+
+  /// Headline while the Today card is being prepared
+  ///
+  /// In en, this message translates to:
+  /// **'Ella is putting something together for you.'**
+  String get todayCardPreparingHeadline;
+
+  /// Retry guidance while the Today card is being prepared
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down in a little while to check again.'**
+  String get todayCardPreparingBody;
+
+  /// Welcome headline for a new user without enough history for a Today card
+  ///
+  /// In en, this message translates to:
+  /// **'What matters to you?'**
+  String get todayCardNewUserHeadline;
+
+  /// Welcome body for a new user without enough history for a Today card
+  ///
+  /// In en, this message translates to:
+  /// **'Tell Ella about a person, place, or interest you would like to talk about.'**
+  String get todayCardNewUserBody;
+
+  /// Headline when the Today card service is temporarily unavailable
+  ///
+  /// In en, this message translates to:
+  /// **'Ella could not refresh this just now.'**
+  String get todayCardDegradedHeadline;
+
+  /// Retry guidance when no Today card can be shown
+  ///
+  /// In en, this message translates to:
+  /// **'Pull down to try again.'**
+  String get todayCardDegradedBody;
+
+  /// Status shown when the last valid Today card is displayed during a refresh problem
+  ///
+  /// In en, this message translates to:
+  /// **'Showing the last item Ella saved for you.'**
+  String get todayCardSavedStatus;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

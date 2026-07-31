@@ -18,22 +18,41 @@ import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
-enum V2VSessionScopeKind { memory }
+enum V2VSessionScopeKind { memory, dailyCard }
 
 @immutable
 class V2VSessionScope {
   const V2VSessionScope.memory({required this.conversationId, this.expectedActiveSummaryVersionId})
-      : kind = V2VSessionScopeKind.memory;
+      : assert(conversationId != ''),
+        kind = V2VSessionScopeKind.memory,
+        cardId = '',
+        expectedVersion = 0;
+
+  const V2VSessionScope.dailyCard({required this.cardId, required this.expectedVersion})
+      : assert(cardId != ''),
+        assert(expectedVersion > 0),
+        kind = V2VSessionScopeKind.dailyCard,
+        conversationId = '',
+        expectedActiveSummaryVersionId = null;
 
   final V2VSessionScopeKind kind;
   final String conversationId;
   final String? expectedActiveSummaryVersionId;
+  final String cardId;
+  final int expectedVersion;
 
-  Map<String, dynamic> toJson() => {
-        'kind': kind.name,
-        'conversation_id': conversationId,
-        if (expectedActiveSummaryVersionId?.isNotEmpty == true)
-          'expected_active_summary_version_id': expectedActiveSummaryVersionId,
+  Map<String, dynamic> toJson() => switch (kind) {
+        V2VSessionScopeKind.memory => {
+            'kind': kind.name,
+            'conversation_id': conversationId,
+            if (expectedActiveSummaryVersionId?.isNotEmpty == true)
+              'expected_active_summary_version_id': expectedActiveSummaryVersionId,
+          },
+        V2VSessionScopeKind.dailyCard => {
+            'kind': 'daily_card',
+            'card_id': cardId,
+            'expected_version': expectedVersion,
+          },
       };
 
   V2VSessionScope withExpectedActiveSummaryVersionId(String? value) =>
@@ -186,7 +205,7 @@ class V2VConnectionReceipt {
         'stage': stage.name,
         if (sessionId.isNotEmpty) 'session_id': sessionId,
         if (sessionScope != null) 'scope_kind': sessionScope!.kind.name,
-        if (sessionScope != null) 'scope_conversation_id': sessionScope!.conversationId,
+        if (sessionScope?.conversationId.isNotEmpty == true) 'scope_conversation_id': sessionScope!.conversationId,
         if (httpStatus != null) 'http_status': httpStatus,
         if (errorCode.isNotEmpty) 'error_code': errorCode,
       };

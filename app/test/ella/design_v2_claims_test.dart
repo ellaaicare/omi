@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/pages/home/today_page.dart';
 
@@ -65,10 +66,20 @@ void main() {
     expect(shouldShowMemoriesLoading(hasLoaded: true, isLoading: true, hasMemories: true), isFalse);
   });
 
-  test('read aloud is offered only for a loaded daily note', () {
-    expect(canReadDailyNote(loading: true, text: 'A real note'), isFalse);
-    expect(canReadDailyNote(loading: false, text: ''), isFalse);
-    expect(canReadDailyNote(loading: false, text: '   '), isFalse);
-    expect(canReadDailyNote(loading: false, text: 'A real note'), isTrue);
+  test('read aloud uses only a validated loaded Today card', () {
+    final card = TodayCard(
+      id: 'card-1',
+      version: 1,
+      kind: TodayCardKind.recap,
+      eyebrow: 'A NOTE FROM YESTERDAY',
+      headline: 'A good conversation',
+      body: 'You talked with Rose about the garden.',
+      generatedAt: DateTime.utc(2026, 7, 31),
+      sourceRefs: const [TodayCardSourceRef(kind: 'conversation_summary', id: 'conversation-1')],
+    );
+
+    expect(card.isValid, isTrue);
+    expect(card.textForSpeech, card.body);
+    expect(const TodayCardViewState.preparing().card, isNull);
   });
 }

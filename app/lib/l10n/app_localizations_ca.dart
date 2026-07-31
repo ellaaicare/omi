@@ -9219,4 +9219,28 @@ class AppLocalizationsCa extends AppLocalizations {
 
   @override
   String get ellaVoiceDemoPreview => 'Demo preview — voice is not active';
+
+  @override
+  String get todayCardPreparingEyebrow => 'FOR YOU TODAY';
+
+  @override
+  String get todayCardPreparingHeadline => 'Ella is putting something together for you.';
+
+  @override
+  String get todayCardPreparingBody => 'Pull down in a little while to check again.';
+
+  @override
+  String get todayCardNewUserHeadline => 'What matters to you?';
+
+  @override
+  String get todayCardNewUserBody => 'Tell Ella about a person, place, or interest you would like to talk about.';
+
+  @override
+  String get todayCardDegradedHeadline => 'Ella could not refresh this just now.';
+
+  @override
+  String get todayCardDegradedBody => 'Pull down to try again.';
+
+  @override
+  String get todayCardSavedStatus => 'Showing the last item Ella saved for you.';
 }

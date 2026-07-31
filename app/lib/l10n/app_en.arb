@@ -10607,5 +10607,37 @@
   "ellaDemoStateSessionMaximum": "Voice — conversation-time limit",
   "ellaDemoStateTechnicalFailure": "Voice — technical connection issue",
   "todayPhoneOnly": "Phone only",
-  "ellaVoiceDemoPreview": "Demo preview — voice is not active"
+  "ellaVoiceDemoPreview": "Demo preview — voice is not active",
+  "todayCardPreparingEyebrow": "FOR YOU TODAY",
+  "@todayCardPreparingEyebrow": {
+    "description": "Neutral eyebrow for a Today card that is not ready yet"
+  },
+  "todayCardPreparingHeadline": "Ella is putting something together for you.",
+  "@todayCardPreparingHeadline": {
+    "description": "Headline while the Today card is being prepared"
+  },
+  "todayCardPreparingBody": "Pull down in a little while to check again.",
+  "@todayCardPreparingBody": {
+    "description": "Retry guidance while the Today card is being prepared"
+  },
+  "todayCardNewUserHeadline": "What matters to you?",
+  "@todayCardNewUserHeadline": {
+    "description": "Welcome headline for a new user without enough history for a Today card"
+  },
+  "todayCardNewUserBody": "Tell Ella about a person, place, or interest you would like to talk about.",
+  "@todayCardNewUserBody": {
+    "description": "Welcome body for a new user without enough history for a Today card"
+  },
+  "todayCardDegradedHeadline": "Ella could not refresh this just now.",
+  "@todayCardDegradedHeadline": {
+    "description": "Headline when the Today card service is temporarily unavailable"
+  },
+  "todayCardDegradedBody": "Pull down to try again.",
+  "@todayCardDegradedBody": {
+    "description": "Retry guidance when no Today card can be shown"
+  },
+  "todayCardSavedStatus": "Showing the last item Ella saved for you.",
+  "@todayCardSavedStatus": {
+    "description": "Status shown when the last valid Today card is displayed during a refresh problem"
+  }
 }

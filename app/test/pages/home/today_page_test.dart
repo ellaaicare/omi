@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/ella/models/today_card.dart';
 import 'package:omi/pages/home/today_page.dart';
 
 void main() {
@@ -35,5 +36,24 @@ void main() {
 
     expect(item.sourceLabel, 'David');
     expect(item.toJson()['source_label'], 'David');
+  });
+
+  test('Talk about this launches with daily-card identifiers only', () {
+    final card = TodayCard(
+      id: 'today-card-42',
+      version: 3,
+      kind: TodayCardKind.memory,
+      eyebrow: 'A MEMORY FROM JUNE 12',
+      headline: 'The roses along Elm Street',
+      body: 'You enjoyed the long walk home with Rose.',
+      generatedAt: DateTime.utc(2026, 7, 31),
+      sourceRefs: const [TodayCardSourceRef(kind: 'memory', id: 'memory-1', versionId: 'v4')],
+    );
+
+    expect(TodayPage.sessionScopeFor(card).toJson(), {
+      'kind': 'daily_card',
+      'card_id': 'today-card-42',
+      'expected_version': 3,
+    });
   });
 }

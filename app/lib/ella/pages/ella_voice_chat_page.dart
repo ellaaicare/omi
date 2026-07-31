@@ -639,7 +639,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   Future<bool> _refreshMemoryScope(int startupGeneration) async {
     final currentScope = _sessionScope;
-    if (currentScope == null || !_isCurrentV2VStartup(startupGeneration)) return false;
+    if (currentScope == null ||
+        currentScope.kind != V2VSessionScopeKind.memory ||
+        !_isCurrentV2VStartup(startupGeneration)) {
+      return false;
+    }
     setState(() {
       _orbState = VoiceOrbState.processing;
       _statusText = context.l10n.memoryTalkStale;
@@ -875,7 +879,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
 
   void _notifyMemorySessionEnded(String sessionId) {
     final scope = _sessionScope;
-    if (scope == null || sessionId.isEmpty) return;
+    if (scope == null || scope.kind != V2VSessionScopeKind.memory || sessionId.isEmpty) return;
     final request = MemoryReceiptDiscoveryRequest(conversationId: scope.conversationId, sessionId: sessionId);
     if (_memorySessionNotificationKey == request.key) return;
     _memorySessionNotificationKey = request.key;
@@ -1058,6 +1062,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   void _handleMemoryReinterpretation(MemoryReinterpretationEvent event) {
     final scope = _sessionScope;
     if (scope == null ||
+        scope.kind != V2VSessionScopeKind.memory ||
         event.conversationId != scope.conversationId ||
         (_activeSessionId.isNotEmpty && event.sessionId != _activeSessionId)) {
       return;
