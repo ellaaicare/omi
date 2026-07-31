@@ -53,13 +53,16 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
+      - "backend/scripts/hermes_product_fit_canary.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
+      - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
+      - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -71,6 +74,7 @@ on:
       - "backend/tests/fixtures/hermes_binding_envelope_v1.json"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.schema.json"
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
+      - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
@@ -139,13 +143,16 @@ on:
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
+      - "backend/scripts/hermes_product_fit_canary.py"
       - "backend/scripts/hermes_cloud_shadow.py"
       - "backend/scripts/voice_canary_admin.py"
       - "backend/utils/ella/postprocess.py"
       - "backend/utils/ella/scanner_keyterms.py"
       - "backend/ella/docs/HERMES_BROKER_PROTOTYPE_RUNBOOK.md"
       - "backend/ella/docs/HERMES_CLOUD_RUNTIME_TARGETS_RUNBOOK.md"
+      - "backend/ella/docs/HERMES_PRODUCT_FIT_CANARY.md"
       - "backend/ella/docs/hermes-cloud-runtime-targets.openapi.yaml"
+      - "backend/tests/fixtures/hermes_product_fit_callback_v1.json"
       - "backend/tests/unit/test_ella_provisioning_repository.py"
       - "backend/tests/unit/test_authority_advisory_lock.py"
       - "backend/tests/unit/test_authority_writer_guard.py"
@@ -157,6 +164,7 @@ on:
       - "backend/tests/fixtures/hermes_binding_envelope_v1.json"
       - "backend/tests/fixtures/hermes_binding_envelope_v1.schema.json"
       - "backend/tests/unit/test_hermes_binding_envelope_contract.py"
+      - "backend/tests/unit/test_hermes_product_fit_canary.py"
       - "backend/tests/unit/test_ella_ai_consent.py"
       - "backend/tests/unit/test_ella_ai_consent_route_gates.py"
       - "backend/tests/unit/test_ella_runtime_route_isolation.py"
@@ -269,6 +277,7 @@ jobs:
           ella/services/voice_honcho.py
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
+          scripts/hermes_product_fit_canary.py
           scripts/hermes_cloud_shadow.py
           scripts/voice_canary_admin.py
           utils/ella/postprocess.py
@@ -296,6 +305,7 @@ jobs:
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
           scripts/voice_canary_admin.py
+          scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
           tests/unit/test_authority_advisory_lock.py
           tests/unit/test_authority_writer_guard.py
@@ -310,6 +320,7 @@ jobs:
           tests/unit/test_hermes_cloud_photon.py
           tests/unit/test_hermes_broker_prototype.py
           tests/unit/test_hermes_binding_envelope_contract.py
+          tests/unit/test_hermes_product_fit_canary.py
           tests/unit/test_hermes_cloud_provider.py
           tests/unit/test_hermes_cloud_runtime.py
           tests/unit/test_hermes_cloud_staged_attestation.py
@@ -334,6 +345,7 @@ jobs:
               tests/unit/test_hermes_cloud_policy.py \
               tests/unit/test_hermes_broker_prototype.py \
               tests/unit/test_hermes_binding_envelope_contract.py \
+              tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_hermes_cloud_photon.py \
               tests/unit/test_hermes_cloud_provider.py \
               tests/unit/test_hermes_cloud_provisioning.py \
@@ -356,12 +368,16 @@ jobs:
           required_ids=(
             "tests/unit/test_hermes_binding_envelope_contract.py::test_hermes_binding_envelope_v1_identity_and_content_free_shape"
             "tests/unit/test_hermes_binding_envelope_contract.py::test_omi_request_uses_exact_stock_contract_from_shared_envelope"
+            "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
+            "tests/unit/test_hermes_product_fit_canary.py::test_replay_errors_fail_closed_for_outcome_correlation_session_timeout_and_ordering"
+            "tests/unit/test_hermes_product_fit_canary.py::test_cleanup_requires_content_free_all_off_receipt_for_exact_synthetic_uid"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_hermes_binding_envelope_contract.py \
+              tests/unit/test_hermes_product_fit_canary.py \
               tests/unit/test_ella_runtime_route_isolation.py \
               tests/postgres/test_hermes_cloud_pool_postgres.py |
               sed '/^$/d'
@@ -369,6 +385,10 @@ jobs:
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
           done
+          test "$(
+            pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
+              grep -c '::'
+          )" -eq 15
           test "$collected" -ge 431
           pytest \
             tests/unit/test_ella_ai_consent.py \
@@ -378,6 +398,7 @@ jobs:
             tests/unit/test_hermes_cloud_policy.py \
             tests/unit/test_hermes_broker_prototype.py \
             tests/unit/test_hermes_binding_envelope_contract.py \
+            tests/unit/test_hermes_product_fit_canary.py \
             tests/unit/test_hermes_cloud_photon.py \
             tests/unit/test_hermes_cloud_provider.py \
             tests/unit/test_hermes_cloud_provisioning.py \
