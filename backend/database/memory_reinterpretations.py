@@ -207,7 +207,14 @@ class PostgresMemoryReinterpretationRepository:
         can_reinterpret = source_ref.get("can_reinterpret")
         if can_reinterpret is None:
             can_reinterpret = metadata.get("can_reinterpret")
-        if scope_kind != "memory" or can_reinterpret is not True:
+        correction_confirmed = source_ref.get("correction_confirmed")
+        if correction_confirmed is None:
+            correction_confirmed = metadata.get("correction_confirmed")
+        if (
+            scope_kind not in {"memory", "daily_card"}
+            or can_reinterpret is not True
+            or (scope_kind == "daily_card" and correction_confirmed is not True)
+        ):
             return None
 
         uid = str(completion.get("uid") or "")
@@ -221,7 +228,7 @@ class PostgresMemoryReinterpretationRepository:
         scoped_rows = [
             row
             for row in rows
-            if row.get("scope_kind") == "memory"
+            if row.get("scope_kind") == scope_kind
             and row.get("conversation_id") == conversation_id
             and row.get("active_summary_version_id") == version_id
         ]
@@ -786,9 +793,20 @@ class InMemoryMemoryReinterpretationRepository:
     async def enqueue(self, completion: dict[str, Any], rows: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
         source_ref = completion.get("source_ref") or {}
         metadata = completion.get("metadata") or {}
-        if (source_ref.get("scope_kind") or metadata.get("scope_kind")) != "memory" or (
+        scope_kind = source_ref.get("scope_kind") or metadata.get("scope_kind")
+        can_reinterpret = (
             source_ref.get("can_reinterpret") if "can_reinterpret" in source_ref else metadata.get("can_reinterpret")
-        ) is not True:
+        )
+        correction_confirmed = (
+            source_ref.get("correction_confirmed")
+            if "correction_confirmed" in source_ref
+            else metadata.get("correction_confirmed")
+        )
+        if (
+            scope_kind not in {"memory", "daily_card"}
+            or can_reinterpret is not True
+            or (scope_kind == "daily_card" and correction_confirmed is not True)
+        ):
             return None
         uid = str(completion.get("uid") or "")
         session_id = str(completion.get("session_id") or "")
@@ -799,7 +817,7 @@ class InMemoryMemoryReinterpretationRepository:
         if any(
             row.get("uid") != uid
             or row.get("session_id") != session_id
-            or row.get("scope_kind") != "memory"
+            or row.get("scope_kind") != scope_kind
             or row.get("conversation_id") != conversation_id
             or row.get("active_summary_version_id") != version_id
             for row in rows

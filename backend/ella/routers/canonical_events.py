@@ -19,6 +19,8 @@ from typing import Any, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from database.ella_postgres import get_ella_postgres_pool
+from ella.services.today_card_postgres import PostgresTodayCardRepository
 from utils.ella.time_context import annotate_event_time, build_time_context
 
 logger = logging.getLogger("ella.canonical_events")
@@ -26,23 +28,10 @@ logger = logging.getLogger("ella.canonical_events")
 DEFAULT_TIMELINE_LIMIT = 100
 MAX_TIMELINE_LIMIT = 500
 
-_pool: Optional[asyncpg.Pool] = None
-
 
 async def _get_pool() -> asyncpg.Pool:
-    """Get or create the Postgres pool used by the OMI backend patches."""
-    global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(
-            host=os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1"),
-            port=int(os.getenv("ELLA_POSTGRES_PORT", "5433")),
-            user=os.getenv("ELLA_POSTGRES_USER", "postgres"),
-            password=os.getenv("ELLA_POSTGRES_PASSWORD", "postgres"),
-            database=os.getenv("ELLA_POSTGRES_DB", "ella_ai"),
-            min_size=1,
-            max_size=10,
-        )
-    return _pool
+    """Compatibility seam for existing repository construction and tests."""
+    return await get_ella_postgres_pool()
 
 
 def _utc_now() -> datetime:
@@ -86,10 +75,10 @@ def _should_replace_existing_event(item: dict[str, Any]) -> bool:
     return item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation"
 
 
-def _is_memory_scoped_event(item: dict[str, Any]) -> bool:
+def _is_private_scoped_event(item: dict[str, Any]) -> bool:
     source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory"
+    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) in {"memory", "daily_card"}
 
 
 def _reinterpretation_enabled() -> bool:
@@ -107,7 +96,13 @@ def _completion_can_reinterpret(completion: SessionCompleteIn) -> bool:
     can_reinterpret = source_ref.get("can_reinterpret")
     if can_reinterpret is None:
         can_reinterpret = metadata.get("can_reinterpret")
-    return (source_ref.get("scope_kind") or metadata.get("scope_kind")) == "memory" and can_reinterpret is True
+    scope_kind = source_ref.get("scope_kind") or metadata.get("scope_kind")
+    if scope_kind == "memory":
+        return can_reinterpret is True
+    confirmation = source_ref.get("correction_confirmed")
+    if confirmation is None:
+        confirmation = metadata.get("correction_confirmed")
+    return scope_kind == "daily_card" and can_reinterpret is True and confirmation is True
 
 
 def _require_reinterpretation_completion_auth(
@@ -288,12 +283,13 @@ class CanonicalEventStore:
 
 
 class PostgresCanonicalEventStore(CanonicalEventStore):
-    def __init__(self, reinterpretation_repository: Any = None):
+    def __init__(self, reinterpretation_repository: Any = None, today_card_repository: Any = None):
         if reinterpretation_repository is None and _reinterpretation_enabled():
             from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository
 
             reinterpretation_repository = PostgresMemoryReinterpretationRepository(_get_pool)
         self._reinterpretation_repository = reinterpretation_repository
+        self._today_card_repository = today_card_repository or PostgresTodayCardRepository(_get_pool)
 
     async def write_batch(self, events: list[CanonicalEventIn]) -> dict[str, Any]:
         if not events:
@@ -305,6 +301,24 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             async with conn.transaction():
                 for event in events:
                     item = event.normalized()
+                    previous_summary_version = ""
+                    conversation_id = ""
+                    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                    source_ref = item.get("source_ref") if isinstance(item.get("source_ref"), dict) else {}
+                    if item.get("channel") == "omi" and metadata.get("adapter") == "omi-enriched-conversation":
+                        conversation_id = str(source_ref.get("conversation_id") or "")
+                        previous = await conn.fetchrow(
+                            """
+                            SELECT source_ref ->> 'active_summary_version_id' AS active_summary_version_id
+                            FROM canonical_events
+                            WHERE event_id = $1 AND source_identity = $2
+                            FOR UPDATE
+                            """,
+                            item["event_id"],
+                            item["source_identity"],
+                        )
+                        if previous:
+                            previous_summary_version = str(previous["active_summary_version_id"] or "")
                     conflict_clause = (
                         """
                         DO UPDATE SET
@@ -366,6 +380,21 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                             "updated": bool(row and not row["inserted"]),
                         }
                     )
+                    current_summary_version = str(source_ref.get("active_summary_version_id") or "")
+                    if (
+                        conversation_id
+                        and previous_summary_version
+                        and current_summary_version != previous_summary_version
+                    ):
+                        try:
+                            await self._today_card_repository.invalidate_source_in_connection(
+                                conn,
+                                uid=item["uid"],
+                                source_id=conversation_id,
+                                reason="source_version_changed",
+                            )
+                        except asyncpg.UndefinedTableError:
+                            logger.warning("Today-card migration missing while processing canonical source update")
 
         inserted_count = sum(1 for status in statuses if status["inserted"])
         updated_count = sum(1 for status in statuses if status.get("updated"))
@@ -473,8 +502,8 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
             "uid = $1",
             (
                 "NOT ("
-                "COALESCE(source_ref ->> 'scope_kind', '') = 'memory' "
-                "OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'"
+                "COALESCE(source_ref ->> 'scope_kind', '') IN ('memory', 'daily_card') "
+                "OR COALESCE(metadata ->> 'scope_kind', '') IN ('memory', 'daily_card')"
                 ")"
             ),
         ]
@@ -615,7 +644,7 @@ class InMemoryCanonicalEventStore(CanonicalEventStore):
                 continue
             if channel_set and event["channel"] not in channel_set:
                 continue
-            if _is_memory_scoped_event(event):
+            if _is_private_scoped_event(event):
                 continue
             events.append(event)
 

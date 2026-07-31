@@ -39,6 +39,7 @@ from utils.notifications import send_action_item_data_message
 from utils.conversations.process_conversation import process_conversation
 from utils.conversations.location import get_google_maps_location
 from utils.llm.memories import identify_category_for_memory
+from ella.services.today_card_postgres import invalidate_deleted_conversation_source
 
 router = APIRouter()
 
@@ -1004,7 +1005,7 @@ def create_conversation_from_segments(
 
 
 @router.delete("/v1/dev/user/conversations/{conversation_id}", tags=["developer"])
-def delete_conversation_endpoint(
+async def delete_conversation_endpoint(
     conversation_id: str,
     uid: str = Depends(get_uid_with_conversations_write),
 ):
@@ -1019,6 +1020,10 @@ def delete_conversation_endpoint(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    try:
+        await invalidate_deleted_conversation_source(uid, conversation_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
     conversations_db.delete_conversation(uid, conversation_id)
     return {"success": True}
 

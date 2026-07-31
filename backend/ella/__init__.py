@@ -316,6 +316,25 @@ def _register_routers(app) -> None:
     except ImportError as e:
         print(f"  ⚠️ Ella canonical events not available: {e}", flush=True)
 
+    # Canonical app-facing daily companion card and materializer.
+    try:
+        from ella.routers.canonical_events import _get_pool
+        from ella.routers.today_cards import create_today_cards_router
+        from ella.services.today_card import TodayCardMaterializer
+        from ella.services.today_card_postgres import PostgresTodayCardRepository
+
+        today_card_repository = PostgresTodayCardRepository(_get_pool)
+        app.include_router(
+            create_today_cards_router(
+                today_card_repository,
+                TodayCardMaterializer(today_card_repository),
+            ),
+            tags=["Ella Today Card"],
+        )
+        print("  🌐 /v1/ella/today-card - Canonical daily companion card", flush=True)
+    except ImportError as e:
+        print(f"  ⚠️ Ella today card not available: {e}", flush=True)
+
     # Durable post-session memory reinterpretation outbox and status API
     try:
         from database.memory_reinterpretations import PostgresMemoryReinterpretationRepository

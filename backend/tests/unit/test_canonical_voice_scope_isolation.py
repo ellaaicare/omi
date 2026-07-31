@@ -14,16 +14,21 @@ def _event(
     *,
     uid: str = "uid-a",
     conversation_id: str = "",
+    card_id: str = "",
 ) -> CanonicalEventIn:
-    scope = (
-        {
+    scope = {}
+    if conversation_id:
+        scope = {
             "scope_kind": "memory",
             "conversation_id": conversation_id,
             "active_summary_version_id": "version-1",
         }
-        if conversation_id
-        else {}
-    )
+    elif card_id:
+        scope = {
+            "scope_kind": "daily_card",
+            "card_id": card_id,
+            "card_version": 1,
+        }
     return CanonicalEventIn(
         uid=uid,
         canonical_identity=uid,
@@ -43,7 +48,7 @@ def _event(
     )
 
 
-def test_public_canonical_timeline_excludes_memory_scoped_voice_events():
+def test_public_canonical_timeline_excludes_memory_and_daily_card_scoped_voice_events():
     store = InMemoryCanonicalEventStore()
     asyncio.run(
         store.write_batch(
@@ -51,6 +56,7 @@ def test_public_canonical_timeline_excludes_memory_scoped_voice_events():
                 _event("general", "General voice turn"),
                 _event("scoped-a", "Private memory A turn", conversation_id="memory-a"),
                 _event("scoped-b", "Private memory B turn", conversation_id="memory-b"),
+                _event("daily-card", "Private daily card turn", card_id="card-a"),
             ]
         )
     )

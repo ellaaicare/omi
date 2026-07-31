@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ import httpx
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from database import voice_canary as voice_canary_db
 from database.conversations import _decrypt_conversation_data
@@ -45,6 +46,8 @@ from ella.services.ai_consent import (
 )
 from ella.services.provisioning import ProvisioningError, cloud_provisioning_enabled, rollout_enabled
 from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_bindings_enabled
+from ella.services.today_card import TodayCardState
+from ella.services.today_card_postgres import PostgresTodayCardRepository
 from ella.services.voice_canary_alerts import (
     VOICE_SPEND_ANOMALY_MICROUSD,
     send_canary_alert,
@@ -115,6 +118,15 @@ ALLOW_LEGACY_VOICE_SESSION_TOKENS = os.getenv("ELLA_ALLOW_LEGACY_VOICE_SESSION_T
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
+_SHA256_REF_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _valid_uuid_text(value: Any) -> bool:
+    try:
+        uuid.UUID(str(value or ""))
+    except ValueError:
+        return False
+    return True
 
 
 def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
@@ -138,6 +150,9 @@ class VoiceProxyPrincipal:
     scope_kind: Optional[str] = None
     conversation_id: Optional[str] = None
     active_summary_version_id: Optional[str] = None
+    card_id: Optional[str] = None
+    card_version: Optional[int] = None
+    card_evidence_hash: Optional[str] = None
     can_reinterpret: bool = False
 
 
@@ -243,18 +258,39 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         "scope_kind",
         "conversation_id",
         "active_summary_version_id",
+        "card_id",
+        "card_version",
+        "card_evidence_hash",
         "can_reinterpret",
     }
     if scope_kind is None:
         if any(key in claims for key in scope_claim_keys):
             raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
-    elif (
-        scope_kind != "memory"
-        or not str(claims.get("conversation_id") or "").strip()
-        or not isinstance(claims.get("active_summary_version_id"), str)
-        or not str(claims.get("active_summary_version_id") or "").strip()
-        or not isinstance(claims.get("can_reinterpret"), bool)
-    ):
+    elif scope_kind == "memory":
+        if (
+            not str(claims.get("conversation_id") or "").strip()
+            or not isinstance(claims.get("active_summary_version_id"), str)
+            or not str(claims.get("active_summary_version_id") or "").strip()
+            or not isinstance(claims.get("can_reinterpret"), bool)
+            or any(key in claims for key in ("card_id", "card_version", "card_evidence_hash"))
+        ):
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+    elif scope_kind == "daily_card":
+        correction_conversation_id = str(claims.get("conversation_id") or "").strip()
+        correction_version_id = str(claims.get("active_summary_version_id") or "").strip()
+        can_reinterpret = claims.get("can_reinterpret")
+        if (
+            not _valid_uuid_text(claims.get("card_id"))
+            or not isinstance(claims.get("card_version"), int)
+            or claims.get("card_version", 0) < 1
+            or _SHA256_REF_PATTERN.fullmatch(str(claims.get("card_evidence_hash") or "")) is None
+            or not isinstance(can_reinterpret, bool)
+            or bool(correction_conversation_id) != bool(correction_version_id)
+            or (can_reinterpret is True and not correction_conversation_id)
+            or (can_reinterpret is False and bool(correction_conversation_id))
+        ):
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+    else:
         raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
 
     assert_current_ai_consent(subject)
@@ -268,16 +304,17 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
         correlation_id=str(claims["correlation_id"]),
         scope_kind=scope_kind,
         conversation_id=str(claims.get("conversation_id") or "").strip() or None,
-        active_summary_version_id=(str(claims.get("active_summary_version_id")) if scope_kind == "memory" else None),
+        active_summary_version_id=str(claims.get("active_summary_version_id") or "").strip() or None,
+        card_id=str(claims.get("card_id") or "").strip() or None,
+        card_version=claims.get("card_version") if scope_kind == "daily_card" else None,
+        card_evidence_hash=str(claims.get("card_evidence_hash") or "").strip() or None,
         can_reinterpret=claims.get("can_reinterpret") is True,
     )
 
 
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
-    bindings_enabled = runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(
-        principal.uid
-    )
+    bindings_enabled = runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(principal.uid)
     voice_enabled = isolated_voice_routing_enabled(principal.uid)
     if bindings_enabled != voice_enabled:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
@@ -456,11 +493,33 @@ def _memory_scoped_voice_provider_mode_error(provider: str, voice_mode: str) -> 
 
 
 class VoiceSessionScope(BaseModel):
-    """Non-authoritative client scope; all memory content is resolved server-side."""
+    """Non-authoritative client scope; all content is resolved server-side."""
 
-    kind: Literal["memory"]
-    conversation_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["memory", "daily_card"]
+    conversation_id: Optional[str] = None
     expected_active_summary_version_id: Optional[str] = None
+    card_id: Optional[uuid.UUID] = None
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_scope_shape(self):
+        if self.kind == "memory":
+            if (
+                not str(self.conversation_id or "").strip()
+                or self.card_id is not None
+                or self.expected_version is not None
+            ):
+                raise ValueError("memory scope requires conversation_id only")
+        elif (
+            not str(self.card_id or "").strip()
+            or self.expected_version is None
+            or self.conversation_id is not None
+            or self.expected_active_summary_version_id is not None
+        ):
+            raise ValueError("daily_card scope requires card_id and expected_version only")
+        return self
 
 
 class VoiceSessionRequest(BaseModel):
@@ -677,9 +736,85 @@ async def _resolve_voice_memory_scope(uid: str, scope: VoiceSessionScope) -> dic
     return resolved
 
 
-async def _resolve_principal_memory_scope(principal: VoiceProxyPrincipal) -> Optional[dict[str, Any]]:
-    if principal.scope_kind != "memory":
+async def _resolve_voice_daily_card_scope(uid: str, scope: VoiceSessionScope) -> dict[str, Any]:
+    repository = PostgresTodayCardRepository(_get_pool)
+    try:
+        card = await repository.get_by_id(uid, str(scope.card_id or ""))
+        if card is None:
+            raise HTTPException(status_code=404, detail={"code": "voice_session_scope_not_found"})
+        if card.version != scope.expected_version:
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
+        if card.state not in {TodayCardState.ready, TodayCardState.new_user} or card.content is None:
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_not_ready"})
+        if not card.evidence_hash:
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_invalid"})
+        if not await repository.sources_are_current(card):
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "[FLOW:VOICE-SCOPE] daily card lookup unavailable uid=%s card=%s error=%s",
+            uid,
+            scope.card_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail={"code": "voice_session_scope_unavailable"}) from exc
+
+    correction_targets = {
+        (source.conversation_id, source.source_version_id)
+        for source in card.source_refs
+        if source.source_type == "conversation_summary" and source.conversation_id and source.source_version_id
+    }
+    can_reinterpret = len(correction_targets) == 1
+    conversation_id = ""
+    active_version_id = ""
+    if can_reinterpret:
+        conversation_id, active_version_id = next(iter(correction_targets))
+    return {
+        "kind": "daily_card",
+        "card_id": card.card_id,
+        "card_version": card.version,
+        "card_evidence_hash": card.evidence_hash,
+        "conversation_id": conversation_id,
+        "active_summary_version_id": active_version_id,
+        "can_reinterpret": can_reinterpret,
+        "title": card.content.headline,
+        "overview": card.content.body,
+        "occurred_at": card.generated_at.isoformat() if card.generated_at else "",
+        "topic_query": f"{card.content.headline} {card.content.body}"[:1200],
+        "instruction": (
+            "This is a daily-card-scoped conversation. Treat the selected card as the controlling "
+            "subject, ask one short low-pressure question at a time, and never quiz the user. "
+            "Ordinary reminiscence must not change memory. A correction can proceed only when the "
+            "single underlying source is unambiguous and the user explicitly confirms the change."
+        ),
+    }
+
+
+async def _resolve_principal_session_scope(principal: VoiceProxyPrincipal) -> Optional[dict[str, Any]]:
+    if principal.scope_kind is None:
         return None
+    if principal.scope_kind != "memory":
+        if principal.scope_kind != "daily_card":
+            raise HTTPException(status_code=401, detail={"code": "voice_session_invalid"})
+        resolved = await _resolve_voice_daily_card_scope(
+            principal.uid,
+            VoiceSessionScope(
+                kind="daily_card",
+                card_id=principal.card_id,
+                expected_version=principal.card_version,
+            ),
+        )
+        if (
+            resolved["card_evidence_hash"] != principal.card_evidence_hash
+            or resolved["can_reinterpret"] != principal.can_reinterpret
+            or (resolved.get("conversation_id") or None) != principal.conversation_id
+            or (resolved.get("active_summary_version_id") or None) != principal.active_summary_version_id
+        ):
+            raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
+        return resolved
+
     resolved = await _resolve_voice_memory_scope(
         principal.uid,
         VoiceSessionScope(
@@ -691,6 +826,11 @@ async def _resolve_principal_memory_scope(principal: VoiceProxyPrincipal) -> Opt
     if resolved["can_reinterpret"] != principal.can_reinterpret:
         raise HTTPException(status_code=409, detail={"code": "voice_session_scope_stale"})
     return resolved
+
+
+async def _resolve_principal_memory_scope(principal: VoiceProxyPrincipal) -> Optional[dict[str, Any]]:
+    """Backward-compatible name used by existing proxy/auth tests."""
+    return await _resolve_principal_session_scope(principal)
 
 
 class TtsRequest(BaseModel):
@@ -813,17 +953,52 @@ def create_session_token(
         "iss": "omi-backend",
     }
     if session_scope:
+        scope_kind = str(session_scope.get("kind") or "")
         active_summary_version_id = str(session_scope.get("active_summary_version_id") or "").strip()
-        if not active_summary_version_id:
-            raise ValueError("memory scope requires an active summary version")
-        payload.update(
-            {
-                "scope_kind": session_scope["kind"],
-                "conversation_id": session_scope["conversation_id"],
-                "active_summary_version_id": active_summary_version_id,
-                "can_reinterpret": bool(session_scope["can_reinterpret"]),
-            }
-        )
+        if scope_kind == "memory":
+            if not active_summary_version_id:
+                raise ValueError("memory scope requires an active summary version")
+            payload.update(
+                {
+                    "scope_kind": scope_kind,
+                    "conversation_id": session_scope["conversation_id"],
+                    "active_summary_version_id": active_summary_version_id,
+                    "can_reinterpret": bool(session_scope["can_reinterpret"]),
+                }
+            )
+        elif scope_kind == "daily_card":
+            card_id = str(session_scope.get("card_id") or "").strip()
+            card_version = session_scope.get("card_version")
+            evidence_hash = str(session_scope.get("card_evidence_hash") or "").strip()
+            if (
+                not _valid_uuid_text(card_id)
+                or not isinstance(card_version, int)
+                or card_version < 1
+                or _SHA256_REF_PATTERN.fullmatch(evidence_hash) is None
+            ):
+                raise ValueError("daily card scope requires an authoritative card version")
+            can_reinterpret = bool(session_scope.get("can_reinterpret"))
+            conversation_id = str(session_scope.get("conversation_id") or "").strip()
+            if can_reinterpret and (not conversation_id or not active_summary_version_id):
+                raise ValueError("daily card correction target is incomplete")
+            payload.update(
+                {
+                    "scope_kind": scope_kind,
+                    "card_id": card_id,
+                    "card_version": card_version,
+                    "card_evidence_hash": evidence_hash,
+                    "can_reinterpret": can_reinterpret,
+                }
+            )
+            if can_reinterpret:
+                payload.update(
+                    {
+                        "conversation_id": conversation_id,
+                        "active_summary_version_id": active_summary_version_id,
+                    }
+                )
+        else:
+            raise ValueError("voice session scope kind is unsupported")
 
     return jwt.encode(payload, ELLA_SESSION_SECRET, algorithm="HS256")
 
@@ -1005,7 +1180,12 @@ async def create_voice_session(
             detail=f"Provider {provider!r} is not configured (missing API key)",
         )
 
-    memory_scope = await _resolve_voice_memory_scope(uid, requested_scope) if requested_scope else None
+    resolved_scope = None
+    if requested_scope:
+        if requested_scope.kind == "memory":
+            resolved_scope = await _resolve_voice_memory_scope(uid, requested_scope)
+        else:
+            resolved_scope = await _resolve_voice_daily_card_scope(uid, requested_scope)
 
     _start = time.time()
     session_id = str(uuid.uuid4())
@@ -1051,7 +1231,7 @@ async def create_voice_session(
             session_id=session_id,
             correlation_id=correlation_id,
             entitlement_revision=entitlement_revision,
-            session_scope=memory_scope,
+            session_scope=resolved_scope,
         )
 
         # Build endpoint URL with mode query param
@@ -1082,12 +1262,19 @@ async def create_voice_session(
             quota=quota,
             session_scope=(
                 {
-                    "kind": memory_scope["kind"],
-                    "conversation_id": memory_scope["conversation_id"],
-                    "active_summary_version_id": memory_scope["active_summary_version_id"],
-                    "can_reinterpret": memory_scope["can_reinterpret"],
+                    key: resolved_scope[key]
+                    for key in (
+                        (
+                            "kind",
+                            "conversation_id",
+                            "active_summary_version_id",
+                            "can_reinterpret",
+                        )
+                        if resolved_scope["kind"] == "memory"
+                        else ("kind", "card_id", "card_version", "can_reinterpret")
+                    )
                 }
-                if memory_scope
+                if resolved_scope
                 else None
             ),
         )
@@ -1619,7 +1806,7 @@ async def get_voice_context(request: Request):
     principal = authenticate_voice_proxy_request(request, uid)
     uid = principal.uid
     runtime = await _resolve_voice_runtime(principal)
-    memory_scope = await _resolve_principal_memory_scope(principal)
+    resolved_session_scope = await _resolve_principal_session_scope(principal)
     honcho_target, honcho_target_reason = await _resolve_voice_honcho_binding(uid, runtime)
 
     budget = body.get("context_budget", 8000)
@@ -1671,11 +1858,7 @@ async def get_voice_context(request: Request):
         gateway_token = ""
         cloud_runtime = getattr(runtime, "provider", "hermes") == "hermes_cloud"
         workspace_api_url = "" if cloud_runtime else HERMES_PROVISION_API_URL
-        workspace_headers = (
-            {}
-            if cloud_runtime
-            else _hermes_workspace_headers(uid)
-        )
+        workspace_headers = {} if cloud_runtime else _hermes_workspace_headers(uid)
     else:
         agent_id = agents.get("userAgentId", "")
         gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
@@ -1748,6 +1931,7 @@ async def get_voice_context(request: Request):
                 max_chars=9000,
                 scope_kind=principal.scope_kind,
                 conversation_id=principal.conversation_id,
+                card_id=principal.card_id,
             )
         )
         if runtime:
@@ -1762,8 +1946,8 @@ async def get_voice_context(request: Request):
                 )
             )
         honcho_query = (
-            memory_scope.get("topic_query")
-            if memory_scope
+            resolved_session_scope.get("topic_query")
+            if resolved_session_scope
             else (
                 "Recent themes, personal facts, relationships, preferences, "
                 "plans, and details useful for a supportive voice conversation."
@@ -1774,7 +1958,7 @@ async def get_voice_context(request: Request):
                 fetch_voice_honcho_context(
                     honcho_target,
                     query=str(honcho_query or ""),
-                    top_k=16 if memory_scope else 12,
+                    top_k=16 if resolved_session_scope else 12,
                 )
             )
         else:
@@ -1869,7 +2053,10 @@ async def get_voice_context(request: Request):
         "memory_context": memory_context,
         "honcho_context": str(honcho_context_result.get("context") or ""),
         "honcho_status": {key: value for key, value in honcho_context_result.items() if key != "context"},
-        "memory_scope": memory_scope,
+        "session_scope": resolved_session_scope,
+        # Compatibility key consumed by the current V4 proxy prompt builder.
+        # Its value remains server-owned and may be kind=memory or daily_card.
+        "memory_scope": resolved_session_scope,
         "shared_reports": shared_reports,
         "caregiver_notes": _extract_caregiver_section(user_profile),
         "dynamic_rules": dynamic_rules,
@@ -2061,7 +2248,7 @@ async def search_omi_conversations(request: Request):
                         date_filter_end = target.replace(hour=23, minute=59, second=59)
                         date_parsed = True
                         # Remove date part from query for keyword matching
-                        remaining = query_lower[:date_match.start()] + query_lower[date_match.end():]
+                        remaining = query_lower[: date_match.start()] + query_lower[date_match.end() :]
                         keyword_terms = [t for t in remaining.split() if t]
                     except ValueError:
                         pass
@@ -2141,14 +2328,16 @@ async def search_omi_conversations(request: Request):
                 else:
                     ts = str(created)[:16]
 
-            results.append({
-                "title": structured.get("title", "Untitled"),
-                "overview": structured.get("overview", ""),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "timestamp": ts,
-                "score": score,
-            })
+            results.append(
+                {
+                    "title": structured.get("title", "Untitled"),
+                    "overview": structured.get("overview", ""),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "timestamp": ts,
+                    "score": score,
+                }
+            )
 
         logger.info(f"[FLOW:VOICE-SEARCH] Found {len(results)} matches for \"{query}\"")
         return {"results": results, "total_searched": len(convos), "query": query}
@@ -2211,14 +2400,14 @@ SEARCH_POLICY = {
 
 # Which source keys map to which request-level source names
 _SOURCE_TO_POLICY_KEYS = {
-    "timeline":  ["timeline"],
-    "channel":   ["timeline"],
+    "timeline": ["timeline"],
+    "channel": ["timeline"],
     "workspace": ["workspace"],
-    "omi":       ["omi_full", "omi_meta"],
-    "memories":  ["memories"],
-    "voice":     ["voice"],
-    "honcho":    ["honcho"],
-    "scanner":   ["scanner"],
+    "omi": ["omi_full", "omi_meta"],
+    "memories": ["memories"],
+    "voice": ["voice"],
+    "honcho": ["honcho"],
+    "scanner": ["scanner"],
 }
 
 
@@ -2563,6 +2752,7 @@ async def _search_canonical_timeline(
     *,
     scope_kind: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    card_id: Optional[str] = None,
 ) -> list:
     """Search the canonical cross-channel event ledger.
 
@@ -2585,8 +2775,8 @@ async def _search_canonical_timeline(
               AND trim(text) != ''
               AND (
                     NOT (
-                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
-                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                        COALESCE(source_ref ->> 'scope_kind', '') IN ('memory', 'daily_card')
+                        OR COALESCE(metadata ->> 'scope_kind', '') IN ('memory', 'daily_card')
                     )
                     OR (
                         $2 = 'memory'
@@ -2596,6 +2786,14 @@ async def _search_canonical_timeline(
                             ''
                         ) = $3
                     )
+                    OR (
+                        $2 = 'daily_card'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'card_id', ''),
+                            metadata ->> 'card_id',
+                            ''
+                        ) = $4
+                    )
               )
             ORDER BY started_at DESC, id DESC
             LIMIT 300
@@ -2603,6 +2801,7 @@ async def _search_canonical_timeline(
             uid,
             scope_kind or "",
             conversation_id or "",
+            card_id or "",
         )
         matches = []
         include_assistant = any(
@@ -2639,18 +2838,18 @@ async def _search_canonical_timeline(
                     score,
                     ts or datetime.min,
                     {
-                "source": "timeline",
-                "title": f"{channel} {role}".strip(),
-                "content": text[:700],
-                "timestamp": ts_text,
-                "score": score + role_boost,
-                "metadata": {
-                    "provenance": "canonical_event",
-                    "channel": channel,
-                    "provider": provider,
-                    "role": role,
-                    "session_id": row["session_id"] or "",
-                },
+                        "source": "timeline",
+                        "title": f"{channel} {role}".strip(),
+                        "content": text[:700],
+                        "timestamp": ts_text,
+                        "score": score + role_boost,
+                        "metadata": {
+                            "provenance": "canonical_event",
+                            "channel": channel,
+                            "provider": provider,
+                            "role": role,
+                            "session_id": row["session_id"] or "",
+                        },
                     },
                 )
             )
@@ -2696,19 +2895,19 @@ async def _search_voice_memory_pack(uid: str, query: str, limit: int) -> list:
         score = 120 if confidence == "high" else 70
         return [
             {
-            "source": "voice_memory",
-            "title": top.get("title") or "Hermes Voice Memory",
-            "content": answer[:900],
-            "timestamp": top.get("timestamp") or "",
-            "score": score,
-            "metadata": {
-                "provenance": "hermes_voice_memory",
-                "path": data.get("path"),
-                "confidence": confidence,
-                "latency_ms": data.get("latency_ms"),
-                "source_ref": top.get("source_ref"),
-                "channel": top.get("channel"),
-            },
+                "source": "voice_memory",
+                "title": top.get("title") or "Hermes Voice Memory",
+                "content": answer[:900],
+                "timestamp": top.get("timestamp") or "",
+                "score": score,
+                "metadata": {
+                    "provenance": "hermes_voice_memory",
+                    "path": data.get("path"),
+                    "confidence": confidence,
+                    "latency_ms": data.get("latency_ms"),
+                    "source_ref": top.get("source_ref"),
+                    "channel": top.get("channel"),
+                },
             }
         ]
     except Exception as e:
@@ -2723,6 +2922,7 @@ async def _fetch_recent_canonical_timeline(
     *,
     scope_kind: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    card_id: Optional[str] = None,
 ) -> str:
     """Fetch the latest cross-channel turns for realtime voice startup context.
 
@@ -2741,8 +2941,8 @@ async def _fetch_recent_canonical_timeline(
               AND trim(text) != ''
               AND (
                     NOT (
-                        COALESCE(source_ref ->> 'scope_kind', '') = 'memory'
-                        OR COALESCE(metadata ->> 'scope_kind', '') = 'memory'
+                        COALESCE(source_ref ->> 'scope_kind', '') IN ('memory', 'daily_card')
+                        OR COALESCE(metadata ->> 'scope_kind', '') IN ('memory', 'daily_card')
                     )
                     OR (
                         $2 = 'memory'
@@ -2752,13 +2952,22 @@ async def _fetch_recent_canonical_timeline(
                             ''
                         ) = $3
                     )
+                    OR (
+                        $2 = 'daily_card'
+                        AND COALESCE(
+                            NULLIF(source_ref ->> 'card_id', ''),
+                            metadata ->> 'card_id',
+                            ''
+                        ) = $4
+                    )
               )
             ORDER BY started_at DESC, id DESC
-            LIMIT $4
+            LIMIT $5
             """,
             uid,
             scope_kind or "",
             conversation_id or "",
+            card_id or "",
             limit,
         )
     except Exception as e:
@@ -3011,25 +3220,25 @@ async def _search_canonical_omi_events(uid: str, query: str, limit: int, full_ac
         structured = metadata.get("structured") if isinstance(metadata.get("structured"), dict) else {}
         results.append(
             {
-            "source": "omi",
-            "title": title,
-            "content": content[:1400],
-            "timestamp": _canonical_event_timestamp(event),
-            "score": score + (55 if window_start else 45),
-            "metadata": {
-                "provenance": "canonical_event",
-                "fallback": False,
-                "event_id": event.get("event_id"),
-                "source_identity": event.get("source_identity"),
-                "channel": event.get("channel"),
-                "provider": event.get("provider"),
-                "emoji": structured.get("emoji", ""),
-                "category": structured.get("category", ""),
-                "time_window_applied": bool(window_start and window_end),
-                "time_window_start_utc": window_start.isoformat() if window_start else "",
-                "time_window_end_utc": window_end.isoformat() if window_end else "",
-                "timestamp_timezone": "America/Los_Angeles",
-            },
+                "source": "omi",
+                "title": title,
+                "content": content[:1400],
+                "timestamp": _canonical_event_timestamp(event),
+                "score": score + (55 if window_start else 45),
+                "metadata": {
+                    "provenance": "canonical_event",
+                    "fallback": False,
+                    "event_id": event.get("event_id"),
+                    "source_identity": event.get("source_identity"),
+                    "channel": event.get("channel"),
+                    "provider": event.get("provider"),
+                    "emoji": structured.get("emoji", ""),
+                    "category": structured.get("category", ""),
+                    "time_window_applied": bool(window_start and window_end),
+                    "time_window_start_utc": window_start.isoformat() if window_start else "",
+                    "time_window_end_utc": window_end.isoformat() if window_end else "",
+                    "timestamp_timezone": "America/Los_Angeles",
+                },
             }
         )
     return results
@@ -3263,19 +3472,19 @@ async def _search_omi_conversations(uid: str, query: str, limit: int, full_acces
 
             results.append(
                 {
-                "source": "omi",
-                "title": structured.get("title", "Untitled"),
-                "content": overview_text,
-                "timestamp": ts,
-                "score": score + 18,
-                "metadata": {
-                    "provenance": "firestore_legacy_omi",
-                    "fallback": True,
-                    "emoji": structured.get("emoji", ""),
-                    "category": structured.get("category", ""),
-                    "has_transcript_detail": bool(transcript_text and full_access),
-                    "timestamp_timezone": "America/Los_Angeles",
-                },
+                    "source": "omi",
+                    "title": structured.get("title", "Untitled"),
+                    "content": overview_text,
+                    "timestamp": ts,
+                    "score": score + 18,
+                    "metadata": {
+                        "provenance": "firestore_legacy_omi",
+                        "fallback": True,
+                        "emoji": structured.get("emoji", ""),
+                        "category": structured.get("category", ""),
+                        "has_transcript_detail": bool(transcript_text and full_access),
+                        "timestamp_timezone": "America/Los_Angeles",
+                    },
                 }
             )
 
@@ -3339,15 +3548,15 @@ async def _search_memories(uid: str, query: str, limit: int) -> list:
             display_content = mem.get("structured_memory", "") or mem.get("content", "")
             results.append(
                 {
-                "source": "memories",
-                "title": (mem.get("category", "") or "Memory").title(),
-                "content": (display_content or "")[:500],
-                "timestamp": ts,
-                "score": score,
-                "metadata": {
-                    "category": mem.get("category", ""),
-                    "id": mem.get("id", ""),
-                },
+                    "source": "memories",
+                    "title": (mem.get("category", "") or "Memory").title(),
+                    "content": (display_content or "")[:500],
+                    "timestamp": ts,
+                    "score": score,
+                    "metadata": {
+                        "category": mem.get("category", ""),
+                        "id": mem.get("id", ""),
+                    },
                 }
             )
 
@@ -3516,17 +3725,17 @@ async def _search_scanner_logs(uid: str, query: str, limit: int, access_level: s
                     (
                         score,
                         {
-                    "source": "scanner",
-                    "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
-                    "content": (display_content or "")[:500],
-                    "timestamp": ts,
-                    "score": score,
-                    "metadata": {
-                        "category": row["category"] or "",
-                        "urgency": row["urgency"] or "",
-                        "escalated": row["escalated"],
-                        "id": str(row["id"]),
-                    },
+                            "source": "scanner",
+                            "title": f"[{(row['urgency'] or 'info').upper()}] {row['category'] or 'alert'}",
+                            "content": (display_content or "")[:500],
+                            "timestamp": ts,
+                            "score": score,
+                            "metadata": {
+                                "category": row["category"] or "",
+                                "urgency": row["urgency"] or "",
+                                "escalated": row["escalated"],
+                                "id": str(row["id"]),
+                            },
                         },
                     )
                 )
@@ -3676,6 +3885,7 @@ async def unified_search(request: Request):
                 limit,
                 scope_kind=principal.scope_kind,
                 conversation_id=principal.conversation_id,
+                card_id=principal.card_id,
             )
         )
         task_source_names.append("timeline")

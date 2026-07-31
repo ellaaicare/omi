@@ -76,9 +76,10 @@ def _event(
     turn_index: int = 0,
     role: str = "user",
     started_at: str = "2026-07-24T18:00:00Z",
+    scope_kind: str = "memory",
 ) -> CanonicalEventIn:
     scope = {
-        "scope_kind": "memory",
+        "scope_kind": scope_kind,
         "conversation_id": conversation_id,
         "active_summary_version_id": version_id,
         "can_reinterpret": True,
@@ -114,6 +115,7 @@ def _completion(
     version_id: str = VERSION_ID,
     can_reinterpret: bool = True,
     scope_kind: str = "memory",
+    correction_confirmed: bool | None = None,
 ) -> tuple[str, SessionCompleteIn]:
     scope = {
         "scope_kind": scope_kind,
@@ -121,6 +123,8 @@ def _completion(
         "active_summary_version_id": version_id,
         "can_reinterpret": can_reinterpret,
     }
+    if correction_confirmed is not None:
+        scope["correction_confirmed"] = correction_confirmed
     return (
         session_id,
         SessionCompleteIn(
@@ -540,6 +544,36 @@ def test_reinterpretation_completion_requires_configured_ledger_bearer(monkeypat
     assert wrong.status_code == 401
     assert accepted.status_code == 200
     assert accepted.json()["reinterpretation"]["job_id"]
+
+
+def test_daily_card_reminiscence_does_not_mutate_without_explicit_confirmation():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        store = InMemoryCanonicalEventStore(repository)
+        await store.write_batch([_event("daily-turn", "A normal reminiscence.", scope_kind="daily_card")])
+        session_id, completion = _completion(scope_kind="daily_card", correction_confirmed=None)
+
+        result = await store.complete_session(session_id, completion)
+
+        assert result["reinterpretation"] is None
+        assert repository.jobs == {}
+
+    asyncio.run(run())
+
+
+def test_daily_card_explicit_confirmed_single_source_reuses_reinterpretation_outbox():
+    async def run():
+        repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
+        store = InMemoryCanonicalEventStore(repository)
+        await store.write_batch([_event("daily-turn", "A confirmed correction.", scope_kind="daily_card")])
+        session_id, completion = _completion(scope_kind="daily_card", correction_confirmed=True)
+
+        result = await store.complete_session(session_id, completion)
+
+        assert result["reinterpretation"]["job_id"]
+        assert len(repository.jobs) == 1
+
+    asyncio.run(run())
 
 
 def test_read_only_or_noise_completion_never_enqueues():
