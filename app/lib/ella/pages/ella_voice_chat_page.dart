@@ -77,6 +77,10 @@ class EllaVoiceChatPage extends StatefulWidget {
   static V2VSessionScope refreshedMemoryScope(V2VSessionScope current, String? activeSummaryVersionId) =>
       current.withExpectedActiveSummaryVersionId(activeSummaryVersionId);
 
+  @visibleForTesting
+  static bool shouldCloseRouteAfterV2VFailure(V2VFailureChoice choice, {required bool modalPresentation}) =>
+      modalPresentation && choice == V2VFailureChoice.stop;
+
   @override
   State<EllaVoiceChatPage> createState() => _EllaVoiceChatPageState();
 }
@@ -759,12 +763,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
           await _startListening();
           break;
         case V2VFailureChoice.stop:
-          _voiceStartupGuard.cancel();
-          _usingElevenLabsFallback = false;
-          _activeV2VProvider = '';
-          setState(() {
-            _statusText = context.l10n.voiceTapToTalk;
-          });
+          await _cancelFailedVoiceAttempt();
+          if (EllaVoiceChatPage.shouldCloseRouteAfterV2VFailure(choice, modalPresentation: widget.modalPresentation) &&
+              mounted) {
+            Navigator.of(context).pop();
+          }
           break;
       }
       return;
@@ -783,6 +786,42 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
       _memoryCorrectionReceipt = null;
       _orbState = VoiceOrbState.listening;
       _statusText = context.l10n.voiceV2vActive(providerName);
+    });
+  }
+
+  Future<void> _cancelFailedVoiceAttempt() async {
+    _voiceStartupGuard.cancel();
+    final client = _v2vClient;
+    _v2vClient = null;
+    _voiceModeActive = false;
+    _isV2VMode = false;
+    _usingElevenLabsFallback = false;
+    _activeV2VProvider = '';
+    _activeSessionId = '';
+    _standardVoiceConsentLease?.stop();
+    _standardVoiceConsentLease = null;
+    _quotaClock?.cancel();
+    if (client != null) {
+      try {
+        await client.disconnect();
+      } catch (_) {}
+    }
+    if (_speech.isListening) {
+      try {
+        await _speech.stop();
+      } catch (_) {}
+    }
+    try {
+      await _audioPlayer.stop();
+    } catch (_) {}
+    try {
+      await ElevenLabsTts.stopOnDevice();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _orbState = VoiceOrbState.idle;
+      _statusText = context.l10n.voiceTapToTalk;
+      _audioLevel = 0.0;
     });
   }
 

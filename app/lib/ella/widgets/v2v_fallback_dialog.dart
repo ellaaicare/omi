@@ -38,13 +38,20 @@ class V2VFallbackDialog extends StatelessWidget {
         style: EllaTextStyles.body,
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop), child: Text(context.l10n.notNow)),
+        OutlinedButton.icon(
+          key: const ValueKey('v2v-failure-cancel'),
+          onPressed: () => Navigator.of(context).pop(V2VFailureChoice.stop),
+          icon: const Icon(Icons.close),
+          label: Text(context.l10n.cancel),
+        ),
         if (allowStandardFallback)
           TextButton(
+            key: const ValueKey('v2v-failure-elevenlabs'),
             onPressed: () => Navigator.of(context).pop(V2VFailureChoice.useElevenLabs),
             child: Text(context.l10n.voiceUseElevenLabs),
           ),
         FilledButton(
+          key: const ValueKey('v2v-failure-retry'),
           onPressed: () => Navigator.of(context).pop(V2VFailureChoice.retry),
           child: Text(context.l10n.retry),
         ),
@@ -60,7 +67,7 @@ Future<V2VFailureChoice> showV2VFallbackDialog(
 }) async {
   return await showDialog<V2VFailureChoice>(
         context: context,
-        barrierDismissible: false,
+        barrierDismissible: true,
         builder: (_) => V2VFallbackDialog(receipt: receipt, allowStandardFallback: allowStandardFallback),
       ) ??
       V2VFailureChoice.stop;
