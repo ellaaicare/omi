@@ -3,8 +3,14 @@ import base64
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+
+from ella.routers.hermes_cloud_enrichment import (
+    create_hermes_cloud_enrichment_router,
+)
 
 from scripts import hermes_product_fit_canary as canary
 
@@ -212,23 +218,85 @@ def test_voice_memory_pack_is_hash_only_and_unscoped_session_isolated():
     assert report.verdicts["profile memory pack"] == "FAIL"
 
 
-def test_enrichment_requires_one_correlated_duplicate_safe_result_without_chat_identity():
+def test_enrichment_requires_one_correlated_duplicate_safe_result_without_chat_identity(monkeypatch):
     config = _config()
+    token = "e" * 32
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_ENRICHMENT_TOKEN", token)
+    expected_interaction_id, _ = canary.production_enrichment_interaction_identity(
+        config.uid,
+        config.enrichment_conversation_id,
+        config.enrichment_transcript_sha256,
+    )
+    old_run_id_digest = canary._sha256(f"{config.run_id}|{config.uid}|{config.enrichment_conversation_id}|enrichment")
+    assert expected_interaction_id != f"omi-enrichment:{old_run_id_digest}"
 
-    class ContaminatedEnrichmentAdapter(FakeAdapter):
-        async def enrichment(self):
-            observed = await super().enrichment()
-            return canary.EnrichmentObservation(
-                **{
-                    **observed.__dict__,
-                    "chat_identity_absent": False,
-                }
+    class ContractService:
+        def __init__(self):
+            self.calls = []
+
+        async def enrich(self, **kwargs):
+            assert kwargs["expected_client_interaction_id"] == expected_interaction_id
+            assert kwargs["expected_transcript_sha256"] == config.enrichment_transcript_sha256
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                conversation_id=kwargs["conversation_id"],
+                runtime_binding_id=config.binding_id,
+                runtime_interaction_id="55555555-5555-4555-8555-555555555555",
+                active_summary_version_id=config.voice_summary_version_id,
+                canonical_user_event_id="canonical-user-event",
+                canonical_assistant_event_id="canonical-assistant-event",
+                transcript_sha256=config.enrichment_transcript_sha256,
+                summary_sha256="c" * 64,
+                provider_response_present=True,
+                duplicate=len(self.calls) > 1,
+                client_interaction_id=kwargs["expected_client_interaction_id"],
             )
 
-    report = asyncio.run(canary.run_harness(config, ContaminatedEnrichmentAdapter(config)))
-    enrichment = next(stage for stage in report.stages if stage.scenario == "E")
-    assert enrichment.status == "FAIL"
-    assert report.verdicts["enrichment"] == "FAIL"
+    service = ContractService()
+
+    async def service_factory():
+        return service
+
+    app = FastAPI()
+    app.include_router(create_hermes_cloud_enrichment_router(service_factory))
+    original_async_client = canary.httpx.AsyncClient
+
+    def asgi_client(*_args, **kwargs):
+        return original_async_client(
+            transport=canary.httpx.ASGITransport(app=app),
+            base_url=config.backend_base_url,
+            timeout=kwargs.get("timeout"),
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    monkeypatch.setattr(canary.httpx, "AsyncClient", asgi_client)
+    observed = asyncio.run(canary.LiveCanaryAdapter(config).enrichment())
+
+    assert observed.status == "applied"
+    assert observed.correlation_matches is True
+    assert observed.transcript_hash_matches is True
+    assert observed.duplicate_replay is True
+    assert observed.chat_identity_absent is True
+    assert [call["expected_client_interaction_id"] for call in service.calls] == [
+        expected_interaction_id,
+        expected_interaction_id,
+    ]
+    assert [call["expected_transcript_sha256"] for call in service.calls] == [
+        config.enrichment_transcript_sha256,
+        config.enrichment_transcript_sha256,
+    ]
+    canonical_result = {
+        "canonical_user_event_id": "canonical-user-event",
+        "canonical_assistant_event_id": "canonical-assistant-event",
+    }
+    assert canary._enrichment_chat_identity_absent(canonical_result)
+    assert not canary._enrichment_chat_identity_absent(
+        {
+            **canonical_result,
+            "session_id": "ella:broker-session:v1:leaked",
+        }
+    )
 
 
 def test_replay_errors_fail_closed_for_outcome_correlation_session_timeout_and_ordering():

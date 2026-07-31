@@ -102,6 +102,14 @@ The callback contract fixture is `ella.hermes.callback.v1` and requires the
 with `stock_best_effort_v1`, `terminal_proof=false`, one generation, and one
 terminal writeback.
 
+Scenario E obtains its `client_interaction_id` from the production enrichment
+identity boundary. That boundary binds UID, conversation ID, transcript SHA-256,
+the current enrichment policy version, and the SHA-256 of the current policy
+instructions. The canary `run_id` is not part of this canonical identity, so an
+exact retry reaches the production duplicate-safe path. Successful enrichment
+receipts may include canonical user and assistant event IDs. Chat session
+key/ID fields remain forbidden and cause the contamination check to fail.
+
 ## Cleanup
 
 Cleanup is deliberately two-phase so the harness cannot mutate n8n or deployment

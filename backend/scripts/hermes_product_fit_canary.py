@@ -24,6 +24,9 @@ import httpx
 from database import voice_canary as voice_canary_db
 from ella.services.hermes_broker_client import HermesBrokerClient
 from ella.services.hermes_broker_prototype import HermesBrokerPrototypeConfig
+from ella.services.hermes_cloud_enrichment import (
+    _interaction_identity as production_enrichment_interaction_identity,
+)
 from ella.services.hermes_cloud_runtime import broker_session_id_for_scope
 from ella.services.runtime_errors import ProvisioningError
 
@@ -36,6 +39,17 @@ TERMINAL_STATUSES = frozenset({"writeback_completed", "blocked", "quarantined", 
 SECRET_REF_RE = re.compile(r"^env:(ELLA_[A-Z0-9_]{3,120})$")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ENRICHMENT_CHAT_IDENTITY_FIELDS = frozenset(
+    {
+        "session_key",
+        "session_id",
+        "chat_session_key",
+        "chat_session_id",
+        "hermes_session_key",
+        "hermes_session_id",
+        "broker_session_id",
+    }
+)
 
 
 class HarnessRefusal(RuntimeError):
@@ -546,8 +560,11 @@ class LiveCanaryAdapter:
     async def enrichment(self) -> EnrichmentObservation:
         started = time.monotonic()
         token = _resolve_env_secret(self.config.enrichment_token_ref)
-        digest = _sha256(f"{self.config.run_id}|{self.config.uid}|{self.config.enrichment_conversation_id}|enrichment")
-        client_interaction_id = f"omi-enrichment:{digest}"
+        client_interaction_id, _ = production_enrichment_interaction_identity(
+            self.config.uid,
+            self.config.enrichment_conversation_id,
+            self.config.enrichment_transcript_sha256,
+        )
         payload = {
             "uid": self.config.uid,
             "conversation_id": self.config.enrichment_conversation_id,
@@ -572,7 +589,6 @@ class LiveCanaryAdapter:
                 headers=headers,
                 json=payload,
             )
-        forbidden_chat_keys = {"session_key", "session_id", "canonical_user_event_id"}
         return EnrichmentObservation(
             status=str(first.get("status") or ""),
             correlation_matches=(
@@ -584,7 +600,7 @@ class LiveCanaryAdapter:
                 and replay.get("transcript_sha256") == self.config.enrichment_transcript_sha256
             ),
             duplicate_replay=first.get("duplicate") is False and replay.get("duplicate") is True,
-            chat_identity_absent=forbidden_chat_keys.isdisjoint(first) and forbidden_chat_keys.isdisjoint(replay),
+            chat_identity_absent=_enrichment_chat_identity_absent(first, replay),
             latency_ms=int((time.monotonic() - started) * 1000),
         )
 
@@ -684,6 +700,10 @@ def _session_id(config: CanaryConfig, session_key: str) -> str:
         channel=config.chat_channel,
         session_key=session_key,
     )
+
+
+def _enrichment_chat_identity_absent(*results: Mapping[str, Any]) -> bool:
+    return all(ENRICHMENT_CHAT_IDENTITY_FIELDS.isdisjoint(result) for result in results)
 
 
 def _source_event_id(config: CanaryConfig, label: str) -> str:
