@@ -1,0 +1,18 @@
+{
+  "schema_version": "ella.hermes.callback.v1",
+  "correlation_id": "canary-correlation-111111111111111111111111",
+  "delivery_id": "canary-delivery-222222222222222222222222",
+  "outcome": "success",
+  "response": {
+    "answer": "CANARY-CONTENT-SAFE",
+    "session_key": "ella:canary:primary",
+    "session_id": "ella:broker-session:v1:d79db7e7a916852093a06d69a3e73531a235548deedffb81",
+    "canonical_user_event_id": "canary-event:444444444444444444444444444444444444444444444444",
+    "model": "gpt-5.6-terra",
+    "usage": {
+      "input_tokens": 1,
+      "output_tokens": 1
+    }
+  },
+  "sent_at": "2026-07-30T00:00:00Z"
+}
