@@ -373,6 +373,10 @@ class DeviceProvider extends ChangeNotifier implements IDeviceServiceSubsciption
     }
 
     var device = pairedDevice!;
+    if (device.firmwareRevision.isEmpty) {
+      return ('Unable to determine current firmware version', false, '', {});
+    }
+
     var latestFirmwareDetails = await getLatestFirmwareVersion(
       deviceModelNumber: device.modelNumber,
       firmwareRevision: device.firmwareRevision,

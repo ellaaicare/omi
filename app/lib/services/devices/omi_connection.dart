@@ -623,9 +623,11 @@ class OmiDeviceConnection extends DeviceConnection {
       Logger.debug('OmiDeviceConnection: Error getting device info: $e');
     }
 
-    // Set defaults if values are empty
+    // Set defaults if values are empty. Keep firmwareRevision empty when the
+    // BLE read fails so callers can distinguish "unknown" from a real legacy
+    // firmware version.
     deviceInfo['modelNumber'] ??= 'Omi Device';
-    deviceInfo['firmwareRevision'] ??= '1.0.2';
+    deviceInfo['firmwareRevision'] ??= '';
     deviceInfo['hardwareRevision'] ??= 'Seeed Xiao BLE Sense';
     deviceInfo['manufacturerName'] ??= 'Based Hardware';
     deviceInfo['hasImageStream'] ??= 'false';

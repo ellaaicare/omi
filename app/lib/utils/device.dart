@@ -11,9 +11,8 @@ class DeviceUtils {
     required String currentFirmware,
     required Map latestFirmwareDetails,
   }) async {
-    Version currentVersion = Version.parse(currentFirmware);
-    if (latestFirmwareDetails.isEmpty) {
-      return ('Latest Version Not Available', false, '');
+    if (currentFirmware.isEmpty) {
+      return ('Unable to determine current firmware version', false, '');
     }
     if (latestFirmwareDetails.isEmpty || latestFirmwareDetails['version'] == null) {
       return ('Latest Version Not Available', false, '');
@@ -22,6 +21,7 @@ class DeviceUtils {
       return ('Latest Version Not Available', false, '');
     }
 
+    Version currentVersion = Version.parse(currentFirmware);
     String latestVersionStr = latestFirmwareDetails['version'];
     Version latestVersion = Version.parse(latestVersionStr);
     Version minVersion = Version.parse(latestFirmwareDetails['min_version']);

@@ -175,6 +175,10 @@ class SDCardWalSyncImpl implements SDCardWalSync {
       var timerStart = DateTime.now().millisecondsSinceEpoch ~/ 1000 - seconds;
 
       var connection = await ServiceManager.instance().device.ensureConnection(deviceId);
+      if (connection == null) {
+        Logger.debug("SDCard: Failed to establish connection for device info");
+        return wals;
+      }
       var pd = await _device!.getDeviceInfo(connection);
       String deviceModel = pd.modelNumber.isNotEmpty ? pd.modelNumber : "Omi";
 
@@ -563,7 +567,11 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
-    var walToSync = _wals.where((w) => w == wal).toList().first;
+    var walToSync = _wals.where((w) => w == wal).firstOrNull;
+    if (walToSync == null) {
+      Logger.debug("SDCardWalSync: WAL not found in _wals, skipping sync");
+      return null;
+    }
 
     _resetSyncState();
     _isSyncing = true;
