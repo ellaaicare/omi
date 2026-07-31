@@ -46,6 +46,9 @@ CONFIG_SCHEMA = "ella-hermes-product-fit-canary-v1"
 CALLBACK_SCHEMA = "ella.hermes.callback.v1"
 STOCK_CALLBACK_CONTRACT = "stock_best_effort_v1"
 FIXTURE_SCHEMA = "ella-hermes-product-fit-fixture-v1"
+OFF_RECEIPT_SCHEMA = "ella-hermes-canary-off-receipt-v1"
+FIXTURE_OFF_RECEIPT_MAX_AGE_SECONDS = 15 * 60
+FIXTURE_OFF_RECEIPT_MAX_FUTURE_SKEW_SECONDS = 30
 APPROVED_SECRET_ROOTS = (Path("/etc/ella"), Path("/var/lib/ella"))
 SYNTHETIC_PREFIXES = ("synthetic-", "staging-synthetic-")
 TERMINAL_STATUSES = frozenset({"writeback_completed", "blocked", "quarantined", "expired", "writeback_blocked"})
@@ -412,6 +415,77 @@ def _assert_fixture_rollout_off() -> None:
         raise HarnessRefusal("fixture_broker_selector_enabled")
 
 
+def _fixture_scope_sha256(config: CanaryConfig) -> str:
+    return _sha256(
+        _canonical_json(
+            {
+                "run_id": config.run_id,
+                "uid": config.uid,
+                "account_id": config.account_id,
+                "profile_id": config.profile_id,
+                "binding_id": config.binding_id,
+                "consent_epoch": config.consent_epoch,
+                "expected_model": config.expected_model,
+                "chat_channel": config.chat_channel,
+            }
+        )
+    )
+
+
+def _validate_fixture_off_receipt(
+    receipt: Mapping[str, Any],
+    config: CanaryConfig,
+    *,
+    now: datetime | None = None,
+) -> None:
+    if set(receipt) != {
+        "schema_version",
+        "uid_sha256",
+        "binding_id_sha256",
+        "scope_sha256",
+        "observed_at_utc",
+        "flags_off",
+        "selectors_empty",
+        "workflows_off",
+        "content_free",
+    }:
+        raise HarnessRefusal("fixture_off_receipt_shape_invalid")
+    try:
+        _validate_off_receipt(
+            {
+                key: receipt.get(key)
+                for key in (
+                    "schema_version",
+                    "uid_sha256",
+                    "flags_off",
+                    "selectors_empty",
+                    "workflows_off",
+                    "content_free",
+                )
+            },
+            config,
+        )
+    except HarnessRefusal as exc:
+        raise HarnessRefusal("fixture_off_receipt_invalid") from exc
+    if receipt.get("binding_id_sha256") != _sha256(config.binding_id) or receipt.get(
+        "scope_sha256"
+    ) != _fixture_scope_sha256(config):
+        raise HarnessRefusal("fixture_off_receipt_invalid")
+    observed_raw = receipt.get("observed_at_utc")
+    if not isinstance(observed_raw, str):
+        raise HarnessRefusal("fixture_off_receipt_invalid")
+    try:
+        observed_at = datetime.strptime(observed_raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise HarnessRefusal("fixture_off_receipt_invalid") from exc
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        raise HarnessRefusal("fixture_off_receipt_invalid")
+    age_seconds = (checked_at.astimezone(timezone.utc) - observed_at).total_seconds()
+    if not (-FIXTURE_OFF_RECEIPT_MAX_FUTURE_SKEW_SECONDS <= age_seconds <= FIXTURE_OFF_RECEIPT_MAX_AGE_SECONDS):
+        raise HarnessRefusal("fixture_off_receipt_stale")
+
+
 def _fixture_conversation_id(config: CanaryConfig) -> str:
     material = "\x1f".join(
         (
@@ -484,9 +558,10 @@ def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def _validate_fixture_conversation(
+def _validate_fixture_provenance(
     config: CanaryConfig,
     conversation: Mapping[str, Any],
+    receipt: Mapping[str, Any] | None = None,
 ) -> None:
     expected = _fixture_conversation(config).model_dump()
     external_data = conversation.get("external_data")
@@ -498,10 +573,30 @@ def _validate_fixture_conversation(
         or _enum_value(conversation.get("visibility")) != ConversationVisibility.private.value
         or _enum_value(conversation.get("status")) != ConversationStatus.completed.value
         or conversation.get("discarded") is not False
-        or conversation.get("enrichment_state") is not None
         or conversation.get("transcript_segments") != expected["transcript_segments"]
-        or conversation.get("structured") != expected["structured"]
     ):
+        raise HarnessRefusal("fixture_conversation_drift")
+    if receipt is not None:
+        identity = build_enrichment_identity(
+            uid=config.uid,
+            conversation_id=str(conversation["id"]),
+            conversation=dict(conversation),
+        )
+        if (
+            receipt.get("conversation_id") != conversation.get("id")
+            or receipt.get("fixture_marker_sha256") != _sha256(_canonical_json(marker))
+            or receipt.get("transcript_sha256") != identity.transcript_sha256
+        ):
+            raise HarnessRefusal("fixture_conversation_drift")
+
+
+def _validate_fixture_conversation(
+    config: CanaryConfig,
+    conversation: Mapping[str, Any],
+) -> None:
+    expected = _fixture_conversation(config).model_dump()
+    _validate_fixture_provenance(config, conversation)
+    if conversation.get("enrichment_state") is not None or conversation.get("structured") != expected["structured"]:
         raise HarnessRefusal("fixture_conversation_drift")
 
 
@@ -691,6 +786,56 @@ def _assert_fixture_summary_version(conversation: Mapping[str, Any], version_id:
         raise HarnessRefusal("fixture_summary_version_drift")
 
 
+def _assert_fixture_lifecycle(
+    config: CanaryConfig,
+    receipt: Mapping[str, Any],
+    conversation: Mapping[str, Any],
+) -> None:
+    _validate_fixture_provenance(config, conversation, receipt)
+    versions = conversation.get("summary_versions")
+    if not isinstance(versions, list) or not versions or not all(isinstance(value, Mapping) for value in versions):
+        raise HarnessRefusal("fixture_summary_version_drift")
+    version_ids = [str(value.get("id") or "") for value in versions]
+    if any(SAFE_ID_RE.fullmatch(value) is None for value in version_ids) or len(set(version_ids)) != len(version_ids):
+        raise HarnessRefusal("fixture_summary_version_drift")
+    prepared_version_id = str(receipt["active_summary_version_id"])
+    prepared = [value for value in versions if str(value.get("id") or "") == prepared_version_id]
+    active = [value for value in versions if value.get("is_active") is True]
+    active_version_id = str(conversation.get("active_summary_version_id") or "")
+    if (
+        len(prepared) != 1
+        or prepared[0].get("source") != "legacy"
+        or prepared[0].get("kind") != "legacy_current"
+        or len(active) != 1
+        or str(active[0].get("id") or "") != active_version_id
+    ):
+        raise HarnessRefusal("fixture_summary_version_drift")
+    enrichment_state = conversation.get("enrichment_state")
+    if active_version_id == prepared_version_id and enrichment_state is None:
+        _validate_fixture_conversation(config, conversation)
+        _assert_fixture_summary_version(conversation, prepared_version_id)
+        return
+    if active_version_id == prepared_version_id or len(versions) < 2 or not isinstance(enrichment_state, Mapping):
+        raise HarnessRefusal("fixture_enrichment_lifecycle_drift")
+    state = str(enrichment_state.get("status") or "")
+    pending = enrichment_state.get("pending")
+    canonical_status = str(enrichment_state.get("canonical_status") or "")
+    applied = (
+        state == "writeback_applied"
+        and pending is False
+        and canonical_status
+        in {
+            "completed",
+            "unconfirmed",
+        }
+    )
+    pending_canonical = (
+        state == "writeback_pending_canonical" and pending is True and canonical_status in {"pending", "failed"}
+    )
+    if not (applied or pending_canonical):
+        raise HarnessRefusal("fixture_enrichment_lifecycle_drift")
+
+
 def _validate_fixture_receipt(receipt: Mapping[str, Any], config: CanaryConfig) -> None:
     if set(receipt) != {
         "schema_version",
@@ -724,13 +869,39 @@ def _validate_fixture_receipt(receipt: Mapping[str, Any], config: CanaryConfig) 
         raise HarnessRefusal("fixture_receipt_invalid")
 
 
-async def prepare_fixture(config: CanaryConfig, store: FixtureStore) -> dict[str, Any]:
+async def _fixture_prepare_preflight(
+    config: CanaryConfig,
+    store: FixtureStore,
+    off_receipt: Mapping[str, Any],
+) -> None:
+    _validate_fixture_off_receipt(off_receipt, config)
     _assert_fixture_rollout_off()
     token = _resolve_env_secret(config.backend_auth_ref)
     _require_firebase_subject(token, config.uid)
     await store.assert_prepare_authority(config)
+
+
+async def prepare_fixture(
+    config: CanaryConfig,
+    store: FixtureStore,
+    *,
+    off_receipt: Mapping[str, Any],
+    existing_receipt: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    await _fixture_prepare_preflight(config, store, off_receipt)
     expected = _fixture_conversation(config)
     existing = await store.get_conversation(config.uid, expected.id)
+    if existing_receipt is not None:
+        _validate_fixture_receipt(existing_receipt, config)
+        if not isinstance(existing, Mapping):
+            raise HarnessRefusal("fixture_conversation_not_found")
+        _validate_fixture_conversation(config, existing)
+        active_summary_version_id = str(existing_receipt["active_summary_version_id"])
+        _assert_fixture_summary_version(existing, active_summary_version_id)
+        observed = _fixture_receipt(config, existing, active_summary_version_id)
+        if not hmac.compare_digest(_canonical_json(observed), _canonical_json(dict(existing_receipt))):
+            raise HarnessRefusal("fixture_receipt_drift")
+        return dict(existing_receipt)
     if existing is None:
         await store.create_conversation(config.uid, expected)
         existing = await store.get_conversation(config.uid, expected.id)
@@ -764,15 +935,7 @@ async def show_fixture(
     conversation = await store.get_conversation(config.uid, str(receipt["conversation_id"]))
     if not isinstance(conversation, Mapping):
         raise HarnessRefusal("fixture_conversation_not_found")
-    _validate_fixture_conversation(config, conversation)
-    _assert_fixture_summary_version(conversation, str(receipt["active_summary_version_id"]))
-    observed = _fixture_receipt(
-        config,
-        conversation,
-        str(receipt["active_summary_version_id"]),
-    )
-    if not hmac.compare_digest(_canonical_json(observed), _canonical_json(dict(receipt))):
-        raise HarnessRefusal("fixture_receipt_drift")
+    _assert_fixture_lifecycle(config, receipt, conversation)
     return dict(receipt)
 
 
@@ -781,8 +944,11 @@ async def cleanup_fixture(
     receipt: Mapping[str, Any],
     store: FixtureStore,
     *,
+    off_receipt: Mapping[str, Any],
     confirm_conversation_id: str,
 ) -> dict[str, Any]:
+    _validate_fixture_off_receipt(off_receipt, config)
+    _assert_fixture_rollout_off()
     _validate_fixture_receipt(receipt, config)
     conversation_id = str(receipt["conversation_id"])
     if confirm_conversation_id != conversation_id:
@@ -791,8 +957,9 @@ async def cleanup_fixture(
     if conversation is not None:
         if not isinstance(conversation, Mapping):
             raise HarnessRefusal("fixture_conversation_drift")
-        _validate_fixture_conversation(config, conversation)
-        await store.delete_vector(config.uid, conversation_id)
+        _assert_fixture_lifecycle(config, receipt, conversation)
+    await store.delete_vector(config.uid, conversation_id)
+    if conversation is not None:
         await store.delete_conversation(config.uid, conversation_id)
     if await store.get_conversation(config.uid, conversation_id) is not None:
         raise HarnessRefusal("fixture_cleanup_conversation_present")
@@ -1716,7 +1883,7 @@ def _validate_off_receipt(receipt: Mapping[str, Any], config: CanaryConfig) -> N
     }:
         raise HarnessRefusal("cleanup_off_receipt_shape_invalid")
     if (
-        receipt.get("schema_version") != "ella-hermes-canary-off-receipt-v1"
+        receipt.get("schema_version") != OFF_RECEIPT_SCHEMA
         or receipt.get("uid_sha256") != _sha256(config.uid)
         or receipt.get("flags_off") is not True
         or receipt.get("selectors_empty") is not True
@@ -1726,8 +1893,17 @@ def _validate_off_receipt(receipt: Mapping[str, Any], config: CanaryConfig) -> N
         raise HarnessRefusal("cleanup_off_receipt_invalid")
 
 
-def load_off_receipt(path: str) -> dict[str, Any]:
-    protected = _assert_protected_file(Path(path))
+def load_off_receipt(
+    path: str,
+    *,
+    approved_roots: tuple[Path, ...] = APPROVED_SECRET_ROOTS,
+    expected_owner_uid: int = 0,
+) -> dict[str, Any]:
+    protected = _assert_protected_file(
+        Path(path),
+        approved_roots=approved_roots,
+        expected_owner_uid=expected_owner_uid,
+    )
     try:
         value = json.loads(protected.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1759,6 +1935,8 @@ async def _main() -> int:
         fixture_parser = subparsers.add_parser(command)
         fixture_parser.add_argument("--config", required=True)
         fixture_parser.add_argument("--fixture-receipt", required=True)
+        if command in {"fixture-prepare", "fixture-cleanup"}:
+            fixture_parser.add_argument("--off-receipt", required=True)
         if command == "fixture-cleanup":
             fixture_parser.add_argument("--confirm-conversation-id", required=True)
     args = parser.parse_args()
@@ -1767,12 +1945,19 @@ async def _main() -> int:
     if args.command.startswith("fixture-"):
         store = ProductionFixtureStore()
         if args.command == "fixture-prepare":
-            if Path(args.fixture_receipt).exists():
-                receipt = load_fixture_receipt(args.fixture_receipt)
-                result = await show_fixture(config, receipt, store)
-            else:
-                result = await prepare_fixture(config, store)
-                write_fixture_receipt(args.fixture_receipt, result)
+            receipt_path = Path(args.fixture_receipt)
+            existing_receipt = (
+                load_fixture_receipt(args.fixture_receipt)
+                if receipt_path.exists() or receipt_path.is_symlink()
+                else None
+            )
+            result = await prepare_fixture(
+                config,
+                store,
+                off_receipt=load_off_receipt(args.off_receipt),
+                existing_receipt=existing_receipt,
+            )
+            write_fixture_receipt(args.fixture_receipt, result)
         else:
             receipt = load_fixture_receipt(args.fixture_receipt)
             if args.command == "fixture-show":
@@ -1782,6 +1967,7 @@ async def _main() -> int:
                     config,
                     receipt,
                     store,
+                    off_receipt=load_off_receipt(args.off_receipt),
                     confirm_conversation_id=args.confirm_conversation_id,
                 )
         print(json.dumps(result, sort_keys=True))

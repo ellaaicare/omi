@@ -371,6 +371,10 @@ jobs:
             "tests/unit/test_hermes_product_fit_canary.py::test_scenarios_a_to_f_pass_with_content_free_stage_tables"
             "tests/unit/test_hermes_product_fit_canary.py::test_replay_errors_fail_closed_for_outcome_correlation_session_timeout_and_ordering"
             "tests/unit/test_hermes_product_fit_canary.py::test_cleanup_requires_content_free_all_off_receipt_for_exact_synthetic_uid"
+            "tests/unit/test_hermes_product_fit_canary.py::test_fixture_prepare_cli_retry_revalidates_authority_and_rollout_off"
+            "tests/unit/test_hermes_product_fit_canary.py::test_fixture_prepare_requires_scope_bound_fresh_protected_off_receipt"
+            "tests/unit/test_hermes_product_fit_canary.py::test_fixture_cleanup_recovers_from_partial_cleanup_idempotently"
+            "tests/unit/test_hermes_product_fit_canary.py::test_fixture_show_and_cleanup_accept_expected_post_enrichment_state_only"
             "tests/unit/test_ella_runtime_route_isolation.py::test_cloud_chat_failure_still_emits_one_terminal_marker"
             "tests/postgres/test_hermes_cloud_pool_postgres.py::test_finalize_ready_cloud_claim_publishes_exact_account_profile_targets"
           )
@@ -388,7 +392,7 @@ jobs:
           test "$(
             pytest --collect-only -q tests/unit/test_hermes_product_fit_canary.py |
               grep -c '::'
-          )" -eq 15
+          )" -eq 19
           test "$collected" -ge 431
           pytest \
             tests/unit/test_ella_ai_consent.py \
