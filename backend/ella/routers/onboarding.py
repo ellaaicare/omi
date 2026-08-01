@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ from ella.services.provisioning import (
     effective_target_schema_version,
     public_receipt,
     retained_compatibility_receipt,
+    self_hosted_provisioning_enabled,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
 from utils.other import endpoints as auth
@@ -39,6 +41,7 @@ logger = logging.getLogger("ella.onboarding")
 router = APIRouter(prefix="/v1/ella/onboarding", tags=["ella-onboarding"])
 SCHEMA_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 _firestore_db: Any = None
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def configure_firestore_db(firestore_db: Any) -> None:
@@ -109,7 +112,14 @@ def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
     return payload.dict()
 
 
-@router.post("/ensure", dependencies=[Depends(require_current_ai_consent)])
+def _ensure_dependencies():
+    """AI consent is required for Cloud but not for self-hosted provisioning."""
+    if self_hosted_provisioning_enabled():
+        return []
+    return [Depends(require_current_ai_consent)]
+
+
+@router.post("/ensure", dependencies=_ensure_dependencies())
 async def ensure_onboarding(
     payload: OnboardingEnsureRequest,
     background_tasks: BackgroundTasks,

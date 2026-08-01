@@ -94,8 +94,16 @@ def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
+def self_hosted_provisioning_enabled(uid: Optional[str] = None) -> bool:
+    return rollout_enabled(
+        "ELLA_SELF_HOSTED_PROVISIONING_ENABLED",
+        "ELLA_SELF_HOSTED_PROVISIONING_ENABLED_UIDS",
+        uid,
+    )
+
+
 def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
-    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid)
+    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
 
 
 def effective_target_schema_version(uid: str, requested: str) -> str:

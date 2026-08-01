@@ -21,6 +21,9 @@ from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
     CLOUD_RUNTIME_TARGET_MODES,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -47,6 +50,24 @@ SYNTHETIC_OPERATOR_ENTITLEMENT_POLICY = {
     "mode_allowlist": list(PILOT_TARGET_MODES),
     "fallback_policy": {"enabled": False, "order": []},
 }
+SELF_HOSTED_OPERATOR_COHORT = "self_hosted_pilot"
+SELF_HOSTED_OPERATOR_POLICY_REVISION = "self-hosted-pilot-v1"
+SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY = {
+    "plan": "pilot_v1",
+    "daily_limit_s": 2700,
+    "monthly_limit_s": 32400,
+    "max_session_s": 1200,
+    "max_concurrent": 1,
+    "max_audio_bytes_per_session": 120_000_000,
+    "max_audio_bytes_per_minute": 6_000_000,
+    "soft_limit_ratio": 0.8,
+    "hard_limit_ratio": 1.0,
+    "provider_allowlist": [SELF_HOSTED_RUNTIME_PROVIDER],
+    "model_allowlist": [SELF_HOSTED_RUNTIME_MODEL],
+    "mode_allowlist": list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+    "fallback_policy": {"enabled": False, "order": []},
+}
+VALID_RUNTIME_PROVIDERS = {CLOUD_RUNTIME_PROVIDER, SELF_HOSTED_RUNTIME_PROVIDER}
 
 
 @dataclass(frozen=True)
@@ -170,6 +191,57 @@ def code_hmac(config: InvitationConfig, normalized_code: str) -> str:
     if not INVITE_CODE_RE.fullmatch(normalized_code):
         raise ValueError("normalized invite code required")
     return _hmac_ref(config, "code-v1", normalized_code)
+
+
+def email_hash_for(config: InvitationConfig, email: str) -> str:
+    """Return domain-separated SHA-256 HMAC of a normalized email."""
+    normalized = email.strip().lower()
+    if not normalized or "@" not in normalized:
+        raise ValueError("valid email required")
+    return _hmac_ref(config, "email-v1", normalized)
+
+
+def _invitation_runtime_target(invitation):
+    try:
+        policy = normalize_entitlement_policy(invitation.get("entitlement_policy"))
+    except InviteConfigurationError:
+        return None
+    if policy.get("provider_allowlist") == [SELF_HOSTED_RUNTIME_PROVIDER]:
+        return SELF_HOSTED_RUNTIME_PROVIDER
+    if policy.get("provider_allowlist") == [CLOUD_RUNTIME_PROVIDER]:
+        return CLOUD_RUNTIME_PROVIDER
+    return None
+
+
+def is_self_hosted_invitation(invitation):
+    try:
+        policy = normalize_entitlement_policy(invitation.get("entitlement_policy"))
+    except InviteConfigurationError:
+        return False
+    return bool(
+        str(invitation.get("kind") or "") in {"ordinary", "app_review"}
+        and str(invitation.get("cohort") or "") == SELF_HOSTED_OPERATOR_COHORT
+        and str(invitation.get("entitlement_policy_revision") or "") == SELF_HOSTED_OPERATOR_POLICY_REVISION
+        and policy == SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY
+    )
+
+
+def _is_valid_entitlement_policy_for_provider(policy, provider):
+    if provider == SELF_HOSTED_RUNTIME_PROVIDER:
+        return bool(
+            policy["provider_allowlist"] == [SELF_HOSTED_RUNTIME_PROVIDER]
+            and (not policy["model_allowlist"] or policy["model_allowlist"] == [SELF_HOSTED_RUNTIME_MODEL])
+            and set(policy["mode_allowlist"]).issubset(set(SELF_HOSTED_RUNTIME_TARGET_MODES))
+            and policy["fallback_policy"] == {"enabled": False, "order": []}
+        )
+    if provider == CLOUD_RUNTIME_PROVIDER:
+        return bool(
+            policy["provider_allowlist"] == [CLOUD_RUNTIME_PROVIDER]
+            and policy["model_allowlist"] == [CLOUD_RUNTIME_MODEL]
+            and policy["mode_allowlist"] == list(CLOUD_RUNTIME_TARGET_MODES)
+            and policy["fallback_policy"] == {"enabled": False, "order": []}
+        )
+    return False
 
 
 def invitation_target_refs(
@@ -485,6 +557,7 @@ async def redeem_invitation(
     code: str,
     source_address: str,
     pilot_admission: Optional[InvitationPilotAdmission] = None,
+    user_email: str = "",
     pilot_admission_revalidator: Optional[PilotAdmissionRevalidator] = None,
     app_build: str = "",
     config: Optional[InvitationConfig] = None,
@@ -616,6 +689,7 @@ async def redeem_invitation(
                         now=now,
                         config=settings,
                         pilot_admission=pilot_admission,
+                        user_email=user_email,
                         pilot_admission_revalidator=pilot_admission_revalidator,
                         owner=owner,
                         owner_lock=owner_lock,
@@ -639,6 +713,7 @@ async def _redeem_locked_invitation(
     now: datetime,
     config: InvitationConfig,
     pilot_admission: InvitationPilotAdmission,
+    user_email: str = "",
     pilot_admission_revalidator: PilotAdmissionRevalidator,
     owner: authority_advisory_lock.AuthorityOwner,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
@@ -675,55 +750,82 @@ async def _redeem_locked_invitation(
     if not isinstance(current_pilot_admission, InvitationPilotAdmission) or current_pilot_admission != pilot_admission:
         raise InvitePilotGateDenied("invite_pilot_authority_changed")
     pilot_admission = current_pilot_admission
-    try:
-        consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
-            conn,
-            owner=owner,
-            owner_lock=owner_lock,
-            grant=managed_cloud_consent.ManagedCloudGrant(
-                account_uid=pilot_admission.account_uid,
-                profile_uid=pilot_admission.profile_uid,
-                consent_receipt_id=pilot_admission.consent_receipt_id,
-                profile_binding_id=pilot_admission.profile_binding_id,
-                policy_version=pilot_admission.policy_version,
-                processor_set_hash=pilot_admission.processor_set_hash,
-                scope_version=pilot_admission.scope_version,
-                scope_hash=pilot_admission.scope_hash,
-            ),
-        )
-    except managed_cloud_consent.ManagedCloudAuthorityDenied as exc:
-        raise InvitePilotGateDenied("invite_pilot_authority_changed") from exc
-    contract_matches = bool(
-        target
-        and hmac.compare_digest(
-            str(target["account_ref_hmac"]),
-            target_account_ref,
-        )
-        and hmac.compare_digest(
-            str(target["profile_ref_hmac"]),
-            target_profile_ref,
-        )
-        and str(target["required_profile_class"]) == "synthetic"
-        and user
-        and str(user["status"]) == "ACTIVE"
-        and str(user["profile_class"]) == "synthetic"
-        and pilot_admission.account_uid == uid
-        and pilot_admission.profile_uid == uid
-        and invitation["required_consent_policy_version"] == pilot_admission.policy_version
-        and invitation["required_consent_processor_set_hash"] == pilot_admission.processor_set_hash
-        and invitation["required_consent_scope_version"] == pilot_admission.scope_version
-        and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash
-        and all(
-            (
-                pilot_admission.consent_receipt_id,
-                pilot_admission.profile_binding_id,
-                pilot_admission.policy_version,
-                pilot_admission.processor_set_hash,
-                pilot_admission.scope_version,
-                pilot_admission.scope_hash,
+
+    runtime_target = _invitation_runtime_target(invitation)
+    is_self_hosted = runtime_target == SELF_HOSTED_RUNTIME_PROVIDER
+    is_cloud = runtime_target == CLOUD_RUNTIME_PROVIDER
+
+    if is_self_hosted:
+        consent_authority_epoch = 0
+    else:
+        try:
+            consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
+                conn,
+                owner=owner,
+                owner_lock=owner_lock,
+                grant=managed_cloud_consent.ManagedCloudGrant(
+                    account_uid=pilot_admission.account_uid,
+                    profile_uid=pilot_admission.profile_uid,
+                    consent_receipt_id=pilot_admission.consent_receipt_id,
+                    profile_binding_id=pilot_admission.profile_binding_id,
+                    policy_version=pilot_admission.policy_version,
+                    processor_set_hash=pilot_admission.processor_set_hash,
+                    scope_version=pilot_admission.scope_version,
+                    scope_hash=pilot_admission.scope_hash,
+                ),
+            )
+        except managed_cloud_consent.ManagedCloudAuthorityDenied as exc:
+            raise InvitePilotGateDenied("invite_pilot_authority_changed") from exc
+
+    if is_self_hosted:
+        contract_matches = bool(
+            user
+            and str(user["status"]) == "ACTIVE"
+            and pilot_admission.account_uid == uid
+            and pilot_admission.profile_uid == uid
+            and all(
+                (
+                    pilot_admission.consent_receipt_id,
+                    pilot_admission.profile_binding_id,
+                    pilot_admission.policy_version,
+                    pilot_admission.processor_set_hash,
+                    pilot_admission.scope_version,
+                    pilot_admission.scope_hash,
+                )
             )
         )
-    )
+    else:
+        contract_matches = bool(
+            target
+            and hmac.compare_digest(
+                str(target["account_ref_hmac"]),
+                target_account_ref,
+            )
+            and hmac.compare_digest(
+                str(target["profile_ref_hmac"]),
+                target_profile_ref,
+            )
+            and str(target["required_profile_class"]) == "synthetic"
+            and user
+            and str(user["status"]) == "ACTIVE"
+            and str(user["profile_class"]) == "synthetic"
+            and pilot_admission.account_uid == uid
+            and pilot_admission.profile_uid == uid
+            and invitation["required_consent_policy_version"] == pilot_admission.policy_version
+            and invitation["required_consent_processor_set_hash"] == pilot_admission.processor_set_hash
+            and invitation["required_consent_scope_version"] == pilot_admission.scope_version
+            and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash
+            and all(
+                (
+                    pilot_admission.consent_receipt_id,
+                    pilot_admission.profile_binding_id,
+                    pilot_admission.policy_version,
+                    pilot_admission.processor_set_hash,
+                    pilot_admission.scope_version,
+                    pilot_admission.scope_hash,
+                )
+            )
+        )
     if not contract_matches:
         await _record_failure(
             conn,
@@ -741,6 +843,37 @@ async def _redeem_locked_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
+
+    # Enforce email scoping when invitation has allowed_email_hash
+    allowed_email_hash = invitation.get("allowed_email_hash")
+    if allowed_email_hash:
+        if not user_email:
+            await _record_failure(
+                conn,
+                invitation_id=invitation_id,
+                uid_ref_hmac=uid_ref_hmac,
+                source_ref_hmac=source_ref_hmac,
+                failure_code="invalid",
+                support_code=support_code,
+                correlation_id=correlation_id,
+                now=now,
+                config=config,
+            )
+            return _failure("invalid", support_code=support_code, correlation_id=correlation_id)
+        expected = email_hash_for(config, user_email)
+        if not hmac.compare_digest(str(allowed_email_hash), expected):
+            await _record_failure(
+                conn,
+                invitation_id=invitation_id,
+                uid_ref_hmac=uid_ref_hmac,
+                source_ref_hmac=source_ref_hmac,
+                failure_code="invalid",
+                support_code=support_code,
+                correlation_id=correlation_id,
+                now=now,
+                config=config,
+            )
+            return _failure("invalid", support_code=support_code, correlation_id=correlation_id)
 
     existing = await conn.fetchrow(
         """
@@ -800,7 +933,7 @@ async def _redeem_locked_invitation(
             "support_code": support_code,
             "correlation_id": correlation_id,
         }
-    if target["consumed_at"] is not None:
+    if target and target["consumed_at"] is not None:
         await _record_audit(
             conn,
             invitation_id=invitation_id,
@@ -926,12 +1059,7 @@ async def _redeem_locked_invitation(
             support_code=support_code,
             correlation_id=correlation_id,
         )
-    if (
-        policy["provider_allowlist"] != [PILOT_RUNTIME_PROVIDER]
-        or policy["model_allowlist"] != [PILOT_MODEL]
-        or policy["mode_allowlist"] != list(PILOT_TARGET_MODES)
-        or policy["fallback_policy"] != {"enabled": False, "order": []}
-    ):
+    if not _is_valid_entitlement_policy_for_provider(policy, runtime_target):
         await _record_audit(
             conn,
             invitation_id=invitation_id,
@@ -1054,7 +1182,7 @@ async def _redeem_locked_invitation(
         ) VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8)
         """,
         invitation_id,
-        target["id"],
+        (target["id"] if target else None),
         uid_ref_hmac,
         _hmac_ref(
             config,
