@@ -387,12 +387,13 @@ class PostgresCanonicalEventStore(CanonicalEventStore):
                         and current_summary_version != previous_summary_version
                     ):
                         try:
-                            await self._today_card_repository.invalidate_source_in_connection(
-                                conn,
-                                uid=item["uid"],
-                                source_id=conversation_id,
-                                reason="source_version_changed",
-                            )
+                            async with conn.transaction():
+                                await self._today_card_repository.invalidate_source_in_connection(
+                                    conn,
+                                    uid=item["uid"],
+                                    source_id=conversation_id,
+                                    reason="source_version_changed",
+                                )
                         except asyncpg.UndefinedTableError:
                             logger.warning("Today-card migration missing while processing canonical source update")
 

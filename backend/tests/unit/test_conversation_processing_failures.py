@@ -1,6 +1,8 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 import os
 import sys
+import threading
 import types
 
 import pytest
@@ -412,3 +414,32 @@ def test_failed_conversations_api_is_uid_scoped_and_preserves_long_transcript(mo
     assert payload["processing_error"] == CONVERSATION_SUMMARY_FAILED
     assert payload["processing_error_at"] is not None
     assert len(payload["transcript_segments"][0]["text"]) > 25_000
+
+
+def test_conversation_delete_offloads_blocking_stores_from_event_loop(monkeypatch):
+    loop_thread = None
+    blocking_threads = []
+
+    def blocking_call(*_args):
+        blocking_threads.append(threading.get_ident())
+        return {}
+
+    async def invalidate(*_args):
+        assert threading.get_ident() == loop_thread
+        return 1
+
+    monkeypatch.setattr(conversations_router, "_get_valid_conversation_by_id", blocking_call)
+    monkeypatch.setattr(conversations_router.conversations_db, "delete_conversation", blocking_call)
+    monkeypatch.setattr(conversations_router, "delete_vector", blocking_call)
+    monkeypatch.setattr(conversations_router, "invalidate_deleted_conversation_source", invalidate)
+
+    async def run():
+        nonlocal loop_thread
+        loop_thread = threading.get_ident()
+        return await conversations_router.delete_conversation("conversation-a", "uid-a")
+
+    result = asyncio.run(run())
+
+    assert result == {"status": "Ok"}
+    assert len(blocking_threads) == 3
+    assert all(thread_id != loop_thread for thread_id in blocking_threads)

@@ -37,6 +37,8 @@ sys.modules.setdefault("utils.conversations.generic_summary", summary_stub)
 from database.memory_reinterpretations import (
     InMemoryMemoryReinterpretationRepository,
     PostgresMemoryReinterpretationRepository,
+    canonical_refs,
+    canonical_transcript_hash,
 )
 from ella.routers import corrections, memory_reinterpretation as reinterpretation_router
 from ella.routers.canonical_events import (
@@ -56,6 +58,7 @@ from ella.services.memory_reinterpretation import (
     ReinterpretationWorkerError,
     run_worker_loop,
     worker_runtime_metrics,
+    _validate_rows,
 )
 
 UID = "CaseSensitiveUserA"
@@ -557,6 +560,42 @@ def test_read_only_or_noise_completion_never_enqueues():
             assert repository.jobs == {}
 
     asyncio.run(run())
+
+
+def test_worker_accepts_uniform_daily_card_scope_and_rejects_mixed_scope():
+    rows = [
+        {
+            "uid": UID,
+            "session_id": SESSION_ID,
+            "event_id": "daily-card-turn",
+            "source_identity": "source-a",
+            "scope_kind": "daily_card",
+            "conversation_id": CONVERSATION_ID,
+            "active_summary_version_id": VERSION_ID,
+            "role": "user",
+            "text": "A confirmed correction.",
+        }
+    ]
+    job = {
+        "uid": UID,
+        "logical_session_id": SESSION_ID,
+        "conversation_id": CONVERSATION_ID,
+        "starting_summary_version_id": VERSION_ID,
+        "transcript_hash": canonical_transcript_hash(rows),
+        "canonical_refs": canonical_refs(rows),
+    }
+
+    _validate_rows(job, rows)
+
+    mixed_rows = [*rows, {**rows[0], "event_id": "memory-turn", "source_identity": "source-b", "scope_kind": "memory"}]
+    mixed_job = {
+        **job,
+        "transcript_hash": canonical_transcript_hash(mixed_rows),
+        "canonical_refs": canonical_refs(mixed_rows),
+    }
+    with pytest.raises(ReinterpretationWorkerError, match="canonical_scope_mismatch") as error:
+        _validate_rows(mixed_job, mixed_rows)
+    assert error.value.retryable is False
 
 
 class _Hermes:

@@ -147,6 +147,12 @@ class TodayCardUserContext(BaseModel):
     canonical_event_count: int = 0
 
 
+@dataclass(frozen=True)
+class TodayCardMaterializationClaim:
+    card: TodayCardRecord
+    acquired: bool
+
+
 class TodayCardMaterializationRepository(Protocol):
     async def get_user_context(self, uid: str) -> TodayCardUserContext | None: ...
 
@@ -160,7 +166,7 @@ class TodayCardMaterializationRepository(Protocol):
         timezone_name: str,
         now: datetime,
         force_regenerate: bool,
-    ) -> TodayCardRecord: ...
+    ) -> TodayCardMaterializationClaim: ...
 
     async def load_evidence(
         self,
@@ -371,13 +377,16 @@ class TodayCardMaterializer:
         ):
             return TodayCardMaterializationResult(card=existing, created=False)
 
-        claimed = await self.repository.claim_materialization(
+        claim = await self.repository.claim_materialization(
             uid=uid,
             local_date=local_date,
             timezone_name=timezone_name,
             now=now,
             force_regenerate=existing is not None,
         )
+        claimed = claim.card
+        if not claim.acquired:
+            return TodayCardMaterializationResult(card=claimed, created=False)
         if claimed.state != TodayCardState.preparing:
             return TodayCardMaterializationResult(card=claimed, created=False)
 

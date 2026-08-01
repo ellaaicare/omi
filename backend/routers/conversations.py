@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from typing import Optional, List
 from datetime import datetime, timezone
 
@@ -200,13 +201,13 @@ def get_conversation_transcripts_by_models(conversation_id: str, uid: str = Depe
 @router.delete("/v1/conversations/{conversation_id}", status_code=204, tags=['conversations'])
 async def delete_conversation(conversation_id: str, uid: str = Depends(auth.get_current_user_uid)):
     print('delete_conversation', conversation_id, uid)
-    _get_valid_conversation_by_id(uid, conversation_id)
+    await run_in_threadpool(_get_valid_conversation_by_id, uid, conversation_id)
     try:
         await invalidate_deleted_conversation_source(uid, conversation_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"code": "today_card_source_invalidation_failed"}) from exc
-    conversations_db.delete_conversation(uid, conversation_id)
-    delete_vector(uid, conversation_id)
+    await run_in_threadpool(conversations_db.delete_conversation, uid, conversation_id)
+    await run_in_threadpool(delete_vector, uid, conversation_id)
     return {"status": "Ok"}
 
 

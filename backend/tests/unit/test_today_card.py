@@ -9,6 +9,7 @@ from ella.services.today_card import (
     TodayCardContent,
     TodayCardEvidence,
     TodayCardKind,
+    TodayCardMaterializationClaim,
     TodayCardMaterializer,
     TodayCardRecord,
     TodayCardSourceRef,
@@ -87,7 +88,7 @@ class InMemoryTodayCardRepository:
             updated_at=now,
         )
         self.current_sources = True
-        return self.current
+        return TodayCardMaterializationClaim(card=self.current, acquired=True)
 
     async def load_evidence(self, **_kwargs):
         self.load_evidence_count += 1
@@ -240,6 +241,34 @@ def test_duplicate_job_is_idempotent_and_notification_token_independent(monkeypa
     assert second.card.version == first.card.version
     assert repository.claim_count == 1
     assert repository.load_evidence_count == 1
+
+
+def test_fresh_preparing_claim_is_returned_without_duplicate_generation():
+    repository = InMemoryTodayCardRepository(
+        [_source(TodayCardKind.recap, "source", occurred_at=datetime(2026, 7, 31, 18, tzinfo=timezone.utc))]
+    )
+    repository.current = TodayCardRecord(
+        card_id=deterministic_card_id(UID, LOCAL_DATE),
+        uid=UID,
+        local_date=LOCAL_DATE,
+        timezone="UTC",
+        version=1,
+        state=TodayCardState.preparing,
+        updated_at=NOW,
+    )
+
+    async def return_in_flight(**_kwargs):
+        repository.claim_count += 1
+        return TodayCardMaterializationClaim(card=repository.current, acquired=False)
+
+    repository.claim_materialization = return_in_flight
+
+    result = _materialize(repository)
+
+    assert result.created is False
+    assert result.card.state == TodayCardState.preparing
+    assert repository.claim_count == 1
+    assert repository.load_evidence_count == 0
 
 
 def test_materializer_has_no_legacy_daily_summary_or_notification_dependency():

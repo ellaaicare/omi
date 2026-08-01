@@ -19,6 +19,7 @@ from ella.services.today_card import (
     TodayCardEvidence,
     TodayCardFeedbackAction,
     TodayCardKind,
+    TodayCardMaterializationClaim,
     TodayCardRecord,
     TodayCardSourceRef,
     TodayCardState,
@@ -310,7 +311,7 @@ class PostgresTodayCardRepository:
         timezone_name: str,
         now: datetime,
         force_regenerate: bool,
-    ) -> TodayCardRecord:
+    ) -> TodayCardMaterializationClaim:
         pool = await self._pool()
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -346,14 +347,14 @@ class PostgresTodayCardRepository:
                         TODAY_CARD_RENDER_CONTRACT_VERSION,
                         now,
                     )
-                    return _card_from_row(row)
+                    return TodayCardMaterializationClaim(card=_card_from_row(row), acquired=True)
 
                 existing = _card_from_row(row)
                 still_running = existing.state == TodayCardState.preparing and existing.updated_at >= now - timedelta(
                     minutes=5
                 )
                 if still_running or not force_regenerate:
-                    return existing
+                    return TodayCardMaterializationClaim(card=existing, acquired=False)
                 row = await conn.fetchrow(
                     """
                     UPDATE ella_today_cards
@@ -377,7 +378,7 @@ class PostgresTodayCardRepository:
                     timezone_name,
                     now,
                 )
-                return _card_from_row(row)
+                return TodayCardMaterializationClaim(card=_card_from_row(row), acquired=True)
 
     async def load_evidence(
         self,

@@ -162,12 +162,14 @@ def _evidence_is_explicit(
 def _validate_rows(job: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise ReinterpretationWorkerError("canonical_session_empty", retryable=True)
+    scope_kinds = {str(row.get("scope_kind") or "") for row in rows}
+    if len(scope_kinds) != 1 or not scope_kinds.issubset({"memory", "daily_card"}):
+        raise ReinterpretationWorkerError("canonical_scope_mismatch", retryable=False)
     for row in rows:
         if row.get("uid") != job["uid"] or row.get("session_id") != job["logical_session_id"]:
             raise ReinterpretationWorkerError("canonical_owner_mismatch", retryable=False)
         if (
-            row.get("scope_kind") != "memory"
-            or row.get("conversation_id") != job["conversation_id"]
+            row.get("conversation_id") != job["conversation_id"]
             or row.get("active_summary_version_id") != job["starting_summary_version_id"]
         ):
             raise ReinterpretationWorkerError("canonical_scope_mismatch", retryable=False)

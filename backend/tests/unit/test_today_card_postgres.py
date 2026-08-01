@@ -98,6 +98,69 @@ def test_sources_are_current_requires_exact_owner_conversation_and_active_versio
     )
 
 
+def test_fresh_preparing_row_is_not_reported_as_acquired():
+    preparing = _card().model_copy(
+        update={
+            "state": TodayCardState.preparing,
+            "kind": None,
+            "content": None,
+            "source_refs": [],
+            "evidence_hash": None,
+            "generated_at": None,
+            "updated_at": NOW,
+        }
+    )
+    row = preparing.model_dump(mode="python")
+    row["state"] = preparing.state.value
+    row["contract_version"] = preparing.contract_version
+    row["render_contract_version"] = preparing.render_contract_version
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def execute(self, query, *_args):
+            assert "pg_advisory_xact_lock" in query
+
+        async def fetchrow(self, query, *_args):
+            assert "FOR UPDATE" in query
+            return row
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class ClaimPool:
+        def acquire(self):
+            return Acquire()
+
+    repository = PostgresTodayCardRepository(lambda: asyncio.sleep(0, result=ClaimPool()))
+
+    claim = asyncio.run(
+        repository.claim_materialization(
+            uid="uid-a",
+            local_date=date(2026, 8, 1),
+            timezone_name="UTC",
+            now=NOW,
+            force_regenerate=True,
+        )
+    )
+
+    assert claim.acquired is False
+    assert claim.card.state == TodayCardState.preparing
+    assert claim.card.version == preparing.version
+
+
 def test_deleted_source_invalidation_is_exact_uid_and_source(monkeypatch):
     pool = Pool()
     monkeypatch.setattr(today_card_postgres, "get_ella_postgres_pool", lambda: asyncio.sleep(0, result=pool))
@@ -177,6 +240,71 @@ def test_canonical_summary_correction_invalidates_card_in_same_transaction(monke
         "source_id": "conversation-a",
         "reason": "source_version_changed",
     }
+
+
+def test_missing_today_card_table_rolls_back_savepoint_without_aborting_canonical_write(monkeypatch):
+    transaction_exits = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, *_args):
+            transaction_exits.append(exc_type)
+            return False
+
+    class Connection:
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *_args):
+            if "SELECT source_ref" in query:
+                return {"active_summary_version_id": "summary-v1"}
+            if "INSERT INTO canonical_events" in query:
+                return {"inserted": False}
+            raise AssertionError(query)
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class CanonicalPool:
+        def acquire(self):
+            return Acquire()
+
+    class MissingTodayRepository:
+        async def invalidate_source_in_connection(self, _conn, **_kwargs):
+            raise canonical_events.asyncpg.UndefinedTableError("ella_today_cards is missing")
+
+    monkeypatch.setattr(canonical_events, "_get_pool", lambda: asyncio.sleep(0, result=CanonicalPool()))
+    store = PostgresCanonicalEventStore(
+        reinterpretation_repository=False,
+        today_card_repository=MissingTodayRepository(),
+    )
+    event = CanonicalEventIn(
+        uid="uid-a",
+        canonical_identity="uid-a",
+        event_id="omi:conversation-a:summary",
+        source_ref={
+            "source_identity": "omi:conversation-a",
+            "conversation_id": "conversation-a",
+            "active_summary_version_id": "summary-v2",
+        },
+        channel="omi",
+        provider="omi-backend",
+        role="assistant",
+        text="",
+        started_at=NOW,
+        metadata={"adapter": "omi-enriched-conversation", "structured": {}},
+    )
+
+    result = asyncio.run(store.write_batch([event]))
+
+    assert result["updated"] == 1
+    assert transaction_exits == [canonical_events.asyncpg.UndefinedTableError, None]
 
 
 def test_migration_defines_versioned_authority_and_source_indexes():
