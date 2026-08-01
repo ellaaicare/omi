@@ -6,7 +6,6 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
-      - "backend/database/ella_postgres.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -18,7 +17,6 @@ on:
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
-      - "backend/ella/routers/today_cards.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/guardian.py"
@@ -47,15 +45,12 @@ on:
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
-      - "backend/ella/services/today_card.py"
-      - "backend/ella/services/today_card_postgres.py"
       - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
-      - "backend/migrations/015_create_today_cards.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
@@ -94,7 +89,6 @@ on:
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
-      - "backend/tests/unit/test_today_card*.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
   push:
     branches: [main]
@@ -102,7 +96,6 @@ on:
       - "backend/contracts/authority_advisory_lock_v1.json"
       - "backend/contracts/README.md"
       - "backend/database/authority_advisory_lock.py"
-      - "backend/database/ella_postgres.py"
       - "backend/database/ella_provisioning.py"
       - "backend/database/hermes_cloud_enrichment_outbox.py"
       - "backend/database/invitations.py"
@@ -114,7 +107,6 @@ on:
       - "backend/ella/routers/auto_provision.py"
       - "backend/ella/routers/callbacks.py"
       - "backend/ella/routers/canonical_events.py"
-      - "backend/ella/routers/today_cards.py"
       - "backend/ella/routers/ai_consent.py"
       - "backend/ella/routers/chat.py"
       - "backend/ella/routers/guardian.py"
@@ -143,15 +135,12 @@ on:
       - "backend/ella/services/runtime_errors.py"
       - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/summary_recovery.py"
-      - "backend/ella/services/today_card.py"
-      - "backend/ella/services/today_card_postgres.py"
       - "backend/ella/services/voice_honcho.py"
       - "backend/migrations/009_create_hermes_cloud_runtime_pool.sql"
       - "backend/migrations/010_add_cloud_profile_class.sql"
       - "backend/migrations/011_create_invitation_redemption.sql"
       - "backend/migrations/012_create_account_profile_runtime_targets.sql"
       - "backend/migrations/013_create_managed_cloud_consent_authority.sql"
-      - "backend/migrations/015_create_today_cards.sql"
       - "backend/scripts/hermes_cloud_pool_admin.py"
       - "backend/scripts/hermes_cloud_enrichment_smoke.py"
       - "backend/scripts/hermes_product_fit_canary.py"
@@ -190,7 +179,6 @@ on:
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_memory_reinterpretation_outbox.py"
       - "backend/tests/unit/test_scanner_keyterms.py"
-      - "backend/tests/unit/test_today_card*.py"
       - ".github/workflows/hermes-cloud-runtime-tests.yml"
 
 jobs:
@@ -251,7 +239,6 @@ jobs:
         run: >-
           python -m py_compile
           database/authority_advisory_lock.py
-          database/ella_postgres.py
           database/ella_provisioning.py
           database/hermes_cloud_enrichment_outbox.py
           database/invitations.py
@@ -267,7 +254,6 @@ jobs:
           ella/routers/invites.py
           ella/routers/onboarding.py
           ella/routers/observer.py
-          ella/routers/today_cards.py
           ella/services/ai_consent.py
           ella/services/consent_authority.py
           ella/services/hermes_broker_client.py
@@ -288,8 +274,6 @@ jobs:
           ella/services/runtime_errors.py
           ella/services/runtime_resolver.py
           ella/services/summary_recovery.py
-          ella/services/today_card.py
-          ella/services/today_card_postgres.py
           ella/services/voice_honcho.py
           scripts/hermes_cloud_pool_admin.py
           scripts/hermes_cloud_enrichment_smoke.py
@@ -303,7 +287,6 @@ jobs:
         run: >-
           black --check --line-length 120 --skip-string-normalization
           database/authority_advisory_lock.py
-          database/ella_postgres.py
           database/ella_provisioning.py database/invitations.py
           database/managed_cloud_consent.py
           database/runtime_targets.py database/voice_canary.py
@@ -311,7 +294,6 @@ jobs:
           ella/routers/ai_consent.py ella/routers/chat.py
           ella/routers/guardian.py ella/routers/invites.py
           ella/routers/onboarding.py ella/services/hermes_cloud_policy.py
-          ella/routers/today_cards.py
           ella/services/hermes_broker_client.py
           ella/services/hermes_broker_prototype.py
           ella/services/hermes_cloud.py ella/services/hermes_cloud_enrichment.py
@@ -322,7 +304,6 @@ jobs:
           ella/services/observer_extractor.py
           ella/services/provisioning.py ella/services/runtime_resolver.py
           ella/services/summary_recovery.py utils/ella/scanner_keyterms.py
-          ella/services/today_card.py ella/services/today_card_postgres.py
           scripts/voice_canary_admin.py
           scripts/hermes_product_fit_canary.py
           tests/unit/test_ella_callbacks_summary_update.py
@@ -345,9 +326,6 @@ jobs:
           tests/unit/test_hermes_cloud_staged_attestation.py
           tests/unit/test_memory_reinterpretation_outbox.py
           tests/unit/test_scanner_keyterms.py
-          tests/unit/test_today_card.py
-          tests/unit/test_today_card_api.py
-          tests/unit/test_today_card_postgres.py
           tests/postgres/test_hermes_cloud_pool_postgres.py
           tests/postgres/test_authority_advisory_lock_postgres.py
           tests/postgres/test_invitation_redemption_postgres.py
@@ -471,21 +449,7 @@ jobs:
           pytest tests/unit/test_ella_observer.py -v
           test "$(pytest --collect-only -q tests/unit/test_invitation_redemption.py | grep -c '::')" -eq 18
           pytest tests/unit/test_invitation_redemption.py -v
-          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 30
+          test "$(pytest --collect-only -q tests/unit/test_memory_reinterpretation_outbox.py | grep -c '::')" -eq 28
           pytest tests/unit/test_memory_reinterpretation_outbox.py -v
           test "$(pytest --collect-only -q tests/unit/test_scanner_keyterms.py | grep -c '::')" -eq 10
           pytest tests/unit/test_scanner_keyterms.py -v
-          test "$(
-            pytest --collect-only -q \
-              tests/unit/test_today_card.py \
-              tests/unit/test_today_card_api.py \
-              tests/unit/test_today_card_postgres.py \
-              tests/unit/test_canonical_voice_scope_isolation.py |
-              grep -c '::'
-          )" -eq 24
-          pytest \
-            tests/unit/test_today_card.py \
-            tests/unit/test_today_card_api.py \
-            tests/unit/test_today_card_postgres.py \
-            tests/unit/test_canonical_voice_scope_isolation.py \
-            -v
