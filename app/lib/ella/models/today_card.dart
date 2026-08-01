@@ -39,20 +39,54 @@ enum TodayCardKind {
 
 @immutable
 class TodayCardSourceRef {
-  const TodayCardSourceRef({required this.kind, required this.id, this.versionId = ''});
+  const TodayCardSourceRef({
+    required this.kind,
+    required this.id,
+    this.versionId = '',
+    this.occurredAt,
+    this.conversationId = '',
+  });
 
   final String kind;
   final String id;
   final String versionId;
+  final DateTime? occurredAt;
+  final String conversationId;
 
-  Map<String, dynamic> toCacheJson() => {'kind': kind, 'id': id, if (versionId.isNotEmpty) 'version_id': versionId};
+  Map<String, dynamic> toCacheJson() => {
+        'kind': kind,
+        'id': id,
+        if (versionId.isNotEmpty) 'version_id': versionId,
+        if (occurredAt != null) 'occurred_at': occurredAt!.toUtc().toIso8601String(),
+        if (conversationId.isNotEmpty) 'conversation_id': conversationId,
+      };
 
   static TodayCardSourceRef? fromCacheJson(Object? value) {
     if (value is! Map) return null;
     final kind = value['kind']?.toString().trim() ?? '';
     final id = value['id']?.toString().trim() ?? '';
     if (kind.isEmpty || id.isEmpty) return null;
-    return TodayCardSourceRef(kind: kind, id: id, versionId: value['version_id']?.toString().trim() ?? '');
+    return TodayCardSourceRef(
+      kind: kind,
+      id: id,
+      versionId: value['version_id']?.toString().trim() ?? '',
+      occurredAt: DateTime.tryParse(value['occurred_at']?.toString() ?? ''),
+      conversationId: value['conversation_id']?.toString().trim() ?? '',
+    );
+  }
+
+  static TodayCardSourceRef? fromApiJson(Object? value) {
+    if (value is! Map) return null;
+    final kind = value['source_type']?.toString().trim() ?? '';
+    final id = value['source_id']?.toString().trim() ?? '';
+    if (kind.isEmpty || id.isEmpty) return null;
+    return TodayCardSourceRef(
+      kind: kind,
+      id: id,
+      versionId: value['source_version_id']?.toString().trim() ?? '',
+      occurredAt: DateTime.tryParse(value['occurred_at']?.toString() ?? ''),
+      conversationId: value['conversation_id']?.toString().trim() ?? '',
+    );
   }
 }
 
@@ -68,6 +102,9 @@ class TodayCard {
     required this.generatedAt,
     this.spokenText = '',
     this.sourceDate = '',
+    this.localDate = '',
+    this.timezone = '',
+    this.evidenceHash = '',
     this.sourceRefs = const [],
   });
 
@@ -79,6 +116,9 @@ class TodayCard {
   final String body;
   final String spokenText;
   final String sourceDate;
+  final String localDate;
+  final String timezone;
+  final String evidenceHash;
   final DateTime generatedAt;
   final List<TodayCardSourceRef> sourceRefs;
 
@@ -101,6 +141,9 @@ class TodayCard {
         'body': body,
         'spoken_text': spokenText,
         'source_date': sourceDate,
+        'local_date': localDate,
+        'timezone': timezone,
+        'evidence_hash': evidenceHash,
         'generated_at': generatedAt.toUtc().toIso8601String(),
         'source_refs': sourceRefs.map((source) => source.toCacheJson()).toList(),
       };
@@ -126,6 +169,39 @@ class TodayCard {
       body: value['body']?.toString().trim() ?? '',
       spokenText: value['spoken_text']?.toString().trim() ?? '',
       sourceDate: value['source_date']?.toString().trim() ?? '',
+      localDate: value['local_date']?.toString().trim() ?? '',
+      timezone: value['timezone']?.toString().trim() ?? '',
+      evidenceHash: value['evidence_hash']?.toString().trim() ?? '',
+      generatedAt: generatedAt,
+      sourceRefs: sourceRefs,
+    );
+    return card.isValid ? card : null;
+  }
+
+  static TodayCard? fromApiJson(Object? value) {
+    if (value is! Map) return null;
+    final kind = TodayCardKind.tryParse(value['kind']?.toString() ?? '');
+    final generatedAt = DateTime.tryParse(value['generated_at']?.toString() ?? '');
+    final rawVersion = value['version'];
+    final sourceRefs = (value['source_refs'] as List?)
+            ?.map(TodayCardSourceRef.fromApiJson)
+            .whereType<TodayCardSourceRef>()
+            .toList(growable: false) ??
+        const <TodayCardSourceRef>[];
+    if (kind == null || generatedAt == null || rawVersion is! num) return null;
+
+    final card = TodayCard(
+      id: value['card_id']?.toString().trim() ?? '',
+      version: rawVersion.toInt(),
+      kind: kind,
+      eyebrow: value['eyebrow']?.toString().trim() ?? '',
+      headline: value['headline']?.toString().trim() ?? '',
+      body: value['body']?.toString().trim() ?? '',
+      spokenText: value['spoken_text']?.toString().trim() ?? '',
+      sourceDate: value['source_date']?.toString().trim() ?? '',
+      localDate: value['local_date']?.toString().trim() ?? '',
+      timezone: value['timezone']?.toString().trim() ?? '',
+      evidenceHash: value['evidence_hash']?.toString().trim() ?? '',
       generatedAt: generatedAt,
       sourceRefs: sourceRefs,
     );
@@ -141,6 +217,9 @@ class TodayCardResponse {
     this.card,
     this.errorCode = '',
     this.retryable = true,
+    this.etag = '',
+    this.serverTime,
+    this.retryAfter = Duration.zero,
   });
 
   final String contractVersion;
@@ -148,6 +227,9 @@ class TodayCardResponse {
   final TodayCard? card;
   final String errorCode;
   final bool retryable;
+  final String etag;
+  final DateTime? serverTime;
+  final Duration retryAfter;
 
   bool get hasCurrentContract => contractVersion == todayCardContractVersion;
 

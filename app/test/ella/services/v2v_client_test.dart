@@ -235,6 +235,46 @@ void main() {
       );
     });
 
+    test('daily card resolved scope must match the requested card and exact version', () {
+      const requested = V2VSessionScope.dailyCard(cardId: 'today-card-42', expectedVersion: 3);
+      final resolved = V2VResolvedSessionScope.tryParse({
+        'kind': 'daily_card',
+        'card_id': 'today-card-42',
+        'card_version': 3,
+        'card_evidence_hash': 'sha256:server-owned',
+        'conversation_id': 'conversation-42',
+        'active_summary_version_id': 'summary-v3',
+        'can_reinterpret': true,
+        'headline': 'ignored by the client',
+      });
+
+      expect(resolved, isNotNull);
+      expect(resolved!.matches(requested), isTrue);
+      expect(resolved.cardId, 'today-card-42');
+      expect(resolved.cardVersion, 3);
+      expect(resolved.conversationId, 'conversation-42');
+      expect(
+        V2VResolvedSessionScope.tryParse({
+          'kind': 'daily_card',
+          'card_id': 'today-card-42',
+          'card_version': 2,
+          'can_reinterpret': false,
+        })!
+            .matches(requested),
+        isFalse,
+      );
+      expect(
+        V2VResolvedSessionScope.tryParse({
+          'kind': 'daily_card',
+          'card_id': 'another-card',
+          'card_version': 3,
+          'can_reinterpret': false,
+        })!
+            .matches(requested),
+        isFalse,
+      );
+    });
+
     test('missing and non-owned scoped memories expose the same safe failure', () {
       const scope = V2VSessionScope.memory(conversationId: 'conversation-42');
 

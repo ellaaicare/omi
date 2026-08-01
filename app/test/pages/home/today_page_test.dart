@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
@@ -67,6 +68,120 @@ void main() {
       'kind': 'daily_card',
       'card_id': 'today-card-42',
       'expected_version': 3,
+    });
+  });
+
+  group('Today card v1 transport', () {
+    const readyEnvelope = {
+      'contract_version': 'ella.today_card.v1',
+      'state': 'ready',
+      'card': {
+        'card_id': '2265689d-e0d7-4a26-bdeb-2c8c97e90b89',
+        'version': 3,
+        'local_date': '2026-08-01',
+        'timezone': 'America/Los_Angeles',
+        'kind': 'recap',
+        'eyebrow': 'A NOTE FROM YESTERDAY',
+        'headline': 'The roses along Elm Street',
+        'body': 'You enjoyed the long walk home with Rose.',
+        'spoken_text': 'The roses along Elm Street. You enjoyed the long walk home with Rose.',
+        'source_date': '2026-07-31',
+        'source_refs': [
+          {
+            'source_type': 'conversation_summary',
+            'source_id': 'conversation-a',
+            'source_version_id': 'summary-v3',
+            'occurred_at': '2026-07-31T18:00:00Z',
+            'conversation_id': 'conversation-a',
+          }
+        ],
+        'evidence_hash': 'sha256:grounded',
+        'generated_at': '2026-08-01T12:00:00Z',
+        'presentation': {'style': 'letter'},
+      },
+      'reason_code': null,
+      'retry_after_seconds': null,
+      'server_time': '2026-08-01T12:00:01Z',
+      'etag': '"today-card-etag"',
+    };
+
+    test('parses the canonical ready envelope without losing provenance', () {
+      final response = HttpTodayCardRepository.parseEnvelope(readyEnvelope, headerEtag: '"today-card-etag"');
+
+      expect(response.isValid, isTrue);
+      expect(response.status, TodayCardStatus.ready);
+      expect(response.etag, '"today-card-etag"');
+      expect(response.serverTime, DateTime.parse('2026-08-01T12:00:01Z'));
+      expect(response.card?.localDate, '2026-08-01');
+      expect(response.card?.timezone, 'America/Los_Angeles');
+      expect(response.card?.evidenceHash, 'sha256:grounded');
+      expect(response.card?.sourceDate, '2026-07-31');
+      expect(response.card?.sourceRefs.single.kind, 'conversation_summary');
+      expect(response.card?.sourceRefs.single.conversationId, 'conversation-a');
+      expect(response.card?.sourceRefs.single.occurredAt, DateTime.parse('2026-07-31T18:00:00Z'));
+    });
+
+    test('keeps new-user, preparing, and degraded responses distinct', () {
+      final welcome = Map<String, Object?>.from(readyEnvelope)
+        ..['state'] = 'new_user'
+        ..['card'] = {
+          ...readyEnvelope['card']! as Map<String, Object?>,
+          'kind': 'welcome',
+          'source_refs': <Object?>[],
+        };
+      final preparing = Map<String, Object?>.from(readyEnvelope)
+        ..['state'] = 'preparing'
+        ..['card'] = null
+        ..['retry_after_seconds'] = 30;
+      final degraded = Map<String, Object?>.from(readyEnvelope)
+        ..['state'] = 'degraded'
+        ..['card'] = null
+        ..['reason_code'] = 'no_safe_source';
+
+      expect(HttpTodayCardRepository.parseEnvelope(welcome).status, TodayCardStatus.newUser);
+      expect(HttpTodayCardRepository.parseEnvelope(preparing).retryAfter, const Duration(seconds: 30));
+      expect(HttpTodayCardRepository.parseEnvelope(degraded).errorCode, 'no_safe_source');
+    });
+
+    test('uses authenticated intended backend path without sending a caller-selected uid', () async {
+      String? requestUrl;
+      bool? authRequired;
+      final repository = HttpTodayCardRepository(
+        baseUrl: 'https://api.ella-ai-care.com',
+        request: ({
+          required url,
+          required headers,
+          required body,
+          required method,
+          timeout,
+          retries,
+          requireAuthCheck,
+        }) async {
+          requestUrl = url;
+          authRequired = requireAuthCheck;
+          expect(method, 'GET');
+          expect(body, isEmpty);
+          return http.Response(jsonEncode(readyEnvelope), 200, headers: {'etag': '"today-card-etag"'});
+        },
+      );
+
+      final response = await repository.fetch(uid: 'firebase-user-a');
+
+      expect(response.isValid, isTrue);
+      expect(requestUrl, 'https://api.ella-ai-care.com/v1/ella/today-card');
+      expect(requestUrl, isNot(contains('firebase-user-a')));
+      expect(authRequired, isTrue);
+    });
+
+    test('fails closed on malformed envelopes, stale contracts, and ETag disagreement', () {
+      final stale = Map<String, Object?>.from(readyEnvelope)..['contract_version'] = 'ella.today_card.v0';
+
+      expect(HttpTodayCardRepository.parseEnvelope('[]').errorCode, 'invalid_today_card_response');
+      expect(HttpTodayCardRepository.parseEnvelope(stale).hasCurrentContract, isFalse);
+      expect(
+        HttpTodayCardRepository.parseEnvelope(readyEnvelope, headerEtag: '"different"').errorCode,
+        'invalid_today_card_response',
+      );
     });
   });
 

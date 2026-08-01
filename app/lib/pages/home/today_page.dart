@@ -90,9 +90,7 @@ class TodayPageState extends State<TodayPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _todayCardController = TodayCardController(
       repository: widget.todayCardRepository ??
-          (SharedPreferencesUtil.isTodayDesignPreview
-              ? const _DemoTodayCardRepository()
-              : const PendingTodayCardRepository()),
+          (SharedPreferencesUtil.isTodayDesignPreview ? const _DemoTodayCardRepository() : HttpTodayCardRepository()),
       cache: widget.todayCardCache ?? SharedPreferencesTodayCardCache(),
     )..addListener(_onTodayCardChanged);
     _loadWhisperState();

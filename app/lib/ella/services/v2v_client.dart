@@ -63,37 +63,57 @@ class V2VSessionScope {
 class V2VResolvedSessionScope {
   const V2VResolvedSessionScope({
     required this.kind,
-    required this.conversationId,
-    required this.activeSummaryVersionId,
-    required this.canReinterpret,
+    this.conversationId = '',
+    this.activeSummaryVersionId = '',
+    this.cardId = '',
+    this.cardVersion = 0,
+    this.canReinterpret = false,
   });
 
   final V2VSessionScopeKind kind;
   final String conversationId;
   final String activeSummaryVersionId;
+  final String cardId;
+  final int cardVersion;
   final bool canReinterpret;
 
   static V2VResolvedSessionScope? tryParse(Object? value) {
     if (value is! Map) return null;
     final kind = value['kind']?.toString();
-    final conversationId = value['conversation_id']?.toString().trim() ?? '';
-    final activeSummaryVersionId = value['active_summary_version_id']?.toString().trim() ?? '';
     final canReinterpret = value['can_reinterpret'];
-    if (kind != V2VSessionScopeKind.memory.name ||
-        conversationId.isEmpty ||
-        activeSummaryVersionId.isEmpty ||
-        canReinterpret is! bool) {
-      return null;
+    if (canReinterpret is! bool) return null;
+    if (kind == V2VSessionScopeKind.memory.name) {
+      final conversationId = value['conversation_id']?.toString().trim() ?? '';
+      final activeSummaryVersionId = value['active_summary_version_id']?.toString().trim() ?? '';
+      if (conversationId.isEmpty || activeSummaryVersionId.isEmpty) return null;
+      return V2VResolvedSessionScope(
+        kind: V2VSessionScopeKind.memory,
+        conversationId: conversationId,
+        activeSummaryVersionId: activeSummaryVersionId,
+        canReinterpret: canReinterpret,
+      );
     }
-    return V2VResolvedSessionScope(
-      kind: V2VSessionScopeKind.memory,
-      conversationId: conversationId,
-      activeSummaryVersionId: activeSummaryVersionId,
-      canReinterpret: canReinterpret,
-    );
+    if (kind == 'daily_card') {
+      final cardId = value['card_id']?.toString().trim() ?? '';
+      final cardVersion = value['card_version'];
+      if (cardId.isEmpty || cardVersion is! num || cardVersion.toInt() < 1) return null;
+      return V2VResolvedSessionScope(
+        kind: V2VSessionScopeKind.dailyCard,
+        conversationId: value['conversation_id']?.toString().trim() ?? '',
+        activeSummaryVersionId: value['active_summary_version_id']?.toString().trim() ?? '',
+        cardId: cardId,
+        cardVersion: cardVersion.toInt(),
+        canReinterpret: canReinterpret,
+      );
+    }
+    return null;
   }
 
-  bool matches(V2VSessionScope requested) => kind == requested.kind && conversationId == requested.conversationId;
+  bool matches(V2VSessionScope requested) => switch (kind) {
+        V2VSessionScopeKind.memory => requested.kind == kind && conversationId == requested.conversationId,
+        V2VSessionScopeKind.dailyCard =>
+          requested.kind == kind && cardId == requested.cardId && cardVersion == requested.expectedVersion,
+      };
 }
 
 @immutable
@@ -206,6 +226,8 @@ class V2VConnectionReceipt {
         if (sessionId.isNotEmpty) 'session_id': sessionId,
         if (sessionScope != null) 'scope_kind': sessionScope!.kind.name,
         if (sessionScope?.conversationId.isNotEmpty == true) 'scope_conversation_id': sessionScope!.conversationId,
+        if (sessionScope?.cardId.isNotEmpty == true) 'scope_card_id': sessionScope!.cardId,
+        if ((sessionScope?.cardVersion ?? 0) > 0) 'scope_card_version': sessionScope!.cardVersion,
         if (httpStatus != null) 'http_status': httpStatus,
         if (errorCode.isNotEmpty) 'error_code': errorCode,
       };
