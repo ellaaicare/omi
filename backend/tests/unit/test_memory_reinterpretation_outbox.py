@@ -562,42 +562,6 @@ def test_read_only_or_noise_completion_never_enqueues():
     asyncio.run(run())
 
 
-def test_worker_accepts_uniform_daily_card_scope_and_rejects_mixed_scope():
-    rows = [
-        {
-            "uid": UID,
-            "session_id": SESSION_ID,
-            "event_id": "daily-card-turn",
-            "source_identity": "source-a",
-            "scope_kind": "daily_card",
-            "conversation_id": CONVERSATION_ID,
-            "active_summary_version_id": VERSION_ID,
-            "role": "user",
-            "text": "A confirmed correction.",
-        }
-    ]
-    job = {
-        "uid": UID,
-        "logical_session_id": SESSION_ID,
-        "conversation_id": CONVERSATION_ID,
-        "starting_summary_version_id": VERSION_ID,
-        "transcript_hash": canonical_transcript_hash(rows),
-        "canonical_refs": canonical_refs(rows),
-    }
-
-    _validate_rows(job, rows)
-
-    mixed_rows = [*rows, {**rows[0], "event_id": "memory-turn", "source_identity": "source-b", "scope_kind": "memory"}]
-    mixed_job = {
-        **job,
-        "transcript_hash": canonical_transcript_hash(mixed_rows),
-        "canonical_refs": canonical_refs(mixed_rows),
-    }
-    with pytest.raises(ReinterpretationWorkerError, match="canonical_scope_mismatch") as error:
-        _validate_rows(mixed_job, mixed_rows)
-    assert error.value.retryable is False
-
-
 class _Hermes:
     def __init__(self, plan):
         self.plan = ReinterpretationPlan(**plan)
@@ -685,10 +649,35 @@ async def _loader(uid, conversation_id):
     return None
 
 
-def test_worker_no_change_finishes_without_proposals_or_writes():
+def test_daily_card_worker_scope_validation_and_no_change_completion():
     async def run():
         repository = InMemoryMemoryReinterpretationRepository(debounce_seconds=0)
         await _seed_job(repository)
+        job = next(iter(repository.jobs.values()))
+        rows = repository.rows[(UID, SESSION_ID)]
+        for row in rows:
+            row["scope_kind"] = "daily_card"
+
+        _validate_rows(job, rows)
+
+        mixed_rows = [
+            *rows,
+            {
+                **rows[0],
+                "event_id": "mixed-memory-turn",
+                "source_identity": "mixed-memory-source",
+                "scope_kind": "memory",
+            },
+        ]
+        mixed_job = {
+            **job,
+            "transcript_hash": canonical_transcript_hash(mixed_rows),
+            "canonical_refs": canonical_refs(mixed_rows),
+        }
+        with pytest.raises(ReinterpretationWorkerError, match="canonical_scope_mismatch") as error:
+            _validate_rows(mixed_job, mixed_rows)
+        assert error.value.retryable is False
+
         repository.now += timedelta(seconds=1)
         hermes = _Hermes({"outcome": "no_change", "proposals": []})
 
