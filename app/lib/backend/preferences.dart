@@ -209,9 +209,9 @@ class SharedPreferencesUtil {
 
   bool get dailyReflectionEnabled => getBool('dailyReflectionEnabled', defaultValue: true);
 
-  set demoMode(bool value) => saveBool('demoMode', value);
+  set demoMode(bool value) => saveBool('demoMode', isPublicBuild ? false : value);
 
-  bool get demoMode => isTodayDesignPreview || getBool('demoMode', defaultValue: false);
+  bool get demoMode => !isPublicBuild && (isTodayDesignPreview || getBool('demoMode', defaultValue: false));
 
   set publicMode(bool value) {
     if (!isPublicBuild) saveBool('publicMode', value);

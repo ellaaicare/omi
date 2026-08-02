@@ -134,7 +134,16 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
 class HomePage extends StatefulWidget {
   final String? navigateToRoute;
   final String? autoMessage;
-  const HomePage({super.key, this.navigateToRoute, this.autoMessage});
+  final List<Widget>? pagesOverride;
+  final bool runtimeSideEffectsEnabled;
+
+  const HomePage({
+    super.key,
+    this.navigateToRoute,
+    this.autoMessage,
+    this.pagesOverride,
+    this.runtimeSideEffectsEnabled = true,
+  });
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -212,14 +221,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   void initState() {
-    _pages = [
-      TodayPage(key: _todayPageKey),
-      const ChatPage(isPivotBottom: true),
-      const EllaVoiceChatPage(),
-      const EllaSettingsPage(),
-    ];
-    SharedPreferencesUtil().onboardingCompleted = true;
-    updateUserOnboardingState(completed: true);
+    _pages = widget.pagesOverride ??
+        [
+          TodayPage(key: _todayPageKey),
+          const ChatPage(isPivotBottom: true),
+          const EllaVoiceChatPage(),
+          const EllaSettingsPage(),
+        ];
+    if (widget.runtimeSideEffectsEnabled) {
+      SharedPreferencesUtil().onboardingCompleted = true;
+      updateUserOnboardingState(completed: true);
+    }
 
     // Navigate uri
     Uri? navigateToUri;
@@ -227,8 +239,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     var homePageIdx = 0;
     String? detailPageId;
 
-    if (widget.navigateToRoute != null && widget.navigateToRoute!.isNotEmpty) {
-      navigateToUri = Uri.tryParse("http://localhost.com${widget.navigateToRoute!}");
+    final allowedNavigateToRoute = allowedEllaNavigationRoute(widget.navigateToRoute);
+    if (allowedNavigateToRoute != null) {
+      navigateToUri = Uri.tryParse("http://localhost.com$allowedNavigateToRoute");
       Logger.debug("initState ${navigateToUri?.pathSegments.join("...")}");
       var segments = navigateToUri?.pathSegments ?? [];
       if (segments.isNotEmpty) {
@@ -253,24 +266,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     // Home controller
     context.read<HomeProvider>().selectedIndex = homePageIdx;
-    WidgetsBinding.instance.addObserver(this);
+    if (widget.runtimeSideEffectsEnabled) WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (allowsInheritedOmiSurface()) _initiateApps();
+      if (widget.runtimeSideEffectsEnabled) {
+        if (allowsInheritedOmiSurface()) _initiateApps();
 
-      // ForegroundUtil.requestPermissions();
-      if (!PlatformService.isDesktop) {
-        await ForegroundUtil.initializeForegroundService();
-        await ForegroundUtil.startForegroundTask();
-      }
-      if (mounted) {
-        await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
-      }
-      if (mounted) {
-        await Provider.of<CaptureProvider>(
-          context,
-          listen: false,
-        ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        // ForegroundUtil.requestPermissions();
+        if (!PlatformService.isDesktop) {
+          await ForegroundUtil.initializeForegroundService();
+          await ForegroundUtil.startForegroundTask();
+        }
+        if (mounted) {
+          await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
+        }
+        if (mounted) {
+          await Provider.of<CaptureProvider>(
+            context,
+            listen: false,
+          ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        }
       }
 
       // Navigate
@@ -405,14 +420,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
     });
 
-    _listenToMessagesFromNotification();
-    if (allowsInheritedOmiSurface()) _listenToFreemiumThreshold();
-    if (allowsInheritedOmiSurface()) _checkForAnnouncements();
+    if (widget.runtimeSideEffectsEnabled) {
+      _listenToMessagesFromNotification();
+      if (allowsInheritedOmiSurface()) _listenToFreemiumThreshold();
+      if (allowsInheritedOmiSurface()) _checkForAnnouncements();
+    }
 
     super.initState();
 
     // After init
-    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+    if (widget.runtimeSideEffectsEnabled) FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
   }
 
   void _checkForAnnouncements() {
@@ -485,10 +502,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   Widget build(BuildContext context) {
-    return MyUpgradeAlert(
-      upgrader: _upgrader,
-      dialogStyle: Platform.isIOS ? UpgradeDialogStyle.cupertino : UpgradeDialogStyle.material,
-      child: Consumer<ConnectivityProvider>(
+    final page = Consumer<ConnectivityProvider>(
         builder: (ctx, connectivityProvider, child) {
           bool isConnected = connectivityProvider.isConnected;
           previousConnection ??= true;
@@ -626,13 +640,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
             );
           },
         ),
-      ),
+      );
+    if (!widget.runtimeSideEffectsEnabled) return page;
+    return MyUpgradeAlert(
+      upgrader: _upgrader,
+      dialogStyle: Platform.isIOS ? UpgradeDialogStyle.cupertino : UpgradeDialogStyle.material,
+      child: page,
     );
   }
 
   @override
   Future<void> dispose() async {
-    WidgetsBinding.instance.removeObserver(this);
+    if (widget.runtimeSideEffectsEnabled) WidgetsBinding.instance.removeObserver(this);
     // Cancel stream subscription to prevent memory leak
     _notificationStreamSubscription?.cancel();
     // Remove capture provider listener using stored reference
@@ -649,8 +668,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Clean up freemium handler
     _freemiumHandler.dispose();
     // Remove foreground task callback to prevent memory leak
-    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
-    ForegroundUtil.stopForegroundTask();
+    if (widget.runtimeSideEffectsEnabled) {
+      FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
+      ForegroundUtil.stopForegroundTask();
+    }
     super.dispose();
   }
 }

@@ -142,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=32
+          expected_issue_test_count=33
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -150,7 +150,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=53
+          expected_app_test_count=54
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -196,6 +196,7 @@ jobs:
             test/ella/services/ella_invite_link_controller_test.dart
             test/ella/services/ella_entitlement_service_test.dart
             test/ella/services/ella_entitlement_provider_test.dart
+            test/ella/public_build_call_paths_test.dart
             test/ella/pages/ella_entitlement_gate_page_test.dart
             test/ella/pages/ella_provisioning_gate_page_test.dart
             test/ella/pages/home_provisioning_gate_test.dart
@@ -206,7 +207,7 @@ jobs:
             test/ella/widgets/v2v_fallback_dialog_test.dart
           )
 
-          expected_focused_test_count=21
+          expected_focused_test_count=22
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1
@@ -216,6 +217,29 @@ jobs:
           done
 
           /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub "${focused_tests[@]}"
+
+      - name: Run conflicting public and internal call-path configurations
+        run: |
+          set -euo pipefail
+
+          conflicting_defines=(
+            --dart-define=ELLA_CALL_PATH_CONFIG_TEST=true
+            --dart-define=ELLA_ACCESS_DEMO_GALLERY=true
+            --dart-define=DEBUG_AUTO_CALL=true
+            --dart-define=ELLA_TODAY_DESIGN_PREVIEW=true
+            --dart-define=ELLA_ENTITLEMENT_STUBS=true
+            --dart-define=ELLA_HERMES_PROVISIONING_GATE=false
+          )
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=true
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=false
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub

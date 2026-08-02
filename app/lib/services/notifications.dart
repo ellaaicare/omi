@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:awesome_notifications/awesome_notifications.dart';
 
 import 'package:omi/main.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/services/notifications/daily_reflection_notification.dart';
 import 'package:omi/services/notifications/ella_notification_handler.dart';
@@ -17,8 +18,13 @@ import 'package:omi/utils/logger.dart';
 
 export 'package:omi/services/notifications/notification_service.dart';
 
+typedef NotificationNavigationDispatcher = void Function(String navigateTo, String? autoMessage);
+
 class NotificationUtil {
   static ReceivePort? receivePort;
+
+  @visibleForTesting
+  static NotificationNavigationDispatcher? debugNavigationDispatcher;
 
   static Future<void> initializeNotificationsEventListeners() async {
     // Only after at least the action method is set, the notification events are delivered
@@ -42,12 +48,11 @@ class NotificationUtil {
     if (receivePort != null) {
       await onActionReceivedMethodImpl(receivedAction);
     } else {
-      print(
-          'onActionReceivedMethod was called inside a parallel dart isolate, where receivePort was never initialized.');
+      Logger.debug('Notification action received before the main isolate port was initialized');
       SendPort? sendPort = IsolateNameServer.lookupPortByName('notification_action_port');
 
       if (sendPort != null) {
-        print('Redirecting the execution to main isolate process in listening...');
+        Logger.debug('Redirecting notification action to the main isolate');
         dynamic serializedData = receivedAction.toMap();
         sendPort.send(serializedData);
       }
@@ -58,10 +63,10 @@ class NotificationUtil {
     if (receivedAction.payload == null || receivedAction.payload!.isEmpty) {
       return;
     }
-    _handleAppLinkOrDeepLink(receivedAction.payload!);
+    await _handleAppLinkOrDeepLink(receivedAction.payload!);
   }
 
-  static void _handleAppLinkOrDeepLink(Map<String, dynamic> payload) async {
+  static Future<void> _handleAppLinkOrDeepLink(Map<String, dynamic> payload) async {
     // Always ensure that all plugins was initialized
     // TODO: for what?
     WidgetsFlutterBinding.ensureInitialized();
@@ -70,8 +75,9 @@ class NotificationUtil {
     if (payload.containsKey('navigate_to')) {
       navigateTo = payload['navigate_to'];
     }
-    if (navigateTo == null) {
-      Logger.debug("Navigate To is null");
+    final allowedNavigateTo = allowedEllaNavigationRoute(navigateTo);
+    if (allowedNavigateTo == null) {
+      Logger.debug('Notification navigation route denied');
       return;
     }
 
@@ -86,10 +92,16 @@ class NotificationUtil {
       autoMessage = DailyReflectionNotification.reflectionMessage;
     }
 
+    final dispatcher = debugNavigationDispatcher;
+    if (dispatcher != null) {
+      dispatcher(allowedNavigateTo, autoMessage);
+      return;
+    }
+
     MyApp.navigatorKey.currentState?.pushReplacement(
       MaterialPageRoute(
         builder: (context) => HomePageWrapper(
-          navigateToRoute: navigateTo,
+          navigateToRoute: allowedNavigateTo,
           autoMessage: autoMessage,
         ),
       ),

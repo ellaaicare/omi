@@ -14,6 +14,7 @@ Future<List<Map<String, dynamic>>> retrieveAppsGrouped({
   int limit = 10,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) return [];
   final url = '${Env.apiBaseUrl}v2/apps?offset=$offset&limit=$limit&include_reviews=$includeReviews';
   final response = await makeApiCall(
     url: url,
@@ -55,6 +56,9 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int limit = 20,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, category: null);
+  }
   final url = '${Env.apiBaseUrl}v2/apps?category=$category&offset=$offset&limit=$limit&include_reviews=$includeReviews';
   final response = await makeApiCall(
     url: url,
@@ -85,6 +89,9 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int limit = 20,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, capability: null);
+  }
   final url =
       '${Env.apiBaseUrl}v2/apps?capability=$capability&offset=$offset&limit=$limit&include_reviews=$includeReviews';
   final response = await makeApiCall(
@@ -115,6 +122,9 @@ Future<({List<Map<String, dynamic>> groups, Map<String, dynamic>? capability, in
   required String capability,
   bool includeReviews = true,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (groups: <Map<String, dynamic>>[], capability: null, totalApps: 0);
+  }
   final url = '${Env.apiBaseUrl}v2/apps/capability/$capability/grouped?include_reviews=$includeReviews';
   final response = await makeApiCall(
     url: url,
@@ -162,6 +172,13 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int offset = 0,
   int limit = 50,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (
+      apps: <App>[],
+      pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit},
+      filters: null,
+    );
+  }
   // Build URL with query parameters
   final params = <String>[];
   if (query != null && query.isNotEmpty) params.add('q=${Uri.encodeComponent(query)}');
@@ -208,6 +225,7 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
 }
 
 Future<List<App>> retrievePopularApps() async {
+  if (SharedPreferencesUtil.isPublicBuild) return [];
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/apps/popular',
     headers: {},

@@ -33,14 +33,24 @@ import 'package:omi/utils/streaming_text_coalescer.dart';
 
 bool get _isEllaApp => true;
 
+typedef ChatAppsRetriever = Future<List<App>> Function();
+
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
 
-  MessageProvider() {
+  MessageProvider({ChatAppsRetriever? chatAppsRetriever})
+      : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
     }
+  }
+
+  final ChatAppsRetriever _chatAppsRetriever;
+
+  static Future<List<App>> _retrieveInstalledChatApps() async {
+    final result = await retrieveAppsSearch(installedApps: true, limit: 50);
+    return result.apps;
   }
 
   AppProvider? appProvider;
@@ -104,18 +114,14 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<void> fetchChatApps() async {
-    if (isLoadingChatApps) return;
+    if (SharedPreferencesUtil.isPublicBuild || isLoadingChatApps) return;
 
     isLoadingChatApps = true;
     notifyListeners();
 
     try {
-      final result = await retrieveAppsSearch(
-        installedApps: true,
-        limit: 50,
-      );
-
-      chatApps = result.apps.where((app) => app.worksWithChat()).toList();
+      final apps = await _chatAppsRetriever();
+      chatApps = apps.where((app) => app.worksWithChat()).toList();
     } catch (e) {
       Logger.debug('Error fetching chat apps: $e');
       chatApps = [];

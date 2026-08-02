@@ -163,7 +163,7 @@ Future _init() async {
   await SharedPreferencesUtil.init();
 
   bool isAuth = (await AuthService.instance.getIdToken()) != null;
-  if (F.env == Environment.prod && !SharedPreferencesUtil.isPublicBuild) {
+  if (F.env == Environment.prod || SharedPreferencesUtil.isPublicBuild) {
     SharedPreferencesUtil().clearDemoStateForAccountBuild();
   }
   if (isAuth) PlatformManager.instance.mixpanel.identify();

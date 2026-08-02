@@ -14,6 +14,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
 import 'package:omi/pages/chat/widgets/ai_message.dart';
 import 'package:omi/pages/chat/widgets/user_message.dart';
@@ -81,9 +82,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       setState(() {});
       // Sync focus state to HomeProvider so BottomNavBar hides when typing
       if (widget.isPivotBottom && mounted) {
-        final homeProvider = context.read<HomeProvider>();
-        homeProvider.isChatFieldFocused = textFieldFocusNode.hasFocus;
-        homeProvider.notifyListeners();
+        context.read<HomeProvider>().setChatFieldFocused(textFieldFocusNode.hasFocus);
       }
       if (textFieldFocusNode.hasFocus) {
         // Scroll to bottom when keyboard opens, with delay to allow keyboard animation
@@ -97,7 +96,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
         provider.refreshMessages();
       }
       // Fetch enabled chat apps
-      provider.fetchChatApps();
+      if (allowsInheritedOmiSurface()) provider.fetchChatApps();
       // Sync Apple Health data if connected (ensures fresh data for health queries)
       _syncAppleHealthIfConnected();
       // Auto-focus the text field only on initial load, not on app switches
@@ -186,6 +185,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     }
   }
 
+  // ignore: unused_element
   void _openSettingsDrawer() {
     HapticFeedback.mediumImpact();
     MixpanelManager().pageOpened('Settings');
@@ -968,6 +968,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  // ignore: unused_element
   Widget _buildChatAppsEndDrawer(BuildContext context) {
     return Drawer(
       backgroundColor: EllaColors.bgSecondary,
@@ -1245,6 +1246,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  // ignore: unused_element
   Widget _getOmiAvatar() {
     return Container(
       height: 24,

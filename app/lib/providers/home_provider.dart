@@ -98,6 +98,12 @@ class HomeProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setChatFieldFocused(bool value) {
+    if (isChatFieldFocused == value) return;
+    isChatFieldFocused = value;
+    notifyListeners();
+  }
+
   void _onConvoSearchFocusChange() {
     isConvoSearchFieldFocused = convoSearchFieldFocusNode.hasFocus;
     // Don't auto-hide search bar when focus is lost - the widget will handle visibility

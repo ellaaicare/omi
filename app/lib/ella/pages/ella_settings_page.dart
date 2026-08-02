@@ -38,7 +38,14 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class EllaSettingsPage extends StatefulWidget {
-  const EllaSettingsPage({super.key});
+  const EllaSettingsPage({
+    super.key,
+    this.runtimeSideEffectsEnabled = true,
+    this.authenticatedUidOverride,
+  });
+
+  final bool runtimeSideEffectsEnabled;
+  final String? authenticatedUidOverride;
 
   @override
   State<EllaSettingsPage> createState() => _EllaSettingsPageState();
@@ -55,8 +62,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   @override
   void initState() {
     super.initState();
-    _loadData();
-    _loadAppVersion();
+    if (widget.runtimeSideEffectsEnabled) {
+      _loadData();
+      _loadAppVersion();
+    }
   }
 
   @override
@@ -212,7 +221,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
-    final publicMode = context.watch<DeveloperModeProvider>().publicMode;
+    final publicMode = SharedPreferencesUtil.isPublicBuild ? true : context.watch<DeveloperModeProvider>().publicMode;
     final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
@@ -221,6 +230,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     final deviceName =
         deviceProvider.presentationConnectedDevice?.name ?? deviceProvider.connectedDevice?.name ?? 'Not connected';
     final userProvider = context.watch<UserProvider>();
+    final authenticatedUid = widget.authenticatedUidOverride ?? FirebaseAuth.instance.currentUser?.uid ?? '';
 
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -332,9 +342,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             EllaSettingsRow(
               icon: Icons.hearing,
               title: context.l10n.listeningAndConsent,
-              subtitle: SharedPreferencesUtil().hasAccountBoundAiConsent(
-                FirebaseAuth.instance.currentUser?.uid ?? '',
-              )
+              subtitle: SharedPreferencesUtil().hasAccountBoundAiConsent(authenticatedUid)
                   ? context.l10n.aiConsentAllowedStatus
                   : context.l10n.aiConsentNotAllowedStatus,
               onTap: _openListeningConsent,

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/pages/ella_access_demo_gallery_page.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/device_selection.dart';
 import 'package:omi/pages/onboarding/ella/ella_onboarding.dart';
@@ -31,17 +32,10 @@ class _MobileAppState extends State<MobileApp> {
 
   @override
   Widget build(BuildContext context) {
-    const debugAutoCall = bool.fromEnvironment('DEBUG_AUTO_CALL');
-    const debugAccessGallery = bool.fromEnvironment('ELLA_ACCESS_DEMO_GALLERY');
+    return EllaStartupRouteGuard(child: _buildStandardStartup(context));
+  }
 
-    if (debugAccessGallery) {
-      return const EllaAccessDemoGalleryPage();
-    }
-
-    // Debug mode: bypass auth and go straight to home
-    if (debugAutoCall && !isHermesProvisioningGateEnabled) {
-      return const HomePageWrapper();
-    }
+  Widget _buildStandardStartup(BuildContext context) {
 
     // Ella app: use simplified onboarding that handles auth internally
     if (_isEllaApp) {
@@ -102,5 +96,33 @@ class _MobileAppState extends State<MobileApp> {
         }
       },
     );
+  }
+}
+
+class EllaStartupRouteGuard extends StatelessWidget {
+  const EllaStartupRouteGuard({
+    super.key,
+    required this.child,
+    this.isPublicBuild = SharedPreferencesUtil.isPublicBuild,
+    this.demoGalleryConfigured = isEllaAccessDemoGalleryConfigured,
+    this.debugAutoCallConfigured = isEllaDebugAutoCallConfigured,
+    this.provisioningGateEnabled = isHermesProvisioningGateEnabled,
+    this.demoGallery = const EllaAccessDemoGalleryPage(),
+    this.debugHome = const HomePageWrapper(),
+  });
+
+  final Widget child;
+  final bool isPublicBuild;
+  final bool demoGalleryConfigured;
+  final bool debugAutoCallConfigured;
+  final bool provisioningGateEnabled;
+  final Widget demoGallery;
+  final Widget debugHome;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPublicBuild && demoGalleryConfigured) return demoGallery;
+    if (!isPublicBuild && debugAutoCallConfigured && !provisioningGateEnabled) return debugHome;
+    return child;
   }
 }

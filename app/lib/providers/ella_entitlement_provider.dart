@@ -29,16 +29,18 @@ class EllaEntitlementProvider extends ChangeNotifier {
     EllaInviteRedemptionError? initialInviteError,
     String initialInviteCode = '',
     int? initialRetryAfterSeconds,
-  })  : _transport = EllaAccessDemoTransport(fetchResult: initialEntitlement),
-        entitlement = initialEntitlement,
-        inviteError = initialInviteError,
-        inviteCode = initialInviteCode,
-        retryAfterSeconds = initialRetryAfterSeconds,
-        state = EllaEntitlementLoadState.ready,
-        supportCode = initialEntitlement.supportCode,
-        correlationId = initialEntitlement.correlationId,
-        _boundUid = 'demo-user',
-        _verifiedUid = 'demo-user';
+  })  : _transport = SharedPreferencesUtil.isPublicBuild
+            ? const EllaEntitlementHttpTransport()
+            : EllaAccessDemoTransport(fetchResult: initialEntitlement),
+        entitlement = SharedPreferencesUtil.isPublicBuild ? null : initialEntitlement,
+        inviteError = SharedPreferencesUtil.isPublicBuild ? null : initialInviteError,
+        inviteCode = SharedPreferencesUtil.isPublicBuild ? '' : initialInviteCode,
+        retryAfterSeconds = SharedPreferencesUtil.isPublicBuild ? null : initialRetryAfterSeconds,
+        state = SharedPreferencesUtil.isPublicBuild ? EllaEntitlementLoadState.idle : EllaEntitlementLoadState.ready,
+        supportCode = SharedPreferencesUtil.isPublicBuild ? '' : initialEntitlement.supportCode,
+        correlationId = SharedPreferencesUtil.isPublicBuild ? '' : initialEntitlement.correlationId,
+        _boundUid = SharedPreferencesUtil.isPublicBuild ? null : 'demo-user',
+        _verifiedUid = SharedPreferencesUtil.isPublicBuild ? null : 'demo-user';
 
   final EllaEntitlementTransport _transport;
   StreamSubscription<String?>? _authSubscription;
@@ -59,6 +61,9 @@ class EllaEntitlementProvider extends ChangeNotifier {
   bool get canProvision => isIdentityVerified && entitlement?.canProvision == true;
   bool get isActive => isIdentityVerified && entitlement?.isActive == true;
   String? get boundUid => _boundUid;
+
+  @visibleForTesting
+  bool get usesDemoTransport => _transport is EllaAccessDemoTransport;
 
   Future<void> load({String prefilledCode = ''}) async {
     final uid = _boundUid;

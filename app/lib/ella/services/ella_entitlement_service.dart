@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 
-const bool isEllaEntitlementGateEnabled = isEllaInternalPilotEnabled;
-const bool isEllaEntitlementStubEnabled = bool.fromEnvironment('ELLA_ENTITLEMENT_STUBS', defaultValue: false);
+const bool isEllaEntitlementGateEnabled = SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled;
+const bool isEllaEntitlementStubConfigured = bool.fromEnvironment('ELLA_ENTITLEMENT_STUBS', defaultValue: false);
+const bool isEllaEntitlementStubEnabled = !SharedPreferencesUtil.isPublicBuild && isEllaEntitlementStubConfigured;
 
 enum EllaEntitlementStatus { invited, active, suspended, revoked, expired, none }
 

@@ -27,6 +27,7 @@ Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
 }
 
 Future<bool> setUserWebhookUrl({required String type, required String url}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type',
     headers: {},
@@ -39,6 +40,7 @@ Future<bool> setUserWebhookUrl({required String type, required String url}) asyn
 }
 
 Future<String> getUserWebhookUrl({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return '';
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type',
     headers: {},
@@ -54,6 +56,7 @@ Future<String> getUserWebhookUrl({required String type}) async {
 }
 
 Future disableWebhook({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type/disable',
     headers: {},
@@ -66,6 +69,7 @@ Future disableWebhook({required String type}) async {
 }
 
 Future enableWebhook({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type/enable',
     headers: {},
@@ -78,6 +82,7 @@ Future enableWebhook({required String type}) async {
 }
 
 Future webhooksStatus() async {
+  if (SharedPreferencesUtil.isPublicBuild) return null;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhooks/status',
     headers: {},
