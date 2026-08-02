@@ -75,8 +75,9 @@ def _runtime_receipt(profile_name="omi-user-a"):
     }
 
 
-def _self_hosted_admission():
+def _self_hosted_admission(uid: str):
     return {
+        "omi_uid": uid,
         "consent_policy_version": CURRENT_POLICY_VERSION,
         "consent_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
         "consent_scope_version": CURRENT_SCOPE_VERSION,
@@ -376,7 +377,7 @@ def test_self_hosted_invitation_admission_precedes_identity_and_job_writes(monke
     assert repository.identity_calls == []
     assert repository.job_calls == []
 
-    repository.self_hosted_admission = _self_hosted_admission()
+    repository.self_hosted_admission = _self_hosted_admission(identity.uid)
     job, binding, claimed = asyncio.run(
         coordinator.ensure_job(
             identity=identity,
@@ -394,7 +395,7 @@ def test_self_hosted_invitation_admission_precedes_identity_and_job_writes(monke
 
 def test_self_hosted_authority_drift_blocks_before_provider_call(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
-    repository = FakeRepository(self_hosted_admission=_self_hosted_admission())
+    repository = FakeRepository(self_hosted_admission=_self_hosted_admission("invited-user"))
     client = FakeProvisionClient(_runtime_receipt())
     coordinator = ProvisioningCoordinator(repository, client)
     identity = VerifiedIdentity("invited-user", "user@example.test", "User", "UTC")

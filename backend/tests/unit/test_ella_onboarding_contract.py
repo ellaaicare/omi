@@ -6,6 +6,7 @@ from fastapi import BackgroundTasks, Response
 from pydantic import ValidationError
 
 from ella.routers import onboarding
+from ella.services import provisioning
 from ella.services.provisioning import ProvisioningError
 from ella.utils.provision_authority import APPROVED_HERMES_PROVISION_URL, _authority_binding_value
 
@@ -372,6 +373,101 @@ def test_authority_rejection_precedes_identity_and_repository_side_effects(monke
     assert error.value.status_code == 409
     assert error.value.detail == {"code": "hermes_provision_authority_incomplete"}
     assert side_effects == []
+
+    # With valid authority config, the real route still admits only the exact
+    # current invitation UID before identity or provisioning writes.
+    _configure_hermes_authority(monkeypatch)
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    identity_calls = []
+    ensure_calls = []
+
+    class Repository:
+        admission = None
+
+        async def get_self_hosted_invitation_admission(self, uid):
+            return self.admission if self.admission and self.admission["omi_uid"] == uid else None
+
+    repository = Repository()
+
+    class Coordinator:
+        def __init__(self):
+            self.repository = repository
+
+        async def ensure_job(self, **kwargs):
+            ensure_calls.append(kwargs)
+            return (
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "target_schema_version": "hermes-user-v1",
+                    "state": "provisioning",
+                    "stage": "profile_ready",
+                    "retryable": True,
+                },
+                None,
+                False,
+            )
+
+    coordinator = Coordinator()
+
+    async def fake_coordinator():
+        return coordinator
+
+    async def no_retained_receipt(_uid, _target_schema_version):
+        return None
+
+    monkeypatch.setattr(onboarding, "_coordinator", fake_coordinator)
+    monkeypatch.setattr(onboarding, "_retained_receipt", no_retained_receipt)
+    monkeypatch.setattr(
+        onboarding.auth,
+        "get_user",
+        lambda uid: identity_calls.append(uid)
+        or SimpleNamespace(
+            email="invited@example.test",
+            email_verified=True,
+            display_name="Invited User",
+        ),
+    )
+
+    with pytest.raises(onboarding.HTTPException) as uninvited:
+        asyncio.run(
+            onboarding.ensure_onboarding(
+                onboarding.OnboardingEnsureRequest(),
+                BackgroundTasks(),
+                Response(),
+                uid="arbitrary-user",
+            )
+        )
+    assert uninvited.value.status_code == 503
+    assert uninvited.value.detail == {"code": "provisioning_disabled"}
+    assert identity_calls == []
+    assert ensure_calls == []
+
+    repository.admission = {
+        "omi_uid": "invited-user",
+        "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
+        "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
+        "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,
+        "consent_scope_hash": provisioning.CURRENT_SCOPE_HASH,
+        "provider_allowlist": [provisioning.SELF_HOSTED_RUNTIME_PROVIDER],
+        "model_allowlist": [provisioning.SELF_HOSTED_RUNTIME_MODEL],
+        "mode_allowlist": list(provisioning.SELF_HOSTED_RUNTIME_TARGET_MODES),
+        "fallback_policy": {"enabled": False, "order": []},
+    }
+    response = Response()
+    result = asyncio.run(
+        onboarding.ensure_onboarding(
+            onboarding.OnboardingEnsureRequest(),
+            BackgroundTasks(),
+            response,
+            uid="invited-user",
+        )
+    )
+
+    assert result["state"] == "provisioning"
+    assert identity_calls == ["invited-user"]
+    assert ensure_calls[0]["identity"].uid == "invited-user"
 
 
 def test_onboarding_rechecks_before_background_job_creation(monkeypatch):

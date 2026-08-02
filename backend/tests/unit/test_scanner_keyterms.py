@@ -252,6 +252,9 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
 
 
 def test_cloud_scanner_never_calls_mini_or_returns_retained_cache(monkeypatch):
+    async def authority_enabled(uid=None):
+        return uid == "uid-cloud"
+
     async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-cloud"
         assert target_mode == "hermes-cloud-guardian"
@@ -267,7 +270,7 @@ def test_cloud_scanner_never_calls_mini_or_returns_retained_cache(monkeypatch):
         fetched_at=time.time(),
         source="isolated:hermes",
     )
-    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", lambda uid=None: uid == "uid-cloud")
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(scanner_keyterms, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", ForbiddenClient)
 

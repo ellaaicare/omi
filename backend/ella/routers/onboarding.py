@@ -34,6 +34,8 @@ from ella.services.provisioning import (
     provisioning_enabled,
     public_receipt,
     retained_compatibility_receipt,
+    self_hosted_invitation_admission,
+    self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
@@ -127,16 +129,33 @@ async def ensure_onboarding(
         target_schema_version = effective_target_schema_version(uid, payload.target_schema_version)
     except ProvisioningError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    if not any_provisioning_enabled(uid):
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_provisioning_enabled(uid)
+    authority_snapshot = None
+    if self_hosted_configured:
+        try:
+            authority_snapshot = HermesProvisionClient.snapshot_authority()
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+    coordinator = None
+    invitation_admission = None
+    if self_hosted_configured:
+        coordinator = await _coordinator()
+        try:
+            invitation_admission = await self_hosted_invitation_admission(
+                uid,
+                repository=coordinator.repository,
+            )
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    if not any_provisioning_enabled(uid, self_hosted_admission=invitation_admission):
         receipt = await _retained_receipt(uid, payload.target_schema_version)
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
     hermes_required = not cloud_provisioning_enabled(uid) and (
-        self_hosted_provisioning_enabled(uid) or provisioning_enabled(uid)
+        self_hosted_provisioning_enabled(uid, admission=invitation_admission) or provisioning_enabled(uid)
     )
-    authority_snapshot = None
-    if hermes_required:
+    if hermes_required and authority_snapshot is None:
         try:
             authority_snapshot = HermesProvisionClient.snapshot_authority()
         except ProvisioningError as exc:
@@ -147,7 +166,7 @@ async def ensure_onboarding(
             HermesProvisionClient.snapshot_authority(authority_snapshot)
         except ProvisioningError as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    coordinator = await _coordinator()
+    coordinator = coordinator or await _coordinator()
     try:
         job, binding, claimed = await coordinator.ensure_job(
             identity=identity,

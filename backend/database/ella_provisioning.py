@@ -564,6 +564,7 @@ class EllaProvisioningRepository:
                 authority.decision AS consent_decision,
                 authority.authority_epoch AS current_authority_epoch,
                 app_user.id AS user_id,
+                app_user.omi_uid,
                 app_user.profile_class
             FROM users app_user
             JOIN voice_entitlements entitlement ON entitlement.uid = app_user.omi_uid
@@ -640,6 +641,34 @@ class EllaProvisioningRepository:
             list(SELF_HOSTED_RUNTIME_TARGET_MODES),
         )
         return _row_dict(row)
+
+    async def has_invitation_owned_self_hosted_runtime(self, uid: str) -> bool:
+        """Return whether this UID is bound to any invitation-owned Hermes target."""
+        return bool(
+            await self.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM users app_user
+                    JOIN voice_entitlements entitlement
+                      ON entitlement.uid = app_user.omi_uid
+                     AND entitlement.invitation_id IS NOT NULL
+                    JOIN ella_invitation_redemptions redemption
+                      ON redemption.invitation_id = entitlement.invitation_id
+                     AND redemption.user_id = app_user.id
+                     AND redemption.user_mapping_state = 'mapped'
+                    JOIN ella_runtime_targets target
+                      ON target.invitation_target_id = redemption.invitation_target_id
+                     AND target.account_user_id = app_user.id
+                     AND target.profile_user_id = app_user.id
+                     AND target.provider = $2
+                    WHERE app_user.omi_uid = $1
+                )
+                """,
+                uid,
+                SELF_HOSTED_RUNTIME_PROVIDER,
+            )
+        )
 
     async def ensure_user_identity(
         self,

@@ -1156,6 +1156,16 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
             authority_lineage=_self_hosted_lineage(),
             model=SELF_HOSTED_RUNTIME_MODEL,
         )
+        assert await runtime_authority_enabled(uid, repository=repository) is True
+        assert await runtime_authority_enabled("any-public-user", repository=repository) is False
+        assert (
+            await resolve_isolated_runtime(
+                "any-public-user",
+                repository=repository,
+                target_mode="hermes-cloud-chat",
+            )
+            is None
+        )
 
         runtime = await resolve_isolated_runtime(
             uid,
@@ -1350,7 +1360,6 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
     monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
     monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
     monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
-    assert runtime_authority_enabled("any-public-user") is True
     asyncio.run(_run_with_database(scenario))
 
 

@@ -1056,7 +1056,7 @@ async def _get_recent_chat_turns(uid: str, limit: int = 5) -> list[dict]:
             flush=True,
         )
 
-    if runtime_authority_enabled(uid):
+    if await runtime_authority_enabled(uid):
         print(
             f"[FLOW:GUARDIAN-CONTEXT] uid={uid} isolated=true canonical_empty=true fallback=disabled",
             flush=True,
@@ -1125,7 +1125,7 @@ async def _consolidate_queue(
     """
     assert_current_ai_consent(uid)
     runtime = None
-    if runtime_authority_enabled(uid):
+    if await runtime_authority_enabled(uid):
         runtime = await resolve_isolated_runtime(
             uid,
             target_mode=_GUARDIAN_CLOUD_TARGET_MODE,

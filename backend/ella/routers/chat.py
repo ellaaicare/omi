@@ -732,7 +732,7 @@ async def _stream_hermes_chat(
     import time as _time
 
     _start = _time.time()
-    if runtime is None and runtime_authority_enabled(uid):
+    if runtime is None and await runtime_authority_enabled(uid):
         yield "data: Error: isolated runtime required\n\n"
         return
 
@@ -1211,7 +1211,7 @@ async def ella_chat_history(
     if uid and uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
     uid = authenticated_uid
-    runtime_bound = runtime_authority_enabled(authenticated_uid)
+    runtime_bound = await runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
             await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")

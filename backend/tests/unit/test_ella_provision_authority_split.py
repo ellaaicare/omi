@@ -718,6 +718,7 @@ class _RecordingRepository:
     async def get_self_hosted_invitation_admission(self, _uid):
         self._record("get_self_hosted_invitation_admission")
         return {
+            "omi_uid": _uid,
             "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
             "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
             "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,

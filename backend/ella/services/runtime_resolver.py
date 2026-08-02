@@ -45,7 +45,10 @@ from ella.services.provisioning import (
     cloud_provisioning_enabled,
     resolve_gateway_credential,
     rollout_enabled,
+    self_hosted_invitation_admission,
+    self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
+    self_hosted_runtime_authority_required,
     validate_internal_gateway_url,
 )
 
@@ -58,9 +61,17 @@ def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
-def runtime_authority_enabled(uid: Optional[str] = None) -> bool:
+async def runtime_authority_enabled(
+    uid: Optional[str] = None,
+    *,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> bool:
     """Return whether this user must resolve through persisted runtime authority."""
-    return runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+    if runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid):
+        return True
+    if not uid:
+        return False
+    return await self_hosted_runtime_authority_required(uid, repository=repository)
 
 
 def _current_self_hosted_lineage() -> RuntimeTargetLineage:
@@ -432,11 +443,21 @@ async def resolve_isolated_runtime(
 ) -> Optional[IsolatedRuntime]:
     """Resolve the one authoritative persisted runtime; never fall through modes."""
     cloud_required = cloud_provisioning_enabled(uid)
-    self_hosted_required = self_hosted_provisioning_enabled(uid) and not cloud_required
     retained_required = runtime_bindings_enabled(uid)
-    if not cloud_required and not self_hosted_required and not retained_required:
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+    if not cloud_required and not retained_required and not self_hosted_configured:
         return None
     repository = repository or await EllaProvisioningRepository.create()
+    invitation_admission = None
+    self_hosted_owned = False
+    if self_hosted_configured:
+        self_hosted_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
+        invitation_admission = await self_hosted_invitation_admission(uid, repository=repository)
+    self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
+    if self_hosted_owned and not self_hosted_required:
+        raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
+    if not cloud_required and not self_hosted_required and not retained_required:
+        return None
     try:
         if cloud_required:
             if target_mode not in CLOUD_RUNTIME_TARGET_MODES:
