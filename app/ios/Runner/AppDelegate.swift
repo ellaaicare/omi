@@ -7,6 +7,7 @@ import AVFoundation
 import Speech
 import EventKit
 import PushKit
+import FirebaseAuth
 
 import TwilioVoice
 extension FlutterError: Error {}
@@ -39,6 +40,7 @@ extension FlutterError: Error {}
   private var twilioVoiceChannel: TwilioVoiceMethodChannel?
   private var guardianModeChannel: FlutterMethodChannel?
   private var audioRouteChannel: FlutterMethodChannel?
+  private var guardianAuthStateHandle: AuthStateDidChangeListenerHandle?
 
 
   override func application(
@@ -274,7 +276,9 @@ extension FlutterError: Error {}
       }
 
       // Report new route to backend so consolidator knows current echo risk
-      GuardianModeManager.shared.reportPlaybackEvent()
+      if let lease = GuardianModeAvailability.shared.captureLease() {
+          GuardianModeManager.shared.reportPlaybackEvent(lease: lease)
+      }
   }
 
   private func currentAudioRoutePayload() -> [String: Any] {
@@ -866,9 +870,10 @@ extension AppDelegate: WCSessionDelegate {
     private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "configureAvailability":
+            ensureGuardianAuthStateListener()
             let args = call.arguments as? [String: Any]
             let enabled = args?["enabled"] as? Bool ?? false
-            GuardianModeManager.shared.configureAvailability(enabled)
+            GuardianModeManager.shared.configureAvailability(enabled, uid: Auth.auth().currentUser?.uid)
             result(["enabled": GuardianModeAvailability.shared.isEnabled])
 
         case "start":
@@ -919,6 +924,15 @@ extension AppDelegate: WCSessionDelegate {
 
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    /// Flutter configures Firebase before it invokes the Guardian channel. Installing
+    /// the listener lazily avoids touching the default Firebase app during launch.
+    private func ensureGuardianAuthStateListener() {
+        guard guardianAuthStateHandle == nil else { return }
+        guardianAuthStateHandle = Auth.auth().addStateDidChangeListener { _, user in
+            GuardianModeManager.shared.authenticatedUIDDidChange(user?.uid)
         }
     }
 }

@@ -77,28 +77,32 @@ void main() {
 
     expect(nativePolicy, contains('private let leaseGate = GuardianWorkLeaseGate()'));
     expect(nativePolicy, contains('func performIfCurrent(_ lease: GuardianWorkLease'));
+    expect(nativePolicy, contains('let uid: String'));
+    expect(nativePolicy, contains('final class GuardianFirebaseTokenBridge'));
+    expect(nativePolicy, contains('final class GuardianModeManagerEffectPath'));
+    expect(nativePolicy, contains('request.setValue("Bearer \\(credential.token)"'));
     expect(manager, contains('private var injectionTasks: [UUID: Task<Void, Never>]'));
     expect(manager, contains('performIfCurrent(lease)'));
-    expect(manager, contains('func configureAvailability(_ enabled: Bool)'));
-    expect(manager, contains('guard GuardianModeAvailability.shared.isEnabled else'));
+    expect(manager, contains('func configureAvailability(_ enabled: Bool, uid: String?)'));
+    expect(manager, contains('guard let startLease = GuardianModeAvailability.shared.captureLease() else'));
     expect(
-      manager.indexOf('guard GuardianModeAvailability.shared.isEnabled else'),
+      manager.indexOf('guard let startLease = GuardianModeAvailability.shared.captureLease() else'),
       lessThan(manager.indexOf('try audioSession.setActive(true)')),
     );
     expect(
-      manager.indexOf(
-        'guard GuardianModeAvailability.shared.isEnabled else { return }',
-        manager.indexOf('func reportPlaybackEvent'),
-      ),
-      lessThan(manager.indexOf('URLSession.shared.dataTask', manager.indexOf('func reportPlaybackEvent'))),
+      manager.indexOf('playbackReporter.report(event, lease: lease)', manager.indexOf('func reportPlaybackEvent')),
+      lessThan(manager.indexOf('func injectRemoteAudio', manager.indexOf('func reportPlaybackEvent'))),
     );
     expect(polling, contains('private var inFlightPoll: InFlightPoll?'));
     expect(polling, contains('inFlightPoll?.task.cancel()'));
     expect(polling, contains('let lease = GuardianModeAvailability.shared.captureLease()'));
-    expect(polling, contains('let uid = uidProvider()'));
+    expect(polling, contains('let credential = try await tokenProvider(lease)'));
+    expect(polling, contains('URLQueryItem(name: "uid", value: lease.uid)'));
+    expect(polling, contains('request.setValue("Bearer \\(credential.token)"'));
     expect(polling, contains('GuardianModeAvailability.shared.performIfCurrent(lease)'));
-    expect(polling, contains('guard pollingIsActive(), uidProvider() == uid else'));
+    expect(polling, isNot(contains('UserDefaults.standard')));
     expect(appDelegate, contains('case "configureAvailability":'));
+    expect(appDelegate, contains('addStateDidChangeListener'));
     expect(appDelegate, contains('case "clearNotificationResidue":'));
     expect(appDelegate, contains('reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled'));
   });

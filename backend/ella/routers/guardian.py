@@ -27,6 +27,7 @@ from typing import Any, Optional
 import asyncpg
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
+from firebase_admin import auth as firebase_auth
 from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
@@ -94,6 +95,22 @@ _pool: Optional[asyncpg.Pool] = None
 
 # uid -> last playback event (resets on restart — used only for echo risk)
 _playback_events: dict[str, dict] = {}
+
+
+def get_guardian_authenticated_uid(authorization: Optional[str] = Header(None)) -> str:
+    """Verify an exact Firebase bearer without admin-key or local-dev fallbacks."""
+    parts = authorization.split() if authorization else []
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        raise HTTPException(status_code=401, detail="Missing or invalid Guardian bearer")
+    try:
+        decoded = firebase_auth.verify_id_token(parts[1])
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired Guardian bearer")
+    uid = str(decoded.get("uid") or "").strip() if isinstance(decoded, dict) else ""
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid Guardian bearer subject")
+    return uid
+
 
 # Echo risk by iOS AVAudioSession portType rawValue
 _ECHO_RISK = {
@@ -1197,10 +1214,11 @@ Rules:
 
 
 @router.get("/next-audio")
-async def next_audio(uid: str):
+async def next_audio(uid: str, authenticated_uid: str = Depends(get_guardian_authenticated_uid)):
     """Pop next audio clip from queue. Consolidates if pile-up detected."""
-    if not uid or uid == "unknown":
-        return {"url": None}
+    if uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail="Guardian UID does not match authenticated user")
+    uid = authenticated_uid
 
     _start = time.time()
     pool = await _get_pool()
@@ -2348,11 +2366,17 @@ async def log_pipeline_event(
 
 
 @router.post("/playback-event")
-async def record_playback_event(req: PlaybackEventRequest):
+async def record_playback_event(
+    req: PlaybackEventRequest,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+):
     """iOS calls this when guardian audio starts playing.
     Records output route so the consolidator knows echo risk."""
+    if req.uid != authenticated_uid:
+        raise HTTPException(status_code=403, detail="Guardian UID does not match authenticated user")
+    uid = authenticated_uid
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
-    _playback_events[req.uid] = {
+    _playback_events[uid] = {
         "queue_item_id": req.queue_item_id,
         "trace_id": req.trace_id,
         "event_type": req.event_type,
@@ -2370,7 +2394,7 @@ async def record_playback_event(req: PlaybackEventRequest):
         status = "error" if event_type == "failed" else "success"
         await _log_pipeline_event(
             trace_id=trace_id,
-            uid=req.uid,
+            uid=uid,
             stage=f"ios_playback_{event_type}",
             status=status,
             latency_ms=req.duration_ms if event_type in ("completed", "failed") else None,
@@ -2386,7 +2410,7 @@ async def record_playback_event(req: PlaybackEventRequest):
         )
 
     print(
-        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} trace={trace_id} item={req.queue_item_id} event={req.event_type} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
+        f"[FLOW:PLAYBACK-EVENT] uid={uid} trace={trace_id} item={req.queue_item_id} event={req.event_type} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
         flush=True,
     )
     return {"ok": True, "trace_id": trace_id, "echo_risk": echo_risk}

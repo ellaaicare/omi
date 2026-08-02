@@ -558,3 +558,124 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
     assert body["uid"] == "auth-uid"
     assert body["alerts"][0]["queue_item_id"] == "guardian_auth"
     assert pool.fetch_args[0] == ("auth-uid", 50)
+
+
+class _GuardianAuthPool:
+    def __init__(self):
+        self.fetchrow_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "COUNT(*) FILTER" in query:
+            return {"pending": 0}
+        if "UPDATE guardian_queue" in query:
+            return {
+                "id": "queue-a",
+                "url": "https://audio.example/a.mp3",
+                "priority": "normal",
+                "message": "",
+                "trigger_type": "guardian",
+                "metadata": {"trace_id": "trace-a"},
+                "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            }
+        return None
+
+
+def _guardian_auth_client(monkeypatch, pool):
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    def verify_token(token):
+        if token == "valid-a":
+            return {"uid": "uid-a"}
+        if token == "valid-b":
+            return {"uid": "uid-b"}
+        raise ValueError("expired or invalid")
+
+    monkeypatch.setattr(guardian.firebase_auth, "verify_id_token", verify_token)
+    app = FastAPI()
+    app.include_router(guardian.router)
+    return TestClient(app)
+
+
+def test_guardian_next_audio_auth_success_consumes_authenticated_owner_only(monkeypatch):
+    pool = _GuardianAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    response = client.get(
+        "/v1/ella/guardian/next-audio?uid=uid-a",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "queue-a"
+    assert len(pool.fetchrow_calls) == 2
+    assert all(args == ("uid-a",) for _, args in pool.fetchrow_calls)
+
+
+@pytest.mark.parametrize(
+    ("headers", "query_uid", "expected_status"),
+    [
+        ({}, "uid-a", 401),
+        ({"Authorization": "Bearer expired"}, "uid-a", 401),
+        ({"Authorization": "Bearer invalid"}, "uid-a", 401),
+        ({"Authorization": "Basic valid-a"}, "uid-a", 401),
+        ({"Authorization": "Bearer valid-b"}, "uid-a", 403),
+    ],
+)
+def test_guardian_next_audio_auth_denials_never_consume(
+    monkeypatch,
+    headers,
+    query_uid,
+    expected_status,
+):
+    pool = _GuardianAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    response = client.get(f"/v1/ella/guardian/next-audio?uid={query_uid}", headers=headers)
+
+    assert response.status_code == expected_status
+    assert pool.fetchrow_calls == []
+
+
+def test_guardian_playback_auth_success_mutates_authenticated_owner_only(monkeypatch):
+    guardian._playback_events.clear()
+    client = _guardian_auth_client(monkeypatch, _GuardianAuthPool())
+
+    response = client.post(
+        "/v1/ella/guardian/playback-event",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"uid": "uid-a", "event_type": "started", "port_type": "Speaker"},
+    )
+
+    assert response.status_code == 200
+    assert set(guardian._playback_events) == {"uid-a"}
+
+
+@pytest.mark.parametrize(
+    ("headers", "body_uid", "expected_status"),
+    [
+        ({}, "uid-a", 401),
+        ({"Authorization": "Bearer expired"}, "uid-a", 401),
+        ({"Authorization": "Bearer invalid"}, "uid-a", 401),
+        ({"Authorization": "Basic valid-a"}, "uid-a", 401),
+        ({"Authorization": "Bearer valid-b"}, "uid-a", 403),
+        ({"Authorization": "Bearer valid-a"}, "uid-b", 403),
+    ],
+)
+def test_guardian_playback_auth_denials_never_mutate(
+    monkeypatch,
+    headers,
+    body_uid,
+    expected_status,
+):
+    guardian._playback_events.clear()
+    client = _guardian_auth_client(monkeypatch, _GuardianAuthPool())
+
+    response = client.post(
+        "/v1/ella/guardian/playback-event",
+        headers=headers,
+        json={"uid": body_uid, "event_type": "started", "port_type": "Speaker"},
+    )
+
+    assert response.status_code == expected_status
+    assert guardian._playback_events == {}
