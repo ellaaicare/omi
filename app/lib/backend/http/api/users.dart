@@ -97,18 +97,12 @@ Future webhooksStatus() async {
 }
 
 class AccountDeletionReceipt {
-  const AccountDeletionReceipt({
-    required this.requestId,
-    required this.serverCompletedAt,
-  });
+  const AccountDeletionReceipt({required this.requestId, required this.serverCompletedAt});
 
   final String requestId;
   final DateTime serverCompletedAt;
 
-  static AccountDeletionReceipt? tryParseResponse({
-    required int statusCode,
-    required String body,
-  }) {
+  static AccountDeletionReceipt? tryParseResponse({required int statusCode, required String body}) {
     if (statusCode != 200) return null;
     try {
       final decoded = jsonDecode(body);
@@ -127,10 +121,7 @@ class AccountDeletionReceipt {
       if (!RegExp(r'^aidel_[A-Za-z0-9_-]{16,128}$').hasMatch(requestId) || completedAt == null) {
         return null;
       }
-      return AccountDeletionReceipt(
-        requestId: requestId,
-        serverCompletedAt: completedAt.toUtc(),
-      );
+      return AccountDeletionReceipt(requestId: requestId, serverCompletedAt: completedAt.toUtc());
     } on FormatException {
       return null;
     }
@@ -145,10 +136,7 @@ Future<AccountDeletionReceipt?> deleteAccount() async {
     body: '',
   );
   if (response == null) return null;
-  final receipt = AccountDeletionReceipt.tryParseResponse(
-    statusCode: response.statusCode,
-    body: response.body,
-  );
+  final receipt = AccountDeletionReceipt.tryParseResponse(statusCode: response.statusCode, body: response.body);
   Logger.debug('deleteAccount completed with verified receipt: ${receipt != null}');
   return receipt;
 }

@@ -29,7 +29,8 @@ class SharedPreferencesUtil {
   static int _aiConsentAuthorityGeneration = 0;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
-  static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
+  static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
+  static const bool isTodayDesignPreviewEnabled = !isPublicBuild && isTodayDesignPreviewConfigured;
   static const String currentAiConsentContractVersion = 'ai-data-processors-v8';
   static const String currentAiConsentProcessorSetHash =
       'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d';
@@ -211,7 +212,7 @@ class SharedPreferencesUtil {
 
   set demoMode(bool value) => saveBool('demoMode', isPublicBuild ? false : value);
 
-  bool get demoMode => !isPublicBuild && (isTodayDesignPreview || getBool('demoMode', defaultValue: false));
+  bool get demoMode => !isPublicBuild && (isTodayDesignPreviewEnabled || getBool('demoMode', defaultValue: false));
 
   set publicMode(bool value) {
     if (!isPublicBuild) saveBool('publicMode', value);
@@ -223,9 +224,7 @@ class SharedPreferencesUtil {
 
   bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
 
-  bool hasCurrentAiConsentAuthority({
-    bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled,
-  }) {
+  bool hasCurrentAiConsentAuthority({bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled}) {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
     }

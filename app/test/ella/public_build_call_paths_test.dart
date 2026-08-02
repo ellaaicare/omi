@@ -4,10 +4,13 @@ import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:intl/intl.dart' show DateFormat;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/action_item.dart';
+import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
@@ -19,8 +22,13 @@ import 'package:omi/main.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/chat/page.dart';
 import 'package:omi/pages/home/page.dart';
+import 'package:omi/pages/home/today_page.dart';
+import 'package:omi/providers/action_items_provider.dart';
 import 'package:omi/providers/app_provider.dart';
+import 'package:omi/providers/audio_route_provider.dart';
+import 'package:omi/providers/capture_provider.dart';
 import 'package:omi/providers/connectivity_provider.dart';
+import 'package:omi/providers/conversation_provider.dart';
 import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/ella_entitlement_provider.dart';
@@ -47,6 +55,23 @@ class _NoRefreshMessageProvider extends MessageProvider {
 
   @override
   Future<void> refreshMessages({bool dropdownSelected = false}) async {}
+}
+
+class _FixedActionItemsProvider extends ActionItemsProvider {
+  _FixedActionItemsProvider(this.items);
+
+  final List<ActionItemWithMetadata> items;
+
+  @override
+  List<ActionItemWithMetadata> get actionItems => items;
+
+  @override
+  Future<void> fetchActionItems({bool showShimmer = false}) async {}
+}
+
+class _NoRefreshConversationProvider extends ConversationProvider {
+  @override
+  Future<void> ensureFreshConversations() async {}
 }
 
 class _FailingEntitlementTransport implements EllaEntitlementTransport {
@@ -104,7 +129,8 @@ void main() {
     if (_isConfiguredCallPathRun) {
       expect(isEllaAccessDemoGalleryConfigured, isTrue);
       expect(isEllaDebugAutoCallConfigured, isTrue);
-      expect(SharedPreferencesUtil.isTodayDesignPreview, isTrue);
+      expect(SharedPreferencesUtil.isTodayDesignPreviewConfigured, isTrue);
+      expect(SharedPreferencesUtil.isTodayDesignPreviewEnabled, !SharedPreferencesUtil.isPublicBuild);
       expect(isEllaEntitlementStubConfigured, isTrue);
       expect(isEllaEntitlementGateEnabled, SharedPreferencesUtil.isPublicBuild);
       expect(isHermesProvisioningGateEnabled, SharedPreferencesUtil.isPublicBuild);
@@ -208,31 +234,80 @@ void main() {
     expect(explicitDemo.isActive, !SharedPreferencesUtil.isPublicBuild);
   });
 
-  testWidgets('Home IndexedStack mounts Chat with zero public catalog calls and one internal call', (tester) async {
+  testWidgets('Home IndexedStack mounts actual Today and Chat with public-safe runtime behavior', (tester) async {
     var catalogCalls = 0;
+    var dailySummaryCalls = 0;
+    final runtimeNow = DateTime(2032, 5, 6, 9, 41);
+    final previewNow = DateTime(2025, 7, 24, 9, 41);
+    final actionItemsProvider = _FixedActionItemsProvider([
+      ActionItemWithMetadata(
+        id: 'runtime-reminder',
+        description: 'Runtime reminder',
+        completed: false,
+        dueAt: DateTime(2032, 5, 6, 10),
+      ),
+      ActionItemWithMetadata(
+        id: 'preview-reminder',
+        description: 'Preview reminder',
+        completed: false,
+        dueAt: DateTime(2025, 7, 24, 10),
+      ),
+    ]);
     final messageProvider = _NoRefreshMessageProvider(
       chatAppsRetriever: () async {
         catalogCalls++;
         return [];
       },
     );
+    final conversationProvider = _NoRefreshConversationProvider();
+    final captureProvider = CaptureProvider();
+    final deviceProvider = DeviceProvider();
+    final audioRouteProvider = AudioRouteProvider();
+
+    await tester.binding.setSurfaceSize(const Size(1200, 2000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
       MultiProvider(
         providers: [
           ChangeNotifierProvider(create: (_) => HomeProvider()),
+          ChangeNotifierProvider<ActionItemsProvider>.value(value: actionItemsProvider),
+          ChangeNotifierProvider<AudioRouteProvider>.value(value: audioRouteProvider),
+          ChangeNotifierProvider<CaptureProvider>.value(value: captureProvider),
+          ChangeNotifierProvider<ConversationProvider>.value(value: conversationProvider),
+          ChangeNotifierProvider<DeviceProvider>.value(value: deviceProvider),
           ChangeNotifierProvider<MessageProvider>.value(value: messageProvider),
           ChangeNotifierProvider(create: (_) => AppProvider()),
           ChangeNotifierProvider(create: (_) => ConnectivityProvider()),
           ChangeNotifierProvider(create: (_) => VoiceRecorderProvider()),
           ChangeNotifierProvider(create: (_) => IntegrationProvider()),
         ],
-        child: const MaterialApp(
+        child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
           home: HomePage(
             runtimeSideEffectsEnabled: false,
-            pagesOverride: [_Marker('today'), ChatPage(isPivotBottom: true), _Marker('voice'), _Marker('settings')],
+            pagesOverride: [
+              TodayPage(
+                nowProvider: () => runtimeNow,
+                dailySummaryLoader: () async {
+                  dailySummaryCalls++;
+                  return [
+                    DailySummary(
+                      id: 'runtime-summary',
+                      date: '2032-05-06',
+                      createdAt: runtimeNow,
+                      headline: 'Runtime summary',
+                      overview: '[Ella] Runtime daily summary.',
+                      stats: DayStats(),
+                    ),
+                  ];
+                },
+              ),
+              const ChatPage(isPivotBottom: true),
+              const _Marker('voice'),
+              const _Marker('settings'),
+            ],
           ),
         ),
       ),
@@ -241,11 +316,34 @@ void main() {
     await tester.pump(const Duration(milliseconds: 350));
 
     expect(find.byType(HomePage), findsOneWidget);
+    expect(find.byType(TodayPage, skipOffstage: false), findsOneWidget);
     expect(find.byType(ChatPage, skipOffstage: false), findsOneWidget);
     expect(catalogCalls, SharedPreferencesUtil.isPublicBuild ? 0 : 1);
+    const previewEnabled = SharedPreferencesUtil.isTodayDesignPreviewEnabled;
+    final expectedNow = previewEnabled ? previewNow : runtimeNow;
+    expect(find.text(DateFormat('EEEE · MMMM d').format(expectedNow).toUpperCase()), findsOneWidget);
+    expect(find.text(previewEnabled ? 'Preview reminder' : 'Runtime reminder'), findsOneWidget);
+    expect(find.text(previewEnabled ? 'Runtime reminder' : 'Preview reminder'), findsNothing);
+
+    if (SharedPreferencesUtil.isPublicBuild) {
+      expect(dailySummaryCalls, 0);
+      expect(find.byKey(const Key('daily-note-card')), findsNothing);
+      expect(find.textContaining('scissors turned up'), findsNothing);
+    } else if (previewEnabled) {
+      expect(dailySummaryCalls, 0);
+      expect(find.textContaining('scissors turned up'), findsOneWidget);
+    } else {
+      expect(dailySummaryCalls, 1);
+      expect(find.textContaining('Runtime daily summary'), findsOneWidget);
+    }
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
+    actionItemsProvider.dispose();
+    audioRouteProvider.dispose();
+    captureProvider.dispose();
+    conversationProvider.dispose();
+    deviceProvider.dispose();
     messageProvider.dispose();
   });
 

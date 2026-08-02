@@ -36,7 +36,6 @@ class _MobileAppState extends State<MobileApp> {
   }
 
   Widget _buildStandardStartup(BuildContext context) {
-
     // Ella app: use simplified onboarding that handles auth internally
     if (_isEllaApp) {
       return Consumer<AuthenticationProvider>(

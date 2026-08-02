@@ -125,6 +125,24 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Enforce pinned Dart formatting for changed source
+        run: |
+          set -euo pipefail
+
+          changed_dart_files=()
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
+            esac
+          done < /tmp/ella-ios-source-ci-changed-files.txt
+
+          if [[ "${#changed_dart_files[@]}" -eq 0 ]]; then
+            echo "No changed Dart files require formatting."
+            exit 0
+          fi
+
+          dart format --output=none --set-exit-if-changed --line-length 120 "${changed_dart_files[@]}"
+
       - name: Verify protected test network sandbox
         run: |
           set -euo pipefail

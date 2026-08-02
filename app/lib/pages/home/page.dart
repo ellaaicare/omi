@@ -503,144 +503,144 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
   @override
   Widget build(BuildContext context) {
     final page = Consumer<ConnectivityProvider>(
-        builder: (ctx, connectivityProvider, child) {
-          bool isConnected = connectivityProvider.isConnected;
-          previousConnection ??= true;
+      builder: (ctx, connectivityProvider, child) {
+        bool isConnected = connectivityProvider.isConnected;
+        previousConnection ??= true;
 
-          if (previousConnection != isConnected &&
-              connectivityProvider.isInitialized &&
-              connectivityProvider.previousConnection != isConnected) {
-            previousConnection = isConnected;
-            if (!isConnected) {
+        if (previousConnection != isConnected &&
+            connectivityProvider.isInitialized &&
+            connectivityProvider.previousConnection != isConnected) {
+          previousConnection = isConnected;
+          if (!isConnected) {
+            // TODO: Re-enable when internet connection banners are redesigned
+            // Future.delayed(const Duration(seconds: 2), () {
+            //   if (mounted && !connectivityProvider.isConnected) {
+            //     ScaffoldMessenger.of(ctx).showMaterialBanner(
+            //       MaterialBanner(
+            //         content: const Text(
+            //           'No internet connection. Please check your connection.',
+            //           style: TextStyle(color: Colors.white70),
+            //         ),
+            //         backgroundColor: const Color(0xFF424242), // Dark gray instead of red
+            //         leading: const Icon(Icons.wifi_off, color: Colors.white70),
+            //         actions: [
+            //           TextButton(
+            //             onPressed: () {
+            //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+            //             },
+            //             child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
+            //           ),
+            //         ],
+            //       ),
+            //     );
+            //   }
+            // });
+          } else {
+            Future.delayed(Duration.zero, () {
               // TODO: Re-enable when internet connection banners are redesigned
-              // Future.delayed(const Duration(seconds: 2), () {
-              //   if (mounted && !connectivityProvider.isConnected) {
-              //     ScaffoldMessenger.of(ctx).showMaterialBanner(
-              //       MaterialBanner(
-              //         content: const Text(
-              //           'No internet connection. Please check your connection.',
-              //           style: TextStyle(color: Colors.white70),
-              //         ),
-              //         backgroundColor: const Color(0xFF424242), // Dark gray instead of red
-              //         leading: const Icon(Icons.wifi_off, color: Colors.white70),
-              //         actions: [
-              //           TextButton(
-              //             onPressed: () {
-              //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-              //             },
-              //             child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
-              //           ),
-              //         ],
+              // if (mounted) {
+              //   ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //   ScaffoldMessenger.of(ctx).showMaterialBanner(
+              //     MaterialBanner(
+              //       content: const Text(
+              //         'Internet connection is restored.',
+              //         style: TextStyle(color: Colors.white),
               //       ),
-              //     );
-              //   }
-              // });
-            } else {
-              Future.delayed(Duration.zero, () {
-                // TODO: Re-enable when internet connection banners are redesigned
-                // if (mounted) {
-                //   ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //   ScaffoldMessenger.of(ctx).showMaterialBanner(
-                //     MaterialBanner(
-                //       content: const Text(
-                //         'Internet connection is restored.',
-                //         style: TextStyle(color: Colors.white),
-                //       ),
-                //       backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
-                //       leading: const Icon(Icons.wifi, color: Colors.white),
-                //       actions: [
-                //         TextButton(
-                //           onPressed: () {
-                //             if (mounted) {
-                //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //             }
-                //           },
-                //           child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
-                //         ),
-                //       ],
-                //       onVisible: () => Future.delayed(const Duration(seconds: 3), () {
-                //         if (mounted) {
-                //           ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //         }
-                //       }),
-                //     ),
-                //   );
-                // }
+              //       backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
+              //       leading: const Icon(Icons.wifi, color: Colors.white),
+              //       actions: [
+              //         TextButton(
+              //           onPressed: () {
+              //             if (mounted) {
+              //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //             }
+              //           },
+              //           child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
+              //         ),
+              //       ],
+              //       onVisible: () => Future.delayed(const Duration(seconds: 3), () {
+              //         if (mounted) {
+              //           ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //         }
+              //       }),
+              //     ),
+              //   );
+              // }
 
-                WidgetsBinding.instance.addPostFrameCallback((_) async {
-                  if (!mounted) return;
+              WidgetsBinding.instance.addPostFrameCallback((_) async {
+                if (!mounted) return;
 
-                  final convoProvider = ctx.read<ConversationProvider>();
-                  final messageProvider = ctx.read<MessageProvider>();
+                final convoProvider = ctx.read<ConversationProvider>();
+                final messageProvider = ctx.read<MessageProvider>();
 
-                  if (convoProvider.conversations.isEmpty) {
-                    await convoProvider.getInitialConversations();
-                  } else {
-                    // Force refresh when internet connection is restored
-                    await convoProvider.forceRefreshConversations();
-                  }
+                if (convoProvider.conversations.isEmpty) {
+                  await convoProvider.getInitialConversations();
+                } else {
+                  // Force refresh when internet connection is restored
+                  await convoProvider.forceRefreshConversations();
+                }
 
-                  if (messageProvider.messages.isEmpty) {
-                    await messageProvider.refreshMessages();
-                  }
-                });
+                if (messageProvider.messages.isEmpty) {
+                  await messageProvider.refreshMessages();
+                }
               });
-            }
+            });
           }
-          return child!;
-        },
-        child: Consumer<HomeProvider>(
-          builder: (context, homeProvider, _) {
-            return Scaffold(
-              backgroundColor: Theme.of(context).colorScheme.primary,
-              resizeToAvoidBottomInset: false,
-              appBar: null,
-              body: DefaultTabController(
-                length: 4,
-                initialIndex: homeProvider.selectedIndex,
-                child: GestureDetector(
-                  onTap: () {
-                    primaryFocus?.unfocus();
-                    // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
-                    // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
-                  },
-                  child: Stack(
-                    children: [
-                      Column(
-                        children: [
-                          Expanded(
-                            child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
-                          ),
-                          // Settings and other non-home tabs just need nav bar clearance
-                          if (context.watch<HomeProvider>().selectedIndex == 3)
-                            SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
-                        ],
-                      ),
-                      Consumer<HomeProvider>(
-                        builder: (context, home, child) {
-                          if (home.isChatFieldFocused) {
-                            return const SizedBox.shrink();
-                          }
+        }
+        return child!;
+      },
+      child: Consumer<HomeProvider>(
+        builder: (context, homeProvider, _) {
+          return Scaffold(
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            resizeToAvoidBottomInset: false,
+            appBar: null,
+            body: DefaultTabController(
+              length: 4,
+              initialIndex: homeProvider.selectedIndex,
+              child: GestureDetector(
+                onTap: () {
+                  primaryFocus?.unfocus();
+                  // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
+                  // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
+                },
+                child: Stack(
+                  children: [
+                    Column(
+                      children: [
+                        Expanded(
+                          child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
+                        ),
+                        // Settings and other non-home tabs just need nav bar clearance
+                        if (context.watch<HomeProvider>().selectedIndex == 3)
+                          SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
+                      ],
+                    ),
+                    Consumer<HomeProvider>(
+                      builder: (context, home, child) {
+                        if (home.isChatFieldFocused) {
+                          return const SizedBox.shrink();
+                        }
 
-                          return BottomNavBar(
-                            onTabTap: (index, isRepeat) {
-                              if (isRepeat) {
-                                _scrollToTop(index);
-                              } else {
-                                home.setIndex(index);
-                              }
-                            },
-                          );
-                        },
-                      ),
-                    ],
-                  ),
+                        return BottomNavBar(
+                          onTabTap: (index, isRepeat) {
+                            if (isRepeat) {
+                              _scrollToTop(index);
+                            } else {
+                              home.setIndex(index);
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
-            );
-          },
-        ),
-      );
+            ),
+          );
+        },
+      ),
+    );
     if (!widget.runtimeSideEffectsEnabled) return page;
     return MyUpgradeAlert(
       upgrader: _upgrader,

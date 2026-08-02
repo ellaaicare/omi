@@ -38,11 +38,7 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class EllaSettingsPage extends StatefulWidget {
-  const EllaSettingsPage({
-    super.key,
-    this.runtimeSideEffectsEnabled = true,
-    this.authenticatedUidOverride,
-  });
+  const EllaSettingsPage({super.key, this.runtimeSideEffectsEnabled = true, this.authenticatedUidOverride});
 
   final bool runtimeSideEffectsEnabled;
   final String? authenticatedUidOverride;
@@ -213,9 +209,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     if (!mounted) return;
     setState(() {});
     if (!revokeSynced) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.aiConsentRevokeSyncFailed)),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.aiConsentRevokeSyncFailed)));
     }
   }
 

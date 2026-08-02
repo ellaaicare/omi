@@ -236,10 +236,12 @@ class MessageProvider extends ChangeNotifier {
     } on PlatformException catch (e) {
       if (e.code == 'camera_access_denied') {
         AppSnackbar.showSnackbarError(
-            l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera');
+          l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera',
+        );
       } else {
         AppSnackbar.showSnackbarError(
-            l10n?.msgCameraAccessError(e.message ?? e.code) ?? 'Error accessing camera: ${e.message ?? e.code}');
+          l10n?.msgCameraAccessError(e.message ?? e.code) ?? 'Error accessing camera: ${e.message ?? e.code}',
+        );
       }
     } catch (e) {
       AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
@@ -278,7 +280,8 @@ class MessageProvider extends ChangeNotifier {
           }
         } on PlatformException catch (e) {
           AppSnackbar.showSnackbarError(
-              l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}');
+            l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}',
+          );
           return;
         } catch (e) {
           Logger.debug('FilePicker general error: $e');
@@ -310,11 +313,13 @@ class MessageProvider extends ChangeNotifier {
     } on PlatformException catch (e) {
       Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError(l10n?.msgPhotosPermissionDenied ??
-            'Photos permission denied. Please allow access to photos to select images');
+        AppSnackbar.showSnackbarError(
+          l10n?.msgPhotosPermissionDenied ?? 'Photos permission denied. Please allow access to photos to select images',
+        );
       } else {
         AppSnackbar.showSnackbarError(
-            l10n?.msgSelectImagesError(e.message ?? e.code) ?? 'Error selecting images: ${e.message ?? e.code}');
+          l10n?.msgSelectImagesError(e.message ?? e.code) ?? 'Error selecting images: ${e.message ?? e.code}',
+        );
       }
     } catch (e) {
       Logger.debug('🖼️ General exception during image picking: $e');
@@ -356,7 +361,8 @@ class MessageProvider extends ChangeNotifier {
       }
     } on PlatformException catch (e) {
       AppSnackbar.showSnackbarError(
-          l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}');
+        l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}',
+      );
     } catch (e) {
       AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
     }
@@ -478,10 +484,7 @@ class MessageProvider extends ChangeNotifier {
       notifyListeners();
     }
     setLoadingMessages(true);
-    var mes = await getMessagesServer(
-      appId: appProvider?.selectedChatAppId,
-      dropdownSelected: dropdownSelected,
-    );
+    var mes = await getMessagesServer(appId: appProvider?.selectedChatAppId, dropdownSelected: dropdownSelected);
     if (!hasCachedMessages) {
       firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
       notifyListeners();
@@ -547,8 +550,11 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future sendVoiceMessageStreamToServer(List<List<int>> audioBytes,
-      {Function? onFirstChunkRecived, BleAudioCodec? codec}) async {
+  Future sendVoiceMessageStreamToServer(
+    List<List<int>> audioBytes, {
+    Function? onFirstChunkRecived,
+    BleAudioCodec? codec,
+  }) async {
     if (!await _ensureAiConsent()) return;
     var file = await FileUtils.saveAudioBytesToTempFile(
       audioBytes,
@@ -564,10 +570,7 @@ class MessageProvider extends ChangeNotifier {
     App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
     bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-    MixpanelManager().chatVoiceInputUsed(
-      chatTargetId: chatTargetId,
-      isPersonaChat: isPersonaChat,
-    );
+    MixpanelManager().chatVoiceInputUsed(chatTargetId: chatTargetId, isPersonaChat: isPersonaChat);
 
     setShowTypingIndicator(true);
     var message = ServerMessage.empty();
@@ -580,8 +583,12 @@ class MessageProvider extends ChangeNotifier {
       bool firstChunkRecieved = false;
       await for (var chunk in sendVoiceMessageStreamServer([file])) {
         if (!firstChunkRecieved &&
-            [MessageChunkType.message, MessageChunkType.data, MessageChunkType.done, MessageChunkType.think]
-                .contains(chunk.type)) {
+            [
+              MessageChunkType.message,
+              MessageChunkType.data,
+              MessageChunkType.done,
+              MessageChunkType.think,
+            ].contains(chunk.type)) {
           firstChunkRecieved = true;
           if (onFirstChunkRecived != null) {
             onFirstChunkRecived();
@@ -792,10 +799,7 @@ class MessageProvider extends ChangeNotifier {
         }
         break;
       default:
-        throw PlatformException(
-          code: 'Unimplemented',
-          details: 'Method ${call.method} not implemented.',
-        );
+        throw PlatformException(code: 'Unimplemented', details: 'Method ${call.method} not implemented.');
     }
   }
 }

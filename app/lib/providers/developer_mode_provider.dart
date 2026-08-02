@@ -15,10 +15,8 @@ typedef WebhooksStatusLoader = Future<dynamic> Function();
 typedef WebhookUrlLoader = Future<String> Function({required String type});
 
 class DeveloperModeProvider extends BaseProvider {
-  DeveloperModeProvider({
-    WebhooksStatusLoader? webhooksStatusLoader,
-    WebhookUrlLoader? webhookUrlLoader,
-  })  : _webhooksStatusLoader = webhooksStatusLoader ?? webhooksStatus,
+  DeveloperModeProvider({WebhooksStatusLoader? webhooksStatusLoader, WebhookUrlLoader? webhookUrlLoader})
+      : _webhooksStatusLoader = webhooksStatusLoader ?? webhooksStatus,
         _webhookUrlLoader = webhookUrlLoader ?? getUserWebhookUrl;
 
   final WebhooksStatusLoader _webhooksStatusLoader;
@@ -251,9 +249,7 @@ class DeveloperModeProvider extends BaseProvider {
     );
     setIsLoading(false);
     notifyListeners();
-    AppSnackbar.showSnackbar(
-      MyApp.navigatorKey.currentContext?.l10n.devModeSettingsSaved ?? 'Settings saved!',
-    );
+    AppSnackbar.showSnackbar(MyApp.navigatorKey.currentContext?.l10n.devModeSettingsSaved ?? 'Settings saved!');
   }
 
   void setIsLoading(bool value) {

@@ -100,10 +100,7 @@ class NotificationUtil {
 
     MyApp.navigatorKey.currentState?.pushReplacement(
       MaterialPageRoute(
-        builder: (context) => HomePageWrapper(
-          navigateToRoute: allowedNavigateTo,
-          autoMessage: autoMessage,
-        ),
+        builder: (context) => HomePageWrapper(navigateToRoute: allowedNavigateTo, autoMessage: autoMessage),
       ),
     );
   }

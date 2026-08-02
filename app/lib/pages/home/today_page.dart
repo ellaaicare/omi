@@ -33,6 +33,7 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef DailySummaryLoader = Future<List<DailySummary>> Function();
+typedef TodayNowProvider = DateTime Function();
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
@@ -56,9 +57,10 @@ List<ActionItemWithMetadata> todayUpcomingReminders(List<ActionItemWithMetadata>
 }
 
 class TodayPage extends StatefulWidget {
-  const TodayPage({super.key, this.dailySummaryLoader});
+  const TodayPage({super.key, this.dailySummaryLoader, this.nowProvider});
 
   final DailySummaryLoader? dailySummaryLoader;
+  final TodayNowProvider? nowProvider;
 
   @override
   State<TodayPage> createState() => TodayPageState();
@@ -94,7 +96,7 @@ class TodayPageState extends State<TodayPage> {
 
   Future<void> _loadDailySummary() async {
     try {
-      final summaries = SharedPreferencesUtil.isTodayDesignPreview
+      final summaries = SharedPreferencesUtil.isTodayDesignPreviewEnabled
           ? DemoFixtures.dailySummaries(now: DateTime(2025, 7, 24, 9, 41))
           : await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
       if (!mounted) return;
@@ -177,7 +179,9 @@ class TodayPageState extends State<TodayPage> {
 
   @override
   Widget build(BuildContext context) {
-    final now = SharedPreferencesUtil.isTodayDesignPreview ? DateTime(2025, 7, 24, 9, 41) : DateTime.now();
+    final now = SharedPreferencesUtil.isTodayDesignPreviewEnabled
+        ? DateTime(2025, 7, 24, 9, 41)
+        : (widget.nowProvider?.call() ?? DateTime.now());
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
     final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
@@ -264,9 +268,8 @@ class TodayPageState extends State<TodayPage> {
                 onOpenLive: () => _openLiveView(capture, conversations),
               ),
               _SeeWhispersLink(
-                onTap: () => Navigator.of(
-                  context,
-                ).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+                onTap: () =>
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
               ),
             ],
             const SizedBox(height: EllaSizes.cardGap),

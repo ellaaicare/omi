@@ -12,10 +12,7 @@ bool allowsUnverifiedEllaSurface({bool isPublicBuild = SharedPreferencesUtil.isP
 /// Notification and alternate Home navigation is intentionally narrower than
 /// the app's internal route set. Public builds only accept exact routes for the
 /// four visible tabs and the public data/privacy settings page.
-String? allowedEllaNavigationRoute(
-  String? route, {
-  bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
-}) {
+String? allowedEllaNavigationRoute(String? route, {bool isPublicBuild = SharedPreferencesUtil.isPublicBuild}) {
   if (route == null || route.trim().isEmpty) return null;
   if (!isPublicBuild) return route;
 
