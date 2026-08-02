@@ -59,6 +59,52 @@ void main() {
     expect(allowsUnverifiedEllaSurface(isPublicBuild: false), isTrue);
   });
 
+  test('Guardian capability is default-off and cannot be enabled publicly or by invitation', () {
+    expect(isEllaGuardianConfigured, isFalse);
+    expect(
+      allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false),
+      isFalse,
+    );
+  });
+
+  test('native Guardian polling, playback reporting, and injection require explicit availability', () {
+    final appRoot = _appRoot();
+    final manager = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModeManager.swift').readAsStringSync();
+    final polling = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModePollingService.swift').readAsStringSync();
+    final appDelegate = File('${appRoot.path}/ios/Runner/AppDelegate.swift').readAsStringSync();
+
+    expect(manager, contains('private var enabled = false'));
+    expect(manager, contains('func configureAvailability(_ enabled: Bool)'));
+    expect(manager, contains('guard GuardianModeAvailability.shared.isEnabled else'));
+    expect(
+      manager.indexOf('guard GuardianModeAvailability.shared.isEnabled else'),
+      lessThan(manager.indexOf('try audioSession.setActive(true)')),
+    );
+    expect(
+      manager.indexOf('guard GuardianModeAvailability.shared.isEnabled else { return }',
+          manager.indexOf('func reportPlaybackEvent')),
+      lessThan(manager.indexOf('URLSession.shared.dataTask', manager.indexOf('func reportPlaybackEvent'))),
+    );
+    expect(
+      polling.indexOf('guard GuardianModeAvailability.shared.isEnabled else'),
+      lessThan(polling.indexOf('let endpoint =')),
+    );
+    expect(polling, contains('guard isPolling, GuardianModeAvailability.shared.isEnabled else'));
+    expect(appDelegate, contains('case "configureAvailability":'));
+    expect(
+      appDelegate,
+      contains('reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled'),
+    );
+  });
+
   test('WAL diagnostics contain no stable owner namespace, identifier, or account path', () {
     final sources = [
       'lib/services/wals/local_wal_sync.dart',

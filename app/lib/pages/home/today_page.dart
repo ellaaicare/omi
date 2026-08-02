@@ -79,6 +79,8 @@ class TodayPageState extends State<TodayPage> {
     super.initState();
     if (allowsUnverifiedEllaSurface()) {
       _loadDailySummary();
+    }
+    if (allowsGuardianSurface()) {
       _loadWhisperState();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -110,6 +112,7 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _loadWhisperState() async {
+    if (!allowsGuardianSurface()) return;
     final info = await guardian_api.getGuardianMode();
     if (!mounted || info == null) return;
     setState(() {
@@ -139,7 +142,7 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _setWhispers(bool enabled) async {
-    if (_updatingWhispers) return;
+    if (_updatingWhispers || !allowsGuardianSurface()) return;
     final previous = _whispersOn;
     setState(() {
       _whispersOn = enabled;
@@ -200,6 +203,7 @@ class TodayPageState extends State<TodayPage> {
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
     final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
+    final showGuardianSurfaces = allowsGuardianSurface();
 
     return SafeArea(
       bottom: false,
@@ -209,7 +213,7 @@ class TodayPageState extends State<TodayPage> {
         onRefresh: () async {
           await Future.wait([
             if (showUnverifiedSurfaces) _loadDailySummary(),
-            if (showUnverifiedSurfaces) _loadWhisperState(),
+            if (showGuardianSurfaces) _loadWhisperState(),
             context.read<ActionItemsProvider>().fetchActionItems(),
             context.read<ConversationProvider>().getInitialConversations(),
           ]);
@@ -259,13 +263,18 @@ class TodayPageState extends State<TodayPage> {
                 onTap: _openDailyNote,
                 onReadAloud: _toggleReadAloud,
               ),
+            ],
+            if (showGuardianSurfaces) ...[
               const SizedBox(height: EllaSizes.cardGap),
-              _WhisperPill(
-                enabled: _whispersOn,
-                live: isLive,
-                updating: _updatingWhispers,
-                onChanged: _setWhispers,
-                onOpenLive: () => _openLiveView(capture, conversations),
+              KeyedSubtree(
+                key: const Key('guardian-whispers-control'),
+                child: _WhisperPill(
+                  enabled: _whispersOn,
+                  live: isLive,
+                  updating: _updatingWhispers,
+                  onChanged: _setWhispers,
+                  onOpenLive: () => _openLiveView(capture, conversations),
+                ),
               ),
               _SeeWhispersLink(
                 onTap: () =>

@@ -2,6 +2,27 @@ import Foundation
 import AVFoundation
 import Combine
 
+final class GuardianModeAvailability {
+    static let shared = GuardianModeAvailability()
+
+    private let lock = NSLock()
+    private var enabled = false
+
+    private init() {}
+
+    var isEnabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return enabled
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        lock.lock()
+        self.enabled = enabled
+        lock.unlock()
+    }
+}
+
 /// GuardianModeManager - Progressive Buffering for 99.9% Reliability
 ///
 /// Architecture:
@@ -43,9 +64,26 @@ class GuardianModeManager: NSObject {
 
     // MARK: - Public API
 
+    func configureAvailability(_ enabled: Bool) {
+        GuardianModeAvailability.shared.setEnabled(enabled)
+        if !enabled {
+            stop()
+        }
+    }
+
     /// Start Guardian Mode - begins silent audio loop with progressive buffering
     func start() throws {
+        guard GuardianModeAvailability.shared.isEnabled else {
+            throw NSError(domain: "GuardianMode", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
+            ])
+        }
         try queue.sync {
+            guard GuardianModeAvailability.shared.isEnabled else {
+                throw NSError(domain: "GuardianMode", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
+                ])
+            }
             guard !isActive else {
                 NSLog("GuardianMode: Already active, ignoring start()")
                 return
@@ -98,6 +136,7 @@ class GuardianModeManager: NSObject {
 
     /// Stop Guardian Mode
     func stop() {
+        GuardianModeAvailability.shared.setEnabled(false)
         queue.sync {
             GuardianModePollingService.shared.stopPolling()
 
@@ -124,6 +163,7 @@ class GuardianModeManager: NSObject {
 
     /// Get current state
     func getState() -> String {
+        guard GuardianModeAvailability.shared.isEnabled else { return "idle" }
         return queue.sync {
             return isActive ? "active" : "idle"
         }
@@ -243,6 +283,7 @@ class GuardianModeManager: NSObject {
         durationMs: Int = 0,
         metadata: [String: Any]? = nil
     ) {
+        guard GuardianModeAvailability.shared.isEnabled else { return }
         let session = AVAudioSession.sharedInstance()
         guard let port = session.currentRoute.outputs.first else { return }
 
@@ -302,9 +343,11 @@ class GuardianModeManager: NSObject {
         triggerType: String? = nil,
         metadata: [String: Any]? = nil
     ) {
+        guard GuardianModeAvailability.shared.isEnabled else { return }
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
             guard let self = self else { return }
+            guard GuardianModeAvailability.shared.isEnabled else { return }
             self.injectionSequence += 1
             self.totalInjections += 1
             let seq = self.injectionSequence
@@ -342,6 +385,7 @@ class GuardianModeManager: NSObject {
         filename: String,
         attempt: Int
     ) async {
+        guard GuardianModeAvailability.shared.isEnabled else { return }
         // Must be called on self.queue
         guard let player = self.audioPlayer, self.isActive else {
             NSLog("INJECT_FAILED #\(seq) (\(filename)) reason=not_active")

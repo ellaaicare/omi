@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/ella_demo_scenarios_page.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 
 class GuardianModePage extends StatefulWidget {
@@ -33,7 +34,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
   @override
   void initState() {
     super.initState();
-    _loadData();
+    if (allowsGuardianSurface()) _loadData();
   }
 
   Future<void> _loadData() async {
@@ -232,6 +233,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
   @override
   Widget build(BuildContext context) {
+    if (!allowsGuardianSurface()) return const SizedBox.shrink();
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -60,6 +61,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
   }
 
   Future<void> _onTap() async {
+    if (!allowsGuardianSurface()) return;
     HapticFeedback.mediumImpact();
 
     try {
@@ -117,6 +119,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
 
   @override
   Widget build(BuildContext context) {
+    if (!allowsGuardianSurface()) return const SizedBox.shrink();
     final isActive = _guardianService.currentState == GuardianModeState.active;
 
     return Column(

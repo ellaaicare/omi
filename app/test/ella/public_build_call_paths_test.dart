@@ -3,7 +3,10 @@ import 'dart:async';
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,9 +17,14 @@ import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
+import 'package:omi/ella/pages/ella_workspace_page.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/ella/services/ella_workspace_status.dart';
+import 'package:omi/ella/services/guardian_alert_history_api.dart';
+import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/services/guardian_mode_service.dart';
 import 'package:omi/l10n/app_localizations.dart';
 import 'package:omi/main.dart';
 import 'package:omi/mobile/mobile_app.dart';
@@ -38,7 +46,9 @@ import 'package:omi/providers/message_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/providers/voice_recorder_provider.dart';
 import 'package:omi/services/notifications.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
 import 'package:omi/services/services.dart';
+import 'package:omi/utils/ella_pilot_locale_policy.dart';
 
 const bool _isConfiguredCallPathRun = bool.fromEnvironment('ELLA_CALL_PATH_CONFIG_TEST');
 
@@ -132,7 +142,7 @@ void main() {
       expect(SharedPreferencesUtil.isTodayDesignPreviewConfigured, isTrue);
       expect(SharedPreferencesUtil.isTodayDesignPreviewEnabled, !SharedPreferencesUtil.isPublicBuild);
       expect(isEllaEntitlementStubConfigured, isTrue);
-      expect(isEllaEntitlementGateEnabled, SharedPreferencesUtil.isPublicBuild);
+      expect(isEllaEntitlementGateEnabled, SharedPreferencesUtil.isPublicBuild || isEllaInternalPilotEnabled);
       expect(isHermesProvisioningGateEnabled, SharedPreferencesUtil.isPublicBuild);
     }
 
@@ -232,6 +242,70 @@ void main() {
     addTearDown(explicitDemo.dispose);
     expect(explicitDemo.usesDemoTransport, !SharedPreferencesUtil.isPublicBuild);
     expect(explicitDemo.isActive, !SharedPreferencesUtil.isPublicBuild);
+  });
+
+  test('Guardian is fail-closed for public, invitation, and missing-flag configurations', () async {
+    expect(
+      allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: true),
+      isTrue,
+    );
+
+    var backendCalls = 0;
+    var localCalls = 0;
+    final history = await GuardianAlertHistoryApi.fetch(
+      guardianAllowed: false,
+      backendLoader: (_) async {
+        backendCalls++;
+        return null;
+      },
+      localLoader: (_) async {
+        localCalls++;
+        return [];
+      },
+    );
+    expect(history.source, GuardianAlertHistorySource.disabled);
+    expect(backendCalls, 0);
+    expect(localCalls, 0);
+
+    var modeCalls = 0;
+    final client = MockClient((_) async {
+      modeCalls++;
+      return http.Response('{}', 200);
+    });
+    expect(await guardian_api.getGuardianMode(guardianAllowed: false, client: client), isNull);
+    expect(await guardian_api.getGuardianPresets(guardianAllowed: false, client: client), isEmpty);
+    expect(modeCalls, 0);
+
+    if (!allowsGuardianSurface()) {
+      const channel = MethodChannel('com.ellaaicare.ella/guardian_mode');
+      final nativeCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+        nativeCalls.add(call);
+        return {'status': 'active'};
+      });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),
+      );
+      await expectLater(GuardianModeService().start(), throwsA(isA<StateError>()));
+      expect(nativeCalls, isEmpty);
+    }
+
+    expect(
+      EllaNotificationHandler.isGuardianPayload({'type': 'ella_notification', 'trigger_type': 'wake_word'}),
+      isTrue,
+    );
   });
 
   testWidgets('Home IndexedStack mounts actual Today and Chat with public-safe runtime behavior', (tester) async {
@@ -336,6 +410,10 @@ void main() {
       expect(dailySummaryCalls, 1);
       expect(find.textContaining('Runtime daily summary'), findsOneWidget);
     }
+    if (!allowsGuardianSurface()) {
+      expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
+      expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
+    }
     expect(tester.takeException(), isNull);
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -360,6 +438,12 @@ void main() {
       '/apps/inherited-app',
       '/conversation/inherited-conversation',
       '/action-items',
+      '/guardian',
+      '/guardian-alerts',
+      '/whispers',
+      '/caregivers',
+      '/emergency',
+      '/settings/guardian',
     ];
 
     for (final route in hiddenRoutes) {
@@ -369,7 +453,12 @@ void main() {
       await NotificationUtil.onActionReceivedMethodImpl(action);
     }
 
-    expect(dispatched, SharedPreferencesUtil.isPublicBuild ? isEmpty : hiddenRoutes);
+    final expectedHiddenDispatches = SharedPreferencesUtil.isPublicBuild
+        ? const <String>[]
+        : allowsGuardianSurface()
+            ? hiddenRoutes
+            : hiddenRoutes.take(9).toList(growable: false);
+    expect(dispatched, expectedHiddenDispatches);
 
     final allowed = ReceivedAction().fromMap({
       'payload': {'navigate_to': '/chat'},
@@ -403,7 +492,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Settings does not construct developer provider publicly and retains internal initialization', (
+  testWidgets('Settings does not construct developer provider before Advanced Settings is opened', (
     tester,
   ) async {
     var providerConstructions = 0;
@@ -445,17 +534,47 @@ void main() {
     );
     await tester.pump();
 
-    if (SharedPreferencesUtil.isPublicBuild) {
-      expect(providerConstructions, 0);
-      expect(statusCalls, 0);
-      expect(urlCalls, 0);
-    } else {
-      expect(providerConstructions, 1);
-      expect(statusCalls, 1);
-      expect(urlCalls, 4);
-    }
+    expect(providerConstructions, 0);
+    expect(statusCalls, 0);
+    expect(urlCalls, 0);
     expect(find.byType(EllaSettingsPage), findsOneWidget);
+    if (!allowsGuardianSurface()) {
+      for (final key in const [
+        'guardian-mode-settings-entry',
+        'care-team-settings-entry',
+        'emergency-contact-settings-entry',
+        'alert-channels-settings-entry',
+        'guardian-history-settings-entry',
+      ]) {
+        expect(find.byKey(Key(key)), findsNothing);
+      }
+    }
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('workspace omits Whispers route when Guardian is scoped out', (tester) async {
+    const status = EllaWorkspaceStatus(
+      email: 'pilot@example.com',
+      workspaceVerified: false,
+      workspaceFingerprint: '',
+      bindingRevision: 0,
+      lastVerifiedAt: null,
+      chat: EllaRouteVerification.notVerified,
+      voice: EllaRouteVerification.notVerified,
+      whispers: EllaRouteVerification.notVerified,
+      quarantinedAudioCount: 0,
+    );
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: EllaWorkspacePage(statusOverride: status),
+      ),
+    );
+    expect(
+      find.byKey(const Key('workspace-whispers-route')),
+      allowsGuardianSurface() ? findsOneWidget : findsNothing,
+    );
   });
 
   test('developer provider initialization and request methods fail closed publicly', () async {

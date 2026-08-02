@@ -4,7 +4,7 @@ import 'dart:math';
 import 'package:awesome_notifications/awesome_notifications.dart';
 import 'package:just_audio/just_audio.dart';
 
-import 'package:omi/main.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/utils/logger.dart';
 
 /// Handler for Ella-specific FCM notifications with audio playback.
@@ -30,6 +30,8 @@ class EllaNotificationHandler {
     String channelKey, {
     bool isAppInForeground = false,
   }) async {
+    final guardianPayload = isGuardianPayload(data);
+    if (guardianPayload && !allowsGuardianSurface()) return;
     final audioUrl = data['audio_url'] as String?;
     final title = data['title'] as String? ?? 'Ella';
     final body = data['body'] as String? ?? '';
@@ -45,6 +47,7 @@ class EllaNotificationHandler {
       body: body,
       audioUrl: audioUrl,
       navigateTo: navigateTo,
+      guardianPayload: guardianPayload,
     );
 
     // Auto-play audio when app is in foreground
@@ -96,12 +99,31 @@ class EllaNotificationHandler {
     return payload['ella_audio_url'] != null && (payload['ella_audio_url'] as String).isNotEmpty;
   }
 
+  static bool isGuardianPayload(Map<String, dynamic> payload) {
+    if (payload['ella_guardian_audio'] == 'true' || payload['ella_guardian_audio'] == true) return true;
+    final values = [
+      payload['subtype'],
+      payload['notification_type'],
+      payload['trigger_type'],
+      payload['guardian_mode'],
+      payload['category'],
+      payload['source'],
+      payload['navigate_to'],
+    ].whereType<Object>().join(' ').toLowerCase();
+    return values.contains('guardian') ||
+        values.contains('whisper') ||
+        values.contains('wake_word') ||
+        values.contains('caregiver') ||
+        values.contains('emergency');
+  }
+
   static Future<void> _showNotification({
     required String channelKey,
     required String title,
     required String body,
     String? audioUrl,
     String? navigateTo,
+    bool guardianPayload = false,
   }) async {
     try {
       final notificationId = Random().nextInt(100000);
@@ -114,6 +136,7 @@ class EllaNotificationHandler {
       if (audioUrl != null && audioUrl.isNotEmpty) {
         payload['ella_audio_url'] = audioUrl;
       }
+      if (guardianPayload) payload['ella_guardian_audio'] = 'true';
 
       await _awesomeNotifications.createNotification(
         content: NotificationContent(

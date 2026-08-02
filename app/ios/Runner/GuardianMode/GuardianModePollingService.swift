@@ -86,6 +86,10 @@ class GuardianModePollingService {
     // MARK: - Public Methods
 
     func startPolling() {
+        guard GuardianModeAvailability.shared.isEnabled else {
+            stopPolling()
+            return
+        }
         guard !isPolling else {
             NSLog("GuardianPolling: Already polling")
             return
@@ -99,6 +103,7 @@ class GuardianModePollingService {
     }
 
     func stopPolling() {
+        speechSynthesizer.stopSpeaking(at: .immediate)
         guard isPolling else { return }
 
         NSLog("GuardianPolling: Stopping poll timer")
@@ -109,6 +114,11 @@ class GuardianModePollingService {
     }
 
     func pollForNewAudio() async throws -> PollResponse? {
+        guard GuardianModeAvailability.shared.isEnabled else {
+            throw NSError(domain: "GuardianPolling", code: 0, userInfo: [
+                NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
+            ])
+        }
         // Flutter shared_preferences stores with "flutter." prefix on iOS
         let uid = UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid") ?? "unknown"
         let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
@@ -146,6 +156,7 @@ class GuardianModePollingService {
     // MARK: - On-Device TTS
 
     private func speakText(_ text: String) {
+        guard GuardianModeAvailability.shared.isEnabled else { return }
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
@@ -172,10 +183,14 @@ class GuardianModePollingService {
     }
 
     private func executePoll() async {
-        guard isPolling else { return }
+        guard isPolling, GuardianModeAvailability.shared.isEnabled else {
+            stopPolling()
+            return
+        }
 
         do {
             if let result = try await pollForNewAudio() {
+                guard GuardianModeAvailability.shared.isEnabled else { return }
                 consecutiveErrors = 0
                 let metadata = result.metadata?.dict ?? [:]
                 let traceId = result.traceId

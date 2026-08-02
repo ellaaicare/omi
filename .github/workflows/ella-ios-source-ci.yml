@@ -254,12 +254,20 @@ jobs:
           /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
             test/ella/public_build_call_paths_test.dart \
             "${conflicting_defines[@]}" \
-            --dart-define=ELLA_PUBLIC_BUILD=true
+            --dart-define=ELLA_PUBLIC_BUILD=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
 
           /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
             test/ella/public_build_call_paths_test.dart \
             "${conflicting_defines[@]}" \
             --dart-define=ELLA_PUBLIC_BUILD=false
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=false \
+            --dart-define=ELLA_ENTITLEMENT_GATE=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub

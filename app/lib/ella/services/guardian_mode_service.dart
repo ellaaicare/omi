@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/services.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 
 enum GuardianModeState {
   idle,
@@ -21,6 +22,7 @@ class GuardianModeService {
 
   GuardianModeState _currentState = GuardianModeState.idle;
   GuardianModeState get currentState => _currentState;
+  bool get isAvailable => allowsGuardianSurface();
 
   Timer? _testAudioTimer;
   int _testClipCounter = 0;
@@ -36,12 +38,17 @@ class GuardianModeService {
 
   /// Start Guardian Mode
   Future<void> start() async {
+    if (!isAvailable) {
+      _updateState(GuardianModeState.idle);
+      throw StateError('Guardian is unavailable in this build');
+    }
     if (_currentState == GuardianModeState.active) {
       print('GuardianMode: Already active');
       return;
     }
 
     try {
+      await _channel.invokeMethod('configureAvailability', {'enabled': true});
       // Call iOS native to start silent loop
       await _channel.invokeMethod('start');
       print('GuardianMode: Native started');
@@ -51,6 +58,11 @@ class GuardianModeService {
       // Start test audio injection timer (every 5 seconds)
       // _startTestAudioTimer(); // Disabled - using polling service instead
     } catch (e) {
+      try {
+        await _channel.invokeMethod('configureAvailability', {'enabled': false});
+      } catch (_) {
+        // Native setup may already be unavailable; local state still fails closed.
+      }
       print('GuardianMode: Error starting: $e');
       _updateState(GuardianModeState.error);
       rethrow;
@@ -59,17 +71,14 @@ class GuardianModeService {
 
   /// Stop Guardian Mode
   Future<void> stop() async {
-    if (_currentState == GuardianModeState.idle) {
-      print('GuardianMode: Already stopped');
-      return;
-    }
-
     try {
       // Stop test audio timer
       _stopTestAudioTimer();
 
-      // Call iOS native to stop
-      await _channel.invokeMethod('stop');
+      // Disable native availability even when Flutter already considers the
+      // service idle. This prevents a failed or interrupted start from leaving
+      // polling/playback enabled.
+      await _channel.invokeMethod('configureAvailability', {'enabled': false});
       print('GuardianMode: Stopped');
 
       _updateState(GuardianModeState.idle);
@@ -85,6 +94,7 @@ class GuardianModeService {
   Future<void> stopForAccountTransition() async {
     _stopTestAudioTimer();
     try {
+      await _channel.invokeMethod('configureAvailability', {'enabled': false});
       await _channel.invokeMethod('stop');
     } catch (_) {
       // The native side may not be initialized; local state still fails closed.
@@ -121,7 +131,7 @@ class GuardianModeService {
   /// Inject next test audio clip from bundled MP3 files
   Future<void> _injectNextTestClip() async {
     // Check if we're still in active state (prevents race conditions)
-    if (_currentState != GuardianModeState.active) {
+    if (!isAvailable || _currentState != GuardianModeState.active) {
       print('GuardianMode: Skipping clip injection - not in active state');
       return;
     }

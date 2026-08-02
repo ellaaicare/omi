@@ -4,6 +4,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/models/guardian_alert.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -18,12 +19,20 @@ class GuardianAlertHistoryResult {
   bool get isLocalFallback => source == GuardianAlertHistorySource.localDebugLog;
 }
 
-enum GuardianAlertHistorySource { backend, localDebugLog }
+enum GuardianAlertHistorySource { backend, localDebugLog, disabled }
 
 class GuardianAlertHistoryApi {
   GuardianAlertHistoryApi._();
 
-  static Future<GuardianAlertHistoryResult> fetch({int limit = 50}) async {
+  static Future<GuardianAlertHistoryResult> fetch({
+    int limit = 50,
+    bool? guardianAllowed,
+    Future<GuardianAlertHistoryResult?> Function(int limit)? backendLoader,
+    Future<List<GuardianAlertRecord>> Function(int limit)? localLoader,
+  }) async {
+    if (!(guardianAllowed ?? allowsGuardianSurface())) {
+      return const GuardianAlertHistoryResult(records: [], source: GuardianAlertHistorySource.disabled);
+    }
     if (SharedPreferencesUtil().demoMode) {
       return GuardianAlertHistoryResult(
         records: DemoFixtures.whispers()
@@ -33,10 +42,10 @@ class GuardianAlertHistoryApi {
         source: GuardianAlertHistorySource.backend,
       );
     }
-    final backend = await _fetchBackend(limit: limit);
+    final backend = await (backendLoader?.call(limit) ?? _fetchBackend(limit: limit));
     if (backend != null) return backend;
 
-    final fallback = await _fetchLocalDebugLogs(limit: limit);
+    final fallback = await (localLoader?.call(limit) ?? _fetchLocalDebugLogs(limit: limit));
     return GuardianAlertHistoryResult(
       records: fallback,
       source: GuardianAlertHistorySource.localDebugLog,

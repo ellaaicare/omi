@@ -252,7 +252,7 @@ extension FlutterError: Error {}
 
       // When headphones or Bluetooth are removed, iOS defaults .playAndRecord back to the
       // earpiece. Override to the loudspeaker so guardian audio stays audible.
-      if reason == .oldDeviceUnavailable {
+      if reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled {
           DispatchQueue.main.async {
               do {
                   try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
@@ -808,6 +808,12 @@ extension AppDelegate: WCSessionDelegate {
 
     private func handleGuardianModeMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "configureAvailability":
+            let args = call.arguments as? [String: Any]
+            let enabled = args?["enabled"] as? Bool ?? false
+            GuardianModeManager.shared.configureAvailability(enabled)
+            result(["enabled": GuardianModeAvailability.shared.isEnabled])
+
         case "start":
             do {
                 try GuardianModeManager.shared.start()

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:omi/ella/ella_theme.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/ella_workspace_status.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
@@ -63,7 +64,11 @@ class EllaWorkspacePage extends StatelessWidget {
           const SizedBox(height: 8),
           _routeRow(context, context.l10n.ellaWorkspaceChatRoute, status.chat),
           _routeRow(context, context.l10n.ellaWorkspaceVoiceRoute, status.voice),
-          _routeRow(context, context.l10n.ellaWorkspaceWhispersRoute, status.whispers),
+          if (allowsGuardianSurface())
+            KeyedSubtree(
+              key: const Key('workspace-whispers-route'),
+              child: _routeRow(context, context.l10n.ellaWorkspaceWhispersRoute, status.whispers),
+            ),
           const SizedBox(height: 12),
           Text(context.l10n.ellaWorkspaceRouteExplanation, style: const TextStyle(color: EllaColors.textTertiary)),
         ],

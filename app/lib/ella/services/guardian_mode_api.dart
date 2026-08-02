@@ -4,6 +4,7 @@ import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/utils/logger.dart';
 
 const String _dashboardBase = 'https://ella-ai-care.com';
@@ -21,16 +22,16 @@ String get _userId {
 /// Returns a [GuardianModeInfo] that includes a [GuardianModeState] for the
 /// two-tier picker.  Handles both the new schema {override, features} and the
 /// legacy schema {mode}.
-Future<GuardianModeInfo?> getGuardianMode() async {
+Future<GuardianModeInfo?> getGuardianMode({bool? guardianAllowed, http.Client? client}) async {
+  if (!(guardianAllowed ?? allowsGuardianSurface())) return null;
   final uid = _userId;
   if (uid.isEmpty) return null;
+  final transport = client ?? http.Client();
   try {
-    final response = await http
-        .get(
-          Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await transport.get(
+      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -43,6 +44,8 @@ Future<GuardianModeInfo?> getGuardianMode() async {
   } catch (e) {
     Logger.debug('getGuardianMode error: $e');
     return null;
+  } finally {
+    if (client == null) transport.close();
   }
 }
 
@@ -50,11 +53,13 @@ Future<GuardianModeInfo?> getGuardianMode() async {
 ///
 /// Sends the new two-tier body:
 ///   { "override": "CYBORG" | "CHATBOT" | "DEMO" | null, "features": [...] }
-Future<bool> setGuardianModeTwoTier(GuardianModeState state) async {
+Future<bool> setGuardianModeTwoTier(GuardianModeState state, {bool? guardianAllowed, http.Client? client}) async {
+  if (!(guardianAllowed ?? allowsGuardianSurface())) return false;
   final uid = _userId;
   if (uid.isEmpty) return false;
+  final transport = client ?? http.Client();
   try {
-    final response = await http
+    final response = await transport
         .put(
           Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
           headers: {'Content-Type': 'application/json'},
@@ -71,15 +76,19 @@ Future<bool> setGuardianModeTwoTier(GuardianModeState state) async {
   } catch (e) {
     Logger.debug('setGuardianMode error: $e');
     return false;
+  } finally {
+    if (client == null) transport.close();
   }
 }
 
 /// Legacy single-mode PUT — kept for callers that haven't migrated yet.
-Future<bool> setGuardianMode(GuardianModeKey mode) async {
+Future<bool> setGuardianMode(GuardianModeKey mode, {bool? guardianAllowed, http.Client? client}) async {
+  if (!(guardianAllowed ?? allowsGuardianSurface())) return false;
   final uid = _userId;
   if (uid.isEmpty) return false;
+  final transport = client ?? http.Client();
   try {
-    final response = await http
+    final response = await transport
         .put(
           Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
           headers: {'Content-Type': 'application/json'},
@@ -96,113 +105,110 @@ Future<bool> setGuardianMode(GuardianModeKey mode) async {
   } catch (e) {
     Logger.debug('setGuardianMode error: $e');
     return false;
+  } finally {
+    if (client == null) transport.close();
   }
 }
 
 /// GET /api/guardian/presets  (no auth required, cached in memory)
-Future<List<GuardianPreset>> getGuardianPresets() async {
+Future<List<GuardianPreset>> getGuardianPresets({bool? guardianAllowed, http.Client? client}) async {
+  if (!(guardianAllowed ?? allowsGuardianSurface())) return const [];
   if (_cachedPresets != null) return _cachedPresets!;
+  final transport = client ?? http.Client();
   try {
-    final response = await http
-        .get(
-          Uri.parse('$_dashboardBase/api/guardian/presets'),
-          headers: {'Content-Type': 'application/json'},
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await transport.get(
+      Uri.parse('$_dashboardBase/api/guardian/presets'),
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (data['success'] == true) {
         final list = data['presets'] as List;
-        _cachedPresets = list
-            .map((p) => GuardianPreset.fromJson(p as Map<String, dynamic>))
-            .toList();
+        _cachedPresets = list.map((p) => GuardianPreset.fromJson(p as Map<String, dynamic>)).toList();
         return _cachedPresets!;
       }
     }
     Logger.debug('getGuardianPresets: ${response.statusCode}');
   } catch (e) {
     Logger.debug('getGuardianPresets error: $e');
+  } finally {
+    if (client == null) transport.close();
   }
   return _fallbackPresets();
 }
 
 /// Hard-coded fallback so the UI works even if the presets endpoint is down.
 List<GuardianPreset> _fallbackPresets() => [
-  GuardianPreset(
-    presetKey: 'EMERGENCY_ONLY',
-    name: 'Emergency Alerts',
-    description:
-        'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
-    detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
-    color: const Color(0xFFF59E0B),
-  ),
-  GuardianPreset(
-    presetKey: 'ACTIVE_SUPPORT',
-    name: 'Active Support',
-    description:
-        'Emergency alerts + recall assistance + schedule reminders + pattern monitoring.',
-    detailsBullets: [
-      'Medical emergencies',
-      'Wake words (always active)',
-      'Recall assistance',
-    ],
-    color: const Color(0xFF14B8A6),
-  ),
-  GuardianPreset(
-    presetKey: 'MAXIMUM_AWARENESS',
-    name: 'Maximum Awareness',
-    description:
-        'High-sensitivity care monitoring for risk, vulnerability, health, cognitive, emotional, and social support signals.',
-    detailsBullets: [
-      'Broad care monitoring',
-      'Lower alert thresholds',
-      'Helpful during outings or recovery',
-    ],
-    color: const Color(0xFF6366F1),
-  ),
-  GuardianPreset(
-    presetKey: 'MEMORY_SUPPORT',
-    name: 'Memory Support',
-    description:
-        'Proactive memory cues and gentle recall assistance for cognitive support.',
-    detailsBullets: [
-      'Memory cues',
-      'Daily routine reminders',
-      'Cognitive pattern monitoring',
-    ],
-    color: const Color(0xFF10B981),
-  ),
-  GuardianPreset(
-    presetKey: 'CYBORG',
-    name: 'Cyborg',
-    description:
-        'Experimental ambient intelligence — Ella listens broadly and speaks only when she can add useful context, coaching, memory, or insight.',
-    detailsBullets: [
-      'Ambient world enhancement',
-      'Useful companion asides',
-      'Experimental brain-enhancer mode',
-    ],
-    color: const Color(0xFFEC4899),
-  ),
-  GuardianPreset(
-    presetKey: 'CHATBOT',
-    name: 'Chatbot',
-    description:
-        'Full two-way voice conversation with Ella, focused on primary-speaker user utterances.',
-    detailsBullets: [
-      'Conversational replies',
-      'Suppresses media/background audio',
-      'Best for direct voice chat',
-    ],
-    color: const Color(0xFFF97316),
-  ),
-  GuardianPreset(
-    presetKey: 'DEMO',
-    name: 'Demo',
-    description:
-        'Demonstration mode with scripted responses for showcasing Ella.',
-    detailsBullets: ['Scripted demo responses', 'Showcase mode'],
-    color: const Color(0xFF3B82F6),
-  ),
-];
+      GuardianPreset(
+        presetKey: 'EMERGENCY_ONLY',
+        name: 'Emergency Alerts',
+        description: 'Critical alerts only — fall detection, medical emergencies, fire/smoke.',
+        detailsBullets: ['Medical emergencies', 'Fall detection', 'Fire/smoke'],
+        color: const Color(0xFFF59E0B),
+      ),
+      GuardianPreset(
+        presetKey: 'ACTIVE_SUPPORT',
+        name: 'Active Support',
+        description: 'Emergency alerts + recall assistance + schedule reminders + pattern monitoring.',
+        detailsBullets: [
+          'Medical emergencies',
+          'Wake words (always active)',
+          'Recall assistance',
+        ],
+        color: const Color(0xFF14B8A6),
+      ),
+      GuardianPreset(
+        presetKey: 'MAXIMUM_AWARENESS',
+        name: 'Maximum Awareness',
+        description:
+            'High-sensitivity care monitoring for risk, vulnerability, health, cognitive, emotional, and social support signals.',
+        detailsBullets: [
+          'Broad care monitoring',
+          'Lower alert thresholds',
+          'Helpful during outings or recovery',
+        ],
+        color: const Color(0xFF6366F1),
+      ),
+      GuardianPreset(
+        presetKey: 'MEMORY_SUPPORT',
+        name: 'Memory Support',
+        description: 'Proactive memory cues and gentle recall assistance for cognitive support.',
+        detailsBullets: [
+          'Memory cues',
+          'Daily routine reminders',
+          'Cognitive pattern monitoring',
+        ],
+        color: const Color(0xFF10B981),
+      ),
+      GuardianPreset(
+        presetKey: 'CYBORG',
+        name: 'Cyborg',
+        description:
+            'Experimental ambient intelligence — Ella listens broadly and speaks only when she can add useful context, coaching, memory, or insight.',
+        detailsBullets: [
+          'Ambient world enhancement',
+          'Useful companion asides',
+          'Experimental brain-enhancer mode',
+        ],
+        color: const Color(0xFFEC4899),
+      ),
+      GuardianPreset(
+        presetKey: 'CHATBOT',
+        name: 'Chatbot',
+        description: 'Full two-way voice conversation with Ella, focused on primary-speaker user utterances.',
+        detailsBullets: [
+          'Conversational replies',
+          'Suppresses media/background audio',
+          'Best for direct voice chat',
+        ],
+        color: const Color(0xFFF97316),
+      ),
+      GuardianPreset(
+        presetKey: 'DEMO',
+        name: 'Demo',
+        description: 'Demonstration mode with scripted responses for showcasing Ella.',
+        detailsBullets: ['Scripted demo responses', 'Showcase mode'],
+        color: const Color(0xFF3B82F6),
+      ),
+    ];

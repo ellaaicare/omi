@@ -31,7 +31,6 @@ import 'package:omi/pages/settings/delete_account.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
-import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
@@ -72,7 +71,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
-      if (!allowsUnverifiedEllaSurface()) return;
+      if (!allowsGuardianSurface()) return;
       final results = await Future.wait([
         caregiver_api.getCaregivers(),
         caregiver_api.getEmergencyContactId(),
@@ -216,8 +215,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
-    final publicMode = SharedPreferencesUtil.isPublicBuild ? true : context.watch<DeveloperModeProvider>().publicMode;
-    final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
+    final showGuardianSurfaces = allowsGuardianSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
@@ -268,8 +266,9 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             const SizedBox(height: 8),
 
             // Internal policy picker, only available after the developer unlock.
-            if (_developerUnlocked)
+            if (_developerUnlocked && showGuardianSurfaces)
               EllaSettingsRow(
+                key: const Key('guardian-mode-settings-entry'),
                 icon: Icons.shield,
                 iconColor: _guardianMode?.color ?? EllaColors.primary,
                 iconBgColor: _guardianMode?.color ?? EllaColors.primary,
@@ -300,10 +299,11 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
             ],
 
-            if (showUnverifiedSurfaces) ...[
+            if (showGuardianSurfaces) ...[
               // CARE TEAM section
               _buildSectionHeader(context.l10n.ellaCareTeamSection),
               EllaSettingsRow(
+                key: const Key('care-team-settings-entry'),
                 icon: Icons.people,
                 title: context.l10n.ellaFamilyCaregivers,
                 subtitle: _caregiverCountSubtitle(),
@@ -313,9 +313,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 },
               ),
             ],
-            if (showUnverifiedSurfaces && !publicMode) ...[
+            if (showGuardianSurfaces) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
+                key: const Key('emergency-contact-settings-entry'),
                 icon: Icons.emergency,
                 iconColor: EllaColors.error,
                 iconBgColor: EllaColors.error,
@@ -331,6 +332,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
               const SizedBox(height: 8),
               EllaSettingsRow(
+                key: const Key('alert-channels-settings-entry'),
                 icon: Icons.notifications_active,
                 title: context.l10n.ellaAlertChannels,
                 subtitle: context.l10n.ellaAlertChannelsSubtitle,
@@ -351,9 +353,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                   : context.l10n.aiConsentNotAllowedStatus,
               onTap: _openListeningConsent,
             ),
-            if (showUnverifiedSurfaces) ...[
+            if (showGuardianSurfaces) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
+                key: const Key('guardian-history-settings-entry'),
                 icon: Icons.record_voice_over_rounded,
                 title: 'What Ella has said',
                 subtitle: 'Helpful things Ella has said and why',
