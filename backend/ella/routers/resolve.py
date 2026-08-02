@@ -40,7 +40,6 @@ HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_PUBLIC_URL", "https://api.ella-ai-care.com/hermes")
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_PROVISION_URL = os.getenv("HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
-HERMES_WORKSPACE = os.getenv("HERMES_WORKSPACE", "")
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -84,7 +83,8 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
 
     routing = None
-    if agents:
+    workspace = str(agents.get("workspace") or "").strip() if isinstance(agents, dict) else ""
+    if agents and workspace:
         gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
         routing = {
             "agentId": agents.get("userAgentId"),
@@ -102,7 +102,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
             "provisionToken": PROVISION_API_KEY,
             "provisionUrl": PROVISION_API_URL,
             "clusterStatus": row["cluster_status"],
-            "workspace": agents.get("workspace"),
+            "workspace": workspace,
             "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
         }
         if CHAT_PLATFORM == "hermes":
@@ -117,7 +117,7 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
                     "token": HERMES_GATEWAY_TOKEN,
                     "provisionToken": PROVISION_API_KEY,
                     "provisionUrl": HERMES_PROVISION_URL,
-                    "workspace": HERMES_WORKSPACE,
+                    "workspace": workspace,
                     "historyUrl": "/v1/ella/chat/history",
                     "platform": "hermes",
                 }
@@ -165,6 +165,7 @@ async def resolve_endpoint(
 
     agents_raw = row["agents"]
     agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
+    workspace = str(agents.get("workspace") or "").strip() if isinstance(agents, dict) else ""
 
     return {
         "user": {
@@ -172,7 +173,7 @@ async def resolve_endpoint(
             "status": row["status"],
         },
         "routing": {
-            "available": bool(agents),
+            "available": bool(agents and workspace),
             "clusterStatus": row["cluster_status"],
             "platform": "hermes" if CHAT_PLATFORM == "hermes" else "openclaw",
         },

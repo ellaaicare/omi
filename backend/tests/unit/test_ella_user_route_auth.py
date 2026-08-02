@@ -29,7 +29,43 @@ class _VoicePool:
         return None
 
 
+class _VoiceContextPool(_VoicePool):
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return {
+            "id": "user-row-a",
+            "name": "Owner A",
+            "conditions": ["owner-condition"],
+            "medications": ["owner-medication"],
+            "guardian_mode": "OFF",
+            "agents": {
+                "userAgentId": "private-agent",
+                "gatewayUrl": "https://private-gateway.invalid",
+                "gatewayToken": "private-routing-value",
+                "workspace": "/profiles/uid-a/workspace",
+            },
+        }
+
+    async def fetch(self, query, *args):
+        return []
+
+
 class _ResolvePool(_VoicePool):
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return {
+            "omi_uid": "uid-a",
+            "status": "active",
+            "agents": {
+                "userAgentId": "private-agent",
+                "gatewayToken": "private-routing-value",
+                "workspace": "/profiles/uid-a/workspace",
+            },
+            "cluster_status": "ready",
+        }
+
+
+class _ResolveMissingWorkspacePool(_ResolvePool):
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
         return {
@@ -239,6 +275,27 @@ def test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routi
         assert forbidden not in serialized
 
 
+def test_resolve_missing_workspace_fails_closed_without_retained_fallback_or_secrets(monkeypatch):
+    pool = _ResolveMissingWorkspacePool()
+    monkeypatch.setattr(resolve, "_pool", pool)
+    monkeypatch.setattr(resolve, "CHAT_PLATFORM", "hermes")
+    client = _client(monkeypatch)
+
+    response = client.get(
+        "/v1/ella/resolve?uid=uid-a",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user": {"omiUid": "uid-a", "status": "active"},
+        "routing": {"available": False, "clusterStatus": "ready", "platform": "hermes"},
+    }
+    serialized = str(response.json()).lower()
+    for forbidden in ("token", "session", "agentid", "workspace", "condition", "medication", "provision"):
+        assert forbidden not in serialized
+
+
 def test_voice_alternate_routes_reject_missing_and_wrong_subject_before_downstream_work(monkeypatch):
     pool = _VoicePool()
     monkeypatch.setattr(voice, "_pool", pool)
@@ -281,6 +338,33 @@ def test_voice_internal_route_credentials_are_narrow_and_fail_closed_before_work
     assert wrong_scope.status_code == 403
     assert unset_scope.status_code == 403
     assert pool.fetchrow_calls == []
+
+
+def test_voice_context_owner_response_never_contains_runtime_credentials(monkeypatch):
+    pool = _VoiceContextPool()
+
+    async def no_context(*_args, **_kwargs):
+        return ""
+
+    monkeypatch.setattr(voice, "_pool", pool)
+    monkeypatch.setattr(voice, "PROVISION_API_TOKEN", "")
+    monkeypatch.setattr(voice, "_fetch_recent_conversations", no_context)
+    monkeypatch.setattr(voice, "_fetch_recent_canonical_timeline", no_context)
+    monkeypatch.setattr(voice, "_fetch_memory_context", no_context)
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/context",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"uid": "uid-a"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["conditions"] == ["owner-condition"]
+    assert payload["medications"] == ["owner-medication"]
+    assert "gateway_token" not in payload
+    assert "private-routing-value" not in str(payload)
 
 
 def test_guardian_alternate_routes_reject_missing_and_wrong_subject_without_side_effect(monkeypatch):
