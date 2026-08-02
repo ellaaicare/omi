@@ -119,6 +119,9 @@ class InvitationPilotAdmission:
     processor_set_hash: str
     scope_version: str
     scope_hash: str
+    verified_email: str = ""
+    required_profile_class: str = "synthetic"
+    consent_pending: bool = False
 
 
 PilotAdmissionRevalidator = Callable[
@@ -218,9 +221,11 @@ def is_self_hosted_invitation(invitation):
         policy = normalize_entitlement_policy(invitation.get("entitlement_policy"))
     except InviteConfigurationError:
         return False
+    kind = str(invitation.get("kind") or "")
+    expected_cohort = "app_review" if kind == "app_review" else SELF_HOSTED_OPERATOR_COHORT
     return bool(
-        str(invitation.get("kind") or "") in {"ordinary", "app_review"}
-        and str(invitation.get("cohort") or "") == SELF_HOSTED_OPERATOR_COHORT
+        kind in {"ordinary", "app_review"}
+        and str(invitation.get("cohort") or "") == expected_cohort
         and str(invitation.get("entitlement_policy_revision") or "") == SELF_HOSTED_OPERATOR_POLICY_REVISION
         and policy == SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY
     )
@@ -551,6 +556,82 @@ def _failure(
     )
 
 
+async def _bind_verified_identity_on_connection(
+    conn: asyncpg.Connection,
+    *,
+    uid: str,
+    verified_email: str,
+    identity_resolution: authority_advisory_lock.IdentityOwnerResolution,
+    owner_lock: authority_advisory_lock.AuthorityLockProof,
+) -> dict[str, Any]:
+    """Bind the verified Firebase identity inside the redemption transaction."""
+    identity_rows = await authority_advisory_lock.verify_identity_owner_after_lock(
+        conn,
+        uid=uid,
+        email=verified_email,
+        resolution=identity_resolution,
+        proof=owner_lock,
+    )
+    by_uid = next((row for row in identity_rows if row["omi_uid"] == uid), None)
+    if by_uid:
+        if str(by_uid["email"] or "").strip().lower() != verified_email:
+            raise InvitePilotGateDenied("invite_identity_mismatch")
+        row = await conn.fetchrow(
+            """
+            SELECT id, omi_uid, email, status, profile_class
+            FROM users
+            WHERE id = $1
+            FOR UPDATE
+            """,
+            by_uid["id"],
+        )
+        return dict(row)
+
+    by_email = next(
+        (row for row in identity_rows if str(row["email"] or "").strip().lower() == verified_email),
+        None,
+    )
+    if by_email:
+        if by_email["omi_uid"] not in (None, "", uid):
+            raise InvitePilotGateDenied("invite_identity_mismatch")
+        row = await conn.fetchrow(
+            """
+            UPDATE users
+            SET omi_uid = $1,
+                identities = COALESCE(identities, '{}'::jsonb)
+                    || jsonb_build_object('omi_uid', $1::text, 'email', email),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $2
+              AND (omi_uid IS NULL OR omi_uid = $1)
+            RETURNING id, omi_uid, email, status, profile_class
+            """,
+            uid,
+            by_email["id"],
+        )
+        if not row:
+            raise InvitePilotGateDenied("invite_identity_mismatch")
+        return dict(row)
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO users (
+            id, email, name, timezone, omi_uid, status,
+            profile_class, identities, settings, tags, updated_at
+        ) VALUES (
+            $1, $2, $3, 'UTC', $4, 'PENDING',
+            'real', jsonb_build_object('omi_uid', $4::text, 'email', $2::text),
+            '{}'::jsonb, ARRAY[]::text[], CURRENT_TIMESTAMP
+        )
+        RETURNING id, omi_uid, email, status, profile_class
+        """,
+        identity_resolution.owner.account_id,
+        verified_email,
+        verified_email.split("@", 1)[0],
+        uid,
+    )
+    return dict(row)
+
+
 async def redeem_invitation(
     *,
     uid: str,
@@ -592,14 +673,15 @@ async def redeem_invitation(
 
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
-        owner = await authority_advisory_lock.resolve_self_owner_unlocked(
+        identity_resolution = await authority_advisory_lock.resolve_identity_owner_unlocked(
             conn,
             uid=uid,
+            email=user_email,
         )
         async with conn.transaction():
             owner_lock = await authority_advisory_lock.acquire_authority_lock(
                 conn,
-                owner=owner,
+                owner=identity_resolution.owner,
             )
             await voice_canary.lock_runtime_authority_on_connection(
                 conn,
@@ -691,7 +773,7 @@ async def redeem_invitation(
                         pilot_admission=pilot_admission,
                         user_email=user_email,
                         pilot_admission_revalidator=pilot_admission_revalidator,
-                        owner=owner,
+                        identity_resolution=identity_resolution,
                         owner_lock=owner_lock,
                     )
 
@@ -715,7 +797,7 @@ async def _redeem_locked_invitation(
     pilot_admission: InvitationPilotAdmission,
     user_email: str = "",
     pilot_admission_revalidator: PilotAdmissionRevalidator,
-    owner: authority_advisory_lock.AuthorityOwner,
+    identity_resolution: authority_advisory_lock.IdentityOwnerResolution,
     owner_lock: authority_advisory_lock.AuthorityLockProof,
 ) -> dict[str, Any] | InviteRedemptionFailure:
     invitation_id = invitation["id"]
@@ -723,28 +805,6 @@ async def _redeem_locked_invitation(
         config,
         account_uid=pilot_admission.account_uid,
         profile_uid=pilot_admission.profile_uid,
-    )
-    target = await conn.fetchrow(
-        """
-        SELECT *
-        FROM ella_invitation_targets
-        WHERE invitation_id = $1
-          AND account_ref_hmac = $2
-          AND profile_ref_hmac = $3
-        FOR UPDATE
-        """,
-        invitation_id,
-        target_account_ref,
-        target_profile_ref,
-    )
-    user = await conn.fetchrow(
-        """
-        SELECT id, omi_uid, status, profile_class
-        FROM users
-        WHERE omi_uid = $1
-        FOR UPDATE
-        """,
-        pilot_admission.profile_uid,
     )
     current_pilot_admission = await pilot_admission_revalidator(pilot_admission)
     if not isinstance(current_pilot_admission, InvitationPilotAdmission) or current_pilot_admission != pilot_admission:
@@ -754,14 +814,159 @@ async def _redeem_locked_invitation(
     runtime_target = _invitation_runtime_target(invitation)
     is_self_hosted = runtime_target == SELF_HOSTED_RUNTIME_PROVIDER
     is_cloud = runtime_target == CLOUD_RUNTIME_PROVIDER
+    if not (is_self_hosted or is_cloud):
+        await _record_audit(
+            conn,
+            invitation_id=invitation_id,
+            uid_ref_hmac=uid_ref_hmac,
+            source_ref_hmac=source_ref_hmac,
+            event_type="policy_invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+        return _failure(
+            "invalid",
+            support_code=support_code,
+            correlation_id=correlation_id,
+        )
+
+    allowed_email_hash = invitation.get("allowed_email_hash")
+    if allowed_email_hash:
+        expected_email_hash = email_hash_for(config, user_email) if user_email else ""
+        if not expected_email_hash or not hmac.compare_digest(
+            str(allowed_email_hash),
+            expected_email_hash,
+        ):
+            await _record_failure(
+                conn,
+                invitation_id=invitation_id,
+                uid_ref_hmac=uid_ref_hmac,
+                source_ref_hmac=source_ref_hmac,
+                failure_code="invalid",
+                support_code=support_code,
+                correlation_id=correlation_id,
+                now=now,
+                config=config,
+            )
+            return _failure(
+                "invalid",
+                support_code=support_code,
+                correlation_id=correlation_id,
+            )
 
     if is_self_hosted:
-        consent_authority_epoch = 0
+        early_existing = await conn.fetchval(
+            """
+            SELECT id
+            FROM ella_invitation_redemptions
+            WHERE invitation_id = $1 AND uid_ref_hmac = $2
+            """,
+            invitation_id,
+            uid_ref_hmac,
+        )
+        if early_existing is None:
+            kind = str(invitation["kind"])
+            kind_enabled = config.ordinary_enabled if kind == "ordinary" else config.app_review_enabled
+            expires_at = invitation.get("expires_at")
+            if (
+                not kind_enabled
+                or invitation["state"] != "sent"
+                or invitation["delivery_state"] != "sent"
+                or int(invitation["redemption_count"]) >= int(invitation["max_redemptions"])
+                or (expires_at and expires_at <= now)
+            ):
+                await _record_failure(
+                    conn,
+                    invitation_id=invitation_id,
+                    uid_ref_hmac=uid_ref_hmac,
+                    source_ref_hmac=source_ref_hmac,
+                    failure_code="expired" if expires_at and expires_at <= now else "invalid",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                    now=now,
+                    config=config,
+                )
+                return _failure(
+                    "expired" if expires_at and expires_at <= now else "invalid",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                )
+            early_reservation = await conn.fetchrow(
+                """
+                SELECT *
+                FROM ella_invitation_capacity_reservations
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                invitation["capacity_reservation_id"],
+            )
+            if (
+                not early_reservation
+                or early_reservation["state"] != "reserved"
+                or (early_reservation["expires_at"] and early_reservation["expires_at"] <= now)
+            ):
+                await _record_failure(
+                    conn,
+                    invitation_id=invitation_id,
+                    uid_ref_hmac=uid_ref_hmac,
+                    source_ref_hmac=source_ref_hmac,
+                    failure_code="capacity",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                    now=now,
+                    config=config,
+                )
+                return _failure(
+                    "capacity",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                )
+            try:
+                early_policy = normalize_entitlement_policy(invitation["entitlement_policy"])
+            except InviteConfigurationError:
+                early_policy = None
+            if early_policy is None or not _is_valid_entitlement_policy_for_provider(
+                early_policy,
+                runtime_target,
+            ):
+                await _record_audit(
+                    conn,
+                    invitation_id=invitation_id,
+                    uid_ref_hmac=uid_ref_hmac,
+                    source_ref_hmac=source_ref_hmac,
+                    event_type="policy_invalid",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                )
+                return _failure(
+                    "service_unavailable",
+                    support_code=support_code,
+                    correlation_id=correlation_id,
+                )
+
+    if is_self_hosted:
+        user = await _bind_verified_identity_on_connection(
+            conn,
+            uid=uid,
+            verified_email=user_email,
+            identity_resolution=identity_resolution,
+            owner_lock=owner_lock,
+        )
+        consent_authority_epoch = None
     else:
+        user = await conn.fetchrow(
+            """
+            SELECT id, omi_uid, status, profile_class
+            FROM users
+            WHERE omi_uid = $1
+            FOR UPDATE
+            """,
+            pilot_admission.profile_uid,
+        )
         try:
             consent_authority_epoch = await managed_cloud_consent.lock_or_bootstrap_grant_on_connection(
                 conn,
-                owner=owner,
+                owner=identity_resolution.owner,
                 owner_lock=owner_lock,
                 grant=managed_cloud_consent.ManagedCloudGrant(
                     account_uid=pilot_admission.account_uid,
@@ -777,22 +982,51 @@ async def _redeem_locked_invitation(
         except managed_cloud_consent.ManagedCloudAuthorityDenied as exc:
             raise InvitePilotGateDenied("invite_pilot_authority_changed") from exc
 
+    target = await conn.fetchrow(
+        """
+        SELECT *
+        FROM ella_invitation_targets
+        WHERE invitation_id = $1
+          AND account_ref_hmac = $2
+          AND profile_ref_hmac = $3
+        FOR UPDATE
+        """,
+        invitation_id,
+        target_account_ref,
+        target_profile_ref,
+    )
+    if is_self_hosted and target is None:
+        target = await conn.fetchrow(
+            """
+            INSERT INTO ella_invitation_targets (
+                invitation_id, account_ref_hmac, profile_ref_hmac,
+                required_profile_class
+            ) VALUES ($1, $2, $3, 'real')
+            RETURNING *
+            """,
+            invitation_id,
+            target_account_ref,
+            target_profile_ref,
+        )
+
     if is_self_hosted:
         contract_matches = bool(
-            user
-            and str(user["status"]) == "ACTIVE"
+            target
+            and hmac.compare_digest(str(target["account_ref_hmac"]), target_account_ref)
+            and hmac.compare_digest(str(target["profile_ref_hmac"]), target_profile_ref)
+            and str(target["required_profile_class"]) == "real"
+            and user
+            and str(user["status"]) in {"PENDING", "ACTIVE"}
+            and str(user["profile_class"]) == "real"
             and pilot_admission.account_uid == uid
             and pilot_admission.profile_uid == uid
-            and all(
-                (
-                    pilot_admission.consent_receipt_id,
-                    pilot_admission.profile_binding_id,
-                    pilot_admission.policy_version,
-                    pilot_admission.processor_set_hash,
-                    pilot_admission.scope_version,
-                    pilot_admission.scope_hash,
-                )
-            )
+            and pilot_admission.consent_pending is True
+            and pilot_admission.required_profile_class == "real"
+            and hmac.compare_digest(pilot_admission.verified_email, user_email)
+            and invitation["required_consent_policy_version"] == pilot_admission.policy_version
+            and invitation["required_consent_processor_set_hash"] == pilot_admission.processor_set_hash
+            and invitation["required_consent_scope_version"] == pilot_admission.scope_version
+            and invitation["required_consent_scope_hash"] == pilot_admission.scope_hash
         )
     else:
         contract_matches = bool(
@@ -844,37 +1078,6 @@ async def _redeem_locked_invitation(
             correlation_id=correlation_id,
         )
 
-    # Enforce email scoping when invitation has allowed_email_hash
-    allowed_email_hash = invitation.get("allowed_email_hash")
-    if allowed_email_hash:
-        if not user_email:
-            await _record_failure(
-                conn,
-                invitation_id=invitation_id,
-                uid_ref_hmac=uid_ref_hmac,
-                source_ref_hmac=source_ref_hmac,
-                failure_code="invalid",
-                support_code=support_code,
-                correlation_id=correlation_id,
-                now=now,
-                config=config,
-            )
-            return _failure("invalid", support_code=support_code, correlation_id=correlation_id)
-        expected = email_hash_for(config, user_email)
-        if not hmac.compare_digest(str(allowed_email_hash), expected):
-            await _record_failure(
-                conn,
-                invitation_id=invitation_id,
-                uid_ref_hmac=uid_ref_hmac,
-                source_ref_hmac=source_ref_hmac,
-                failure_code="invalid",
-                support_code=support_code,
-                correlation_id=correlation_id,
-                now=now,
-                config=config,
-            )
-            return _failure("invalid", support_code=support_code, correlation_id=correlation_id)
-
     existing = await conn.fetchrow(
         """
         SELECT entitlement_revision
@@ -887,17 +1090,40 @@ async def _redeem_locked_invitation(
     if existing:
         entitlement = await conn.fetchrow(
             """
-            SELECT uid, status, consent_authority_epoch
+            SELECT uid, status, consent_authority_epoch, invitation_consent_pending
             FROM voice_entitlements
             WHERE uid = $1 AND invitation_id = $2
             """,
             uid,
             invitation_id,
         )
+        self_hosted_consent_valid = True
+        if is_self_hosted and entitlement:
+            if bool(entitlement["invitation_consent_pending"]):
+                self_hosted_consent_valid = entitlement["consent_authority_epoch"] is None
+            else:
+                self_hosted_consent_valid = bool(
+                    await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM users app_user
+                            JOIN ella_managed_cloud_consent_authority authority
+                              ON authority.user_id = app_user.id
+                            WHERE app_user.omi_uid = $1
+                              AND authority.decision = 'granted'
+                              AND authority.authority_epoch = $2
+                        )
+                        """,
+                        uid,
+                        entitlement["consent_authority_epoch"],
+                    )
+                )
         if (
             not entitlement
             or str(entitlement["status"]) not in {"invited", "active"}
-            or entitlement["consent_authority_epoch"] != consent_authority_epoch
+            or (is_self_hosted and not self_hosted_consent_valid)
+            or (not is_self_hosted and entitlement["consent_authority_epoch"] != consent_authority_epoch)
         ):
             await _record_audit(
                 conn,
@@ -1108,11 +1334,11 @@ async def _redeem_locked_invitation(
                 invitation_id, entitlement_policy_revision, cohort,
                 exclude_from_product_analytics, consent_policy_version,
                 consent_processor_set_hash, consent_scope_version, consent_scope_hash,
-                consent_authority_epoch
+                consent_authority_epoch, invitation_consent_pending
             ) VALUES (
                 $1, 'invited', $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14::jsonb, $15, $16, $17, $18,
-                $19, $20, $21, $22, $23
+                $19, $20, $21, $22, $23, $24
             )
             RETURNING revision
             """,
@@ -1139,8 +1365,31 @@ async def _redeem_locked_invitation(
             pilot_admission.scope_version,
             pilot_admission.scope_hash,
             consent_authority_epoch,
+            is_self_hosted,
         )
     )
+    if is_self_hosted:
+        await conn.execute(
+            """
+            INSERT INTO ella_runtime_targets (
+                account_user_id, profile_user_id, role, mode, provider,
+                status, policy_version, processor_set_hash, scope_version,
+                scope_hash, entitlement_revision, invitation_target_id,
+                metadata
+            ) VALUES (
+                $1, $1, 'user', 'hermes-chat', 'hermes',
+                'reserved', $2, $3, $4, $5, $6, $7,
+                '{"source":"invitation","content_free":true}'::jsonb
+            )
+            """,
+            user["id"],
+            pilot_admission.policy_version,
+            pilot_admission.processor_set_hash,
+            pilot_admission.scope_version,
+            pilot_admission.scope_hash,
+            entitlement_revision,
+            target["id"],
+        )
     if kind == "ordinary":
         await conn.execute(
             """
@@ -1178,21 +1427,27 @@ async def _redeem_locked_invitation(
         INSERT INTO ella_invitation_redemptions (
             invitation_id, invitation_target_id, uid_ref_hmac,
             consent_receipt_ref_hmac, entitlement_revision,
-            support_code, correlation_id, app_build
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8)
+            support_code, correlation_id, app_build, user_id, consent_pending
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::uuid, $8, $9, $10)
         """,
         invitation_id,
         (target["id"] if target else None),
         uid_ref_hmac,
-        _hmac_ref(
-            config,
-            "consent-receipt-v1",
-            pilot_admission.consent_receipt_id,
+        (
+            None
+            if is_self_hosted
+            else _hmac_ref(
+                config,
+                "consent-receipt-v1",
+                pilot_admission.consent_receipt_id,
+            )
         ),
         entitlement_revision,
         support_code,
         correlation_id,
         app_build if SAFE_APP_BUILD_RE.fullmatch(app_build) else None,
+        user["id"],
+        is_self_hosted,
     )
     await conn.execute(
         """

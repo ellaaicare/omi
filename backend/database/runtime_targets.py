@@ -15,11 +15,11 @@ CLOUD_RUNTIME_TARGET_MODES = (
     "hermes-cloud-photon",
 )
 
-SELF_HOSTED_RUNTIME_PROVIDER = "hermes_self_hosted"
+SELF_HOSTED_RUNTIME_PROVIDER = "hermes"
 SELF_HOSTED_RUNTIME_MODEL = "gpt-5.6-sol"
 SELF_HOSTED_RUNTIME_TARGET_MODES = (
-    "hermes-only-chat",
-    "hermes-only-voice",
+    "hermes-chat",
+    "hermes-voice",
 )
 
 

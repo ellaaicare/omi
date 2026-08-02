@@ -18,6 +18,8 @@ from database.runtime_targets import (
     CLOUD_RUNTIME_PROVIDER,
     CLOUD_RUNTIME_TARGET_MODES,
     RuntimeTargetLineage,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
 )
 
 _pool: Optional[asyncpg.Pool] = None
@@ -121,6 +123,25 @@ REQUIRED_CLOUD_RUNTIME_CONSTRAINTS = (
     "ella_runtime_bindings_cloud_target_shape_check",
     "voice_entitlements_invitation_consent_lineage_check",
     "users_profile_class_check",
+)
+REQUIRED_SELF_HOSTED_INVITE_COLUMNS = (
+    ("ella_invitations", "allowed_email_hash"),
+    ("ella_invitation_redemptions", "consent_pending"),
+    ("ella_invitation_redemptions", "user_id"),
+    ("voice_entitlements", "invitation_consent_pending"),
+    ("ella_runtime_targets", "invitation_target_id"),
+)
+REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS = (
+    "ella_invitation_targets_required_profile_class_check",
+    "ella_invitation_redemptions_consent_shape_check",
+    "ella_runtime_targets_provider_check",
+    "ella_runtime_targets_status_check",
+    "ella_runtime_targets_shape_check",
+    "voice_entitlements_invitation_authority_epoch_check",
+)
+REQUIRED_SELF_HOSTED_INVITE_INDEXES = (
+    "ella_runtime_targets_invitation_target_key",
+    "ella_runtime_targets_active_hermes_profile_key",
 )
 
 
@@ -331,6 +352,105 @@ class EllaProvisioningRepository:
             missing.append("cloud_runtime_schema_probe")
         if missing:
             raise ProvisioningSchemaNotReadyError(missing)
+
+    async def assert_self_hosted_invite_schema_ready(self) -> None:
+        """Require migration 015 before any invited self-hosted side effect."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                ARRAY(
+                    SELECT required.table_name || '.' || required.column_name
+                    FROM unnest($1::text[], $2::text[])
+                        AS required(table_name, column_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = required.table_name
+                          AND column_name = required.column_name
+                    )
+                    ORDER BY required.table_name, required.column_name
+                ) AS missing_columns,
+                ARRAY(
+                    SELECT required.constraint_name
+                    FROM unnest($3::text[]) AS required(constraint_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE connamespace = 'public'::regnamespace
+                          AND conname = required.constraint_name
+                    )
+                    ORDER BY required.constraint_name
+                ) AS missing_constraints,
+                ARRAY(
+                    SELECT required.index_name
+                    FROM unnest($4::text[]) AS required(index_name)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND indexname = required.index_name
+                    )
+                    ORDER BY required.index_name
+                ) AS missing_indexes
+            """,
+            [table for table, _column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
+            [column for _table, column in REQUIRED_SELF_HOSTED_INVITE_COLUMNS],
+            list(REQUIRED_SELF_HOSTED_INVITE_CONSTRAINTS),
+            list(REQUIRED_SELF_HOSTED_INVITE_INDEXES),
+        )
+        missing: list[str] = []
+        if not row:
+            missing.append("self_hosted_invite_schema_probe")
+        else:
+            missing.extend(f"column:{value}" for value in (row["missing_columns"] or []))
+            missing.extend(f"constraint:{value}" for value in (row["missing_constraints"] or []))
+            missing.extend(f"index:{value}" for value in (row["missing_indexes"] or []))
+        if missing:
+            raise ProvisioningSchemaNotReadyError(missing)
+
+    async def get_self_hosted_invitation_admission(self, uid: str) -> Optional[dict[str, Any]]:
+        """Return one consent-complete invitation target for local Hermes."""
+        row = await self.pool.fetchrow(
+            """
+            SELECT
+                entitlement.*,
+                target.id AS runtime_target_id,
+                target.status AS runtime_target_status,
+                target.entitlement_revision AS runtime_target_entitlement_revision,
+                authority.decision AS consent_decision,
+                authority.authority_epoch AS current_authority_epoch,
+                app_user.id AS user_id,
+                app_user.profile_class
+            FROM users app_user
+            JOIN voice_entitlements entitlement ON entitlement.uid = app_user.omi_uid
+            JOIN ella_invitation_redemptions redemption
+              ON redemption.invitation_id = entitlement.invitation_id
+             AND redemption.user_id = app_user.id
+            JOIN ella_runtime_targets target
+              ON target.invitation_target_id = redemption.invitation_target_id
+             AND target.account_user_id = app_user.id
+             AND target.profile_user_id = app_user.id
+            JOIN ella_managed_cloud_consent_authority authority
+              ON authority.user_id = app_user.id
+            WHERE app_user.omi_uid = $1
+              AND app_user.profile_class = 'real'
+              AND entitlement.status IN ('invited', 'active')
+              AND entitlement.invitation_consent_pending = FALSE
+              AND entitlement.consent_authority_epoch = authority.authority_epoch
+              AND authority.decision = 'granted'
+              AND redemption.consent_pending = FALSE
+              AND target.provider = $2
+              AND target.mode = 'hermes-chat'
+              AND target.status IN ('reserved', 'ready')
+              AND target.entitlement_revision = entitlement.revision
+              AND target.policy_version = entitlement.consent_policy_version
+              AND target.processor_set_hash = entitlement.consent_processor_set_hash
+              AND target.scope_version = entitlement.consent_scope_version
+              AND target.scope_hash = entitlement.consent_scope_hash
+            """,
+            uid,
+            SELF_HOSTED_RUNTIME_PROVIDER,
+        )
+        return _row_dict(row)
 
     async def ensure_user_identity(
         self,
@@ -2428,21 +2548,24 @@ class EllaProvisioningRepository:
                 row = await connection.fetchrow(
                     """
                     INSERT INTO ella_runtime_bindings (
-                        id, user_id, role, provider, profile_name, agent_id, workspace_root,
+                        id, user_id, account_user_id, profile_user_id,
+                        role, provider, profile_name, agent_id, workspace_root,
                         internal_gateway_url, gateway_port, service_label, credential_ref,
                         honcho_workspace, observed_peer, observer_peer, template_version,
                         model_policy_version, voice_policy_version, health_state,
                         health_receipt, revision, active
                     )
                     SELECT
-                        $1, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        $1, u.id, u.id, u.id, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                         $12, $13, $14, $15, $16, $17, $18, $19::jsonb, 1, false
                     FROM users u
                     WHERE u.omi_uid = $2
                     ON CONFLICT (user_id, role, provider)
                     WHERE provider <> 'hermes_cloud'
                     DO UPDATE
-                    SET profile_name = EXCLUDED.profile_name,
+                    SET account_user_id = EXCLUDED.account_user_id,
+                        profile_user_id = EXCLUDED.profile_user_id,
+                        profile_name = EXCLUDED.profile_name,
                         agent_id = EXCLUDED.agent_id,
                         workspace_root = EXCLUDED.workspace_root,
                         internal_gateway_url = EXCLUDED.internal_gateway_url,
@@ -2492,6 +2615,7 @@ class EllaProvisioningRepository:
         uid: str,
         provider: str,
         role: str = "user",
+        require_invitation_target: bool = False,
     ) -> dict[str, Any]:
         async with self.pool.acquire() as connection:
             owner = await authority_advisory_lock.resolve_self_owner_unlocked(
@@ -2546,6 +2670,26 @@ class EllaProvisioningRepository:
                     """,
                     selected["id"],
                 )
+                if require_invitation_target:
+                    target = await connection.fetchrow(
+                        """
+                        UPDATE ella_runtime_targets
+                        SET runtime_binding_id = $2,
+                            status = 'ready',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE account_user_id = $1
+                          AND profile_user_id = $1
+                          AND provider = 'hermes'
+                          AND mode = 'hermes-chat'
+                          AND status = 'reserved'
+                          AND runtime_binding_id IS NULL
+                        RETURNING id
+                        """,
+                        selected["user_id"],
+                        selected["id"],
+                    )
+                    if not target:
+                        raise RuntimePoolClaimError("invitation_runtime_target_missing")
                 await connection.execute(
                     """
                     UPDATE users

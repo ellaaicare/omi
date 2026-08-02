@@ -1,50 +1,45 @@
 #!/usr/bin/env python3
-"""Root-only production invitation admin for self-hosted Ella pilot and App Review codes.
-
-Issues invitation codes for the self-hosted Hermes runtime.
-Codes can be open (any authenticated user) or email-scoped.
-
-Usage:
-  # Open code — any signed-in user can redeem
-  sudo python pilot_invite_admin.py issue --kind ordinary --slots 5 --expiry-days 90
-
-  # Email-scoped code — only the matching email can redeem
-  sudo python pilot_invite_admin.py issue --kind ordinary --email alice@example.com
-
-  # App Review code — open, with reviewer-friendly limits
-  sudo python pilot_invite_admin.py issue --kind app_review --slots 22 --expiry-days 365
-
-  # Inspect / revoke / rotate
-  sudo python pilot_invite_admin.py show --receipt-id <uuid>
-  sudo python pilot_invite_admin.py revoke --receipt-id <uuid>
-  sudo python pilot_invite_admin.py rotate --receipt-id <uuid> --kind ordinary
-"""
+"""Root-only invitation operator for the invite-gated self-hosted launch."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import os
+import re
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from database import authority_advisory_lock, invitations, voice_canary
+from database import invitations, voice_canary
 from database.invitations import (
     SELF_HOSTED_OPERATOR_COHORT,
     SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY,
     SELF_HOSTED_OPERATOR_POLICY_REVISION,
-    email_hash_for,
+)
+from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
+)
+from scripts.synthetic_invite_admin import (
+    ProtectedCodeFileError,
+    prepare_protected_code_file,
 )
 
 ROOT_UID = 0
-OPERATOR_PURPOSE = "self_hosted_pilot_issuance"
+OPERATOR_PURPOSE = "self_hosted_invitation_v1"
 MIN_EXPIRY = timedelta(minutes=5)
 MAX_EXPIRY = timedelta(days=400)
+SAFE_CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class PilotInvitationError(RuntimeError):
@@ -58,70 +53,217 @@ def _require_root() -> None:
         raise SystemExit("operator_refused:root_required")
 
 
-def _print_receipt(action: str, receipt: dict[str, Any]) -> None:
-    print(json.dumps({"action": action, **receipt}, sort_keys=True, default=str))
+def _print_receipt(action: str, receipt: dict[str, Any], *, code_output_file: str = "") -> None:
+    payload = {"action": action, **receipt, "content_free": True}
+    if code_output_file:
+        payload["code_output_file"] = code_output_file
+    print(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise PilotInvitationError("expiry_timezone_required")
+    return value.astimezone(timezone.utc)
+
+
+def _safe_context(value: str, *, code: str) -> str:
+    normalized = value.strip()
+    if not SAFE_CONTEXT_RE.fullmatch(normalized):
+        raise PilotInvitationError(code)
+    return normalized
+
+
+def _email_hash(config: invitations.InvitationConfig, email: str) -> Optional[str]:
+    return invitations.email_hash_for(config, email) if email else None
+
+
+def _recovery_binding(
+    *,
+    code: str,
+    code_file_ref_hmac: str,
+    kind: str,
+    allowed_email_hash: Optional[str],
+    expires_at: Optional[datetime],
+    environment: str,
+    config: invitations.InvitationConfig,
+) -> str:
+    normalized_code = invitations.normalize_invite_code(code)
+    if not normalized_code or not re.fullmatch(r"[0-9a-f]{64}", code_file_ref_hmac):
+        raise PilotInvitationError("issue_contract_invalid")
+    payload = json.dumps(
+        {
+            "allowed_email_hash": allowed_email_hash,
+            "code_file_ref_hmac": code_file_ref_hmac,
+            "code_hmac": invitations.code_hmac(config, normalized_code),
+            "environment": environment,
+            "expires_at": _utc(expires_at).isoformat() if expires_at else None,
+            "kind": kind,
+            "policy_version": CURRENT_POLICY_VERSION,
+            "processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
+            "purpose": OPERATOR_PURPOSE,
+            "scope_hash": CURRENT_SCOPE_HASH,
+            "scope_version": CURRENT_SCOPE_VERSION,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hmac.new(
+        config.hmac_pepper,
+        b"self-hosted-invitation-recovery-v1\x1f" + payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _rotation_recovery_binding(
+    *,
+    code: str,
+    code_file_ref_hmac: str,
+    receipt_id: str,
+    expected_version: int,
+    environment: str,
+    config: invitations.InvitationConfig,
+) -> str:
+    normalized_code = invitations.normalize_invite_code(code)
+    if not normalized_code or not re.fullmatch(r"[0-9a-f]{64}", code_file_ref_hmac) or expected_version < 1:
+        raise PilotInvitationError("rotate_contract_invalid")
+    payload = json.dumps(
+        {
+            "code_file_ref_hmac": code_file_ref_hmac,
+            "code_hmac": invitations.code_hmac(config, normalized_code),
+            "environment": environment,
+            "expected_version": expected_version,
+            "purpose": OPERATOR_PURPOSE,
+            "rotated_from": str(_receipt_uuid(receipt_id)),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hmac.new(
+        config.hmac_pepper,
+        b"self-hosted-invitation-rotate-recovery-v1\x1f" + payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _stored_shape_matches(
+    row: dict[str, Any],
+    *,
+    kind: str,
+    allowed_email_hash: Optional[str],
+    expires_at: Optional[datetime],
+    code_file_ref_hmac: str,
+) -> bool:
+    metadata = row.get("operator_metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            return False
+    expected_app_review = kind == "app_review"
+    return bool(
+        row["kind"] == kind
+        and row["state"] == "sent"
+        and row["delivery_state"] == "sent"
+        and row["usage_mode"] == ("capped_multi_redeem" if expected_app_review else "single_use")
+        and int(row["max_redemptions"]) == (20 if expected_app_review else 1)
+        and int(row["reserved_setup_slots"]) == (2 if expected_app_review else 1)
+        and row["cohort"] == ("app_review" if expected_app_review else SELF_HOSTED_OPERATOR_COHORT)
+        and bool(row["exclude_from_product_analytics"]) is expected_app_review
+        and row["required_consent_policy_version"] == CURRENT_POLICY_VERSION
+        and row["required_consent_processor_set_hash"] == CURRENT_PROCESSOR_SET_HASH
+        and row["required_consent_scope_version"] == CURRENT_SCOPE_VERSION
+        and row["required_consent_scope_hash"] == CURRENT_SCOPE_HASH
+        and row["allowed_email_hash"] == allowed_email_hash
+        and (row["expires_at"] is None if expires_at is None else _utc(row["expires_at"]) == _utc(expires_at))
+        and isinstance(metadata, dict)
+        and metadata.get("purpose") == OPERATOR_PURPOSE
+        and metadata.get("code_file_ref_hmac") == code_file_ref_hmac
+        and metadata.get("content_free") is True
+    )
 
 
 async def _issue_invitation(
     *,
-    email: str,
+    code: str,
+    code_file_existed: bool,
+    code_file_ref_hmac: str,
     kind: str,
-    reserved_slots: int,
-    max_redemptions: int,
-    expires_at: datetime,
+    email: str,
+    expires_at: Optional[datetime],
+    environment: str,
     config: invitations.InvitationConfig,
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    expiry = expires_at.astimezone(timezone.utc)
-
     if kind not in {"ordinary", "app_review"}:
         raise PilotInvitationError("invalid_kind")
-    if reserved_slots < 1 or reserved_slots > 100:
-        raise PilotInvitationError("invalid_slots")
-    if max_redemptions < 1 or (kind == "ordinary" and max_redemptions > 100):
-        raise PilotInvitationError("invalid_max_redemptions")
-    if expiry <= now or expiry > now + MAX_EXPIRY:
-        raise PilotInvitationError("invalid_expiry")
     if not config.redemption_enabled:
         raise PilotInvitationError("redemption_disabled")
     if kind == "ordinary" and not config.ordinary_enabled:
         raise PilotInvitationError("ordinary_disabled")
     if kind == "app_review" and not config.app_review_enabled:
         raise PilotInvitationError("app_review_disabled")
+    now = datetime.now(timezone.utc)
+    expiry = _utc(expires_at) if expires_at else None
+    if kind == "ordinary" and (expiry is None or expiry < now + MIN_EXPIRY or expiry > now + MAX_EXPIRY):
+        raise PilotInvitationError("invalid_expiry")
+    if kind == "app_review" and expiry is not None:
+        raise PilotInvitationError("reviewer_expiry_forbidden")
 
-    code = invitations.generate_invite_code()
     normalized_code = invitations.normalize_invite_code(code)
+    if not normalized_code:
+        raise PilotInvitationError("issue_contract_invalid")
     invitation_code_hmac = invitations.code_hmac(config, normalized_code)
-
-    # Compute email hash if scoped
-    allowed_email_hash = None
-    email_display = "open"
-    if email:
-        allowed_email_hash = email_hash_for(config, email)
-        email_display = email
-
-    # Entitlement policy
-    if kind == "app_review":
-        entitlement_policy = {
-            **SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY,
-            "daily_limit_s": 14400,
-            "monthly_limit_s": 432000,
-            "max_session_s": 3600,
-            "max_audio_bytes_per_session": 500_000_000,
-        }
-    else:
-        entitlement_policy = SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY
-
+    allowed_email_hash = _email_hash(config, email)
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Check for code collision (astronomically unlikely but guard anyway)
-            if await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM ella_invitations WHERE code_hmac = $1)",
+            existing = await conn.fetchrow(
+                """
+                SELECT i.*, audit.metadata AS operator_metadata
+                FROM ella_invitations i
+                LEFT JOIN LATERAL (
+                    SELECT metadata
+                    FROM ella_invitation_audit_receipts
+                    WHERE invitation_id = i.id
+                      AND event_type = 'pilot_operator_issued'
+                    ORDER BY created_at, id
+                    LIMIT 1
+                ) audit ON TRUE
+                WHERE i.code_hmac = $1
+                FOR UPDATE OF i
+                """,
                 invitation_code_hmac,
-            ):
-                raise PilotInvitationError("code_collision_retry")
+            )
+            if existing:
+                row = dict(existing)
+                if not code_file_existed or not _stored_shape_matches(
+                    row,
+                    kind=kind,
+                    allowed_email_hash=allowed_email_hash,
+                    expires_at=expiry,
+                    code_file_ref_hmac=code_file_ref_hmac,
+                ):
+                    raise PilotInvitationError("invitation_recovery_mismatch")
+                await invitations._record_audit(
+                    conn,
+                    invitation_id=row["id"],
+                    uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
+                    source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
+                    event_type="pilot_operator_idempotent_retry",
+                    support_code=invitations._support_code(),
+                    correlation_id=invitations._correlation_id(),
+                    metadata={"purpose": OPERATOR_PURPOSE, "content_free": True},
+                )
+                return {
+                    "receipt_id": str(row["id"]),
+                    "kind": kind,
+                    "state": "sent",
+                    "email_scoped": allowed_email_hash is not None,
+                    "idempotent": True,
+                }
 
+            is_review = kind == "app_review"
+            reserved_slots = 2 if is_review else 1
+            max_redemptions = 20 if is_review else 1
             reservation_id = await conn.fetchval(
                 """
                 INSERT INTO ella_invitation_capacity_reservations (
@@ -129,7 +271,7 @@ async def _issue_invitation(
                 ) VALUES ($1, 'reserved', $2, $3)
                 RETURNING id
                 """,
-                f"pilot_{kind}",
+                "app_review" if is_review else "self_hosted_pilot",
                 reserved_slots,
                 expiry,
             )
@@ -145,111 +287,123 @@ async def _issue_invitation(
                     cohort, exclude_from_product_analytics,
                     first_sent_at, expires_at, allowed_email_hash
                 ) VALUES (
-                    $1, $2, $3, $4,
-                    'sent', 'sent', 'multi_use', $5,
-                    $6, $7, $8::jsonb, $9, $10, $11, $12,
-                    $13, $14, $15, $16, $17
+                    $1, $2, $3, $4, 'sent', 'sent', $5, $6, $7,
+                    $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, $18
                 )
                 RETURNING id
                 """,
                 reservation_id,
                 kind,
                 invitation_code_hmac,
-                f"{normalized_code[:2]}**",
+                normalized_code[:2],
+                "capped_multi_redeem" if is_review else "single_use",
                 max_redemptions,
                 reserved_slots,
                 SELF_HOSTED_OPERATOR_POLICY_REVISION,
-                json.dumps(entitlement_policy, sort_keys=True),
-                "self-hosted-v1",
-                "self-hosted-hash",
-                "self-hosted-scope-v1",
-                "self-hosted-scope-hash",
-                SELF_HOSTED_OPERATOR_COHORT,
-                kind == "app_review",
+                json.dumps(SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY, sort_keys=True),
+                CURRENT_POLICY_VERSION,
+                CURRENT_PROCESSOR_SET_HASH,
+                CURRENT_SCOPE_VERSION,
+                CURRENT_SCOPE_HASH,
+                "app_review" if is_review else SELF_HOSTED_OPERATOR_COHORT,
+                is_review,
                 now,
                 expiry,
                 allowed_email_hash,
             )
-            # Create a placeholder target (real users bind at redemption time)
-            await conn.execute(
-                """
-                INSERT INTO ella_invitation_targets (
-                    invitation_id, account_ref_hmac, profile_ref_hmac,
-                    required_profile_class
-                ) VALUES ($1, $2, $3, 'real')
-                """,
-                invitation_id,
-                "self-hosted-open" if not email else f"self-hosted-email-{normalized_code[:4]}",
-                "self-hosted-open" if not email else f"self-hosted-email-{normalized_code[:4]}",
+            await invitations._record_audit(
+                conn,
+                invitation_id=invitation_id,
+                uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
+                source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
+                event_type="pilot_operator_issued",
+                support_code=invitations._support_code(),
+                correlation_id=invitations._correlation_id(),
+                metadata={
+                    "purpose": OPERATOR_PURPOSE,
+                    "code_file_ref_hmac": code_file_ref_hmac,
+                    "email_scoped": allowed_email_hash is not None,
+                    "content_free": True,
+                },
             )
+            return {
+                "receipt_id": str(invitation_id),
+                "kind": kind,
+                "state": "sent",
+                "email_scoped": allowed_email_hash is not None,
+                "idempotent": False,
+            }
 
-    return {
-        "receipt_id": str(invitation_id),
-        "kind": kind,
-        "cohort": SELF_HOSTED_OPERATOR_COHORT,
-        "state": "sent",
-        "code": code,
-        "display_hint": f"{normalized_code[:2]}**",
-        "email": email_display if email else None,
-        "email_scoped": bool(email),
-        "max_redemptions": max_redemptions,
-        "reserved_slots": reserved_slots,
-        "expires_at": expiry.isoformat(),
-        "content_free": True,
-    }
+
+def _receipt_uuid(value: str) -> uuid.UUID:
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PilotInvitationError("receipt_invalid") from exc
+    if str(parsed) != value:
+        raise PilotInvitationError("receipt_invalid")
+    return parsed
 
 
 async def _show_invitation(*, receipt_id: str) -> dict[str, Any]:
-    import uuid as _uuid
-
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM ella_invitations WHERE id = $1", _uuid.UUID(receipt_id))
-        if not row:
-            raise PilotInvitationError("receipt_not_found")
-        r = dict(row)
-        return {
-            "receipt_id": str(r["id"]),
-            "kind": str(r["kind"]),
-            "cohort": str(r["cohort"]),
-            "state": str(r["state"]),
-            "delivery_state": str(r["delivery_state"]),
-            "redemption_count": int(r["redemption_count"]),
-            "max_redemptions": int(r["max_redemptions"]),
-            "email_scoped": r["allowed_email_hash"] is not None,
-            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
-            "content_free": True,
-        }
+        row = await conn.fetchrow(
+            """
+            SELECT id, kind, state, delivery_state, redemption_count,
+                   max_redemptions, allowed_email_hash, expires_at, version
+            FROM ella_invitations
+            WHERE id = $1
+            """,
+            _receipt_uuid(receipt_id),
+        )
+    if not row:
+        raise PilotInvitationError("receipt_not_found")
+    return {
+        "receipt_id": str(row["id"]),
+        "kind": str(row["kind"]),
+        "state": str(row["state"]),
+        "delivery_state": str(row["delivery_state"]),
+        "redemption_count": int(row["redemption_count"]),
+        "max_redemptions": int(row["max_redemptions"]),
+        "email_scoped": row["allowed_email_hash"] is not None,
+        "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+        "version": int(row["version"]),
+    }
 
 
-async def _revoke_invitation(*, receipt_id: str) -> dict[str, Any]:
-    import uuid as _uuid
-
+async def _revoke_invitation(
+    *,
+    receipt_id: str,
+    expected_version: int,
+    environment: str,
+    config: invitations.InvitationConfig,
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 "SELECT * FROM ella_invitations WHERE id = $1 FOR UPDATE",
-                _uuid.UUID(receipt_id),
+                _receipt_uuid(receipt_id),
             )
             if not row:
                 raise PilotInvitationError("receipt_not_found")
-            r = dict(row)
-            if str(r["state"]) == "revoked":
-                return {"receipt_id": str(r["id"]), "state": "revoked", "idempotent": True}
-            if str(r["state"]) not in {"issued", "sent"}:
-                raise PilotInvitationError("not_revokable")
-            if int(r["redemption_count"]) > 0:
-                raise PilotInvitationError("has_redemptions")
-            await conn.execute(
+            if int(row["version"]) != expected_version:
+                raise PilotInvitationError("receipt_stale")
+            if row["state"] == "revoked":
+                return {"receipt_id": str(row["id"]), "state": "revoked", "idempotent": True}
+            if row["state"] not in {"issued", "sent"} or int(row["redemption_count"]) != 0:
+                raise PilotInvitationError("revoke_refused")
+            updated = await conn.fetchrow(
                 """
                 UPDATE ella_invitations
                 SET state = 'revoked', delivery_state = 'suppressed',
                     revoked_at = $2, version = version + 1, updated_at = $2
                 WHERE id = $1
+                RETURNING id, state, version
                 """,
-                r["id"],
+                row["id"],
                 now,
             )
             await conn.execute(
@@ -259,81 +413,365 @@ async def _revoke_invitation(*, receipt_id: str) -> dict[str, Any]:
                     version = version + 1, updated_at = $2
                 WHERE id = $1 AND state = 'reserved'
                 """,
-                r["capacity_reservation_id"],
+                row["capacity_reservation_id"],
                 now,
             )
-            return {"receipt_id": str(r["id"]), "state": "revoked"}
+            await invitations._record_audit(
+                conn,
+                invitation_id=row["id"],
+                uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
+                source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
+                event_type="pilot_operator_revoked",
+                support_code=invitations._support_code(),
+                correlation_id=invitations._correlation_id(),
+                metadata={"purpose": OPERATOR_PURPOSE, "content_free": True},
+            )
+            return {
+                "receipt_id": str(updated["id"]),
+                "state": str(updated["state"]),
+                "version": int(updated["version"]),
+                "idempotent": False,
+            }
 
 
-async def main() -> None:
-    _require_root()
-    config = invitations.InvitationConfig.from_env()
+async def _rotate_invitation(
+    *,
+    receipt_id: str,
+    expected_version: int,
+    code: str,
+    code_file_existed: bool,
+    code_file_ref_hmac: str,
+    environment: str,
+    config: invitations.InvitationConfig,
+) -> dict[str, Any]:
+    old_id = _receipt_uuid(receipt_id)
+    normalized_code = invitations.normalize_invite_code(code)
+    if not normalized_code or not re.fullmatch(r"[0-9a-f]{64}", code_file_ref_hmac):
+        raise PilotInvitationError("rotate_contract_invalid")
+    code_hmac = invitations.code_hmac(config, normalized_code)
+    now = datetime.now(timezone.utc)
+    pool = await voice_canary.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            old = await conn.fetchrow(
+                "SELECT * FROM ella_invitations WHERE id = $1 FOR UPDATE",
+                old_id,
+            )
+            if not old:
+                raise PilotInvitationError("receipt_not_found")
+            existing = await conn.fetchrow(
+                """
+                SELECT invitation.*, audit.metadata AS operator_metadata
+                FROM ella_invitations invitation
+                LEFT JOIN LATERAL (
+                    SELECT metadata
+                    FROM ella_invitation_audit_receipts
+                    WHERE invitation_id = invitation.id
+                      AND event_type = 'pilot_operator_rotated'
+                    ORDER BY created_at, id
+                    LIMIT 1
+                ) audit ON TRUE
+                WHERE invitation.code_hmac = $1
+                FOR UPDATE OF invitation
+                """,
+                code_hmac,
+            )
+            if existing:
+                metadata = existing["operator_metadata"]
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError as exc:
+                        raise PilotInvitationError("rotation_recovery_mismatch") from exc
+                if not (
+                    code_file_existed
+                    and old["state"] == "revoked"
+                    and existing["state"] == "sent"
+                    and existing["delivery_state"] == "sent"
+                    and existing["kind"] == old["kind"]
+                    and existing["allowed_email_hash"] == old["allowed_email_hash"]
+                    and existing["entitlement_policy_revision"] == old["entitlement_policy_revision"]
+                    and existing["required_consent_policy_version"] == old["required_consent_policy_version"]
+                    and existing["required_consent_processor_set_hash"] == old["required_consent_processor_set_hash"]
+                    and existing["required_consent_scope_version"] == old["required_consent_scope_version"]
+                    and existing["required_consent_scope_hash"] == old["required_consent_scope_hash"]
+                    and isinstance(metadata, dict)
+                    and metadata.get("purpose") == OPERATOR_PURPOSE
+                    and metadata.get("rotated_from") == str(old_id)
+                    and metadata.get("code_file_ref_hmac") == code_file_ref_hmac
+                    and metadata.get("content_free") is True
+                ):
+                    raise PilotInvitationError("rotation_recovery_mismatch")
+                return {
+                    "receipt_id": str(existing["id"]),
+                    "rotated_from": str(old_id),
+                    "state": "sent",
+                    "idempotent": True,
+                }
+            if code_file_existed:
+                raise PilotInvitationError("rotation_recovery_mismatch")
+            if int(old["version"]) != expected_version:
+                raise PilotInvitationError("receipt_stale")
+            if old["state"] not in {"issued", "sent"} or int(old["redemption_count"]) != 0:
+                raise PilotInvitationError("rotate_refused")
+            if old["expires_at"] and old["expires_at"] <= now:
+                raise PilotInvitationError("rotate_refused")
 
-    parser = argparse.ArgumentParser(description="Pilot invitation admin CLI")
-    sub = parser.add_subparsers(dest="command", required=True)
+            old_reservation = await conn.fetchrow(
+                """
+                SELECT *
+                FROM ella_invitation_capacity_reservations
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                old["capacity_reservation_id"],
+            )
+            if not old_reservation or old_reservation["state"] != "reserved":
+                raise PilotInvitationError("rotate_refused")
+            new_reservation_id = await conn.fetchval(
+                """
+                INSERT INTO ella_invitation_capacity_reservations (
+                    pool_key, state, reserved_slots, expires_at
+                ) VALUES ($1, 'reserved', $2, $3)
+                RETURNING id
+                """,
+                old_reservation["pool_key"],
+                old_reservation["reserved_slots"],
+                old_reservation["expires_at"],
+            )
+            new_invitation_id = await conn.fetchval(
+                """
+                INSERT INTO ella_invitations (
+                    capacity_reservation_id, kind, code_hmac, display_hint,
+                    state, delivery_state, usage_mode, max_redemptions,
+                    reserved_setup_slots, entitlement_policy_revision,
+                    entitlement_policy, required_consent_policy_version,
+                    required_consent_processor_set_hash,
+                    required_consent_scope_version, required_consent_scope_hash,
+                    cohort, exclude_from_product_analytics,
+                    first_sent_at, expires_at, allowed_email_hash
+                ) VALUES (
+                    $1, $2, $3, $4, 'sent', 'sent', $5, $6, $7,
+                    $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+                )
+                RETURNING id
+                """,
+                new_reservation_id,
+                old["kind"],
+                code_hmac,
+                normalized_code[:2],
+                old["usage_mode"],
+                old["max_redemptions"],
+                old["reserved_setup_slots"],
+                old["entitlement_policy_revision"],
+                old["entitlement_policy"],
+                old["required_consent_policy_version"],
+                old["required_consent_processor_set_hash"],
+                old["required_consent_scope_version"],
+                old["required_consent_scope_hash"],
+                old["cohort"],
+                old["exclude_from_product_analytics"],
+                now,
+                old["expires_at"],
+                old["allowed_email_hash"],
+            )
+            await conn.execute(
+                """
+                UPDATE ella_invitations
+                SET state = 'revoked', delivery_state = 'suppressed',
+                    revoked_at = $2, version = version + 1, updated_at = $2
+                WHERE id = $1
+                """,
+                old_id,
+                now,
+            )
+            await conn.execute(
+                """
+                UPDATE ella_invitation_capacity_reservations
+                SET state = 'released', released_at = $2,
+                    version = version + 1, updated_at = $2
+                WHERE id = $1
+                """,
+                old["capacity_reservation_id"],
+                now,
+            )
+            await invitations._record_audit(
+                conn,
+                invitation_id=new_invitation_id,
+                uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
+                source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
+                event_type="pilot_operator_rotated",
+                support_code=invitations._support_code(),
+                correlation_id=invitations._correlation_id(),
+                metadata={
+                    "purpose": OPERATOR_PURPOSE,
+                    "rotated_from": str(old_id),
+                    "code_file_ref_hmac": code_file_ref_hmac,
+                    "content_free": True,
+                },
+            )
+            return {
+                "receipt_id": str(new_invitation_id),
+                "rotated_from": str(old_id),
+                "state": "sent",
+                "idempotent": False,
+            }
 
-    issue = sub.add_parser("issue")
-    issue.add_argument("--kind", required=True, choices=["ordinary", "app_review"])
-    issue.add_argument("--email", default=None, help="Email to scope code to (omit for open code)")
-    issue.add_argument("--slots", type=int, default=5)
-    issue.add_argument("--expiry-days", type=int, default=90)
 
-    sub.add_parser("show").add_argument("--receipt-id", required=True)
-    sub.add_parser("revoke").add_argument("--receipt-id", required=True)
-    rotate_parser = sub.add_parser("rotate")
-    rotate_parser.add_argument("--receipt-id", required=True)
-    rotate_parser.add_argument("--kind", required=True)
-    rotate_parser.add_argument("--email", default=None)
-
-    args = parser.parse_args()
-
+def _configuration() -> invitations.InvitationConfig:
     try:
-        if args.command == "issue":
-            max_redemptions = 1 if args.kind == "ordinary" else 22
-            expires_at = datetime.now(timezone.utc) + timedelta(days=args.expiry_days)
-            receipt = await _issue_invitation(
-                email=args.email or "",
-                kind=args.kind,
-                reserved_slots=args.slots,
-                max_redemptions=max_redemptions,
-                expires_at=expires_at,
-                config=config,
-            )
-            _print_receipt("issued", receipt)
-            scope_msg = f"scoped to {args.email}" if args.email else "OPEN (any authenticated user)"
-            print(f"\nPLAINTEXT CODE (show once only): {receipt['code']}", file=sys.stderr)
-            print(f"Scope: {scope_msg}", file=sys.stderr)
-            print(f"Receipt ID: {receipt['receipt_id']}", file=sys.stderr)
+        return invitations.InvitationConfig.from_env()
+    except invitations.InviteConfigurationError as exc:
+        raise SystemExit("operator_refused:configuration_invalid") from exc
 
-        elif args.command == "show":
-            receipt = await _show_invitation(receipt_id=args.receipt_id)
-            _print_receipt("show", receipt)
 
-        elif args.command == "revoke":
-            receipt = await _revoke_invitation(receipt_id=args.receipt_id)
-            _print_receipt("revoke", receipt)
+async def _issue(args: argparse.Namespace) -> None:
+    config = _configuration()
+    environment = _safe_context(args.expected_environment, code="environment_invalid")
+    email = (args.email or "").strip().lower()
+    expiry = None
+    if args.kind == "ordinary":
+        expiry = datetime.now(timezone.utc) + timedelta(days=args.expiry_days)
+    elif args.expiry_days is not None:
+        raise PilotInvitationError("reviewer_expiry_forbidden")
+    allowed_email_hash = _email_hash(config, email)
+    code_file_ref_hmac = invitations.invitation_code_file_ref(config, args.code_output_file)
 
-        elif args.command == "rotate":
-            await _revoke_invitation(receipt_id=args.receipt_id)
-            max_redemptions = 1 if args.kind == "ordinary" else 22
-            expires_at = datetime.now(timezone.utc) + timedelta(days=90)
-            receipt = await _issue_invitation(
-                email=args.email or "",
-                kind=args.kind,
-                reserved_slots=5,
-                max_redemptions=max_redemptions,
-                expires_at=expires_at,
-                config=config,
-            )
-            _print_receipt("rotated", {"revoked_receipt_id": args.receipt_id, **receipt})
+    def recovery_binding_for_code(code: str) -> str:
+        return _recovery_binding(
+            code=code,
+            code_file_ref_hmac=code_file_ref_hmac,
+            kind=args.kind,
+            allowed_email_hash=allowed_email_hash,
+            expires_at=expiry,
+            environment=environment,
+            config=config,
+        )
 
-    except PilotInvitationError as exc:
-        print(json.dumps({"status": "error", "code": exc.code}), file=sys.stderr)
-        sys.exit(1)
-    except Exception as exc:
-        print(json.dumps({"status": "error", "code": "internal_error", "detail": str(exc)}), file=sys.stderr)
-        sys.exit(2)
+    prepared = prepare_protected_code_file(
+        approved_root=args.approved_code_output_root,
+        code_output_file=args.code_output_file,
+        recovery_binding_for_code=recovery_binding_for_code,
+        expected_owner_uid=ROOT_UID,
+    )
+    try:
+        receipt = await _issue_invitation(
+            code=prepared.code,
+            code_file_existed=prepared.existed,
+            code_file_ref_hmac=code_file_ref_hmac,
+            kind=args.kind,
+            email=email,
+            expires_at=expiry,
+            environment=environment,
+            config=config,
+        )
+    finally:
+        prepared = None
+    _print_receipt("issue", receipt, code_output_file=args.code_output_file)
+
+
+async def _rotate(args: argparse.Namespace) -> None:
+    config = _configuration()
+    environment = _safe_context(args.expected_environment, code="environment_invalid")
+    code_file_ref_hmac = invitations.invitation_code_file_ref(config, args.code_output_file)
+
+    def recovery_binding_for_code(code: str) -> str:
+        return _rotation_recovery_binding(
+            code=code,
+            code_file_ref_hmac=code_file_ref_hmac,
+            receipt_id=args.receipt_id,
+            expected_version=args.expected_version,
+            environment=environment,
+            config=config,
+        )
+
+    prepared = prepare_protected_code_file(
+        approved_root=args.approved_code_output_root,
+        code_output_file=args.code_output_file,
+        recovery_binding_for_code=recovery_binding_for_code,
+        expected_owner_uid=ROOT_UID,
+    )
+    try:
+        receipt = await _rotate_invitation(
+            receipt_id=args.receipt_id,
+            expected_version=args.expected_version,
+            code=prepared.code,
+            code_file_existed=prepared.existed,
+            code_file_ref_hmac=code_file_ref_hmac,
+            environment=environment,
+            config=config,
+        )
+    finally:
+        prepared = None
+    _print_receipt("rotate", receipt, code_output_file=args.code_output_file)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    issue = subparsers.add_parser("issue")
+    issue.add_argument("--kind", required=True, choices=["ordinary", "app_review"])
+    issue.add_argument("--email", default="")
+    issue.add_argument("--expiry-days", type=int)
+    issue.add_argument("--expected-environment", required=True)
+    issue.add_argument("--approved-code-output-root", required=True)
+    issue.add_argument("--code-output-file", required=True)
+    issue.set_defaults(handler=_issue)
+
+    show = subparsers.add_parser("show")
+    show.add_argument("--receipt-id", required=True)
+    show.set_defaults(handler=lambda args: _show_and_print(args))
+
+    revoke = subparsers.add_parser("revoke")
+    revoke.add_argument("--receipt-id", required=True)
+    revoke.add_argument("--expected-version", required=True, type=int)
+    revoke.add_argument("--expected-environment", required=True)
+    revoke.set_defaults(handler=lambda args: _revoke_and_print(args))
+
+    rotate = subparsers.add_parser("rotate")
+    rotate.add_argument("--receipt-id", required=True)
+    rotate.add_argument("--expected-version", required=True, type=int)
+    rotate.add_argument("--expected-environment", required=True)
+    rotate.add_argument("--approved-code-output-root", required=True)
+    rotate.add_argument("--code-output-file", required=True)
+    rotate.set_defaults(handler=_rotate)
+    return parser
+
+
+async def _show_and_print(args: argparse.Namespace) -> None:
+    _print_receipt("show", await _show_invitation(receipt_id=args.receipt_id))
+
+
+async def _revoke_and_print(args: argparse.Namespace) -> None:
+    config = _configuration()
+    environment = _safe_context(args.expected_environment, code="environment_invalid")
+    _print_receipt(
+        "revoke",
+        await _revoke_invitation(
+            receipt_id=args.receipt_id,
+            expected_version=args.expected_version,
+            environment=environment,
+            config=config,
+        ),
+    )
+
+
+async def _main() -> None:
+    _require_root()
+    args = _parser().parse_args()
+    if args.command == "issue" and args.kind == "ordinary" and args.expiry_days is None:
+        args.expiry_days = 90
+    await args.handler(args)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(_main())
+    except (PilotInvitationError, ProtectedCodeFileError) as exc:
+        print(json.dumps({"status": "error", "code": exc.code}), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception:
+        print(json.dumps({"status": "error", "code": "outcome_ambiguous"}), file=sys.stderr)
+        sys.exit(2)

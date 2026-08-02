@@ -25,8 +25,14 @@ from database.ella_provisioning import (
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
 )
 from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -95,15 +101,26 @@ def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
 
 
 def self_hosted_provisioning_enabled(uid: Optional[str] = None) -> bool:
-    return rollout_enabled(
-        "ELLA_SELF_HOSTED_PROVISIONING_ENABLED",
-        "ELLA_SELF_HOSTED_PROVISIONING_ENABLED_UIDS",
-        uid,
-    )
+    del uid
+    return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false").strip().lower() in TRUE_VALUES
 
 
 def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
     return cloud_provisioning_enabled(uid) or provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+
+
+def _self_hosted_invitation_matches(admission: Optional[dict[str, Any]]) -> bool:
+    if not admission:
+        return False
+    model_allowlist = set(admission.get("model_allowlist") or [])
+    return bool(
+        str(admission.get("consent_policy_version") or "") == CURRENT_POLICY_VERSION
+        and str(admission.get("consent_processor_set_hash") or "") == CURRENT_PROCESSOR_SET_HASH
+        and str(admission.get("consent_scope_version") or "") == CURRENT_SCOPE_VERSION
+        and str(admission.get("consent_scope_hash") or "") == CURRENT_SCOPE_HASH
+        and SELF_HOSTED_RUNTIME_PROVIDER in set(admission.get("provider_allowlist") or [])
+        and (not model_allowlist or SELF_HOSTED_RUNTIME_MODEL in model_allowlist)
+    )
 
 
 def effective_target_schema_version(uid: str, requested: str) -> str:
@@ -440,13 +457,33 @@ class ProvisioningCoordinator:
         request_payload: dict[str, Any],
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
         cloud_required = cloud_provisioning_enabled(identity.uid)
+        self_hosted_required = self_hosted_provisioning_enabled(identity.uid) and not cloud_required
         try:
             await self.repository.assert_schema_ready()
             if cloud_required:
                 await self.repository.assert_cloud_schema_ready()
+            elif self_hosted_required:
+                await self.repository.assert_self_hosted_invite_schema_ready()
         except ProvisioningSchemaNotReadyError as exc:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+
+        preexisting_binding = None
+        invitation_admission = None
+        if self_hosted_required:
+            # Admission must precede identity/job writes. A previously active
+            # self-hosted binding remains reconcilable without replaying its
+            # invitation, but a new binding requires current invitation and
+            # consent authority from PostgreSQL.
+            preexisting_binding = await self.repository.resolve_active_runtime(
+                identity.uid,
+                template_version=target_schema_version,
+                required_provider="hermes",
+            )
+            if not preexisting_binding:
+                invitation_admission = await self.repository.get_self_hosted_invitation_admission(identity.uid)
+                if not _self_hosted_invitation_matches(invitation_admission):
+                    raise ProvisioningError("invitation_authority_required", retryable=False)
 
         await self.repository.ensure_user_identity(
             uid=identity.uid,
@@ -497,10 +534,8 @@ class ProvisioningCoordinator:
                 model=CLOUD_RUNTIME_MODEL,
             )
         else:
-            binding = await self.repository.resolve_active_runtime(
-                identity.uid,
-                template_version=target_schema_version,
-                required_provider="hermes",
+            binding = preexisting_binding or await self.repository.resolve_active_runtime(
+                identity.uid, template_version=target_schema_version, required_provider="hermes"
             )
         if binding:
             if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
@@ -516,7 +551,7 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not cloud_required and not provisioning_enabled(identity.uid):
+        if not cloud_required and not provisioning_enabled(identity.uid) and not self_hosted_required:
             job = await self.repository.update_job(
                 job_id=str(job["id"]),
                 state="degraded",
@@ -533,6 +568,11 @@ class ProvisioningCoordinator:
             await self._process_cloud_claimed_job(job=job, identity=identity)
             return
         try:
+            self_hosted_required = self_hosted_provisioning_enabled(identity.uid)
+            if self_hosted_required:
+                invitation_admission = await self.repository.get_self_hosted_invitation_admission(identity.uid)
+                if not _self_hosted_invitation_matches(invitation_admission):
+                    raise ProvisioningError("invitation_authority_required", retryable=False)
             result = await self.client.provision(identity, str(job["target_schema_version"]))
             binding_data = extract_runtime_binding(
                 result,
@@ -551,7 +591,11 @@ class ProvisioningCoordinator:
                     "binding_revision": binding["revision"],
                 },
             )
-            activated = await self.repository.activate_runtime_binding(uid=identity.uid, provider="hermes")
+            activated = await self.repository.activate_runtime_binding(
+                uid=identity.uid,
+                provider="hermes",
+                require_invitation_target=self_hosted_required,
+            )
             await self.repository.update_job(
                 job_id=str(job["id"]),
                 state="ready",

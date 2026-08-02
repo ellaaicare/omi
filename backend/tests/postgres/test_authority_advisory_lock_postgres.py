@@ -112,6 +112,8 @@ async def _run_with_database(scenario):
                 "011_create_invitation_redemption.sql",
                 "012_create_account_profile_runtime_targets.sql",
                 "013_create_managed_cloud_consent_authority.sql",
+                "014_add_synthetic_invitation_operator_audit.sql",
+                "015_add_invitation_allowed_email_hash.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
         await scenario(pool)

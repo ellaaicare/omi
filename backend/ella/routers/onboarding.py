@@ -32,7 +32,6 @@ from ella.services.provisioning import (
     effective_target_schema_version,
     public_receipt,
     retained_compatibility_receipt,
-    self_hosted_provisioning_enabled,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
 from utils.other import endpoints as auth
@@ -76,7 +75,7 @@ def _verified_identity(uid: str, payload: OnboardingEnsureRequest) -> VerifiedId
         raise HTTPException(status_code=401, detail={"code": "auth_required"}) from exc
 
     email = str(getattr(firebase_user, "email", "") or "").strip()
-    if not email:
+    if not email or getattr(firebase_user, "email_verified", None) is not True:
         raise HTTPException(status_code=409, detail={"code": "identity_missing_email"})
     name = str(getattr(firebase_user, "display_name", "") or "").strip() or email.split("@", 1)[0]
     return VerifiedIdentity(
@@ -112,14 +111,7 @@ def _payload_dict(payload: OnboardingEnsureRequest) -> dict[str, Any]:
     return payload.dict()
 
 
-def _ensure_dependencies():
-    """AI consent is required for Cloud but not for self-hosted provisioning."""
-    if self_hosted_provisioning_enabled():
-        return []
-    return [Depends(require_current_ai_consent)]
-
-
-@router.post("/ensure", dependencies=_ensure_dependencies())
+@router.post("/ensure", dependencies=[Depends(require_current_ai_consent)])
 async def ensure_onboarding(
     payload: OnboardingEnsureRequest,
     background_tasks: BackgroundTasks,

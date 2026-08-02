@@ -33,6 +33,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/ella_provisioning.py", "stage_runtime_binding"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
@@ -47,6 +48,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
     ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
     ("database/managed_cloud_consent.py", "lock_or_bootstrap_grant_on_connection"),
@@ -63,6 +65,7 @@ EXPECTED_GLOBAL_USER_WRITERS = {
     ("database/ella_provisioning.py", "activate_user"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"),
+    ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("ella/utils/auto_provision.py", "auto_provision_user"),
 }
@@ -105,6 +108,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/invitations.py", "_redeem_locked_invitation"): (
         "tests/postgres/test_invitation_redemption_postgres.py",
         "test_broker_lock_blocks_invitation_before_capacity_or_entitlement_mutation",
+    ),
+    ("database/invitations.py", "_bind_verified_identity_on_connection"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically",
     ),
     ("database/invitation_operator.py", "_cleanup_locked"): (
         "tests/postgres/test_invitation_redemption_postgres.py",
@@ -251,7 +258,7 @@ def test_every_owner_bound_writer_has_direct_lock_or_lock_proof():
         source = writers[key]["source"]
         assert "owner_lock" in source, key
         if key[1] != "_redeem_locked_invitation":
-            assert "require_self_owner_lock(" in source, key
+            assert "require_self_owner_lock(" in source or "verify_identity_owner_after_lock(" in source, key
 
 
 def test_unowned_pool_registration_is_the_only_authority_neutral_exception():

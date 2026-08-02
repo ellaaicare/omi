@@ -26,6 +26,35 @@ Issue: `ellaaicare/ella-ai#1126`. Product and security contract:
 - Voice allow/deny and quota frames remain server-authoritative under
   `ellaaicare/ella-ai#1113`.
 
+### Invitation-only self-hosted launch
+
+The self-hosted launch lane is separate from the synthetic Hermes Cloud pilot:
+
+- `/v1/invite/redeem` still authenticates with Firebase and derives the email
+  only from a nonempty `email_verified=true` claim. The request body contains
+  only the invitation code.
+- An ordinary invitation may bind a domain-separated HMAC of that verified
+  email. An open App Review invitation still requires a verified email and is
+  bounded by the migration-011 reviewer quota.
+- Redemption atomically binds the Firebase UID/email to one PostgreSQL user,
+  consumes invitation capacity, creates the pending entitlement, and reserves
+  one exact `hermes` runtime target. A losing concurrent or mismatched
+  redemption creates none of those protected records.
+- The entitlement and target remain unusable until the unconditional
+  `/v1/ella/onboarding/ensure` current-consent dependency publishes the exact
+  current consent authority epoch and clears `invitation_consent_pending` in
+  the same PostgreSQL transaction.
+- New provisioning admission requires the exact invitation entitlement,
+  account/profile owner, current consent epoch, and reserved target. There is
+  no post-sign-in UID allowlist and no fallback to Hermes Cloud, OpenClaw, or a
+  retained runtime.
+
+The root-only `pilot_invite_admin.py` operator writes the plaintext code once
+to an approved `0400` file. `issue`, `show`, `rotate`, and `revoke` print only
+content-free receipts. Rotation copies the email HMAC and policy pins inside
+one transaction, revokes/releases the previous invitation, and is idempotent
+when the protected recovery file proves the same operation.
+
 ## Feature gates
 
 All gates default off:
@@ -34,6 +63,7 @@ All gates default off:
 ELLA_INVITE_REDEMPTION_ENABLED=false
 ELLA_INVITE_ORDINARY_SELF_SERVICE_ENABLED=false
 ELLA_INVITE_APP_REVIEW_ENABLED=false
+ELLA_SELF_HOSTED_PROVISIONING_ENABLED=false
 ELLA_HERMES_CLOUD_SYNTHETIC_ONLY=true
 ELLA_RUNTIME_BINDINGS_ENABLED=false
 ELLA_RUNTIME_BINDINGS_ENABLED_UIDS=
@@ -78,7 +108,15 @@ psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/013_create_managed_cloud_consent_authority.sql
 psql "$ELLA_POSTGRES_DSN" \
   -f backend/migrations/014_add_synthetic_invitation_operator_audit.sql
+psql "$ELLA_POSTGRES_DSN" \
+  -f backend/migrations/015_add_invitation_allowed_email_hash.sql
 ```
+
+Migration `015` is reserved for this invitation lane. Open
+`ellaaicare/omi#360` currently also uses migration number `015`; it must rebase
+after this lane and renumber its migration to the next available number before
+merge. Neither migration may be applied while both files claim the same
+sequence number.
 
 The migration is forward-only and idempotent. It adds:
 
@@ -94,6 +132,8 @@ The migration is forward-only and idempotent. It adds:
 - a per-UID managed-cloud consent authority epoch that serializes consent
   mutation through invitation entitlement publication and revocation quarantine.
 - content-free audit event types for the root-only synthetic operator lifecycle.
+- verified-email HMAC scope, explicit pending-consent entitlement/redemption
+  state, and the exact reserved/ready self-hosted runtime target.
 
 It does not seed codes, grants, or production users.
 
@@ -128,8 +168,8 @@ synthetic code must remain unconsumed and must not create an entitlement.
 ## Promotion order
 
 1. Independently review and merge the backend source.
-2. Back up schema metadata and apply/verify migrations 008, 009, 010, 011, and 012 in
-   release order.
+2. Back up schema metadata and apply/verify migrations 008 through 015 in
+   release order, after the migration-number dependency above is resolved.
 3. Deploy the exact reviewed OMI backend and voice proxy revisions with all
    invitation flags off.
 4. Run authenticated synthetic/non-family reads and disabled-redemption checks.

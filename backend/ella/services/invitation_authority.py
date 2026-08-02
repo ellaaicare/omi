@@ -15,6 +15,10 @@ from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_PROVIDER,
 )
 from ella.services.ai_consent import (
+    CURRENT_POLICY_VERSION,
+    CURRENT_PROCESSOR_SET_HASH,
+    CURRENT_SCOPE_HASH,
+    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -41,7 +45,6 @@ PILOT_GLOBAL_FLAGS_REQUIRED_FALSE = (
     "ELLA_INVITE_APP_REVIEW_ENABLED",
 )
 
-SELF_HOSTED_UID_ALLOWLISTS = ("ELLA_SELF_HOSTED_PROVISIONING_ENABLED_UIDS",)
 SELF_HOSTED_GLOBAL_FLAGS_REQUIRED_TRUE = (
     "ELLA_SELF_HOSTED_PROVISIONING_ENABLED",
     "ELLA_AI_CONSENT_ENFORCEMENT_ENABLED",
@@ -114,35 +117,33 @@ async def revalidate_invitation_pilot(
 
 
 def assert_self_hosted_invitation_rollout(uid: str) -> None:
-    """Require self-hosted provisioning flags plus AI consent enforcement."""
+    """Require the invite-gated self-hosted rollout and consent enforcement."""
     if (
         not uid
         or not all(_global_flag_enabled(name) for name in SELF_HOSTED_GLOBAL_FLAGS_REQUIRED_TRUE)
         or any(_global_flag_enabled(name) for name in SELF_HOSTED_GLOBAL_FLAGS_REQUIRED_FALSE)
     ):
         raise InvitePilotGateDenied("invite_pilot_identity_not_allowed")
-    allowed = {
-        value.strip()
-        for name in SELF_HOSTED_UID_ALLOWLISTS
-        for value in os.getenv(name, "").split(",")
-        if value.strip()
-    }
-    if uid not in allowed:
-        raise InvitePilotGateDenied("invite_pilot_identity_not_allowed")
 
 
-def authorize_self_hosted_invitation(uid: str) -> InvitationPilotAdmission:
-    """Authorize a real user or App Review profile for self-hosted redemption."""
+def authorize_self_hosted_invitation(uid: str, verified_email: str) -> InvitationPilotAdmission:
+    """Authorize a verified identity for a consent-pending invitation bind."""
     assert_self_hosted_invitation_rollout(uid)
+    normalized_email = verified_email.strip().lower()
+    if not normalized_email or "@" not in normalized_email:
+        raise InvitePilotGateDenied("invite_verified_email_required")
     return InvitationPilotAdmission(
         account_uid=uid,
         profile_uid=uid,
-        consent_receipt_id=f"self-hosted-{uid[:12]}",
-        profile_binding_id=f"self-hosted-binding-{uid[:12]}",
-        policy_version="self-hosted-v1",
-        processor_set_hash="self-hosted-hash",
-        scope_version="self-hosted-scope-v1",
-        scope_hash="self-hosted-scope-hash",
+        consent_receipt_id="",
+        profile_binding_id="",
+        policy_version=CURRENT_POLICY_VERSION,
+        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+        verified_email=normalized_email,
+        required_profile_class="real",
+        consent_pending=True,
     )
 
 
@@ -152,7 +153,10 @@ async def revalidate_self_hosted_invitation(
     """Require the initial admission to remain the exact current authority."""
     if not isinstance(pilot_admission, InvitationPilotAdmission):
         raise InvitePilotGateDenied("invite_pilot_authority_changed")
-    current_admission = authorize_self_hosted_invitation(pilot_admission.account_uid)
+    current_admission = authorize_self_hosted_invitation(
+        pilot_admission.account_uid,
+        pilot_admission.verified_email,
+    )
     if current_admission != pilot_admission:
         raise InvitePilotGateDenied("invite_pilot_authority_changed")
     return current_admission

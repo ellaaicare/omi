@@ -25,6 +25,7 @@ from ella.services import consent_authority, invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
 from ella.services.runtime_resolver import resolve_isolated_runtime
+from scripts import pilot_invite_admin
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
@@ -87,9 +88,15 @@ pytestmark = pytest.mark.skipif(
 BASE_PROVISIONING_SCHEMA = """
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    omi_uid TEXT NOT NULL UNIQUE,
+    omi_uid TEXT UNIQUE,
+    email TEXT UNIQUE,
     name TEXT NOT NULL DEFAULT 'Synthetic User',
-    status TEXT NOT NULL DEFAULT 'ACTIVE'
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    identities JSONB NOT NULL DEFAULT '{}'::jsonb,
+    settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+    tags TEXT[] NOT NULL DEFAULT ARRAY[]::text[],
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE ella_provisioning_jobs (
@@ -159,6 +166,22 @@ def _admission(uid: str) -> invitations.InvitationPilotAdmission:
     )
 
 
+def _self_hosted_admission(uid: str, email: str) -> invitations.InvitationPilotAdmission:
+    return invitations.InvitationPilotAdmission(
+        account_uid=uid,
+        profile_uid=uid,
+        consent_receipt_id="",
+        profile_binding_id="",
+        policy_version=ai_consent.CURRENT_POLICY_VERSION,
+        processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+        scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+        scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        verified_email=email,
+        required_profile_class="real",
+        consent_pending=True,
+    )
+
+
 async def _run_with_database(
     scenario: Callable[[asyncpg.Pool], Awaitable[None]],
 ) -> None:
@@ -184,6 +207,7 @@ async def _run_with_database(
                 "012_create_account_profile_runtime_targets.sql",
                 "013_create_managed_cloud_consent_authority.sql",
                 "014_add_synthetic_invitation_operator_audit.sql",
+                "015_add_invitation_allowed_email_hash.sql",
             ):
                 await conn.execute((MIGRATIONS / name).read_text(encoding="utf-8"))
             assert await conn.fetchval(
@@ -349,6 +373,33 @@ async def _redeem(
     )
 
 
+async def _redeem_self_hosted(
+    uid: str,
+    email: str,
+    code: str,
+    *,
+    source: str = "192.0.2.44",
+):
+    admission = _self_hosted_admission(uid, email)
+
+    async def revalidate(
+        expected: invitations.InvitationPilotAdmission,
+    ) -> invitations.InvitationPilotAdmission:
+        assert expected == admission
+        return expected
+
+    return await invitations.redeem_invitation(
+        uid=uid,
+        code=code,
+        source_address=source,
+        app_build="self-hosted-test",
+        config=CONFIG,
+        pilot_admission=admission,
+        user_email=email,
+        pilot_admission_revalidator=revalidate,
+    )
+
+
 def _grant_v7(repository: ai_consent.InMemoryConsentRepository, uid: str) -> None:
     ai_consent.AiConsentService(repository).submit(
         uid,
@@ -373,6 +424,490 @@ def _set_pilot_rollout(monkeypatch, uids: Iterable[str]) -> None:
         monkeypatch.setenv(name, value)
     for name in invitation_authority.PILOT_GLOBAL_FLAGS_REQUIRED_FALSE:
         monkeypatch.setenv(name, "false")
+
+
+def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "firebase-self-hosted-one"
+        email = "pilot.one@example.test"
+        issued = await pilot_invite_admin._issue_invitation(
+            code="WXYZ-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="f" * 64,
+            kind="ordinary",
+            email=email,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+
+        first = await _redeem_self_hosted(uid, email, "WXYZ-2345")
+        second = await _redeem_self_hosted(uid, email, "wxyz 2345")
+        assert first["status"] == second["status"] == "invited"
+        assert first["revision"] == second["revision"] == 1
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    app_user.omi_uid, app_user.email, app_user.profile_class,
+                    entitlement.invitation_consent_pending,
+                    entitlement.consent_authority_epoch,
+                    entitlement.revision AS entitlement_revision,
+                    redemption.user_id AS redemption_user_id,
+                    redemption.consent_pending AS redemption_consent_pending,
+                    redemption.consent_receipt_ref_hmac,
+                    target.provider, target.mode, target.status AS target_status,
+                    target.runtime_binding_id,
+                    target.entitlement_revision AS target_entitlement_revision,
+                    reservation.consumed_slots
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                JOIN ella_invitation_redemptions redemption
+                  ON redemption.invitation_id = invitation.id
+                JOIN users app_user ON app_user.id = redemption.user_id
+                JOIN voice_entitlements entitlement
+                  ON entitlement.uid = app_user.omi_uid
+                 AND entitlement.invitation_id = invitation.id
+                JOIN ella_runtime_targets target
+                  ON target.invitation_target_id = redemption.invitation_target_id
+                WHERE invitation.id = $1::uuid
+                """,
+                issued["receipt_id"],
+            )
+        assert row["omi_uid"] == uid
+        assert row["email"] == email
+        assert row["profile_class"] == "real"
+        assert row["invitation_consent_pending"] is True
+        assert row["consent_authority_epoch"] is None
+        assert row["redemption_user_id"] is not None
+        assert row["redemption_consent_pending"] is True
+        assert row["consent_receipt_ref_hmac"] is None
+        assert (row["provider"], row["mode"], row["target_status"]) == (
+            "hermes",
+            "hermes-chat",
+            "reserved",
+        )
+        assert row["runtime_binding_id"] is None
+        assert row["target_entitlement_revision"] == row["entitlement_revision"] == 1
+        assert row["consumed_slots"] == 1
+
+        grant = managed_cloud_consent.ManagedCloudGrant(
+            account_uid=uid,
+            profile_uid=uid,
+            consent_receipt_id="receipt-self-hosted-one",
+            profile_binding_id=ai_consent.derive_profile_binding_id(
+                account_uid=uid,
+                profile_uid=uid,
+            ),
+            policy_version=ai_consent.CURRENT_POLICY_VERSION,
+            processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+            scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+            scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+        )
+        await managed_cloud_consent.synchronize_grant(grant=grant)
+        repository = EllaProvisioningRepository(pool)
+        admission = await repository.get_self_hosted_invitation_admission(uid)
+        assert admission is not None
+        assert admission["invitation_consent_pending"] is False
+        assert admission["consent_authority_epoch"] == admission["current_authority_epoch"]
+        assert admission["runtime_target_entitlement_revision"] == admission["revision"] == 2
+
+        staged = await repository.stage_runtime_binding(
+            uid=uid,
+            binding={
+                "provider": "hermes",
+                "agent_id": "hermes-pilot-one",
+                "profile_name": "ella-pilot-one",
+                "template_version": "hermes-user-v1",
+                "model_policy_version": "self-hosted-pilot-v1",
+                "voice_policy_version": "ella-voice-v1",
+                "health_state": "healthy",
+                "health_receipt": {"content_free": True},
+            },
+        )
+        activated = await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+        )
+        assert activated["id"] == staged["id"]
+        async with pool.acquire() as conn:
+            ready_target = await conn.fetchrow(
+                """
+                SELECT status, runtime_binding_id
+                FROM ella_runtime_targets
+                WHERE invitation_target_id IS NOT NULL
+                  AND account_user_id = $1
+                """,
+                admission["user_id"],
+            )
+        assert ready_target["status"] == "ready"
+        assert ready_target["runtime_binding_id"] == staged["id"]
+
+        after_consent_retry = await _redeem_self_hosted(uid, email, "WXYZ-2345")
+        assert after_consent_retry["revision"] == 2
+        async with pool.acquire() as conn:
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ella_invitation_redemptions WHERE invitation_id = $1::uuid",
+                    issued["receipt_id"],
+                )
+                == 1
+            )
+            await conn.execute(
+                """
+                UPDATE ella_runtime_targets
+                SET scope_hash = $2
+                WHERE invitation_target_id IS NOT NULL
+                  AND account_user_id = $1
+                """,
+                admission["user_id"],
+                "sha256:" + "0" * 64,
+            )
+        assert await repository.get_self_hosted_invitation_admission(uid) is None
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        scoped = await pilot_invite_admin._issue_invitation(
+            code="JKMN-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="a" * 64,
+            kind="ordinary",
+            email="approved@example.test",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        with pytest.raises(invitations.InviteRedemptionFailure) as mismatch:
+            await _redeem_self_hosted(
+                "firebase-wrong-email",
+                "wrong@example.test",
+                "JKMN-2345",
+            )
+        assert mismatch.value.code == "invalid"
+        async with pool.acquire() as conn:
+            assert await conn.fetchval("SELECT COUNT(*) FROM users WHERE omi_uid = 'firebase-wrong-email'") == 0
+            assert (
+                await conn.fetchval(
+                    "SELECT COUNT(*) FROM ella_invitation_targets WHERE invitation_id = $1::uuid",
+                    scoped["receipt_id"],
+                )
+                == 0
+            )
+
+        opened = await pilot_invite_admin._issue_invitation(
+            code="NPQR-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="b" * 64,
+            kind="ordinary",
+            email="",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        results = await asyncio.gather(
+            _redeem_self_hosted("firebase-open-a", "a@example.test", "NPQR-2345"),
+            _redeem_self_hosted("firebase-open-b", "b@example.test", "NPQR-2345"),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, dict) for result in results) == 1
+        assert (
+            sum(
+                isinstance(result, invitations.InviteRedemptionFailure) and result.code == "invalid"
+                for result in results
+            )
+            == 1
+        )
+        async with pool.acquire() as conn:
+            counts = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM ella_invitation_redemptions
+                     WHERE invitation_id = $1::uuid) AS redemptions,
+                    (SELECT COUNT(*) FROM ella_invitation_targets
+                     WHERE invitation_id = $1::uuid) AS targets,
+                    (SELECT COUNT(*) FROM users
+                     WHERE omi_uid IN ('firebase-open-a', 'firebase-open-b')) AS users
+                """,
+                opened["receipt_id"],
+            )
+        assert tuple(counts.values()) == (1, 1, 1)
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_pilot_operator_ordinary_and_reviewer_rows_obey_migration_constraints():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        ordinary = await pilot_invite_admin._issue_invitation(
+            code="STUV-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="c" * 64,
+            kind="ordinary",
+            email="pilot@example.test",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=90),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        reviewer = await pilot_invite_admin._issue_invitation(
+            code="BCDF-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="d" * 64,
+            kind="app_review",
+            email="",
+            expires_at=None,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        retried = await pilot_invite_admin._issue_invitation(
+            code="BCDF-2345",
+            code_file_existed=True,
+            code_file_ref_hmac="d" * 64,
+            kind="app_review",
+            email="",
+            expires_at=None,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        assert retried["receipt_id"] == reviewer["receipt_id"]
+        assert retried["idempotent"] is True
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT i.kind, i.display_hint, i.usage_mode, i.max_redemptions,
+                       i.reserved_setup_slots, i.cohort,
+                       i.exclude_from_product_analytics, i.expires_at,
+                       i.allowed_email_hash, r.reserved_slots
+                FROM ella_invitations i
+                JOIN ella_invitation_capacity_reservations r
+                  ON r.id = i.capacity_reservation_id
+                WHERE i.id = ANY($1::uuid[])
+                ORDER BY i.kind
+                """,
+                [uuid.UUID(ordinary["receipt_id"]), uuid.UUID(reviewer["receipt_id"])],
+            )
+        review_row, ordinary_row = rows
+        assert (
+            review_row["usage_mode"],
+            review_row["max_redemptions"],
+            review_row["reserved_setup_slots"],
+            review_row["reserved_slots"],
+            review_row["cohort"],
+            review_row["exclude_from_product_analytics"],
+            review_row["expires_at"],
+        ) == ("capped_multi_redeem", 20, 2, 2, "app_review", True, None)
+        assert (
+            ordinary_row["usage_mode"],
+            ordinary_row["max_redemptions"],
+            ordinary_row["reserved_setup_slots"],
+            ordinary_row["reserved_slots"],
+            ordinary_row["cohort"],
+            ordinary_row["exclude_from_product_analytics"],
+        ) == (
+            "single_use",
+            1,
+            1,
+            1,
+            invitations.SELF_HOSTED_OPERATOR_COHORT,
+            False,
+        )
+        assert all(len(row["display_hint"]) == 2 for row in rows)
+        assert ordinary_row["allowed_email_hash"] is not None
+        assert review_row["allowed_email_hash"] is None
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        old = await pilot_invite_admin._issue_invitation(
+            code="QRST-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="8" * 64,
+            kind="ordinary",
+            email="rotate@example.test",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        rotated = await pilot_invite_admin._rotate_invitation(
+            receipt_id=old["receipt_id"],
+            expected_version=1,
+            code="VWXY-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="9" * 64,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        retried = await pilot_invite_admin._rotate_invitation(
+            receipt_id=old["receipt_id"],
+            expected_version=1,
+            code="VWXY-2345",
+            code_file_existed=True,
+            code_file_ref_hmac="9" * 64,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        assert retried["receipt_id"] == rotated["receipt_id"]
+        assert retried["idempotent"] is True
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT invitation.id, invitation.state, invitation.delivery_state,
+                       invitation.allowed_email_hash, reservation.state AS reservation_state,
+                       invitation.version
+                FROM ella_invitations invitation
+                JOIN ella_invitation_capacity_reservations reservation
+                  ON reservation.id = invitation.capacity_reservation_id
+                WHERE invitation.id = ANY($1::uuid[])
+                ORDER BY invitation.id = $2::uuid DESC
+                """,
+                [uuid.UUID(old["receipt_id"]), uuid.UUID(rotated["receipt_id"])],
+                old["receipt_id"],
+            )
+        previous, current = rows
+        assert (previous["state"], previous["delivery_state"], previous["reservation_state"]) == (
+            "revoked",
+            "suppressed",
+            "released",
+        )
+        assert previous["version"] == 2
+        assert (current["state"], current["delivery_state"], current["reservation_state"]) == (
+            "sent",
+            "sent",
+            "reserved",
+        )
+        assert current["allowed_email_hash"] == previous["allowed_email_hash"]
+
+        with pytest.raises(invitations.InviteRedemptionFailure) as old_code:
+            await _redeem_self_hosted(
+                "rotate-user",
+                "rotate@example.test",
+                "QRST-2345",
+            )
+        assert old_code.value.code == "invalid"
+        redeemed = await _redeem_self_hosted(
+            "rotate-user",
+            "rotate@example.test",
+            "VWXY-2345",
+        )
+        assert redeemed["status"] == "invited"
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed():
+    async def scenario(pool: asyncpg.Pool) -> None:
+        reviewer = await pilot_invite_admin._issue_invitation(
+            code="GHJK-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="e" * 64,
+            kind="app_review",
+            email="",
+            expires_at=None,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        for index in range(20):
+            await _redeem_self_hosted(
+                f"reviewer-{index}",
+                f"reviewer-{index}@example.test",
+                "GHJK-2345",
+            )
+        with pytest.raises(invitations.InviteRedemptionFailure) as exhausted:
+            await _redeem_self_hosted(
+                "reviewer-over-cap",
+                "reviewer-over-cap@example.test",
+                "GHJK-2345",
+            )
+        assert exhausted.value.code == "invalid"
+        async with pool.acquire() as conn:
+            reviewer_state = await conn.fetchrow(
+                """
+                SELECT i.redemption_count, i.state, r.state AS capacity_state,
+                       r.consumed_slots,
+                       (SELECT COUNT(*) FROM ella_invitation_targets
+                        WHERE invitation_id = i.id) AS target_count
+                FROM ella_invitations i
+                JOIN ella_invitation_capacity_reservations r
+                  ON r.id = i.capacity_reservation_id
+                WHERE i.id = $1::uuid
+                """,
+                reviewer["receipt_id"],
+            )
+        assert tuple(reviewer_state.values()) == (20, "sent", "reserved", 0, 20)
+
+        expiring = await pilot_invite_admin._issue_invitation(
+            code="KLMN-2345".replace("L", "M"),
+            code_file_existed=False,
+            code_file_ref_hmac="6" * 64,
+            kind="ordinary",
+            email="",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE ella_invitations SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1::uuid",
+                expiring["receipt_id"],
+            )
+        with pytest.raises(invitations.InviteRedemptionFailure) as expired:
+            await _redeem_self_hosted(
+                "expired-user",
+                "expired@example.test",
+                "KMMN-2345",
+            )
+        assert expired.value.code == "expired"
+
+        revokable = await pilot_invite_admin._issue_invitation(
+            code="MNPQ-2345",
+            code_file_existed=False,
+            code_file_ref_hmac="7" * 64,
+            kind="ordinary",
+            email="",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        revoked = await pilot_invite_admin._revoke_invitation(
+            receipt_id=revokable["receipt_id"],
+            expected_version=1,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        assert revoked["state"] == "revoked"
+        with pytest.raises(invitations.InviteRedemptionFailure) as refused:
+            await _redeem_self_hosted(
+                "revoked-user",
+                "revoked@example.test",
+                "MNPQ-2345",
+            )
+        assert refused.value.code == "invalid"
+        async with pool.acquire() as conn:
+            states = await conn.fetchrow(
+                """
+                SELECT i.state, r.state AS reservation_state,
+                       (SELECT COUNT(*) FROM users
+                        WHERE omi_uid IN ('expired-user', 'revoked-user')) AS user_count,
+                       (SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                        WHERE invitation_id = i.id
+                          AND event_type = 'pilot_operator_revoked') AS revoke_audit_count
+                FROM ella_invitations i
+                JOIN ella_invitation_capacity_reservations r
+                  ON r.id = i.capacity_reservation_id
+                WHERE i.id = $1::uuid
+                """,
+                revokable["receipt_id"],
+            )
+        assert tuple(states.values()) == ("revoked", "released", 0, 1)
+
+    asyncio.run(_run_with_database(scenario))
 
 
 def test_same_uid_retry_is_idempotent_and_privacy_safe():

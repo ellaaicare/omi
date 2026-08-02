@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -215,6 +215,11 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
         ),
     )
     monkeypatch.setattr(invites.invitations, "redeem_invitation", fake_redeem)
+    monkeypatch.setattr(
+        invites.auth,
+        "get_user",
+        lambda _uid: SimpleNamespace(email="verified@example.test", email_verified=True),
+    )
     app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
     response = client.post(
         "/v1/invite/redeem",
@@ -226,6 +231,32 @@ def test_routes_require_auth_and_use_only_authenticated_uid(monkeypatch):
     assert captured["uid"] == "firebase-subject"
     assert captured["app_build"] == "804"
     assert captured["pilot_admission_revalidator"] is invites.revalidate_invitation_pilot
+
+
+def test_redeem_rejects_unverified_firebase_email_before_authority_or_database(monkeypatch):
+    app = FastAPI()
+    app.include_router(invites.router)
+    app.dependency_overrides[auth.get_current_user_uid] = lambda: "firebase-subject"
+    monkeypatch.setattr(
+        invites.auth,
+        "get_user",
+        lambda _uid: SimpleNamespace(email="unverified@example.test", email_verified=False),
+    )
+    monkeypatch.setattr(
+        invites,
+        "authorize_invitation_pilot",
+        lambda _uid: (_ for _ in ()).throw(AssertionError("authority must not run")),
+    )
+    monkeypatch.setattr(
+        invites.invitations,
+        "redeem_invitation",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("database must not run")),
+    )
+
+    response = TestClient(app).post("/v1/invite/redeem", json={"code": "ABCD-2345"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "invalid"
 
 
 @pytest.mark.parametrize(
@@ -345,6 +376,11 @@ def test_typed_failure_shape_is_compatible_with_ios(monkeypatch):
         ),
     )
     monkeypatch.setattr(invites.invitations, "redeem_invitation", fake_redeem)
+    monkeypatch.setattr(
+        invites.auth,
+        "get_user",
+        lambda _uid: SimpleNamespace(email="verified@example.test", email_verified=True),
+    )
     response = TestClient(app).post("/v1/invite/redeem", json={"code": "ABCD-2345"})
 
     assert response.status_code == 429

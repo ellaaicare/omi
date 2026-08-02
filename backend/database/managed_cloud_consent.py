@@ -78,6 +78,11 @@ def consent_receipt_ref(uid: str, receipt_id: str) -> str:
     return f"sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
+def invitation_consent_receipt_ref(uid: str, receipt_id: str) -> str:
+    material = f"ella-invitation-consent-receipt-v1\x1f{uid}\x1f{receipt_id}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _grant_matches(row: asyncpg.Record, grant: ManagedCloudGrant) -> bool:
     return bool(
         row["decision"] == "granted"
@@ -264,8 +269,6 @@ async def synchronize_grant(
                     """,
                     user_id,
                 )
-                if row is not None and _grant_matches(row, grant):
-                    return dict(row)
                 if row is None:
                     row = await conn.fetchrow(
                         """
@@ -287,7 +290,7 @@ async def synchronize_grant(
                         grant.scope_version,
                         grant.scope_hash,
                     )
-                else:
+                elif not _grant_matches(row, grant):
                     row = await conn.fetchrow(
                         """
                         UPDATE ella_managed_cloud_consent_authority
@@ -324,6 +327,84 @@ async def synchronize_grant(
                     )
                 if row is None or not _grant_matches(row, grant):
                     raise ManagedCloudAuthorityUnavailable("managed_cloud_authority_grant_failed")
+                pending_count = int(
+                    await conn.fetchval(
+                        """
+                        SELECT COUNT(*)
+                        FROM voice_entitlements
+                        WHERE uid = $1
+                          AND invitation_id IS NOT NULL
+                          AND invitation_consent_pending = TRUE
+                        """,
+                        grant.account_uid,
+                    )
+                    or 0
+                )
+                if pending_count > 1:
+                    raise ManagedCloudAuthorityUnavailable("invitation_consent_binding_ambiguous")
+                if pending_count == 1:
+                    entitlement = await conn.fetchrow(
+                        """
+                        UPDATE voice_entitlements
+                        SET consent_authority_epoch = $2,
+                            invitation_consent_pending = FALSE,
+                            revision = revision + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE uid = $1
+                          AND invitation_id IS NOT NULL
+                          AND invitation_consent_pending = TRUE
+                          AND consent_policy_version = $3
+                          AND consent_processor_set_hash = $4
+                          AND consent_scope_version = $5
+                          AND consent_scope_hash = $6
+                        RETURNING invitation_id, revision
+                        """,
+                        grant.account_uid,
+                        row["authority_epoch"],
+                        grant.policy_version,
+                        grant.processor_set_hash,
+                        grant.scope_version,
+                        grant.scope_hash,
+                    )
+                    if not entitlement:
+                        raise ManagedCloudAuthorityUnavailable("invitation_consent_lineage_stale")
+                    redemption = await conn.fetchrow(
+                        """
+                        UPDATE ella_invitation_redemptions
+                        SET consent_pending = FALSE,
+                            consent_receipt_ref_hmac = $3
+                        WHERE invitation_id = $1
+                          AND user_id = $2
+                          AND consent_pending = TRUE
+                        RETURNING id
+                        """,
+                        entitlement["invitation_id"],
+                        user_id,
+                        invitation_consent_receipt_ref(
+                            grant.account_uid,
+                            grant.consent_receipt_id,
+                        ),
+                    )
+                    if not redemption:
+                        raise ManagedCloudAuthorityUnavailable("invitation_consent_redemption_missing")
+                    target_result = await conn.execute(
+                        """
+                        UPDATE ella_runtime_targets target
+                        SET entitlement_revision = $3,
+                            updated_at = CURRENT_TIMESTAMP
+                        FROM ella_invitation_redemptions redemption
+                        WHERE redemption.invitation_id = $1
+                          AND redemption.user_id = $2
+                          AND target.invitation_target_id = redemption.invitation_target_id
+                          AND target.provider = 'hermes'
+                          AND target.status = 'reserved'
+                        """,
+                        entitlement["invitation_id"],
+                        user_id,
+                        entitlement["revision"],
+                    )
+                    if target_result != "UPDATE 1":
+                        raise ManagedCloudAuthorityUnavailable("invitation_runtime_target_missing")
                 return dict(row)
     except ManagedCloudAuthorityUnavailable:
         raise

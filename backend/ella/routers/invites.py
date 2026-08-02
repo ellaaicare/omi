@@ -102,21 +102,24 @@ async def redeem_invite(
     app_build: str = Header(default="", alias="X-Ella-App-Build"),
 ) -> dict:
     payload = await _validated_payload(request)
-    if _self_hosted_enabled():
-        authorize = authorize_self_hosted_invitation
-        revalidate = revalidate_self_hosted_invitation
-    else:
-        authorize = authorize_invitation_pilot
-        revalidate = revalidate_invitation_pilot
-        # Fetch the authenticated user's email for invitation scoping
-        try:
-            firebase_user = auth.get_user(authenticated_uid)
-            user_email = str(getattr(firebase_user, "email", "") or "").strip()
-        except Exception:
-            user_email = ""
+    try:
+        firebase_user = auth.get_user(authenticated_uid)
+    except Exception as exc:
+        raise _invalid_request() from exc
+    user_email = str(getattr(firebase_user, "email", "") or "").strip().lower()
+    if not user_email or getattr(firebase_user, "email_verified", None) is not True:
+        raise _invalid_request()
 
     try:
-        pilot_admission = authorize(authenticated_uid)
+        if _self_hosted_enabled():
+            pilot_admission = authorize_self_hosted_invitation(
+                authenticated_uid,
+                user_email,
+            )
+            revalidate = revalidate_self_hosted_invitation
+        else:
+            pilot_admission = authorize_invitation_pilot(authenticated_uid)
+            revalidate = revalidate_invitation_pilot
         return await invitations.redeem_invitation(
             uid=authenticated_uid,
             code=payload.code,

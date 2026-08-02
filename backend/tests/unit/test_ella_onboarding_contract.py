@@ -16,11 +16,20 @@ def test_ensure_contract_forbids_caller_supplied_identity():
         onboarding.OnboardingEnsureRequest(client={"platform": "ios", "gateway_token": "secret"})
 
 
+def test_onboarding_ensure_requires_current_ai_consent_dependency():
+    route = next(route for route in onboarding.router.routes if route.path == "/v1/ella/onboarding/ensure")
+    assert any(dependency.call is onboarding.require_current_ai_consent for dependency in route.dependant.dependencies)
+
+
 def test_verified_identity_comes_from_firebase_subject(monkeypatch):
     monkeypatch.setattr(
         onboarding.auth,
         "get_user",
-        lambda uid: SimpleNamespace(email="verified@example.com", display_name="Verified User"),
+        lambda uid: SimpleNamespace(
+            email="verified@example.com",
+            email_verified=True,
+            display_name="Verified User",
+        ),
     )
     payload = onboarding.OnboardingEnsureRequest(client={"timezone": "America/New_York"})
 
@@ -64,7 +73,11 @@ def test_ensure_schedules_only_authenticated_subject(monkeypatch):
     monkeypatch.setattr(
         onboarding.auth,
         "get_user",
-        lambda uid: SimpleNamespace(email="verified@example.com", display_name="Verified User"),
+        lambda uid: SimpleNamespace(
+            email="verified@example.com",
+            email_verified=True,
+            display_name="Verified User",
+        ),
     )
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "true")
 
@@ -256,7 +269,11 @@ def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
     monkeypatch.setattr(
         onboarding.auth,
         "get_user",
-        lambda uid: SimpleNamespace(email="canary@example.com", display_name="Canary"),
+        lambda uid: SimpleNamespace(
+            email="canary@example.com",
+            email_verified=True,
+            display_name="Canary",
+        ),
     )
 
     async def fake_coordinator():
@@ -285,7 +302,11 @@ def test_schema_not_ready_returns_retryable_service_unavailable(monkeypatch):
     monkeypatch.setattr(
         onboarding.auth,
         "get_user",
-        lambda uid: SimpleNamespace(email="canary@example.com", display_name="Canary"),
+        lambda uid: SimpleNamespace(
+            email="canary@example.com",
+            email_verified=True,
+            display_name="Canary",
+        ),
     )
 
     async def fake_coordinator():
