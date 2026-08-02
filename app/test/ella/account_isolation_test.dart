@@ -21,6 +21,8 @@ import 'package:omi/backend/schema/person.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/ella/services/ella_account_isolation_service.dart';
+import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/ella_workspace_status.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/pages/conversation_detail/conversation_detail_provider.dart';
@@ -683,6 +685,181 @@ void main() {
     expect(authority.checks, greaterThanOrEqualTo(4));
   });
 
+  test('standard voice production turn discards a late account-A stream before cache TTS or playback', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var current = true;
+    final streamStarted = Completer<void>();
+    final releaseStream = Completer<void>();
+    var syntheses = 0;
+    var playbacks = 0;
+    var invalidations = 0;
+    StandardVoiceTurnResult? result;
+    final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => current));
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) async* {
+        expect(expectedAuthenticatedUid, 'uid-a');
+        expect(exactAuthority?.uid, 'uid-a');
+        streamStarted.complete();
+        await releaseStream.future;
+        yield ServerMessageChunk('reply-a', 'Account A reply', MessageChunkType.data);
+      },
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async {
+        syntheses++;
+        return '${Directory.systemTemp.path}/must-not-exist.mp3';
+      },
+    );
+
+    final pending = provider.runProtectedOperationAtEntry(
+      (operation) async {
+        result = await coordinator.run(
+          transcript: 'Account A private question',
+          authority: operation.exactAuthority,
+          commitMessages: (transcript, reply) => provider.addVoiceMessagesForProtectedOperation(
+            _voiceMessage('user-a', transcript, MessageSender.human),
+            _voiceMessage('assistant-a', reply, MessageSender.ai),
+            operation,
+          ),
+          onReplyReady: (_) {},
+          playFile: (_) async => playbacks++,
+          speakOnDevice: (_) async => playbacks++,
+        );
+      },
+      onInvalidated: () => invalidations++,
+    );
+    await streamStarted.future;
+    current = false;
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    releaseStream.complete();
+    await pending;
+
+    expect(result?.discarded, isTrue);
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+    expect(syntheses, 0);
+    expect(playbacks, 0);
+    expect(invalidations, 1);
+  });
+
+  test('standard voice production turn deletes late A audio and never plays it after authority loss', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    var current = true;
+    final synthesisStarted = Completer<void>();
+    final releaseSynthesis = Completer<String?>();
+    final staleAudio = File('${Directory.systemTemp.path}/ella_tts_stale_account_a.mp3');
+    addTearDown(() async {
+      if (await staleAudio.exists()) await staleAudio.delete();
+    });
+    var playbacks = 0;
+    StandardVoiceTurnResult? result;
+    final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => current));
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) =>
+          Stream.value(ServerMessageChunk('reply-a', 'Account A reply', MessageChunkType.data)),
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) {
+        synthesisStarted.complete();
+        return releaseSynthesis.future;
+      },
+    );
+
+    final pending = provider.runProtectedOperationAtEntry((operation) async {
+      result = await coordinator.run(
+        transcript: 'Account A private question',
+        authority: operation.exactAuthority,
+        commitMessages: (transcript, reply) => provider.addVoiceMessagesForProtectedOperation(
+          _voiceMessage('user-a', transcript, MessageSender.human),
+          _voiceMessage('assistant-a', reply, MessageSender.ai),
+          operation,
+        ),
+        onReplyReady: (_) {},
+        playFile: (_) async => playbacks++,
+        speakOnDevice: (_) async => playbacks++,
+      );
+    });
+    await synthesisStarted.future;
+    await staleAudio.writeAsBytes([1, 2, 3], flush: true);
+    current = false;
+    prefs.uid = 'uid-b';
+    await _quiesce();
+    releaseSynthesis.complete(staleAudio.path);
+    await pending;
+
+    expect(result?.discarded, isTrue);
+    expect(provider.messages, isEmpty);
+    expect(prefs.cachedMessages, isEmpty);
+    expect(await staleAudio.exists(), isFalse);
+    expect(playbacks, 0);
+  });
+
+  test('standard voice production turn commits and plays under unchanged exact authority', () async {
+    final prefs = SharedPreferencesUtil()..uid = 'uid-a';
+    await _grantAuthority(prefs, 'uid-a');
+    final audio = File('${Directory.systemTemp.path}/ella_tts_current_account_a.mp3')..writeAsBytesSync([1, 2, 3]);
+    addTearDown(() async {
+      if (await audio.exists()) await audio.delete();
+    });
+    var playbacks = 0;
+    StandardVoiceTurnResult? result;
+    final provider = MessageProvider(activeAuthority: () => _activeAuthority('uid-a', () => true));
+    final coordinator = StandardVoiceTurnCoordinator(
+      streamSender: (text, {expectedAuthenticatedUid, exactAuthority}) =>
+          Stream.value(ServerMessageChunk('reply-a', 'Current reply', MessageChunkType.data)),
+      synthesizer: (text, {expectedAuthenticatedUid, exactAuthority}) async => audio.path,
+    );
+
+    await provider.runProtectedOperationAtEntry((operation) async {
+      result = await coordinator.run(
+        transcript: 'Current question',
+        authority: operation.exactAuthority,
+        commitMessages: (transcript, reply) => provider.addVoiceMessagesForProtectedOperation(
+          _voiceMessage('user-current', transcript, MessageSender.human),
+          _voiceMessage('assistant-current', reply, MessageSender.ai),
+          operation,
+        ),
+        onReplyReady: (_) {},
+        playFile: (path) async {
+          expect(path, audio.path);
+          playbacks++;
+        },
+        speakOnDevice: (_) async => fail('current-authority control must use synthesized audio'),
+      );
+    });
+
+    expect(result?.discarded, isFalse);
+    expect(result?.reply, 'Current reply');
+    expect(provider.messages.map((message) => message.text), ['Current question', 'Current reply']);
+    expect(prefs.cachedMessages.map((message) => message.text), ['Current question', 'Current reply']);
+    expect(playbacks, 1);
+  });
+
+  test('real TTS HTTP path aborts before file creation when exact authority changes during response', () async {
+    final prefs = SharedPreferencesUtil()
+      ..uid = 'uid-a'
+      ..authToken = 'test-token'
+      ..tokenExpirationTime = DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch;
+    await _grantAuthority(prefs, 'uid-a');
+    final responseStarted = Completer<void>();
+    final response = Completer<http.Response>();
+    final authority = _MutableExactAuthority();
+    HttpPoolManager.instance.replaceClientForTesting(
+      MockClient((request) {
+        responseStarted.complete();
+        return response.future;
+      }),
+    );
+
+    final pending = ElevenLabsTts.synthesize('Account A private reply', exactAuthority: authority);
+    final expectation = expectLater(pending, throwsStateError);
+    await responseStarted.future;
+    authority.current = false;
+    response.complete(http.Response.bytes([1, 2, 3], 200, headers: {'content-type': 'audio/mpeg'}));
+    await expectation;
+
+    expect(authority.checks, greaterThanOrEqualTo(4));
+  });
+
   test('people update, sample delete, and person delete discard A responses after switch', () async {
     final prefs = SharedPreferencesUtil()..uid = 'uid-a';
     final original = _person('person-a');
@@ -1081,6 +1258,20 @@ Person _person(String id) => Person(
 
 MessageFile _messageFile(String id) =>
     MessageFile('provider-$id', null, '$id.txt', 'text/plain', id, DateTime.utc(2026, 8, 2), null);
+
+ServerMessage _voiceMessage(String id, String text, MessageSender sender) => ServerMessage(
+      id,
+      DateTime.utc(2026, 8, 2),
+      text,
+      sender,
+      MessageType.text,
+      null,
+      false,
+      const [],
+      const [],
+      const [],
+      fromVoice: true,
+    );
 
 class _DelayedDiscoverer implements DeviceDiscoverer {
   _DelayedDiscoverer(this._stop);

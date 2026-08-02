@@ -7,6 +7,7 @@ returned plan and report delivery status to trace tables.
 
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/v1/ella/escalations", tags=["Ella Escalations"])
 
 ESCALATION_WEBHOOK_KEY = os.getenv(
     "ELLA_ESCALATION_WEBHOOK_KEY",
-    os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f"),
+    os.getenv("GUARDIAN_WEBHOOK_KEY", ""),
 )
 
 _pool: Optional[asyncpg.Pool] = None
@@ -65,7 +66,7 @@ async def _get_pool() -> asyncpg.Pool:
 
 def _verify_key(x_guardian_key: Optional[str], x_escalation_key: Optional[str], key: Optional[str]) -> None:
     provided = x_escalation_key or x_guardian_key or key
-    if provided != ESCALATION_WEBHOOK_KEY:
+    if not ESCALATION_WEBHOOK_KEY or not provided or not secrets.compare_digest(provided, ESCALATION_WEBHOOK_KEY):
         raise HTTPException(status_code=403, detail="Invalid escalation key")
 
 

@@ -10,13 +10,14 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
 /// Build Ella-specific debug headers for routing observability (Issue #216).
 /// Backend trace.py captures these to correlate client requests with server routing decisions.
-Map<String, String> _ellaDebugHeaders({required String routeSource}) {
-  final uid = SharedPreferencesUtil().uid;
+Map<String, String> _ellaDebugHeaders({required String routeSource, String? expectedUid}) {
+  final uid = expectedUid ?? SharedPreferencesUtil().uid;
   return {
     'X-Ella-Client': 'ios-app',
     'X-Ella-Client-Version': PlatformManager.instance.appVersion,
@@ -98,10 +99,17 @@ Future<List<ServerMessage>> fetchEllaChatHistory({int limit = 50}) async {
 ///
 /// Yields the same [ServerMessageChunk] types as [sendEllaMessageStream],
 /// so callers (MessageProvider, EllaVoiceChatPage) need no logic changes.
-Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
+Stream<ServerMessageChunk> sendEllaChatStream(
+  String text, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     Logger.debug('[EllaChat] Blocked chat stream without AI consent');
     return;
+  }
+  if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+    throw ExactAccountAuthorityChangedException('Exact account authority changed before Ella chat');
   }
 
   if (SharedPreferencesUtil().demoMode) {
@@ -112,8 +120,10 @@ Stream<ServerMessageChunk> sendEllaChatStream(String text) async* {
 
   yield* sendEllaMessageStream(
     text,
-    headers: _ellaDebugHeaders(routeSource: 'proxy-canonical'),
+    headers: _ellaDebugHeaders(routeSource: 'proxy-canonical', expectedUid: expectedAuthenticatedUid),
     clientMessageId: const Uuid().v4(),
     clientSentAt: DateTime.now().toUtc(),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
 }

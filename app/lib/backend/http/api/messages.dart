@@ -139,10 +139,18 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   Map<String, String> headers = const {},
   String? clientMessageId,
   DateTime? clientSentAt,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+    throw ExactAccountAuthorityChangedException('Exact account authority changed before Ella stream assembly');
+  }
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
-  var uid = SharedPreferencesUtil().uid;
+  var uid = expectedAuthenticatedUid ?? exactAuthority?.uid ?? SharedPreferencesUtil().uid;
+  if (exactAuthority != null && exactAuthority.uid != uid) {
+    throw StateError('Ella stream UID does not match exact account authority');
+  }
   var messageId = "1000";
   final requestClientMessageId = clientMessageId ?? '';
   final requestClientSentAt = clientSentAt?.toUtc().toIso8601String() ?? '';
@@ -150,6 +158,8 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   await for (var line in makeStreamingApiCall(
     url: url,
     headers: headers,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
     body: jsonEncode({
       if (!isHermesProvisioningGateEnabled) 'uid': uid,
       'message': text,

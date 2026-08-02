@@ -61,6 +61,8 @@ class MessageProtectedOperation {
   final bool Function() _currentCheck;
 
   bool get isCurrent => _currentCheck();
+  String get uid => _lease.uid;
+  ExactAccountAuthorityVerifier get exactAuthority => _lease;
 }
 
 class MessageProvider extends ChangeNotifier {
@@ -167,14 +169,22 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  EllaAccountCommitLease? _beginAccountCommit() =>
-      EllaAccountCommitBarrier.begin(authorityProvider: _activeAuthority, onInvalidated: reset);
+  EllaAccountCommitLease? _beginAccountCommit([VoidCallback? onInvalidated]) => EllaAccountCommitBarrier.begin(
+        authorityProvider: _activeAuthority,
+        onInvalidated: () {
+          reset();
+          onInvalidated?.call();
+        },
+      );
 
   Future<bool> _authorizeProtectedOperation(EllaAccountCommitLease lease, int generation) async =>
       await _ensureAiConsent() && _canCommit(lease, generation);
 
-  Future<void> runProtectedOperationAtEntry(Future<void> Function(MessageProtectedOperation operation) action) {
-    final lease = _beginAccountCommit();
+  Future<void> runProtectedOperationAtEntry(
+    Future<void> Function(MessageProtectedOperation operation) action, {
+    VoidCallback? onInvalidated,
+  }) {
+    final lease = _beginAccountCommit(onInvalidated);
     if (lease == null) return Future<void>.value();
     final generation = _operationGeneration;
     final operation = MessageProtectedOperation._(lease, generation, () => _canCommit(lease, generation));
@@ -758,6 +768,26 @@ class MessageProvider extends ChangeNotifier {
     // Persist to cache so voice messages survive tab switches / refreshes
     SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
+  }
+
+  bool addVoiceMessagesForProtectedOperation(
+    ServerMessage userMessage,
+    ServerMessage assistantMessage,
+    MessageProtectedOperation operation,
+  ) {
+    if (!operation.isCurrent) return false;
+    final additions = [userMessage, assistantMessage]
+        .where((message) => messages.firstWhereOrNull((existing) => existing.id == message.id) == null)
+        .toList();
+    if (additions.isEmpty) return true;
+    messages.addAll(additions);
+    if (!operation.isCurrent) {
+      messages.removeWhere((message) => additions.any((addition) => addition.id == message.id));
+      return false;
+    }
+    SharedPreferencesUtil().cachedMessages = messages;
+    notifyListeners();
+    return true;
   }
 
   Future sendVoiceMessageStreamToServer(

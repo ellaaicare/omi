@@ -1,21 +1,16 @@
 """
 Ella Resolve Router - User identity to active Ella agent resolution.
 
-Resolves any user identifier (Firebase UID, email, phone) to the correct
-Hermes or legacy OpenClaw agent routing info (agentId, sessionKey, gatewayUrl,
-token).
+Resolves the exact Firebase bearer subject to non-secret runtime availability.
 
 Endpoints:
 - GET  /v1/ella/resolve?uid={firebase_uid}
-- GET  /v1/ella/resolve?email={email}
-- GET  /v1/ella/resolve?phone={phone}
 
 Used by:
 - iOS Flutter app for history/config discovery. Production chat should use
   /v1/ella/chat/stream so the backend can hydrate from and write to the
   canonical timeline.
-- E2E Flow Debugger
-- Any client that needs to discover the active agent runtime
+- Authenticated clients that need a non-secret runtime readiness signal
 """
 
 import json
@@ -24,7 +19,9 @@ import os
 from typing import Optional
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ HERMES_AGENT_ID = os.getenv("HERMES_AGENT_ID", "hermes")
 HERMES_GATEWAY_URL = os.getenv("HERMES_GATEWAY_PUBLIC_URL", "https://api.ella-ai-care.com/hermes")
 HERMES_GATEWAY_TOKEN = os.getenv("HERMES_API_SERVER_KEY", os.getenv("API_SERVER_KEY", ""))
 HERMES_PROVISION_URL = os.getenv("HERMES_PROVISION_API_URL", "http://100.76.138.56:8210")
-HERMES_WORKSPACE = os.getenv("HERMES_WORKSPACE", "/Users/ellaai/.hermes/profiles/plato-eval/workspace")
+HERMES_WORKSPACE = os.getenv("HERMES_WORKSPACE", "")
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -83,7 +80,8 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
     if not row:
         return None
 
-    agents = json.loads(row["agents"]) if row["agents"] else None
+    agents_raw = row["agents"]
+    agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
 
     routing = None
     if agents:
@@ -143,126 +141,51 @@ async def resolve_user_routing(uid: str) -> Optional[dict]:
 @router.get("/resolve")
 async def resolve_endpoint(
     uid: Optional[str] = Query(None, description="Firebase UID (omiUid)"),
-    email: Optional[str] = Query(None, description="User email"),
-    phone: Optional[str] = Query(None, description="User phone (E.164)"),
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
-    """Resolve a user identifier to active agent routing info.
-
-    Accepts one of: uid, email, phone. Returns the user's agent cluster
-    routing information including agentId, sessionKey, gatewayUrl, and token.
-    """
-    if not uid and not email and not phone:
-        raise HTTPException(
-            status_code=400,
-            detail="One of uid, email, or phone is required",
-        )
+    """Resolve only the exact Firebase bearer subject to a safe status view."""
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Ella resolve")
 
     pool = await _get_pool()
-
-    # Build query based on which identifier was provided
-    if uid:
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
-                   ac.agents, ac.status AS cluster_status
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.omi_uid = $1
-            """,
-            uid,
-        )
-    elif email:
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
-                   ac.agents, ac.status AS cluster_status
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.email = $1
-            """,
-            email,
-        )
-    else:
-        # Phone lookup via identities JSONB
-        row = await pool.fetchrow(
-            """
-            SELECT u.id, u.name, u.omi_uid, u.status, u.guardian_mode, u.timezone,
-                   u.conditions, u.medications,
-                   ac.agents, ac.status AS cluster_status
-            FROM users u
-            LEFT JOIN agent_clusters ac ON ac.user_id = u.id
-            WHERE u.identities->>'phone' = $1
-            """,
-            phone,
-        )
+    row = await pool.fetchrow(
+        """
+        SELECT u.omi_uid, u.status, ac.agents, ac.status AS cluster_status
+        FROM users u
+        LEFT JOIN agent_clusters ac ON ac.user_id = u.id
+        WHERE u.omi_uid = $1
+        """,
+        uid,
+    )
 
     if not row:
-        identifier = uid or email or phone
         raise HTTPException(
             status_code=404,
-            detail={"error": "user_not_found", "identifier": identifier},
+            detail={"error": "user_not_found"},
         )
 
-    agents = json.loads(row["agents"]) if row["agents"] else None
-
-    routing = None
-    if agents:
-        gateway_url = agents.get("gatewayUrl", DEFAULT_GATEWAY_URL)
-        routing = {
-            "agentId": agents.get("userAgentId"),
-            "caregiverAgentId": agents.get("caregiverAgentId"),
-            "scannerAgentId": agents.get("scannerAgentId"),
-            "summarizerAgentId": agents.get("summarizerAgentId"),
-            "sessionKey": (
-                f"agent:{agents.get('userAgentId')}:direct:ella:omi-{row['omi_uid'].lower()}"
-                if row["omi_uid"] and agents.get("userAgentId")
-                else None
-            ),
-            "gatewayUrl": PUBLIC_GATEWAY_URL,
-            "scannerGatewayUrl": agents.get("scannerGatewayUrl", gateway_url),
-            "token": agents.get("gatewayToken") or OPENCLAW_GATEWAY_TOKEN,
-            "provisionToken": PROVISION_API_KEY,
-            "provisionUrl": PROVISION_API_URL,
-            "clusterStatus": row["cluster_status"],
-            "workspace": agents.get("workspace"),
-            "historyUrl": f"/v1/ella/chat/history/{agents.get('userAgentId', '')}",
-        }
-        if CHAT_PLATFORM == "hermes":
-            routing.update(
-                {
-                    "agentId": HERMES_AGENT_ID,
-                    "sessionKey": f"ella:omi:{row['omi_uid'].lower()}:canonical",
-                    "gatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
-                    "scannerGatewayUrl": HERMES_GATEWAY_URL.rstrip("/"),
-                    "token": HERMES_GATEWAY_TOKEN,
-                    "provisionToken": PROVISION_API_KEY,
-                    "provisionUrl": HERMES_PROVISION_URL,
-                    "clusterStatus": row["cluster_status"],
-                    "workspace": HERMES_WORKSPACE,
-                    "historyUrl": "/v1/ella/chat/history",
-                    "platform": "hermes",
-                }
-            )
+    agents_raw = row["agents"]
+    agents = json.loads(agents_raw) if isinstance(agents_raw, str) else agents_raw
 
     return {
         "user": {
-            "id": str(row["id"]),
-            "name": row["name"],
             "omiUid": row["omi_uid"],
             "status": row["status"],
-            "guardianMode": row["guardian_mode"],
-            "timezone": row["timezone"],
-            "conditions": row["conditions"],
-            "medications": row["medications"],
         },
-        "routing": routing,
+        "routing": {
+            "available": bool(agents),
+            "clusterStatus": row["cluster_status"],
+            "platform": "hermes" if CHAT_PLATFORM == "hermes" else "openclaw",
+        },
     }
 
 
 @router.get("/chat/history/{agent_id}")
-async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Optional[str] = None):
+async def proxy_chat_history(
+    agent_id: str,
+    limit: int = 50,
+    session_key: Optional[str] = None,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
+):
     """Proxy chat history requests to the Provision API on Mac Mini.
 
     The iOS app can't reach the Mac Mini's Tailscale IP directly,
@@ -270,12 +193,21 @@ async def proxy_chat_history(agent_id: str, limit: int = 50, session_key: Option
     """
     import httpx
 
+    resolved = await resolve_user_routing(authenticated_uid)
+    routing = resolved.get("routing") if resolved else None
+    expected_agent_id = str((routing or {}).get("agentId") or "")
+    expected_session_key = str((routing or {}).get("sessionKey") or "")
+    if not expected_agent_id or agent_id != expected_agent_id:
+        raise HTTPException(status_code=403, detail="History agent does not match authenticated user")
+    if session_key and session_key != expected_session_key:
+        raise HTTPException(status_code=403, detail="History session does not match authenticated user")
+
     provision_base = PROVISION_API_URL.rstrip('/')
     params = f"limit={limit}"
-    if session_key:
+    if expected_session_key:
         from urllib.parse import quote
 
-        params += f"&session_key={quote(session_key)}"
+        params += f"&session_key={quote(expected_session_key)}"
     url = f"{provision_base}/chat/history/{agent_id}?{params}"
 
     try:

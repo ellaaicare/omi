@@ -1,4 +1,4 @@
-"""Production-route authentication tests for Ella chat and voice."""
+"""Production-route authentication tests for Ella user and service boundaries."""
 
 import sys
 import types
@@ -11,8 +11,12 @@ sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool
 conversations_module = types.ModuleType("database.conversations")
 conversations_module._decrypt_conversation_data = lambda conversation, _uid: conversation
 sys.modules.setdefault("database.conversations", conversations_module)
+app_settings_module = types.ModuleType("database.app_settings")
+app_settings_module.get_voice_settings = lambda _uid: {}
+app_settings_module.save_voice_settings = lambda _uid, voice_settings: voice_settings
+sys.modules.setdefault("database.app_settings", app_settings_module)
 
-from ella.routers import chat, voice
+from ella.routers import chat, guardian, resolve, voice
 from utils.ella import exact_firebase_auth
 
 
@@ -25,6 +29,41 @@ class _VoicePool:
         return None
 
 
+class _ResolvePool(_VoicePool):
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return {
+            "omi_uid": "uid-a",
+            "status": "active",
+            "agents": {"userAgentId": "private-agent", "gatewayToken": "private-routing-value"},
+            "cluster_status": "ready",
+        }
+
+
+class _GuardianPool(_VoicePool):
+    def __init__(self):
+        super().__init__()
+        self.fetch_calls = []
+        self.fetchval_calls = []
+        self.execute_calls = []
+
+    async def fetch(self, query, *args):
+        self.fetch_calls.append((query, args))
+        return []
+
+    async def fetchval(self, query, *args):
+        self.fetchval_calls.append((query, args))
+        return 0
+
+    async def execute(self, query, *args):
+        self.execute_calls.append((query, args))
+        return "OK"
+
+    @property
+    def call_count(self):
+        return len(self.fetchrow_calls) + len(self.fetch_calls) + len(self.fetchval_calls) + len(self.execute_calls)
+
+
 def _client(monkeypatch):
     def verify_token(token):
         if token == "valid-a":
@@ -35,6 +74,8 @@ def _client(monkeypatch):
     app = FastAPI()
     app.include_router(chat.router)
     app.include_router(voice.router)
+    app.include_router(resolve.router)
+    app.include_router(guardian.router)
     return TestClient(app)
 
 
@@ -135,18 +176,154 @@ def test_user_routes_reject_missing_or_expired_token_before_work(monkeypatch):
 
 def test_voice_tts_allows_only_explicit_internal_guardian_service_key(monkeypatch):
     monkeypatch.setattr(voice, "ELLA_INTERNAL_TTS_KEY", "internal-key")
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "guardian-key")
     client = _client(monkeypatch)
 
     response = client.post(
         "/v1/voice/tts",
-        headers={"X-Guardian-Key": "internal-key", "X-TTS-Provider": "grok-voice"},
+        headers={"X-Ella-TTS-Key": "internal-key", "X-TTS-Provider": "grok-voice"},
         json={"text": "hello"},
     )
-    denied = client.post(
+    broad_guardian_denied = client.post(
         "/v1/voice/tts",
-        headers={"X-Guardian-Key": "wrong", "X-TTS-Provider": "grok-voice"},
+        headers={"X-Guardian-Key": "guardian-key", "X-TTS-Provider": "grok-voice"},
         json={"text": "hello"},
     )
 
     assert response.status_code == 422
-    assert denied.status_code == 401
+    assert broad_guardian_denied.status_code == 401
+
+
+def test_voice_tts_internal_service_key_fails_closed_when_unset(monkeypatch):
+    monkeypatch.setattr(voice, "ELLA_INTERNAL_TTS_KEY", "")
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/v1/voice/tts",
+        headers={"X-Ella-TTS-Key": "unconfigured-key", "X-TTS-Provider": "grok-voice"},
+        json={"text": "hello"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_resolve_requires_exact_owner_before_lookup_and_returns_no_private_routing(monkeypatch):
+    pool = _ResolvePool()
+    monkeypatch.setattr(resolve, "_pool", pool)
+    client = _client(monkeypatch)
+
+    assert client.get("/v1/ella/resolve?uid=uid-a").status_code == 401
+    assert (
+        client.get(
+            "/v1/ella/resolve?uid=uid-b",
+            headers={"Authorization": "Bearer valid-a"},
+        ).status_code
+        == 403
+    )
+    assert pool.fetchrow_calls == []
+
+    response = client.get(
+        "/v1/ella/resolve?uid=uid-a",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert pool.fetchrow_calls[0][1] == ("uid-a",)
+    payload = response.json()
+    assert payload == {
+        "user": {"omiUid": "uid-a", "status": "active"},
+        "routing": {"available": True, "clusterStatus": "ready", "platform": "openclaw"},
+    }
+    serialized = str(payload).lower()
+    for forbidden in ("token", "session", "agentid", "workspace", "condition", "medication", "provision"):
+        assert forbidden not in serialized
+
+
+def test_voice_alternate_routes_reject_missing_and_wrong_subject_before_downstream_work(monkeypatch):
+    pool = _VoicePool()
+    monkeypatch.setattr(voice, "_pool", pool)
+    monkeypatch.setattr(voice, "ELLA_INTERNAL_VOICE_CONTEXT_KEY", "context-service")
+    monkeypatch.setattr(voice, "ELLA_INTERNAL_VOICE_SEARCH_KEY", "search-service")
+    client = _client(monkeypatch)
+    cases = [
+        ("/v1/voice/context", {"uid": "uid-b"}),
+        ("/v1/voice/search-omi", {"uid": "uid-b", "query": "private"}),
+        (
+            "/v1/voice/search",
+            {"uid": "uid-b", "query": "private", "agent_role": "caregiver", "agent_id": "chosen-agent"},
+        ),
+    ]
+
+    for path, body in cases:
+        assert client.post(path, json=body).status_code == 401
+        assert client.post(path, headers={"Authorization": "Bearer valid-a"}, json=body).status_code == 403
+        assert pool.fetchrow_calls == []
+
+
+def test_voice_internal_route_credentials_are_narrow_and_fail_closed_before_work(monkeypatch):
+    pool = _VoicePool()
+    monkeypatch.setattr(voice, "_pool", pool)
+    monkeypatch.setattr(voice, "ELLA_INTERNAL_VOICE_CONTEXT_KEY", "context-service")
+    monkeypatch.setattr(voice, "ELLA_INTERNAL_VOICE_SEARCH_KEY", "search-service")
+    client = _client(monkeypatch)
+
+    wrong_scope = client.post(
+        "/v1/voice/context",
+        headers={"X-Ella-Voice-Context-Key": "search-service"},
+        json={"uid": "uid-a"},
+    )
+    unset_scope = client.post(
+        "/v1/voice/search-omi",
+        headers={"X-Ella-Caregiver-Search-Key": "not-configured"},
+        json={"uid": "uid-a", "query": "private"},
+    )
+
+    assert wrong_scope.status_code == 403
+    assert unset_scope.status_code == 403
+    assert pool.fetchrow_calls == []
+
+
+def test_guardian_alternate_routes_reject_missing_and_wrong_subject_without_side_effect(monkeypatch):
+    pool = _GuardianPool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "guardian-service")
+    monkeypatch.setattr(guardian, "_playback_events", {})
+    client = _client(monkeypatch)
+    cases = [
+        ("GET", "/v1/ella/guardian/queue?uid=uid-b", None),
+        ("POST", "/v1/ella/guardian/activate", {"uid": "uid-b"}),
+        ("GET", "/v1/ella/guardian/trace/trace-a?uid=uid-b", None),
+        (
+            "POST",
+            "/v1/ella/guardian/playback-debug",
+            {"uid": "uid-b", "event_name": "received", "trace_id": "trace-a"},
+        ),
+    ]
+
+    for method, path, body in cases:
+        missing = client.request(method, path, json=body)
+        mismatch = client.request(method, path, headers={"Authorization": "Bearer valid-a"}, json=body)
+        assert missing.status_code == 401, path
+        assert mismatch.status_code == 403, path
+        assert pool.call_count == 0, path
+    assert guardian._playback_events == {}
+
+
+def test_guardian_trace_log_requires_configured_service_key_before_state_work(monkeypatch):
+    pool = _GuardianPool()
+    monkeypatch.setattr(guardian, "_pool", pool)
+    client = _client(monkeypatch)
+    payload = {"trace_id": "trace-a", "uid": "uid-a", "stage": "scanner_classified"}
+
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "")
+    assert client.post("/v1/ella/guardian/trace/log", json=payload).status_code == 403
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "guardian-service")
+    assert (
+        client.post(
+            "/v1/ella/guardian/trace/log",
+            headers={"X-Guardian-Key": "wrong-service"},
+            json=payload,
+        ).status_code
+        == 403
+    )
+    assert pool.call_count == 0

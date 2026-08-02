@@ -57,6 +57,12 @@ assert _ROUTER_SPEC and _ROUTER_SPEC.loader
 _ROUTER_SPEC.loader.exec_module(guardian)
 
 
+@pytest.fixture(autouse=True)
+def _configured_service_credentials(monkeypatch):
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-key")
+    monkeypatch.setattr(guardian, "ELLA_INTERNAL_TTS_KEY", "configured-tts-key")
+
+
 class _FakePool:
     def __init__(self, user_row=None, caregiver_rows=None, existing_rows=None):
         self.user_row = user_row
@@ -248,7 +254,8 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     url, kwargs = _FakeAsyncClient.posts[0]
     assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
     assert kwargs["headers"]["X-TTS-Provider"] == "xai-tts"
-    assert kwargs["headers"]["X-Guardian-Key"] == guardian.GUARDIAN_WEBHOOK_KEY
+    assert kwargs["headers"]["X-Ella-TTS-Key"] == guardian.ELLA_INTERNAL_TTS_KEY
+    assert "X-Guardian-Key" not in kwargs["headers"]
     assert kwargs["json"]["text"] == "Hello"
     assert response.headers["x-guardian-tts-provider"] == "xai-tts"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
@@ -375,18 +382,20 @@ def test_wake_word_row_matches_fallback_variants():
     assert guardian._is_wake_word_row({"trigger_type": "wake_word_fallback", "metadata": {}})
 
 
-def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):
+def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-key")
 
-    ok = asyncio.run(
-        guardian.log_pipeline_event(
-            guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
-            x_guardian_key=None,
-            key=None,
+    with pytest.raises(HTTPException) as missing:
+        asyncio.run(
+            guardian.log_pipeline_event(
+                guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
+                x_guardian_key=None,
+                key=None,
+            )
         )
-    )
-    assert ok["logged"] is True
+    assert missing.value.status_code == 403
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(

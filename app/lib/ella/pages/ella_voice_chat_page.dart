@@ -15,7 +15,6 @@ import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/api/conversations.dart';
 import 'package:omi/backend/preferences.dart';
-import 'package:omi/ella/services/ella_chat_service.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
@@ -24,6 +23,7 @@ import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/ella/services/memory_reinterpretation_receipt_service.dart';
+import 'package:omi/ella/services/standard_voice_turn.dart';
 import 'package:omi/ella/services/v2v_client.dart';
 import 'package:omi/ella/services/voice_session_startup_guard.dart';
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
@@ -99,6 +99,7 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription? _playerSub;
   final SpeechToText _speech = SpeechToText();
+  final StandardVoiceTurnCoordinator _standardVoiceTurn = const StandardVoiceTurnCoordinator();
   bool _speechAvailable = false;
   String _currentWords = '';
 
@@ -1129,101 +1130,72 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     _currentWords = '';
 
     if (!mounted) return;
-    setState(() {
-      _orbState = VoiceOrbState.processing;
-      _statusText = 'Ella is thinking...';
-      _audioLevel = 0.0;
-      _lastUserText = transcript;
-    });
-
+    final messageProvider = Provider.of<MessageProvider>(context, listen: false);
     try {
-      if (_speech.isListening) {
-        debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
-        await _speech.stop();
-        // Let iOS release the recording session before we synthesize/play audio.
-        await Future.delayed(const Duration(milliseconds: 150));
-      }
+      await messageProvider.runProtectedOperationAtEntry(
+        (operation) async {
+          if (!mounted || !operation.isCurrent) return;
+          setState(() {
+            _orbState = VoiceOrbState.processing;
+            _statusText = 'Ella is thinking...';
+            _audioLevel = 0.0;
+            _lastUserText = transcript;
+          });
 
-      // Send via Ella's chat endpoint
-      debugPrint('[VoiceChat] Sending to Ella chat...');
-      final replyBuffer = StringBuffer();
-      await for (var chunk in sendEllaChatStream(transcript)) {
-        if (chunk.type == MessageChunkType.data) {
-          replyBuffer.write(chunk.text);
-        } else if (chunk.type == MessageChunkType.done && chunk.message != null) {
-          if (chunk.message!.text.isNotEmpty) {
-            replyBuffer.clear();
-            replyBuffer.write(chunk.message!.text);
+          if (_speech.isListening) {
+            debugPrint('[VoiceChat] Stopping speech recognizer before response playback');
+            await _speech.stop();
+            if (!mounted || !operation.isCurrent) return;
+            await Future.delayed(const Duration(milliseconds: 150));
+            if (!mounted || !operation.isCurrent) return;
           }
-        }
-      }
 
-      final fullReply = replyBuffer.toString().trim();
-      debugPrint(
-        '[VoiceChat] Ella reply (${fullReply.length} chars): "${fullReply.substring(0, math.min(100, fullReply.length))}"',
+          debugPrint('[VoiceChat] Sending to Ella chat for authority uid=${operation.uid}');
+          final result = await _standardVoiceTurn.run(
+            transcript: transcript,
+            authority: operation.exactAuthority,
+            prepareTtsText: _stripEmojis,
+            commitMessages: (userText, ellaReply) =>
+                !EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope) ||
+                _injectStandardVoiceMessages(userText, ellaReply, messageProvider, operation),
+            onReplyReady: (fullReply) {
+              if (!mounted || !operation.isCurrent) return;
+              debugPrint(
+                '[VoiceChat] Ella reply (${fullReply.length} chars): '
+                '"${fullReply.substring(0, math.min(100, fullReply.length))}"',
+              );
+              _lastEllaText = fullReply;
+              _startTypewriter(fullReply);
+              setState(() {
+                _statusText = 'Ella is speaking...';
+                _orbState = VoiceOrbState.speaking;
+              });
+            },
+            speakOnDevice: (ttsText) => ElevenLabsTts.speakOnDevice(ttsText, exactAuthority: operation.exactAuthority),
+            playFile: (audioPath) async {
+              if (!mounted || !operation.isCurrent) return;
+              debugPrint('[VoiceChat] Playing authority-bound audio: $audioPath');
+              if (!await _prepareTtsPlaybackSession(isCurrent: () => mounted && operation.isCurrent)) return;
+              if (!mounted || !operation.isCurrent) return;
+              await _audioPlayer.setVolume(1.0);
+              if (!mounted || !operation.isCurrent) return;
+              await _audioPlayer.setFilePath(audioPath);
+              if (!mounted || !operation.isCurrent) return;
+              await _audioPlayer.play();
+            },
+          );
+
+          if (!mounted || !operation.isCurrent || result.discarded) return;
+          if (result.reply.isEmpty || result.usedOnDeviceTts) {
+            if (_voiceModeActive) {
+              _startListening();
+            } else {
+              _returnToIdle();
+            }
+          }
+        },
+        onInvalidated: _cancelStandardVoiceEffects,
       );
-      if (!mounted) return;
-      if (fullReply.isEmpty) {
-        if (_voiceModeActive) {
-          _startListening();
-        } else {
-          _returnToIdle();
-        }
-        return;
-      }
-
-      // Inject both messages into chat history so Chat tab shows them
-      if (EllaVoiceChatPage.shouldInjectVoiceTurns(_sessionScope)) {
-        _injectVoiceMessages(transcript, fullReply);
-      }
-
-      // Store full reply and start typewriter reveal
-      _lastEllaText = fullReply;
-      _startTypewriter(fullReply);
-
-      setState(() {
-        _statusText = 'Ella is speaking...';
-        _orbState = VoiceOrbState.speaking;
-      });
-
-      // Strip emojis before TTS — prevents the TTS engine from reading emoji names aloud
-      final ttsText = _stripEmojis(fullReply.length > 500 ? fullReply.substring(0, 500) : fullReply);
-      debugPrint('[VoiceChat] Synthesizing TTS (${ttsText.length} chars)...');
-      final audioPath = await ElevenLabsTts.synthesize(ttsText);
-      debugPrint('[VoiceChat] TTS result: $audioPath');
-
-      if (!mounted) return;
-      if (audioPath == null) {
-        // Backend unavailable — fall back to on-device TTS
-        debugPrint('[VoiceChat] Backend TTS unavailable, using on-device TTS');
-        await ElevenLabsTts.speakOnDevice(ttsText);
-        if (!mounted) return;
-        if (_voiceModeActive) {
-          _startListening();
-        } else {
-          _returnToIdle();
-        }
-        return;
-      }
-
-      // Play audio
-      debugPrint('[VoiceChat] Playing audio: $audioPath');
-      try {
-        await _prepareTtsPlaybackSession();
-        await _audioPlayer.setVolume(1.0);
-        await _audioPlayer.setFilePath(audioPath);
-        await _audioPlayer.play();
-      } catch (playbackError, playbackStack) {
-        debugPrint('[VoiceChat] File playback failed, using on-device TTS: $playbackError\n$playbackStack');
-        await ElevenLabsTts.speakOnDevice(ttsText);
-        if (!mounted) return;
-        if (_voiceModeActive) {
-          _startListening();
-        } else {
-          _returnToIdle();
-        }
-      }
-      // playerStateStream listener handles return to idle on completion
     } catch (e, st) {
       debugPrint('[VoiceChat] Error in voice flow: $e\n$st');
       if (mounted) {
@@ -1240,8 +1212,27 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
     }
   }
 
-  Future<void> _prepareTtsPlaybackSession() async {
+  void _cancelStandardVoiceEffects() {
+    _typewriterTimer?.cancel();
+    _voiceModeActive = false;
+    _currentWords = '';
+    unawaited(_audioPlayer.stop());
+    unawaited(ElevenLabsTts.stopOnDevice());
+    unawaited(_speech.stop());
+    if (mounted) {
+      setState(() {
+        _lastUserText = '';
+        _lastEllaText = '';
+        _ellaDisplayText = '';
+        _orbState = VoiceOrbState.idle;
+        _statusText = 'Tap to Start';
+      });
+    }
+  }
+
+  Future<bool> _prepareTtsPlaybackSession({bool Function()? isCurrent}) async {
     final session = await AudioSession.instance;
+    if (isCurrent?.call() == false) return false;
     await session.configure(
       AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
@@ -1254,8 +1245,11 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
       ),
     );
+    if (isCurrent?.call() == false) return false;
     await session.setActive(true);
+    if (isCurrent?.call() == false) return false;
     debugPrint('[VoiceChat] Audio session prepared for TTS playback');
+    return true;
   }
 
   /// Strip emojis from text so TTS doesn't read them aloud.
@@ -1264,9 +1258,13 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
   }
 
   /// Inject voice exchange into MessageProvider so Chat tab shows it.
-  void _injectVoiceMessages(String userText, String ellaReply) {
+  bool _injectStandardVoiceMessages(
+    String userText,
+    String ellaReply,
+    MessageProvider msgProvider,
+    MessageProtectedOperation operation,
+  ) {
     try {
-      final msgProvider = Provider.of<MessageProvider>(context, listen: false);
       final now = DateTime.now();
 
       final userMsg = ServerMessage(
@@ -1282,8 +1280,6 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         [],
         fromVoice: true,
       );
-      msgProvider.addMessage(userMsg);
-
       final aiMsg = ServerMessage(
         const Uuid().v4(),
         now.add(const Duration(milliseconds: 100)),
@@ -1297,10 +1293,51 @@ class _EllaVoiceChatPageState extends State<EllaVoiceChatPage> with AutomaticKee
         [],
         fromVoice: true,
       );
-      msgProvider.addMessage(aiMsg);
-      debugPrint('[VoiceChat] Injected voice messages into chat history');
+      final committed = msgProvider.addVoiceMessagesForProtectedOperation(userMsg, aiMsg, operation);
+      if (committed) debugPrint('[VoiceChat] Injected authority-bound voice messages into chat history');
+      return committed;
     } catch (e) {
       debugPrint('[VoiceChat] Failed to inject messages: $e');
+      return false;
+    }
+  }
+
+  void _injectVoiceMessages(String userText, String ellaReply) {
+    try {
+      final msgProvider = Provider.of<MessageProvider>(context, listen: false);
+      final now = DateTime.now();
+      msgProvider.addMessage(
+        ServerMessage(
+          const Uuid().v4(),
+          now,
+          userText,
+          MessageSender.human,
+          MessageType.text,
+          null,
+          false,
+          [],
+          [],
+          [],
+          fromVoice: true,
+        ),
+      );
+      msgProvider.addMessage(
+        ServerMessage(
+          const Uuid().v4(),
+          now.add(const Duration(milliseconds: 100)),
+          ellaReply,
+          MessageSender.ai,
+          MessageType.text,
+          null,
+          false,
+          [],
+          [],
+          [],
+          fromVoice: true,
+        ),
+      );
+    } catch (e) {
+      debugPrint('[VoiceChat] Failed to inject V2V messages: $e');
     }
   }
 
