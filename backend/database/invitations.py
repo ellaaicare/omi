@@ -235,8 +235,8 @@ def _is_valid_entitlement_policy_for_provider(policy, provider):
     if provider == SELF_HOSTED_RUNTIME_PROVIDER:
         return bool(
             policy["provider_allowlist"] == [SELF_HOSTED_RUNTIME_PROVIDER]
-            and (not policy["model_allowlist"] or policy["model_allowlist"] == [SELF_HOSTED_RUNTIME_MODEL])
-            and set(policy["mode_allowlist"]).issubset(set(SELF_HOSTED_RUNTIME_TARGET_MODES))
+            and policy["model_allowlist"] == [SELF_HOSTED_RUNTIME_MODEL]
+            and policy["mode_allowlist"] == list(SELF_HOSTED_RUNTIME_TARGET_MODES)
             and policy["fallback_policy"] == {"enabled": False, "order": []}
         )
     if provider == CLOUD_RUNTIME_PROVIDER:

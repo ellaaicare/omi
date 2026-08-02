@@ -17,6 +17,7 @@ on:
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
@@ -31,6 +32,7 @@ on:
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/unit/test_synthetic_invite_admin.py"
@@ -54,6 +56,7 @@ on:
       - "backend/ella/services/consent_authority.py"
       - "backend/ella/services/invitation_authority.py"
       - "backend/ella/services/provisioning.py"
+      - "backend/ella/services/runtime_resolver.py"
       - "backend/ella/services/hermes_cloud_policy.py"
       - "backend/ella/routers/voice.py"
       - "backend/ella/__init__.py"
@@ -68,6 +71,7 @@ on:
       - "backend/ella/docs/SYNTHETIC_INVITE_OPERATOR.md"
       - "backend/tests/unit/test_invitation_redemption.py"
       - "backend/tests/unit/test_pilot_invite_admin.py"
+      - "backend/tests/unit/test_authority_writer_guard.py"
       - "backend/tests/unit/test_ella_onboarding_contract.py"
       - "backend/tests/unit/test_ella_provisioning_service.py"
       - "backend/tests/unit/test_synthetic_invite_admin.py"
@@ -137,6 +141,7 @@ jobs:
           ella/services/consent_authority.py
           ella/services/invitation_authority.py
           ella/services/provisioning.py
+          ella/services/runtime_resolver.py
           ella/services/hermes_cloud_policy.py
           scripts/synthetic_invite_admin.py
           scripts/pilot_invite_admin.py
@@ -148,6 +153,7 @@ jobs:
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_synthetic_invite_admin.py \
               tests/unit/test_pilot_invite_admin.py \
+              tests/unit/test_authority_writer_guard.py \
               tests/unit/test_voice_canary.py \
               tests/unit/test_ella_onboarding_contract.py \
               tests/unit/test_ella_provisioning_service.py \
@@ -155,14 +161,16 @@ jobs:
               tests/postgres/test_runtime_migration_atomicity_postgres.py |
               grep -c '::'
           )"
-          test "$collected" -eq 122
+          test "$collected" -eq 135
           collected_ids="$(
             pytest --collect-only -q \
               tests/unit/test_invitation_redemption.py \
               tests/unit/test_pilot_invite_admin.py \
+              tests/unit/test_authority_writer_guard.py \
               tests/unit/test_ella_onboarding_contract.py \
               tests/unit/test_ella_provisioning_service.py \
-              tests/postgres/test_invitation_redemption_postgres.py |
+              tests/postgres/test_invitation_redemption_postgres.py \
+              tests/postgres/test_runtime_migration_atomicity_postgres.py |
               sed '/^$/d'
           )"
           required_ids=(
@@ -175,6 +183,12 @@ jobs:
             "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_email_mismatch_and_concurrent_open_redeem_fail_closed"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_operator_rotation_is_atomic_idempotent_and_preserves_email_scope"
             "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review_is_separate"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicate_or_orphan"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation"
+            "tests/postgres/test_invitation_redemption_postgres.py::test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry"
+            "tests/postgres/test_runtime_migration_atomicity_postgres.py::test_migration_015_upgrades_multi_redemption_app_review_history_atomically"
           )
           for required_id in "${required_ids[@]}"; do
             grep -Fqx "$required_id" <<<"$collected_ids"
@@ -183,6 +197,7 @@ jobs:
             tests/unit/test_invitation_redemption.py \
             tests/unit/test_synthetic_invite_admin.py \
             tests/unit/test_pilot_invite_admin.py \
+            tests/unit/test_authority_writer_guard.py \
             tests/unit/test_voice_canary.py \
             tests/unit/test_ella_onboarding_contract.py \
             tests/unit/test_ella_provisioning_service.py \

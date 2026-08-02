@@ -18,7 +18,8 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from database import invitations, voice_canary
+from database import authority_advisory_lock, invitations, voice_canary
+from database.ella_provisioning import invalidate_self_hosted_authority_on_connection
 from database.invitations import (
     SELF_HOSTED_OPERATOR_COHORT,
     SELF_HOSTED_OPERATOR_ENTITLEMENT_POLICY,
@@ -32,6 +33,7 @@ from ella.services.ai_consent import (
 )
 from scripts.synthetic_invite_admin import (
     ProtectedCodeFileError,
+    discard_uncommitted_protected_code_file,
     prepare_protected_code_file,
 )
 
@@ -39,6 +41,8 @@ ROOT_UID = 0
 OPERATOR_PURPOSE = "self_hosted_invitation_v1"
 MIN_EXPIRY = timedelta(minutes=5)
 MAX_EXPIRY = timedelta(days=400)
+MAX_NON_REVIEW_PILOTS = 5
+PILOT_CAPACITY_LOCK = "self-hosted-pilot-capacity-v1"
 SAFE_CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -46,6 +50,10 @@ class PilotInvitationError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class _OwnerSetChanged(RuntimeError):
+    pass
 
 
 def _require_root() -> None:
@@ -75,6 +83,44 @@ def _safe_context(value: str, *, code: str) -> str:
 
 def _email_hash(config: invitations.InvitationConfig, email: str) -> Optional[str]:
     return invitations.email_hash_for(config, email) if email else None
+
+
+def _absolute_expiry(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PilotInvitationError("expiry_invalid") from exc
+    return _utc(parsed)
+
+
+async def _lock_pilot_capacity(conn) -> None:
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        PILOT_CAPACITY_LOCK,
+    )
+
+
+async def _active_non_review_slots(conn, *, now: datetime) -> int:
+    return int(
+        await conn.fetchval(
+            """
+            SELECT COALESCE(SUM(reservation.reserved_slots), 0)
+            FROM ella_invitation_capacity_reservations reservation
+            JOIN ella_invitations invitation
+              ON invitation.capacity_reservation_id = reservation.id
+            WHERE reservation.pool_key = 'self_hosted_pilot'
+              AND reservation.state IN ('reserved', 'consumed')
+              AND invitation.kind = 'ordinary'
+              AND invitation.state IN ('sent', 'redeemed')
+              AND (
+                    invitation.state = 'redeemed'
+                    OR invitation.expires_at > $1
+                  )
+            """,
+            now,
+        )
+        or 0
+    )
 
 
 def _recovery_binding(
@@ -203,7 +249,7 @@ async def _issue_invitation(
         raise PilotInvitationError("app_review_disabled")
     now = datetime.now(timezone.utc)
     expiry = _utc(expires_at) if expires_at else None
-    if kind == "ordinary" and (expiry is None or expiry < now + MIN_EXPIRY or expiry > now + MAX_EXPIRY):
+    if kind == "ordinary" and expiry is None:
         raise PilotInvitationError("invalid_expiry")
     if kind == "app_review" and expiry is not None:
         raise PilotInvitationError("reviewer_expiry_forbidden")
@@ -216,6 +262,8 @@ async def _issue_invitation(
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if kind == "ordinary":
+                await _lock_pilot_capacity(conn)
             existing = await conn.fetchrow(
                 """
                 SELECT i.*, audit.metadata AS operator_metadata
@@ -262,6 +310,10 @@ async def _issue_invitation(
                 }
 
             is_review = kind == "app_review"
+            if not is_review and (expiry < now + MIN_EXPIRY or expiry > now + MAX_EXPIRY):
+                raise PilotInvitationError("invalid_expiry")
+            if not is_review and await _active_non_review_slots(conn, now=now) >= MAX_NON_REVIEW_PILOTS:
+                raise PilotInvitationError("pilot_capacity_exhausted")
             reserved_slots = 2 if is_review else 1
             max_redemptions = 20 if is_review else 1
             reservation_id = await conn.fetchval(
@@ -380,58 +432,124 @@ async def _revoke_invitation(
     config: invitations.InvitationConfig,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    invitation_uuid = _receipt_uuid(receipt_id)
     pool = await voice_canary.get_pool()
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT * FROM ella_invitations WHERE id = $1 FOR UPDATE",
-                _receipt_uuid(receipt_id),
-            )
-            if not row:
-                raise PilotInvitationError("receipt_not_found")
-            if int(row["version"]) != expected_version:
-                raise PilotInvitationError("receipt_stale")
-            if row["state"] == "revoked":
-                return {"receipt_id": str(row["id"]), "state": "revoked", "idempotent": True}
-            if row["state"] not in {"issued", "sent"} or int(row["redemption_count"]) != 0:
-                raise PilotInvitationError("revoke_refused")
-            updated = await conn.fetchrow(
+        for _attempt in range(22):
+            owner_rows = await conn.fetch(
                 """
-                UPDATE ella_invitations
-                SET state = 'revoked', delivery_state = 'suppressed',
-                    revoked_at = $2, version = version + 1, updated_at = $2
-                WHERE id = $1
-                RETURNING id, state, version
+                SELECT DISTINCT app_user.id, app_user.omi_uid
+                FROM ella_invitation_redemptions redemption
+                JOIN users app_user ON app_user.id = redemption.user_id
+                WHERE redemption.invitation_id = $1
+                  AND redemption.user_mapping_state = 'mapped'
+                ORDER BY app_user.id
                 """,
-                row["id"],
-                now,
+                invitation_uuid,
             )
-            await conn.execute(
-                """
-                UPDATE ella_invitation_capacity_reservations
-                SET state = 'released', released_at = $2,
-                    version = version + 1, updated_at = $2
-                WHERE id = $1 AND state = 'reserved'
-                """,
-                row["capacity_reservation_id"],
-                now,
-            )
-            await invitations._record_audit(
-                conn,
-                invitation_id=row["id"],
-                uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
-                source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
-                event_type="pilot_operator_revoked",
-                support_code=invitations._support_code(),
-                correlation_id=invitations._correlation_id(),
-                metadata={"purpose": OPERATOR_PURPOSE, "content_free": True},
-            )
-            return {
-                "receipt_id": str(updated["id"]),
-                "state": str(updated["state"]),
-                "version": int(updated["version"]),
-                "idempotent": False,
-            }
+            expected_owners = tuple((row["id"], str(row["omi_uid"] or "")) for row in owner_rows)
+            try:
+                async with conn.transaction():
+                    owner_locks = {}
+                    for user_id, uid in expected_owners:
+                        if not uid:
+                            raise PilotInvitationError("revoke_owner_invalid")
+                        owner = authority_advisory_lock.AuthorityOwner.from_values(user_id, user_id)
+                        owner_locks[user_id] = await authority_advisory_lock.acquire_authority_lock(
+                            conn,
+                            owner=owner,
+                        )
+                    preview_kind = await conn.fetchval(
+                        "SELECT kind FROM ella_invitations WHERE id = $1",
+                        invitation_uuid,
+                    )
+                    if preview_kind == "ordinary":
+                        await _lock_pilot_capacity(conn)
+                    row = await conn.fetchrow(
+                        "SELECT * FROM ella_invitations WHERE id = $1 FOR UPDATE",
+                        invitation_uuid,
+                    )
+                    if not row:
+                        raise PilotInvitationError("receipt_not_found")
+                    current_owner_rows = await conn.fetch(
+                        """
+                        SELECT DISTINCT app_user.id, app_user.omi_uid
+                        FROM ella_invitation_redemptions redemption
+                        JOIN users app_user ON app_user.id = redemption.user_id
+                        WHERE redemption.invitation_id = $1
+                          AND redemption.user_mapping_state = 'mapped'
+                        ORDER BY app_user.id
+                        """,
+                        invitation_uuid,
+                    )
+                    current_owners = tuple(
+                        (owner_row["id"], str(owner_row["omi_uid"] or "")) for owner_row in current_owner_rows
+                    )
+                    if current_owners != expected_owners:
+                        raise _OwnerSetChanged()
+                    if row["state"] == "revoked":
+                        return {"receipt_id": str(row["id"]), "state": "revoked", "idempotent": True}
+                    if int(row["version"]) != expected_version:
+                        raise PilotInvitationError("receipt_stale")
+                    if row["state"] not in {"issued", "sent", "redeemed"}:
+                        raise PilotInvitationError("revoke_refused")
+                    updated = await conn.fetchrow(
+                        """
+                        UPDATE ella_invitations
+                        SET state = 'revoked', delivery_state = 'suppressed',
+                            revoked_at = $2, version = version + 1, updated_at = $2
+                        WHERE id = $1 AND version = $3
+                        RETURNING id, state, version
+                        """,
+                        row["id"],
+                        now,
+                        expected_version,
+                    )
+                    if not updated:
+                        raise PilotInvitationError("receipt_stale")
+                    await conn.execute(
+                        """
+                        UPDATE ella_invitation_capacity_reservations
+                        SET state = 'released', released_at = COALESCE(released_at, $2),
+                            version = version + 1, updated_at = $2
+                        WHERE id = $1 AND state IN ('reserved', 'consumed')
+                        """,
+                        row["capacity_reservation_id"],
+                        now,
+                    )
+                    for user_id, uid in current_owners:
+                        await invalidate_self_hosted_authority_on_connection(
+                            conn,
+                            uid=uid,
+                            user_id=user_id,
+                            invitation_id=invitation_uuid,
+                            reason="self_hosted_invitation_revoked",
+                            owner_lock=owner_locks[user_id],
+                        )
+                    await invitations._record_audit(
+                        conn,
+                        invitation_id=row["id"],
+                        uid_ref_hmac=invitations._hmac_ref(config, "uid-v1", OPERATOR_PURPOSE),
+                        source_ref_hmac=invitations._hmac_ref(config, "source-v1", environment),
+                        event_type="pilot_operator_revoked",
+                        support_code=invitations._support_code(),
+                        correlation_id=invitations._correlation_id(),
+                        metadata={
+                            "purpose": OPERATOR_PURPOSE,
+                            "content_free": True,
+                            "invalidated_users": len(current_owners),
+                        },
+                    )
+                    return {
+                        "receipt_id": str(updated["id"]),
+                        "state": str(updated["state"]),
+                        "version": int(updated["version"]),
+                        "idempotent": False,
+                        "invalidated_users": len(current_owners),
+                    }
+            except _OwnerSetChanged:
+                continue
+    raise PilotInvitationError("revoke_concurrent_change")
 
 
 async def _rotate_invitation(
@@ -631,8 +749,10 @@ async def _issue(args: argparse.Namespace) -> None:
     email = (args.email or "").strip().lower()
     expiry = None
     if args.kind == "ordinary":
-        expiry = datetime.now(timezone.utc) + timedelta(days=args.expiry_days)
-    elif args.expiry_days is not None:
+        if not args.expires_at:
+            raise PilotInvitationError("ordinary_expiry_required")
+        expiry = _absolute_expiry(args.expires_at)
+    elif args.expires_at is not None:
         raise PilotInvitationError("reviewer_expiry_forbidden")
     allowed_email_hash = _email_hash(config, email)
     code_file_ref_hmac = invitations.invitation_code_file_ref(config, args.code_output_file)
@@ -665,6 +785,14 @@ async def _issue(args: argparse.Namespace) -> None:
             environment=environment,
             config=config,
         )
+    except Exception:
+        discard_uncommitted_protected_code_file(
+            approved_root=args.approved_code_output_root,
+            code_output_file=args.code_output_file,
+            prepared=prepared,
+            expected_owner_uid=ROOT_UID,
+        )
+        raise
     finally:
         prepared = None
     _print_receipt("issue", receipt, code_output_file=args.code_output_file)
@@ -712,7 +840,7 @@ def _parser() -> argparse.ArgumentParser:
     issue = subparsers.add_parser("issue")
     issue.add_argument("--kind", required=True, choices=["ordinary", "app_review"])
     issue.add_argument("--email", default="")
-    issue.add_argument("--expiry-days", type=int)
+    issue.add_argument("--expires-at")
     issue.add_argument("--expected-environment", required=True)
     issue.add_argument("--approved-code-output-root", required=True)
     issue.add_argument("--code-output-file", required=True)
@@ -759,8 +887,6 @@ async def _revoke_and_print(args: argparse.Namespace) -> None:
 async def _main() -> None:
     _require_root()
     args = _parser().parse_args()
-    if args.command == "issue" and args.kind == "ordinary" and args.expiry_days is None:
-        args.expiry_days = 90
     await args.handler(args)
 
 

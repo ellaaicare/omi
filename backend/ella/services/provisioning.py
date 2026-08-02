@@ -25,8 +25,10 @@ from database.ella_provisioning import (
 from database.runtime_targets import (
     CLOUD_RUNTIME_MODEL,
     CLOUD_RUNTIME_PROVIDER,
+    RuntimeTargetLineage,
     SELF_HOSTED_RUNTIME_MODEL,
     SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 from ella.services.ai_consent import (
     CURRENT_POLICY_VERSION,
@@ -112,14 +114,21 @@ def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
 def _self_hosted_invitation_matches(admission: Optional[dict[str, Any]]) -> bool:
     if not admission:
         return False
-    model_allowlist = set(admission.get("model_allowlist") or [])
+    fallback_policy = admission.get("fallback_policy")
+    if isinstance(fallback_policy, str):
+        try:
+            fallback_policy = json.loads(fallback_policy)
+        except json.JSONDecodeError:
+            return False
     return bool(
         str(admission.get("consent_policy_version") or "") == CURRENT_POLICY_VERSION
         and str(admission.get("consent_processor_set_hash") or "") == CURRENT_PROCESSOR_SET_HASH
         and str(admission.get("consent_scope_version") or "") == CURRENT_SCOPE_VERSION
         and str(admission.get("consent_scope_hash") or "") == CURRENT_SCOPE_HASH
-        and SELF_HOSTED_RUNTIME_PROVIDER in set(admission.get("provider_allowlist") or [])
-        and (not model_allowlist or SELF_HOSTED_RUNTIME_MODEL in model_allowlist)
+        and list(admission.get("provider_allowlist") or []) == [SELF_HOSTED_RUNTIME_PROVIDER]
+        and list(admission.get("model_allowlist") or []) == [SELF_HOSTED_RUNTIME_MODEL]
+        and list(admission.get("mode_allowlist") or []) == list(SELF_HOSTED_RUNTIME_TARGET_MODES)
+        and fallback_policy == {"enabled": False, "order": []}
     )
 
 
@@ -468,22 +477,14 @@ class ProvisioningCoordinator:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
 
-        preexisting_binding = None
         invitation_admission = None
         if self_hosted_required:
-            # Admission must precede identity/job writes. A previously active
-            # self-hosted binding remains reconcilable without replaying its
-            # invitation, but a new binding requires current invitation and
-            # consent authority from PostgreSQL.
-            preexisting_binding = await self.repository.resolve_active_runtime(
-                identity.uid,
-                template_version=target_schema_version,
-                required_provider="hermes",
-            )
-            if not preexisting_binding:
-                invitation_admission = await self.repository.get_self_hosted_invitation_admission(identity.uid)
-                if not _self_hosted_invitation_matches(invitation_admission):
-                    raise ProvisioningError("invitation_authority_required", retryable=False)
+            # Invitation mode is itself authoritative. Even an already active
+            # binding must still resolve through the exact current invitation,
+            # entitlement, consent epoch, and lineage chain.
+            invitation_admission = await self.repository.get_self_hosted_invitation_admission(identity.uid)
+            if not _self_hosted_invitation_matches(invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
 
         await self.repository.ensure_user_identity(
             uid=identity.uid,
@@ -534,8 +535,22 @@ class ProvisioningCoordinator:
                 model=CLOUD_RUNTIME_MODEL,
             )
         else:
-            binding = preexisting_binding or await self.repository.resolve_active_runtime(
-                identity.uid, template_version=target_schema_version, required_provider="hermes"
+            binding = await self.repository.resolve_active_runtime(
+                identity.uid,
+                template_version=target_schema_version,
+                target_mode="hermes-chat" if self_hosted_required else None,
+                required_provider="hermes",
+                authority_lineage=(
+                    RuntimeTargetLineage(
+                        policy_version=CURRENT_POLICY_VERSION,
+                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+                        scope_version=CURRENT_SCOPE_VERSION,
+                        scope_hash=CURRENT_SCOPE_HASH,
+                    )
+                    if self_hosted_required
+                    else None
+                ),
+                model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
             )
         if binding:
             if cloud_required and str(binding.get("provider") or "").lower() != "hermes_cloud":
@@ -595,6 +610,17 @@ class ProvisioningCoordinator:
                 uid=identity.uid,
                 provider="hermes",
                 require_invitation_target=self_hosted_required,
+                authority_lineage=(
+                    RuntimeTargetLineage(
+                        policy_version=CURRENT_POLICY_VERSION,
+                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+                        scope_version=CURRENT_SCOPE_VERSION,
+                        scope_hash=CURRENT_SCOPE_HASH,
+                    )
+                    if self_hosted_required
+                    else None
+                ),
+                model=SELF_HOSTED_RUNTIME_MODEL,
             )
             await self.repository.update_job(
                 job_id=str(job["id"]),
@@ -614,6 +640,14 @@ class ProvisioningCoordinator:
                 retryable=exc.retryable,
                 error_code=exc.code,
                 error_detail=exc.detail,
+            )
+        except RuntimePoolClaimError as exc:
+            await self.repository.update_job(
+                job_id=str(job["id"]),
+                state="blocked",
+                stage="runtime_ready",
+                retryable=False,
+                error_code=exc.code,
             )
         except Exception:
             logger.exception("Unexpected Hermes provisioning failure for uid=%s", identity.uid)

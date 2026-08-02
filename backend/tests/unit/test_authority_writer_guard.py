@@ -28,6 +28,7 @@ EXPECTED_WRITERS = {
     ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "ensure_user_identity"),
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"),
+    ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/ella_provisioning.py", "promote_cloud_binding"),
     ("database/ella_provisioning.py", "quarantine_cloud_pool_claim"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
@@ -48,6 +49,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
     ("database/ella_provisioning.py", "cleanup_cloud_pool_binding"),
     ("database/ella_provisioning.py", "register_cloud_pool_binding"),
     ("database/invitation_operator.py", "_cleanup_locked"),
+    ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/invitations.py", "_bind_verified_identity_on_connection"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
@@ -55,6 +57,7 @@ DIRECT_LOCKED_WRITERS = EXPECTED_WRITERS - {
 }
 
 PROOF_GATED_HELPERS = {
+    ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"),
     ("database/invitation_operator.py", "_cleanup_locked"),
     ("database/invitations.py", "_redeem_locked_invitation"),
     ("database/managed_cloud_consent.py", "_quarantine_on_connection"),
@@ -92,6 +95,10 @@ REAL_POSTGRES_WRITER_COVERAGE = {
     ("database/ella_provisioning.py", "finalize_cloud_pool_claim"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",
         '"cloud_finalize"',
+    ),
+    ("database/ella_provisioning.py", "invalidate_self_hosted_authority_on_connection"): (
+        "tests/postgres/test_invitation_redemption_postgres.py",
+        "test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation",
     ),
     ("database/ella_provisioning.py", "promote_cloud_binding"): (
         "tests/postgres/test_authority_advisory_lock_postgres.py",

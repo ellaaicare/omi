@@ -45,15 +45,31 @@ The self-hosted launch lane is separate from the synthetic Hermes Cloud pilot:
   current consent authority epoch and clears `invitation_consent_pending` in
   the same PostgreSQL transaction.
 - New provisioning admission requires the exact invitation entitlement,
-  account/profile owner, current consent epoch, and reserved target. There is
-  no post-sign-in UID allowlist and no fallback to Hermes Cloud, OpenClaw, or a
+  account/profile owner, current consent epoch, v8 lineage, exact `hermes`
+  provider, `gpt-5.6-sol` model, chat/voice mode allowlists, disabled fallback,
+  and the same reserved/ready invitation target. Invitation mode remains
+  authoritative during chat/runtime resolution; there is no post-sign-in UID
+  allowlist and no fallback to Hermes Cloud, OpenClaw, shared, default, or a
   retained runtime.
+- An owner-locked transaction revalidates that complete authority chain after
+  the external provisioner returns and immediately before activation. Revoke,
+  decline, or consent-authority drift atomically revokes the invitation target
+  and entitlement, disables bindings, removes sessions, and blocks future
+  claims. Re-granting consent cannot reactivate a revoked invitation target.
+- Ordinary capacity is a transactionally advisory-locked ceiling of five
+  active non-review pilot slots. App Review has a separate, no-expiry capacity
+  reservation: at most 20 redemptions with two reserved setup slots.
 
 The root-only `pilot_invite_admin.py` operator writes the plaintext code once
 to an approved `0400` file. `issue`, `show`, `rotate`, and `revoke` print only
 content-free receipts. Rotation copies the email HMAC and policy pins inside
 one transaction, revokes/releases the previous invitation, and is idempotent
-when the protected recovery file proves the same operation.
+when the protected recovery file proves the same operation. Ordinary issuance
+requires an absolute timezone-qualified `--expires-at`; the absolute expiry is
+part of the protected recovery identity, so a lost-receipt retry using the same
+output path deterministically recovers the existing invitation. App Review
+issuance forbids an expiry. Consent remains mandatory for every redemption,
+including App Review.
 
 ## Feature gates
 
@@ -134,6 +150,10 @@ The migration is forward-only and idempotent. It adds:
 - content-free audit event types for the root-only synthetic operator lifecycle.
 - verified-email HMAC scope, explicit pending-consent entitlement/redemption
   state, and the exact reserved/ready self-hosted runtime target.
+- a phased redemption mapping for migration-011 history: unambiguous rows are
+  mapped to exact users, valid multi-redemption App Review history is retained
+  as `legacy_unmapped`, and the post-015 consent-shape constraint is validated
+  only after that classification.
 
 It does not seed codes, grants, or production users.
 

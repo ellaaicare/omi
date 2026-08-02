@@ -3,7 +3,11 @@ import uuid
 
 import pytest
 
-from database.runtime_targets import SELF_HOSTED_RUNTIME_MODEL, SELF_HOSTED_RUNTIME_PROVIDER
+from database.runtime_targets import (
+    SELF_HOSTED_RUNTIME_MODEL,
+    SELF_HOSTED_RUNTIME_PROVIDER,
+    SELF_HOSTED_RUNTIME_TARGET_MODES,
+)
 from database.ella_provisioning import (
     EllaProvisioningRepository,
     ProvisioningSchemaNotReadyError,
@@ -79,6 +83,8 @@ def _self_hosted_admission():
         "consent_scope_hash": CURRENT_SCOPE_HASH,
         "provider_allowlist": [SELF_HOSTED_RUNTIME_PROVIDER],
         "model_allowlist": [SELF_HOSTED_RUNTIME_MODEL],
+        "mode_allowlist": list(SELF_HOSTED_RUNTIME_TARGET_MODES),
+        "fallback_policy": {"enabled": False, "order": []},
     }
 
 
@@ -153,8 +159,16 @@ class FakeRepository:
         self.staged = dict(binding, omi_uid=uid, revision=1, active=False)
         return self.staged
 
-    async def activate_runtime_binding(self, *, uid, provider, require_invitation_target=False):
-        del require_invitation_target
+    async def activate_runtime_binding(
+        self,
+        *,
+        uid,
+        provider,
+        require_invitation_target=False,
+        authority_lineage=None,
+        model=SELF_HOSTED_RUNTIME_MODEL,
+    ):
+        del require_invitation_target, authority_lineage, model
         self.binding = dict(self.staged, active=True, revision=2)
         self.user_active = True
         return self.binding

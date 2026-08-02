@@ -12,6 +12,7 @@ from typing import Any, Literal
 import asyncpg
 
 from database import authority_advisory_lock, voice_canary
+from database.ella_provisioning import invalidate_self_hosted_authority_on_connection
 
 AuthorityDecision = Literal["granted", "declined", "revoked"]
 
@@ -125,6 +126,13 @@ async def _quarantine_on_connection(
         conn,
         owner_lock,
         user_id=user_id,
+    )
+    await invalidate_self_hosted_authority_on_connection(
+        conn,
+        uid=uid,
+        user_id=user_id,
+        reason=reason,
+        owner_lock=owner_lock,
     )
     await conn.execute(
         """

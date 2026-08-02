@@ -17,6 +17,9 @@ COMMENT ON COLUMN ella_invitations.allowed_email_hash IS
     'Domain-separated HMAC of a normalized verified Firebase email; NULL means any verified email may redeem.';
 
 ALTER TABLE ella_invitation_targets
+    ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+
+ALTER TABLE ella_invitation_targets
     DROP CONSTRAINT IF EXISTS ella_invitation_targets_required_profile_class_check;
 
 ALTER TABLE ella_invitation_targets
@@ -46,7 +49,8 @@ ALTER TABLE voice_entitlements
 ALTER TABLE ella_invitation_redemptions
     ADD COLUMN IF NOT EXISTS consent_pending BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)
-        ON DELETE RESTRICT ON UPDATE CASCADE;
+        ON DELETE RESTRICT ON UPDATE CASCADE,
+    ADD COLUMN IF NOT EXISTS user_mapping_state TEXT COLLATE "C";
 
 UPDATE ella_invitation_redemptions redemption
 SET user_id = candidate.user_id
@@ -64,8 +68,21 @@ FROM (
 WHERE redemption.id = candidate.redemption_id
   AND redemption.user_id IS NULL;
 
+-- Migration 011 intentionally stored only a domain-separated UID HMAC. The
+-- database does not have the application HMAC pepper, so a multi-redemption
+-- App Review invitation cannot be reconstructed per user during SQL upgrade.
+-- Map history only when it is unambiguous, mark the remaining 011-014 rows as
+-- legacy-unmapped, then require every post-015 row to carry an exact user.
+UPDATE ella_invitation_redemptions
+SET user_mapping_state = CASE
+        WHEN user_id IS NULL THEN 'legacy_unmapped'
+        ELSE 'mapped'
+    END
+WHERE user_mapping_state IS NULL;
+
 ALTER TABLE ella_invitation_redemptions
-    ALTER COLUMN user_id SET NOT NULL;
+    ALTER COLUMN user_mapping_state SET DEFAULT 'mapped',
+    ALTER COLUMN user_mapping_state SET NOT NULL;
 
 ALTER TABLE ella_invitation_redemptions
     ALTER COLUMN consent_receipt_ref_hmac DROP NOT NULL;
@@ -76,10 +93,25 @@ ALTER TABLE ella_invitation_redemptions
 ALTER TABLE ella_invitation_redemptions
     ADD CONSTRAINT ella_invitation_redemptions_consent_shape_check
     CHECK (
-        (consent_pending = TRUE AND consent_receipt_ref_hmac IS NULL)
-        OR
-        (consent_pending = FALSE AND consent_receipt_ref_hmac IS NOT NULL)
-    );
+        (
+            user_mapping_state = 'mapped'
+            AND user_id IS NOT NULL
+            AND (
+                (consent_pending = TRUE AND consent_receipt_ref_hmac IS NULL)
+                OR
+                (consent_pending = FALSE AND consent_receipt_ref_hmac IS NOT NULL)
+            )
+        )
+        OR (
+            user_mapping_state = 'legacy_unmapped'
+            AND user_id IS NULL
+            AND consent_pending = FALSE
+            AND consent_receipt_ref_hmac IS NOT NULL
+        )
+    ) NOT VALID;
+
+ALTER TABLE ella_invitation_redemptions
+    VALIDATE CONSTRAINT ella_invitation_redemptions_consent_shape_check;
 
 ALTER TABLE ella_runtime_targets
     ADD COLUMN IF NOT EXISTS invitation_target_id UUID

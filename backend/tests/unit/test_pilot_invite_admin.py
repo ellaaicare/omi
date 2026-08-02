@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ def _issue_args(root: Path, output: Path, *, email: str = "pilot@example.test") 
     return argparse.Namespace(
         kind="ordinary",
         email=email,
-        expiry_days=30,
+        expires_at=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
         expected_environment="unit-test",
         approved_code_output_root=str(root),
         code_output_file=str(output),
@@ -142,6 +143,8 @@ def test_migration_015_is_additive_and_reserves_invitation_lane():
         "provider IN ('retained', 'hermes_cloud', 'hermes')",
         "required_profile_class IN ('real', 'synthetic')",
         "pilot_operator_rotated",
+        "legacy_unmapped",
+        "revoked_at",
     ):
         assert fragment in migration
     assert "DROP TABLE" not in migration

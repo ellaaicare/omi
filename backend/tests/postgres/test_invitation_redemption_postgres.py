@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import json
 import os
@@ -20,11 +21,12 @@ from database.ella_provisioning import (
     EllaProvisioningRepository,
     RuntimePoolClaimError,
 )
+from database.runtime_targets import RuntimeTargetLineage, SELF_HOSTED_RUNTIME_MODEL
 from ella.services import ai_consent
 from ella.services import consent_authority, invitation_authority
 from ella.services.provisioning import ProvisioningCoordinator, VerifiedIdentity
 from ella.services.runtime_errors import ProvisioningError
-from ella.services.runtime_resolver import resolve_isolated_runtime
+from ella.services.runtime_resolver import resolve_isolated_runtime, runtime_authority_enabled
 from scripts import pilot_invite_admin
 
 TEST_DSN = os.getenv("ELLA_TEST_POSTGRES_DSN", "").strip()
@@ -426,6 +428,53 @@ def _set_pilot_rollout(monkeypatch, uids: Iterable[str]) -> None:
         monkeypatch.setenv(name, "false")
 
 
+def _self_hosted_lineage() -> RuntimeTargetLineage:
+    return RuntimeTargetLineage(
+        policy_version=ai_consent.CURRENT_POLICY_VERSION,
+        processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+        scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+        scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+    )
+
+
+def _self_hosted_grant(uid: str) -> managed_cloud_consent.ManagedCloudGrant:
+    return managed_cloud_consent.ManagedCloudGrant(
+        account_uid=uid,
+        profile_uid=uid,
+        consent_receipt_id=f"receipt-{uid}",
+        profile_binding_id=ai_consent.derive_profile_binding_id(
+            account_uid=uid,
+            profile_uid=uid,
+        ),
+        policy_version=ai_consent.CURRENT_POLICY_VERSION,
+        processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+        scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+        scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+    )
+
+
+def _local_runtime_binding(uid: str, *, port: int = 18701) -> dict:
+    profile_name = f"ella-{uid}"[:63]
+    return {
+        "provider": "hermes",
+        "agent_id": f"hermes-{uid}"[:63],
+        "profile_name": profile_name,
+        "workspace_root": f"/Users/ellaai/.hermes/profiles/{profile_name}/workspace",
+        "internal_gateway_url": f"http://100.76.138.56:{port}",
+        "gateway_port": port,
+        "service_label": f"com.ella.hermes.{profile_name}"[:255],
+        "credential_ref": "env:HERMES_API_SERVER_KEY",
+        "honcho_workspace": f"honcho-{uid}"[:63],
+        "observed_peer": f"observed-{uid}"[:63],
+        "observer_peer": f"observer-{uid}"[:63],
+        "template_version": "hermes-user-v1",
+        "model_policy_version": "self-hosted-pilot-v1",
+        "voice_policy_version": "ella-voice-v1",
+        "health_state": "healthy",
+        "health_receipt": {"content_free": True, "smoke_passed": True},
+    }
+
+
 def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomically():
     async def scenario(pool: asyncpg.Pool) -> None:
         uid = "firebase-self-hosted-one"
@@ -531,6 +580,13 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
             uid=uid,
             provider="hermes",
             require_invitation_target=True,
+            authority_lineage=RuntimeTargetLineage(
+                policy_version=ai_consent.CURRENT_POLICY_VERSION,
+                processor_set_hash=ai_consent.CURRENT_PROCESSOR_SET_HASH,
+                scope_version=ai_consent.CURRENT_SCOPE_VERSION,
+                scope_hash=ai_consent.CURRENT_SCOPE_HASH,
+            ),
+            model=SELF_HOSTED_RUNTIME_MODEL,
         )
         assert activated["id"] == staged["id"]
         async with pool.acquire() as conn:
@@ -547,7 +603,7 @@ def test_self_hosted_redemption_binds_verified_email_identity_and_target_atomica
         assert ready_target["runtime_binding_id"] == staged["id"]
 
         after_consent_retry = await _redeem_self_hosted(uid, email, "WXYZ-2345")
-        assert after_consent_retry["revision"] == 2
+        assert after_consent_retry["revision"] == 3
         async with pool.acquire() as conn:
             assert (
                 await conn.fetchval(
@@ -907,6 +963,566 @@ def test_pilot_reviewer_quota_expiry_and_revoke_are_fail_closed():
             )
         assert tuple(states.values()) == ("revoked", "released", 0, 1)
 
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_pilot_capacity_concurrent_sixth_denial_has_zero_side_effects_and_review_is_separate(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        root = tmp_path / "capacity-handoff"
+        root.mkdir(mode=0o700)
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).replace(microsecond=0).isoformat()
+        monkeypatch.setattr(pilot_invite_admin, "ROOT_UID", os.getuid())
+        monkeypatch.setattr(pilot_invite_admin, "_configuration", lambda: CONFIG)
+        receipts = []
+        monkeypatch.setattr(
+            pilot_invite_admin,
+            "_print_receipt",
+            lambda action, receipt, **kwargs: receipts.append((action, receipt, kwargs)),
+        )
+
+        async def issue(index: int):
+            return await pilot_invite_admin._issue(
+                argparse.Namespace(
+                    kind="ordinary",
+                    email=f"pilot-{index}@example.test",
+                    expires_at=expires_at,
+                    expected_environment="postgres-test",
+                    approved_code_output_root=str(root),
+                    code_output_file=str(root / f"pilot-{index}.code"),
+                )
+            )
+
+        results = await asyncio.gather(*(issue(index) for index in range(6)), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, pilot_invite_admin.PilotInvitationError)]
+        assert sum(result is None for result in results) == 5
+        assert len(failures) == 1
+        assert failures[0].code == "pilot_capacity_exhausted"
+        failed_index = results.index(failures[0])
+        assert not (root / f"pilot-{failed_index}.code").exists()
+        assert len(list(root.glob("pilot-*.code"))) == 5
+        assert len(list(root.glob(".synthetic-invite-recovery-*.json"))) == 5
+        assert len(receipts) == 5
+
+        async with pool.acquire() as conn:
+            counts = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM ella_invitations) AS invitations,
+                    (SELECT COUNT(*) FROM ella_invitation_capacity_reservations) AS reservations,
+                    (SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                     WHERE event_type = 'pilot_operator_issued') AS issue_audits,
+                    (SELECT COALESCE(SUM(reserved_slots), 0)
+                     FROM ella_invitation_capacity_reservations
+                     WHERE pool_key = 'self_hosted_pilot'
+                       AND state IN ('reserved', 'consumed')) AS pilot_slots
+                """
+            )
+        assert tuple(counts.values()) == (5, 5, 5, 5)
+
+        await pilot_invite_admin._issue(
+            argparse.Namespace(
+                kind="app_review",
+                email="",
+                expires_at=None,
+                expected_environment="postgres-test",
+                approved_code_output_root=str(root),
+                code_output_file=str(root / "review.code"),
+            )
+        )
+        async with pool.acquire() as conn:
+            pools = await conn.fetch(
+                """
+                SELECT pool_key, SUM(reserved_slots)::int AS slots
+                FROM ella_invitation_capacity_reservations
+                WHERE state IN ('reserved', 'consumed')
+                GROUP BY pool_key
+                ORDER BY pool_key
+                """
+            )
+        assert [(row["pool_key"], row["slots"]) for row in pools] == [
+            ("app_review", 2),
+            ("self_hosted_pilot", 5),
+        ]
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicate_or_orphan(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        del pool
+        root = tmp_path / "pilot-handoff"
+        root.mkdir(mode=0o700)
+        output = root / "stable-expiry.code"
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).replace(microsecond=0).isoformat()
+        args = argparse.Namespace(
+            kind="ordinary",
+            email="recovery@example.test",
+            expires_at=expires_at,
+            expected_environment="postgres-test",
+            approved_code_output_root=str(root),
+            code_output_file=str(output),
+        )
+        monkeypatch.setattr(pilot_invite_admin, "ROOT_UID", os.getuid())
+        monkeypatch.setattr(pilot_invite_admin, "_configuration", lambda: CONFIG)
+
+        def lose_receipt(*_args, **_kwargs):
+            raise RuntimeError("simulated_lost_receipt")
+
+        monkeypatch.setattr(pilot_invite_admin, "_print_receipt", lose_receipt)
+        with pytest.raises(RuntimeError, match="simulated_lost_receipt"):
+            await pilot_invite_admin._issue(args)
+
+        receipts = []
+        monkeypatch.setattr(
+            pilot_invite_admin,
+            "_print_receipt",
+            lambda action, receipt, **kwargs: receipts.append((action, receipt, kwargs)),
+        )
+        await pilot_invite_admin._issue(args)
+        assert receipts[0][0] == "issue"
+        assert receipts[0][1]["idempotent"] is True
+        assert output.exists()
+
+        pool = await voice_canary.get_pool()
+        async with pool.acquire() as conn:
+            counts = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM ella_invitations) AS invitations,
+                    (SELECT COUNT(*) FROM ella_invitation_capacity_reservations) AS reservations,
+                    (SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                     WHERE event_type = 'pilot_operator_issued') AS issue_audits,
+                    (SELECT COUNT(*) FROM ella_invitation_audit_receipts
+                     WHERE event_type = 'pilot_operator_idempotent_retry') AS retry_audits
+                """
+            )
+        assert tuple(counts.values()) == (1, 1, 1, 1)
+        rendered = repr(receipts)
+        assert output.read_text(encoding="ascii").strip() not in rendered
+        assert "recovery@example.test" not in rendered
+
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(monkeypatch):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "runtime-authority-user"
+        email = "runtime-authority@example.test"
+        await pilot_invite_admin._issue_invitation(
+            code="HJKM-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="b" * 64,
+            kind="ordinary",
+            email=email,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, "HJKM-3456")
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        staged = await repository.stage_runtime_binding(uid=uid, binding=_local_runtime_binding(uid))
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+
+        runtime = await resolve_isolated_runtime(
+            uid,
+            repository=repository,
+            target_mode="hermes-cloud-chat",
+        )
+        assert runtime is not None
+        assert runtime.binding_id == str(staged["id"])
+        assert runtime.provider == "hermes"
+        assert runtime.runtime_target_mode == "hermes-chat"
+        assert runtime.expected_model == SELF_HOSTED_RUNTIME_MODEL
+        assert runtime.consent_authority_epoch
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE voice_entitlements
+                SET provider_allowlist = ARRAY['hermes', 'retained']::text[]
+                WHERE uid = $1
+                """,
+                uid,
+            )
+        with pytest.raises(ProvisioningError) as drifted:
+            await resolve_isolated_runtime(
+                uid,
+                repository=repository,
+                target_mode="hermes-cloud-chat",
+            )
+        assert drifted.value.code == "self_hosted_invitation_runtime_not_provisioned"
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    assert runtime_authority_enabled("any-public-user") is True
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_self_hosted_revoke_invalidates_authority_and_blocks_reactivation(monkeypatch):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        users = (
+            ("review-revoke-a", "review-revoke-a@example.test"),
+            ("review-revoke-b", "review-revoke-b@example.test"),
+        )
+        issued = await pilot_invite_admin._issue_invitation(
+            code="JKMN-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="c" * 64,
+            kind="app_review",
+            email="",
+            expires_at=None,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        for uid, email in users:
+            await _redeem_self_hosted(uid, email, "JKMN-3456")
+            await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+
+        repository = EllaProvisioningRepository(pool)
+        staged = await repository.stage_runtime_binding(
+            uid=users[0][0],
+            binding=_local_runtime_binding(users[0][0]),
+        )
+        activated = await repository.activate_runtime_binding(
+            uid=users[0][0],
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+        async with pool.acquire() as conn:
+            entitlement_revision = await conn.fetchval(
+                "SELECT revision FROM voice_entitlements WHERE uid = $1",
+                users[0][0],
+            )
+            await conn.execute(
+                """
+                INSERT INTO voice_active_sessions (
+                    session_id, uid, correlation_id, entitlement_revision,
+                    provider, model, mode
+                ) VALUES ('review-revoke-session', $1, 'correlation', $2,
+                          'hermes', $3, 'hermes-chat')
+                """,
+                users[0][0],
+                entitlement_revision,
+                SELF_HOSTED_RUNTIME_MODEL,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ella_runtime_session_scopes (
+                    binding_id, user_id, role, channel, session_key
+                ) VALUES ($1, $2, 'user', 'chat', 'review-revoke-runtime-session')
+                """,
+                activated["id"],
+                activated["user_id"],
+            )
+            for uid, _email in users:
+                await conn.execute(
+                    """
+                    INSERT INTO ella_provisioning_jobs (
+                        user_id, target_schema_version, state, stage, retryable
+                    ) SELECT id, 'hermes-user-v1', 'retryable', 'profile_ready', TRUE
+                      FROM users WHERE omi_uid = $1
+                    ON CONFLICT (user_id, target_schema_version) DO NOTHING
+                    """,
+                    uid,
+                )
+            version = await conn.fetchval(
+                "SELECT version FROM ella_invitations WHERE id = $1::uuid",
+                issued["receipt_id"],
+            )
+
+        revoked = await pilot_invite_admin._revoke_invitation(
+            receipt_id=issued["receipt_id"],
+            expected_version=version,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        assert revoked["invalidated_users"] == 2
+        retried = await pilot_invite_admin._revoke_invitation(
+            receipt_id=issued["receipt_id"],
+            expected_version=version,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        assert retried["idempotent"] is True
+
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT state FROM ella_invitations WHERE id = $1::uuid) AS invitation_state,
+                        (SELECT reservation.state FROM ella_invitation_capacity_reservations reservation
+                     JOIN ella_invitations invitation
+                       ON invitation.capacity_reservation_id = reservation.id
+                     WHERE invitation.id = $1::uuid) AS capacity_state,
+                    (SELECT COUNT(*) FROM voice_entitlements
+                     WHERE uid = ANY($2::text[]) AND status = 'revoked') AS revoked_entitlements,
+                    (SELECT COUNT(*) FROM ella_runtime_targets target
+                     JOIN ella_invitation_targets invitation_target
+                       ON invitation_target.id = target.invitation_target_id
+                     WHERE invitation_target.invitation_id = $1::uuid
+                       AND target.status = 'revoked') AS revoked_targets,
+                    (SELECT COUNT(*) FROM ella_invitation_targets
+                     WHERE invitation_id = $1::uuid AND revoked_at IS NOT NULL) AS revoked_invitation_targets,
+                    (SELECT COUNT(*) FROM voice_active_sessions
+                     WHERE uid = ANY($2::text[])) AS voice_sessions,
+                    (SELECT COUNT(*) FROM ella_runtime_session_scopes
+                     WHERE binding_id = $3) AS runtime_sessions,
+                    (SELECT COUNT(*) FROM ella_runtime_bindings
+                     WHERE id = $3 AND active = FALSE AND status = 'disabled') AS disabled_bindings,
+                    (SELECT COUNT(*) FROM ella_provisioning_jobs job
+                     JOIN users app_user ON app_user.id = job.user_id
+                     WHERE app_user.omi_uid = ANY($2::text[]) AND job.state = 'blocked') AS blocked_jobs
+                """,
+                issued["receipt_id"],
+                [uid for uid, _email in users],
+                staged["id"],
+            )
+        assert tuple(state.values()) == ("revoked", "released", 2, 2, 2, 0, 0, 1, 2)
+
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(users[0][0]))
+        with pytest.raises((RuntimePoolClaimError, RuntimeError)):
+            await repository.activate_runtime_binding(
+                uid=users[0][0],
+                provider="hermes",
+                require_invitation_target=True,
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+        with pytest.raises(ProvisioningError):
+            await resolve_isolated_runtime(
+                users[0][0],
+                repository=repository,
+                target_mode="hermes-cloud-chat",
+            )
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    asyncio.run(_run_with_database(scenario))
+
+
+@pytest.mark.parametrize(
+    ("authority_change", "code"),
+    (("declined", "MNPQ-3456"), ("grant_drift", "NPQR-3456")),
+)
+def test_self_hosted_consent_authority_change_invalidates_runtime(
+    monkeypatch,
+    authority_change,
+    code,
+):
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = f"self-hosted-{authority_change}"
+        email = f"{uid}@example.test"
+        await pilot_invite_admin._issue_invitation(
+            code=code,
+            code_file_existed=False,
+            code_file_ref_hmac="e" * 64,
+            kind="ordinary",
+            email=email,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, code)
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        activated = await repository.stage_runtime_binding(
+            uid=uid,
+            binding=_local_runtime_binding(uid),
+        )
+        await repository.activate_runtime_binding(
+            uid=uid,
+            provider="hermes",
+            require_invitation_target=True,
+            authority_lineage=_self_hosted_lineage(),
+            model=SELF_HOSTED_RUNTIME_MODEL,
+        )
+
+        if authority_change == "declined":
+            await managed_cloud_consent.synchronize_denial(uid=uid, decision="declined")
+        else:
+            changed = _self_hosted_grant(uid)
+            await managed_cloud_consent.synchronize_grant(
+                grant=managed_cloud_consent.ManagedCloudGrant(
+                    account_uid=changed.account_uid,
+                    profile_uid=changed.profile_uid,
+                    consent_receipt_id=f"{changed.consent_receipt_id}-changed",
+                    profile_binding_id=changed.profile_binding_id,
+                    policy_version=changed.policy_version,
+                    processor_set_hash=changed.processor_set_hash,
+                    scope_version=changed.scope_version,
+                    scope_hash=changed.scope_hash,
+                )
+            )
+
+        assert await repository.get_self_hosted_invitation_admission(uid) is None
+        with pytest.raises((RuntimePoolClaimError, RuntimeError)):
+            await repository.activate_runtime_binding(
+                uid=uid,
+                provider="hermes",
+                require_invitation_target=True,
+                authority_lineage=_self_hosted_lineage(),
+                model=SELF_HOSTED_RUNTIME_MODEL,
+            )
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT status FROM voice_entitlements WHERE uid = $1) AS entitlement_status,
+                    (SELECT target.status FROM ella_runtime_targets target
+                     JOIN users app_user ON app_user.id = target.account_user_id
+                     WHERE app_user.omi_uid = $1 AND target.provider = 'hermes') AS target_status,
+                    (SELECT COUNT(*) FROM ella_invitation_targets invitation_target
+                     JOIN ella_invitation_redemptions redemption
+                       ON redemption.invitation_target_id = invitation_target.id
+                     JOIN users app_user ON app_user.id = redemption.user_id
+                     WHERE app_user.omi_uid = $1
+                       AND invitation_target.revoked_at IS NOT NULL) AS revoked_targets,
+                    (SELECT COUNT(*) FROM ella_runtime_bindings
+                     WHERE id = $2 AND active = FALSE AND status = 'disabled') AS disabled_bindings
+                """,
+                uid,
+                activated["id"],
+            )
+        assert tuple(state.values()) == ("revoked", "revoked", 1, 1)
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
+    asyncio.run(_run_with_database(scenario))
+
+
+def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypatch):
+    class ControlledProvisionClient:
+        def __init__(self, receipt):
+            self.receipt = receipt
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def provision(self, identity, target_schema_version):
+            del identity, target_schema_version
+            self.started.set()
+            await self.release.wait()
+            return self.receipt
+
+    async def scenario(pool: asyncpg.Pool) -> None:
+        uid = "post-provider-race"
+        email = "post-provider-race@example.test"
+        issued = await pilot_invite_admin._issue_invitation(
+            code="KMNP-3456",
+            code_file_existed=False,
+            code_file_ref_hmac="d" * 64,
+            kind="ordinary",
+            email=email,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        await _redeem_self_hosted(uid, email, "KMNP-3456")
+        await managed_cloud_consent.synchronize_grant(grant=_self_hosted_grant(uid))
+        repository = EllaProvisioningRepository(pool)
+        async with pool.acquire() as conn:
+            job = await conn.fetchrow(
+                """
+                INSERT INTO ella_provisioning_jobs (
+                    user_id, target_schema_version, state, stage, retryable
+                ) SELECT id, 'hermes-user-v1', 'provisioning', 'profile_ready', TRUE
+                  FROM users WHERE omi_uid = $1
+                RETURNING *
+                """,
+                uid,
+            )
+            version = await conn.fetchval(
+                "SELECT version FROM ella_invitations WHERE id = $1::uuid",
+                issued["receipt_id"],
+            )
+        client = ControlledProvisionClient(
+            {
+                "mode": "hermes_only",
+                "provisionMode": "hermes_only",
+                "runtimeBinding": {
+                    **_local_runtime_binding(uid),
+                    "profileName": _local_runtime_binding(uid)["profile_name"],
+                    "agentId": _local_runtime_binding(uid)["agent_id"],
+                    "workspaceRoot": _local_runtime_binding(uid)["workspace_root"],
+                    "internalGatewayUrl": _local_runtime_binding(uid)["internal_gateway_url"],
+                    "gatewayPort": _local_runtime_binding(uid)["gateway_port"],
+                    "serviceLabel": _local_runtime_binding(uid)["service_label"],
+                    "credentialRef": _local_runtime_binding(uid)["credential_ref"],
+                    "healthState": "healthy",
+                    "smokePassed": True,
+                    "healthReceipt": {"content_free": True, "smoke_passed": True},
+                    "templateVersion": "hermes-user-v1",
+                    "modelPolicyVersion": "self-hosted-pilot-v1",
+                    "voicePolicyVersion": "ella-voice-v1",
+                    "honcho": {
+                        "workspace": _local_runtime_binding(uid)["honcho_workspace"],
+                        "observedPeer": _local_runtime_binding(uid)["observed_peer"],
+                        "observerPeer": _local_runtime_binding(uid)["observer_peer"],
+                    },
+                },
+            }
+        )
+        coordinator = ProvisioningCoordinator(repository, client)
+        task = asyncio.create_task(
+            coordinator.process_claimed_job(
+                job=dict(job),
+                identity=VerifiedIdentity(uid, email, "Race User", "UTC"),
+            )
+        )
+        await client.started.wait()
+        await pilot_invite_admin._revoke_invitation(
+            receipt_id=issued["receipt_id"],
+            expected_version=version,
+            environment="postgres-test",
+            config=CONFIG,
+        )
+        client.release.set()
+        await task
+
+        async with pool.acquire() as conn:
+            state = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT status FROM voice_entitlements WHERE uid = $1) AS entitlement_status,
+                    (SELECT target.status FROM ella_runtime_targets target
+                     JOIN users app_user ON app_user.id = target.account_user_id
+                     WHERE app_user.omi_uid = $1 AND target.provider = 'hermes') AS target_status,
+                    (SELECT COUNT(*) FROM ella_runtime_bindings binding
+                     JOIN users app_user ON app_user.id = binding.user_id
+                     WHERE app_user.omi_uid = $1 AND binding.provider = 'hermes'
+                       AND binding.active = TRUE) AS active_bindings,
+                    (SELECT state FROM ella_provisioning_jobs WHERE id = $2) AS job_state,
+                    (SELECT retryable FROM ella_provisioning_jobs WHERE id = $2) AS job_retryable
+                """,
+                uid,
+                job["id"],
+            )
+        assert tuple(state.values()) == ("revoked", "revoked", 0, "blocked", False)
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("HERMES_API_SERVER_KEY", "unit-test-gateway-secret")
     asyncio.run(_run_with_database(scenario))
 
 
