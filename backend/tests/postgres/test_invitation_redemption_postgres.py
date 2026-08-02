@@ -1064,7 +1064,6 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
     monkeypatch,
 ):
     async def scenario(pool: asyncpg.Pool) -> None:
-        del pool
         root = tmp_path / "pilot-handoff"
         root.mkdir(mode=0o700)
         output = root / "stable-expiry.code"
@@ -1083,14 +1082,20 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
         monkeypatch.setattr(pilot_invite_admin, "ROOT_UID", os.getuid())
         monkeypatch.setattr(pilot_invite_admin, "_configuration", lambda: CONFIG)
 
-        def lose_receipt(*_args, **_kwargs):
-            raise RuntimeError("simulated_lost_receipt")
+        issue_invitation = pilot_invite_admin._issue_invitation
 
-        monkeypatch.setattr(pilot_invite_admin, "_print_receipt", lose_receipt)
-        with pytest.raises(RuntimeError, match="simulated_lost_receipt"):
+        async def commit_then_lose_ack(**kwargs):
+            await issue_invitation(**kwargs)
+            raise ConnectionError("simulated_lost_commit_ack")
+
+        monkeypatch.setattr(pilot_invite_admin, "_issue_invitation", commit_then_lose_ack)
+        with pytest.raises(ConnectionError, match="simulated_lost_commit_ack"):
             await pilot_invite_admin._issue(args)
+        assert output.exists()
+        assert len(list(root.glob(".synthetic-invite-recovery-*.json"))) == 1
 
         receipts = []
+        monkeypatch.setattr(pilot_invite_admin, "_issue_invitation", issue_invitation)
         monkeypatch.setattr(
             pilot_invite_admin,
             "_print_receipt",
@@ -1101,7 +1106,6 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
         assert receipts[0][1]["idempotent"] is True
         assert output.exists()
 
-        pool = await voice_canary.get_pool()
         async with pool.acquire() as conn:
             counts = await conn.fetchrow(
                 """
@@ -1111,10 +1115,15 @@ def test_pilot_issue_absolute_expiry_recovers_ambiguous_outcome_without_duplicat
                     (SELECT COUNT(*) FROM ella_invitation_audit_receipts
                      WHERE event_type = 'pilot_operator_issued') AS issue_audits,
                     (SELECT COUNT(*) FROM ella_invitation_audit_receipts
-                     WHERE event_type = 'pilot_operator_idempotent_retry') AS retry_audits
+                     WHERE event_type = 'pilot_operator_idempotent_retry') AS retry_audits,
+                    (SELECT COUNT(*)
+                     FROM ella_invitation_capacity_reservations reservation
+                     LEFT JOIN ella_invitations invitation
+                       ON invitation.capacity_reservation_id = reservation.id
+                     WHERE invitation.id IS NULL) AS orphan_reservations
                 """
             )
-        assert tuple(counts.values()) == (1, 1, 1, 1)
+        assert tuple(counts.values()) == (1, 1, 1, 1, 0)
         rendered = repr(receipts)
         assert output.read_text(encoding="ascii").strip() not in rendered
         assert "recovery@example.test" not in rendered

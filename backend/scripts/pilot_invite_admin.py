@@ -47,6 +47,7 @@ PILOT_CAPACITY_LOCK = "self-hosted-pilot-capacity-v1"
 SAFE_CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_EMAIL_INPUT_BYTES = 320
 EMAIL_INPUT_ALLOWED_MODES = {0o400, 0o600}
+TRANSACTION_OUTCOME_UNKNOWN_SQLSTATES = {"40003"}
 
 
 class PilotInvitationError(RuntimeError):
@@ -57,6 +58,19 @@ class PilotInvitationError(RuntimeError):
 
 class _OwnerSetChanged(RuntimeError):
     pass
+
+
+def _issue_failure_proves_non_commit(exc: Exception) -> bool:
+    """Return true only when retrying with a new code cannot orphan a commit."""
+    if isinstance(exc, PilotInvitationError):
+        return True
+    sqlstate = getattr(exc, "sqlstate", None)
+    return bool(
+        isinstance(sqlstate, str)
+        and re.fullmatch(r"[0-9A-Z]{5}", sqlstate)
+        and not sqlstate.startswith("08")
+        and sqlstate not in TRANSACTION_OUTCOME_UNKNOWN_SQLSTATES
+    )
 
 
 def _require_root() -> None:
@@ -867,13 +881,14 @@ async def _issue(args: argparse.Namespace) -> None:
             environment=environment,
             config=config,
         )
-    except Exception:
-        discard_uncommitted_protected_code_file(
-            approved_root=args.approved_code_output_root,
-            code_output_file=args.code_output_file,
-            prepared=prepared,
-            expected_owner_uid=ROOT_UID,
-        )
+    except Exception as exc:
+        if _issue_failure_proves_non_commit(exc):
+            discard_uncommitted_protected_code_file(
+                approved_root=args.approved_code_output_root,
+                code_output_file=args.code_output_file,
+                prepared=prepared,
+                expected_owner_uid=ROOT_UID,
+            )
         raise
     finally:
         prepared = None

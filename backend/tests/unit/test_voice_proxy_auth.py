@@ -348,8 +348,13 @@ def test_voice_proxy_rechecks_current_consent_after_token_issuance(monkeypatch):
 
 
 def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
-    runtime = SimpleNamespace(runtime_target_mode="hermes-voice")
+    runtime = SimpleNamespace(
+        agent_id="isolated-agent-a",
+        revision=7,
+        runtime_target_mode="hermes-voice",
+    )
     resolved = []
+    provider_http_calls = []
 
     async def resolve(uid, **kwargs):
         resolved.append((uid, kwargs))
@@ -391,6 +396,73 @@ def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
 
     assert current is runtime
     assert resolved == [("uid-a", {"target_mode": "hermes-voice"})]
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *args, **kwargs):
+            provider_http_calls.append(("forbidden", args, kwargs))
+            raise AssertionError("provider HTTP must not be constructed for a session mismatch")
+
+    monkeypatch.setattr(voice.httpx, "AsyncClient", ForbiddenAsyncClient)
+    with pytest.raises(HTTPException) as mismatch:
+        asyncio.run(
+            voice.execute_voice_tool(
+                _request(
+                    {
+                        "uid": "uid-a",
+                        "session_id": "attacker-selected-session",
+                        "tool_name": "ask_ella",
+                        "arguments": {"query": "hello"},
+                    },
+                    token=_token("uid-a", provider="hermes", voice_mode="hermes-voice"),
+                    service_token="test-proxy-secret",
+                )
+            )
+        )
+    assert mismatch.value.status_code == 403
+    assert mismatch.value.detail == {"code": "voice_session_claim_mismatch"}
+    assert provider_http_calls == []
+    assert resolved == [("uid-a", {"target_mode": "hermes-voice"})]
+
+    class ProviderResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"answer": "synthetic answer"}
+
+    class RecordingAsyncClient:
+        def __init__(self, *args, **kwargs):
+            provider_http_calls.append(("init", args, kwargs))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, *, headers, json):
+            provider_http_calls.append(("post", url, headers, json))
+            return ProviderResponse()
+
+    monkeypatch.setattr(voice.httpx, "AsyncClient", RecordingAsyncClient)
+    result = asyncio.run(
+        voice.execute_voice_tool(
+            _request(
+                {
+                    "uid": "uid-a",
+                    "session_id": "session-uid-a",
+                    "tool_name": "ask_ella",
+                    "arguments": {"query": "hello"},
+                },
+                token=_token("uid-a", provider="hermes", voice_mode="hermes-voice"),
+                service_token="test-proxy-secret",
+            )
+        )
+    )
+    assert result["answer"] == "synthetic answer"
+    posts = [call for call in provider_http_calls if call[0] == "post"]
+    assert len(posts) == 1
+    assert posts[0][3]["session_id"] == "session-uid-a"
 
 
 @pytest.mark.parametrize(
@@ -748,8 +820,7 @@ def test_cloud_context_never_calls_mini_workspace_api(monkeypatch):
 
     assert result["runtime"]["provider"] == "hermes_cloud"
     assert (
-        result["runtime"]["workspace_residency"]
-        == "canonical_postgres+hermes_cloud_profile_memory+hermes_cloud_policy"
+        result["runtime"]["workspace_residency"] == "canonical_postgres+hermes_cloud_profile_memory+hermes_cloud_policy"
     )
     assert result["soul"] == ""
     assert result["user_profile"] == ""

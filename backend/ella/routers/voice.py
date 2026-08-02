@@ -2010,6 +2010,9 @@ async def execute_voice_tool(request: Request):
         raise HTTPException(status_code=400, detail={"code": "uid_required"})
 
     principal = authenticate_voice_proxy_request(request, uid)
+    requested_session_id = str(body.get("session_id") or "").strip()
+    if requested_session_id and requested_session_id != principal.session_id:
+        raise HTTPException(status_code=403, detail={"code": "voice_session_claim_mismatch"})
     runtime = await _resolve_voice_runtime(principal)
     if not runtime:
         raise HTTPException(status_code=409, detail={"code": "isolated_runtime_required"})
@@ -2031,7 +2034,7 @@ async def execute_voice_tool(request: Request):
                 headers=_hermes_workspace_headers(principal.uid),
                 json={
                     "prompt": prompt,
-                    "session_id": str(body.get("session_id") or principal.session_id),
+                    "session_id": principal.session_id,
                     "max_tokens": 320,
                 },
             )
