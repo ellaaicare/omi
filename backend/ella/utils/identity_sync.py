@@ -3,7 +3,7 @@
 Identity Sync — Sync-on-write helpers + daily reconciliation safety net.
 
 PRIMARY SYNC happens at write-time:
-    - Dashboard API routes call syncIdentityToOpenClaw() (TypeScript)
+    - Dashboard API routes call the corresponding Hermes identity sync
     - auto_provision.py sends full identity data during provisioning
     - OMI backend can call sync_user_identity() after user profile changes
 
@@ -25,11 +25,12 @@ Environment variables:
     ELLA_POSTGRES_USER       (default: postgres)
     ELLA_POSTGRES_PASSWORD   (default: postgres)
     ELLA_POSTGRES_DB         (default: ella_ai)
-    ELLA_PROVISION_API_URL   (default: http://100.76.138.56:8200)
-    ELLA_PROVISION_API_TOKEN (default: empty)
+    ELLA_HERMES_PROVISION_API_URL   (default: http://100.76.138.56:8210)
+    ELLA_HERMES_PROVISION_API_TOKEN (required)
     IDENTITY_SYNC_STATE_FILE (default: ~/.ella-identity-sync-state.json)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -40,12 +41,16 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import httpx
+except ImportError:  # pragma: no cover - the synchronous helper remains stdlib-only
+    httpx = None
+
+from ella.utils.provision_authority import ProvisionAuthorityError, hermes_provision_authority
+
 logger = logging.getLogger("ella.identity_sync")
 
 # --- Configuration ---
-
-PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
 POSTGRES_HOST = os.getenv("ELLA_POSTGRES_HOST", "127.0.0.1")
 POSTGRES_PORT = int(os.getenv("ELLA_POSTGRES_PORT", "5433"))
@@ -53,16 +58,14 @@ POSTGRES_USER = os.getenv("ELLA_POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("ELLA_POSTGRES_PASSWORD", "postgres")
 POSTGRES_DB = os.getenv("ELLA_POSTGRES_DB", "ella_ai")
 
-STATE_FILE = Path(os.getenv(
-    "IDENTITY_SYNC_STATE_FILE",
-    os.path.expanduser("~/.ella-identity-sync-state.json")
-))
+STATE_FILE = Path(os.getenv("IDENTITY_SYNC_STATE_FILE", os.path.expanduser("~/.ella-identity-sync-state.json")))
 
 
 # --- Sync-on-Write API (stdlib only — no external deps) ---
 
+
 def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> dict:
-    """Sync a user's identity data to OpenClaw via Provision API.
+    """Sync a user's identity data to the isolated Hermes provision authority.
 
     Calls POST /identity-sync with the given phone/email. Merges with
     existing identity links (doesn't replace).
@@ -90,11 +93,17 @@ def sync_user_identity(omi_uid: str, phone: str = None, email: str = None) -> di
     if email:
         payload["email"] = email
 
-    headers = {"Content-Type": "application/json"}
-    if PROVISION_API_TOKEN:
-        headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
+    try:
+        authority = hermes_provision_authority()
+    except ProvisionAuthorityError as exc:
+        logger.error("Hermes identity authority is unavailable for uid=%s: %s", omi_uid, exc.code)
+        return {"status": "error", "error": exc.code}
 
-    url = f"{PROVISION_API_URL}/identity-sync"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {authority.token}",
+    }
+    url = f"{authority.base_url}/identity-sync"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
@@ -152,14 +161,23 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
     if email:
         payload["email"] = email
 
-    headers = {"Content-Type": "application/json"}
-    if PROVISION_API_TOKEN:
-        headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
+    try:
+        authority = hermes_provision_authority()
+    except ProvisionAuthorityError as exc:
+        logger.error("Hermes identity authority is unavailable for uid=%s: %s", omi_uid, exc.code)
+        return {"status": "error", "error": exc.code}
 
-    url = f"{PROVISION_API_URL}/identity-sync"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {authority.token}",
+    }
+    url = f"{authority.base_url}/identity-sync"
+
+    if httpx is None:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: sync_user_identity(omi_uid, phone=phone, email=email))
 
     try:
-        import httpx
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code == 404:
@@ -168,19 +186,13 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
             result = resp.json()
             logger.info(f"Identity synced for {omi_uid}: {result.get('changed', 'unknown')}")
             return result
-    except ImportError:
-        # No httpx — fall back to sync in thread
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: sync_user_identity(omi_uid, phone=phone, email=email)
-        )
     except Exception as e:
         logger.warning(f"Async identity sync failed for {omi_uid}: {e}")
         return {"status": "error", "error": str(e)}
 
 
 # --- Daily Reconciliation (Safety Net) ---
+
 
 def _load_state() -> dict:
     if not STATE_FILE.exists():
@@ -215,9 +227,12 @@ def _get_changed_users(last_check: str) -> list:
     try:
         import psycopg2
         import psycopg2.extras
+
         conn = psycopg2.connect(
-            host=POSTGRES_HOST, port=POSTGRES_PORT,
-            user=POSTGRES_USER, password=POSTGRES_PASSWORD,
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
             dbname=POSTGRES_DB,
         )
         try:
@@ -231,9 +246,12 @@ def _get_changed_users(last_check: str) -> list:
 
     try:
         import pg8000
+
         conn = pg8000.connect(
-            host=POSTGRES_HOST, port=POSTGRES_PORT,
-            user=POSTGRES_USER, password=POSTGRES_PASSWORD,
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD,
             database=POSTGRES_DB,
         )
         try:

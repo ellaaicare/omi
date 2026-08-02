@@ -5,7 +5,7 @@ When a user connects via /v4/listen websocket and has no agent cluster,
 this module automatically provisions one via the Ella provision API.
 
 Also handles identity sync — writing phone/email back to the users table
-after provisioning so OpenClaw identity links stay up to date.
+after provisioning so isolated Hermes identity links stay up to date.
 """
 
 import json
@@ -17,13 +17,12 @@ from typing import Optional
 import asyncpg
 import httpx
 
+from ella.utils.provision_authority import ProvisionAuthorityError, hermes_provision_authority
+
 logger = logging.getLogger("ella.auto_provision")
 
 # Database connection pool (shared pattern from resolve.py)
 _pool: Optional[asyncpg.Pool] = None
-
-PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:8200")
-PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
 
 def _slugify_user_id(name: str, uid: str) -> str:
@@ -141,7 +140,9 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
         if not row:
             logger.warning(f"User {uid} not found in DB, falling back to minimal provision")
             # Fall back to minimal provision (email/phone may not be available)
-            return await _provision_with_payload(uid, {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name})
+            return await _provision_with_payload(
+                uid, {"userId": _slugify_user_id(name, uid), "omiUid": uid, "label": name}
+            )
 
         # 2. Extract identity data
         email = row["email"]
@@ -211,13 +212,12 @@ async def _provision_with_payload(uid: str, payload: dict) -> dict:
         dict with success/error/cluster keys
     """
     try:
-        headers = {}
-        if PROVISION_API_TOKEN:
-            headers["Authorization"] = f"Bearer {PROVISION_API_TOKEN}"
+        authority = hermes_provision_authority()
+        headers = {"Authorization": f"Bearer {authority.token}"}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{PROVISION_API_URL}/provision",
+                f"{authority.base_url}/provision",
                 headers=headers,
                 json=payload,
             )
@@ -231,6 +231,9 @@ async def _provision_with_payload(uid: str, payload: dict) -> dict:
                 logger.warning(f"Auto-provision failed for uid={uid}: {error_msg}")
                 return {"success": False, "error": error_msg}
 
+    except ProvisionAuthorityError as exc:
+        logger.error("Hermes provision authority is unavailable for uid=%s: %s", uid, exc.code)
+        return {"success": False, "error": exc.code}
     except httpx.TimeoutException:
         error_msg = "Provision API timeout"
         logger.error(f"Auto-provision timeout for uid={uid}")
