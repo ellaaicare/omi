@@ -15,12 +15,14 @@ import 'package:omi/ella/pages/ella_care_team_page.dart';
 import 'package:omi/ella/pages/alert_channels_page.dart';
 import 'package:omi/ella/pages/ella_emergency_contact_page.dart';
 import 'package:omi/ella/pages/ella_profile_page.dart';
+import 'package:omi/ella/pages/ella_workspace_page.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/pages/guardian_mode_page.dart';
 import 'package:omi/ella/services/caregiver_api.dart' as caregiver_api;
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_legal_links.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
 import 'package:omi/ella/widgets/ella_settings_row.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
@@ -29,7 +31,6 @@ import 'package:omi/pages/settings/delete_account.dart';
 import 'package:omi/pages/settings/settings_drawer.dart';
 import 'package:omi/providers/device_provider.dart';
 import 'package:omi/providers/capture_provider.dart';
-import 'package:omi/providers/developer_mode_provider.dart';
 import 'package:omi/providers/ella_provisioning_provider.dart';
 import 'package:omi/providers/user_provider.dart';
 import 'package:omi/utils/auth_utils.dart';
@@ -37,7 +38,10 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 
 class EllaSettingsPage extends StatefulWidget {
-  const EllaSettingsPage({super.key});
+  const EllaSettingsPage({super.key, this.runtimeSideEffectsEnabled = true, this.authenticatedUidOverride});
+
+  final bool runtimeSideEffectsEnabled;
+  final String? authenticatedUidOverride;
 
   @override
   State<EllaSettingsPage> createState() => _EllaSettingsPageState();
@@ -54,8 +58,10 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   @override
   void initState() {
     super.initState();
-    _loadData();
-    _loadAppVersion();
+    if (widget.runtimeSideEffectsEnabled) {
+      _loadData();
+      _loadAppVersion();
+    }
   }
 
   @override
@@ -65,11 +71,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
-      if (SharedPreferencesUtil().publicMode) {
-        final caregivers = await caregiver_api.getCaregivers();
-        if (mounted) setState(() => _caregivers = caregivers);
-        return;
-      }
+      if (!allowsGuardianCareSurface()) return;
       final results = await Future.wait([
         caregiver_api.getCaregivers(),
         caregiver_api.getEmergencyContactId(),
@@ -102,6 +104,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
   }
 
   void _unlockDeveloperSettings() {
+    if (!allowsInheritedOmiSurface()) return;
     setState(() {
       _versionTapCount += 1;
       if (_versionTapCount >= 7) _developerUnlocked = true;
@@ -206,15 +209,14 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     if (!mounted) return;
     setState(() {});
     if (!revokeSynced) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.aiConsentRevokeSyncFailed)),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.aiConsentRevokeSyncFailed)));
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final publicMode = context.watch<DeveloperModeProvider>().publicMode;
+    final showWhisperSurfaces = allowsGuardianSurface();
+    final showGuardianCareSurfaces = allowsGuardianCareSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
@@ -222,6 +224,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
     final deviceName =
         deviceProvider.presentationConnectedDevice?.name ?? deviceProvider.connectedDevice?.name ?? 'Not connected';
     final userProvider = context.watch<UserProvider>();
+    final authenticatedUid = widget.authenticatedUidOverride ?? FirebaseAuth.instance.currentUser?.uid ?? '';
 
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
@@ -253,10 +256,20 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               },
             ),
             const SizedBox(height: 8),
+            EllaSettingsRow(
+              icon: Icons.lock_person_outlined,
+              title: context.l10n.ellaWorkspaceTitle,
+              subtitle: context.l10n.ellaWorkspaceSettingsSubtitle,
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaWorkspacePage()));
+              },
+            ),
+            const SizedBox(height: 8),
 
             // Internal policy picker, only available after the developer unlock.
-            if (_developerUnlocked)
+            if (_developerUnlocked && showGuardianCareSurfaces)
               EllaSettingsRow(
+                key: const Key('guardian-mode-settings-entry'),
                 icon: Icons.shield,
                 iconColor: _guardianMode?.color ?? EllaColors.primary,
                 iconBgColor: _guardianMode?.color ?? EllaColors.primary,
@@ -287,20 +300,24 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
             ],
 
-            // CARE TEAM section
-            _buildSectionHeader(context.l10n.ellaCareTeamSection),
-            EllaSettingsRow(
-              icon: Icons.people,
-              title: context.l10n.ellaFamilyCaregivers,
-              subtitle: _caregiverCountSubtitle(),
-              onTap: () async {
-                await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaCareTeamPage()));
-                _loadData();
-              },
-            ),
-            if (!publicMode) ...[
+            if (showGuardianCareSurfaces) ...[
+              // CARE TEAM section
+              _buildSectionHeader(context.l10n.ellaCareTeamSection),
+              EllaSettingsRow(
+                key: const Key('care-team-settings-entry'),
+                icon: Icons.people,
+                title: context.l10n.ellaFamilyCaregivers,
+                subtitle: _caregiverCountSubtitle(),
+                onTap: () async {
+                  await Navigator.push(context, MaterialPageRoute(builder: (context) => const EllaCareTeamPage()));
+                  _loadData();
+                },
+              ),
+            ],
+            if (showGuardianCareSurfaces) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
+                key: const Key('emergency-contact-settings-entry'),
                 icon: Icons.emergency,
                 iconColor: EllaColors.error,
                 iconBgColor: EllaColors.error,
@@ -316,6 +333,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
               const SizedBox(height: 8),
               EllaSettingsRow(
+                key: const Key('alert-channels-settings-entry'),
                 icon: Icons.notifications_active,
                 title: context.l10n.ellaAlertChannels,
                 subtitle: context.l10n.ellaAlertChannelsSubtitle,
@@ -331,22 +349,23 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             EllaSettingsRow(
               icon: Icons.hearing,
               title: context.l10n.listeningAndConsent,
-              subtitle: SharedPreferencesUtil().hasAccountBoundAiConsent(
-                FirebaseAuth.instance.currentUser?.uid ?? '',
-              )
+              subtitle: SharedPreferencesUtil().hasAccountBoundAiConsent(authenticatedUid)
                   ? context.l10n.aiConsentAllowedStatus
                   : context.l10n.aiConsentNotAllowedStatus,
               onTap: _openListeningConsent,
             ),
-            const SizedBox(height: 8),
-            EllaSettingsRow(
-              icon: Icons.record_voice_over_rounded,
-              title: 'What Ella has said',
-              subtitle: 'Helpful things Ella has said and why',
-              onTap: () {
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
-              },
-            ),
+            if (showWhisperSurfaces) ...[
+              const SizedBox(height: 8),
+              EllaSettingsRow(
+                key: const Key('guardian-history-settings-entry'),
+                icon: Icons.record_voice_over_rounded,
+                title: 'What Ella has said',
+                subtitle: 'Helpful things Ella has said and why',
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (context) => const GuardianAlertHistoryPage()));
+                },
+              ),
+            ],
             const SizedBox(height: 8),
             EllaSettingsRow(
               icon: Icons.schedule,
@@ -410,7 +429,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             if (_appVersion.isNotEmpty)
               Center(
                 child: GestureDetector(
-                  onTap: _unlockDeveloperSettings,
+                  onTap: allowsInheritedOmiSurface() ? _unlockDeveloperSettings : null,
                   child: Text(_appVersion, style: const TextStyle(fontSize: 14, color: EllaColors.textDisabled)),
                 ),
               ),

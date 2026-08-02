@@ -14,13 +14,9 @@ Future<List<Map<String, dynamic>>> retrieveAppsGrouped({
   int limit = 10,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) return [];
   final url = '${Env.apiBaseUrl}v2/apps?offset=$offset&limit=$limit&include_reviews=$includeReviews';
-  final response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  final response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200 || response.body.isEmpty) return [];
     final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -34,12 +30,7 @@ Future<List<Map<String, dynamic>>> retrieveAppsGrouped({
       final pagination = g['pagination'] as Map<String, dynamic>? ?? {};
       final items = (g['data'] as List?) ?? [];
       final apps = App.fromJsonList(items).where((p) => !p.deleted).toList();
-      parsed.add({
-        'capability': capability,
-        'category': category,
-        'data': apps,
-        'pagination': pagination,
-      });
+      parsed.add({'capability': capability, 'category': category, 'data': apps, 'pagination': pagination});
     }
     return parsed;
   } catch (e, stackTrace) {
@@ -55,13 +46,11 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int limit = 20,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, category: null);
+  }
   final url = '${Env.apiBaseUrl}v2/apps?category=$category&offset=$offset&limit=$limit&include_reviews=$includeReviews';
-  final response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  final response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200 || response.body.isEmpty) {
       return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, category: null);
@@ -85,14 +74,12 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int limit = 20,
   bool includeReviews = false,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, capability: null);
+  }
   final url =
       '${Env.apiBaseUrl}v2/apps?capability=$capability&offset=$offset&limit=$limit&include_reviews=$includeReviews';
-  final response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  final response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200 || response.body.isEmpty) {
       return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, capability: null);
@@ -111,17 +98,12 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
 }
 
 Future<({List<Map<String, dynamic>> groups, Map<String, dynamic>? capability, int totalApps})>
-    retrieveCapabilityAppsGroupedByCategory({
-  required String capability,
-  bool includeReviews = true,
-}) async {
+    retrieveCapabilityAppsGroupedByCategory({required String capability, bool includeReviews = true}) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (groups: <Map<String, dynamic>>[], capability: null, totalApps: 0);
+  }
   final url = '${Env.apiBaseUrl}v2/apps/capability/$capability/grouped?include_reviews=$includeReviews';
-  final response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  final response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200 || response.body.isEmpty) {
       return (groups: <Map<String, dynamic>>[], capability: null, totalApps: 0);
@@ -134,11 +116,7 @@ Future<({List<Map<String, dynamic>> groups, Map<String, dynamic>? capability, in
       final items = (g['data'] as List?) ?? [];
       final apps = App.fromJsonList(items).where((p) => !p.deleted).toList();
       final count = g['count'] as int? ?? apps.length;
-      parsed.add({
-        'category': category,
-        'data': apps,
-        'count': count,
-      });
+      parsed.add({'category': category, 'data': apps, 'count': count});
     }
     final cap = (data['capability'] as Map<String, dynamic>?);
     final meta = (data['meta'] as Map<String, dynamic>?) ?? {};
@@ -162,6 +140,9 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   int offset = 0,
   int limit = 50,
 }) async {
+  if (SharedPreferencesUtil.isPublicBuild) {
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, filters: null);
+  }
   // Build URL with query parameters
   final params = <String>[];
   if (query != null && query.isNotEmpty) params.add('q=${Uri.encodeComponent(query)}');
@@ -175,20 +156,11 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   params.add('limit=$limit');
 
   final url = '${Env.apiBaseUrl}v2/apps/search?${params.join('&')}';
-  final response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  final response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
 
   try {
     if (response == null || response.statusCode != 200 || response.body.isEmpty) {
-      return (
-        apps: <App>[],
-        pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit},
-        filters: null,
-      );
+      return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, filters: null);
     }
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final items = (data['data'] as List?) ?? [];
@@ -199,21 +171,13 @@ Future<({List<App> apps, Map<String, dynamic> pagination, Map<String, dynamic>? 
   } catch (e, stackTrace) {
     Logger.debug(e.toString());
     PlatformManager.instance.crashReporter.reportCrash(e, stackTrace);
-    return (
-      apps: <App>[],
-      pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit},
-      filters: null,
-    );
+    return (apps: <App>[], pagination: {'total': 0, 'count': 0, 'offset': offset, 'limit': limit}, filters: null);
   }
 }
 
 Future<List<App>> retrievePopularApps() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/apps/popular',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  if (SharedPreferencesUtil.isPublicBuild) return [];
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/apps/popular', headers: {}, body: '', method: 'GET');
   if (response != null && response.statusCode == 200 && response.body.isNotEmpty) {
     try {
       log('apps: ${response.body}');
@@ -280,10 +244,7 @@ Future<Map<String, String>> uploadAppThumbnail(File file) async {
 
     if (response.statusCode == 200) {
       var data = jsonDecode(response.body);
-      return {
-        'thumbnail_url': data['thumbnail_url'],
-        'thumbnail_id': data['thumbnail_id'],
-      };
+      return {'thumbnail_url': data['thumbnail_url'], 'thumbnail_id': data['thumbnail_id']};
     } else {
       Logger.debug('Failed to upload thumbnail. Status code: ${response.statusCode}');
       return {};
@@ -344,12 +305,7 @@ Future<List<AppReview>> getAppReviews(String appId) async {
 }
 
 Future<String> getAppMarkdown(String appMarkdownPath) async {
-  var response = await makeApiCall(
-    url: appMarkdownPath,
-    method: 'GET',
-    headers: {},
-    body: '',
-  );
+  var response = await makeApiCall(url: appMarkdownPath, method: 'GET', headers: {}, body: '');
   return response?.body ?? '';
 }
 
@@ -394,11 +350,7 @@ Future<(bool, String, String?)> submitAppServer(File file, Map<String, dynamic> 
     } else {
       Logger.debug('Failed to submit app. Status code: ${response.statusCode}');
       if (response.body.isNotEmpty) {
-        return (
-          false,
-          jsonDecode(response.body)['detail'] as String,
-          null,
-        );
+        return (false, jsonDecode(response.body)['detail'] as String, null);
       } else {
         return (false, 'Failed to submit app. Please try again later', '');
       }
@@ -435,12 +387,7 @@ Future<bool> updateAppServer(File? file, Map<String, dynamic> appData) async {
 }
 
 Future<List<Category>> getAppCategories() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/app-categories',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/app-categories', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return [];
     log('getAppCategories: ${response.body}');
@@ -454,12 +401,7 @@ Future<List<Category>> getAppCategories() async {
 }
 
 Future<List<AppCapability>> getAppCapabilitiesServer() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/app-capabilities',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/app-capabilities', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return [];
     log('getAppCapabilities: ${response.body}');
@@ -510,12 +452,7 @@ Future changeAppVisibilityServer(String appId, bool makePublic) async {
 }
 
 Future deleteAppServer(String appId) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/apps/$appId',
-    headers: {},
-    body: '',
-    method: 'DELETE',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/apps/$appId', headers: {}, body: '', method: 'DELETE');
   try {
     if (response == null || response.statusCode != 200) return false;
     log('deleteAppServer: ${response.body}');
@@ -528,12 +465,7 @@ Future deleteAppServer(String appId) async {
 }
 
 Future<Map<String, dynamic>?> getAppDetailsServer(String appId) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/apps/$appId',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/apps/$appId', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return null;
     log('getAppDetailsServer: ${response.body}');
@@ -546,12 +478,7 @@ Future<Map<String, dynamic>?> getAppDetailsServer(String appId) async {
 }
 
 Future<List<PaymentPlan>> getPaymentPlansServer() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/app/plans',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/app/plans', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return [];
     log('getPaymentPlansServer: ${response.body}');
@@ -660,11 +587,7 @@ Future<String?> generateAppIcon(String name, String description, String category
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/app/generate-icon',
     headers: {'Content-Type': 'application/json'},
-    body: jsonEncode({
-      'name': name,
-      'description': description,
-      'category': category,
-    }),
+    body: jsonEncode({'name': name, 'description': description, 'category': category}),
     method: 'POST',
   );
   try {
@@ -684,12 +607,7 @@ Future<String?> generateAppIcon(String name, String description, String category
 
 // API Keys
 Future<List<AppApiKey>> listApiKeysServer(String appId) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/apps/$appId/keys',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/apps/$appId/keys', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return [];
     log('listApiKeysServer: ${response.body}');
@@ -702,12 +620,7 @@ Future<List<AppApiKey>> listApiKeysServer(String appId) async {
 }
 
 Future<Map<String, dynamic>> createApiKeyServer(String appId) async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/apps/$appId/keys',
-    headers: {},
-    body: '',
-    method: 'POST',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/apps/$appId/keys', headers: {}, body: '', method: 'POST');
   try {
     if (response == null || response.statusCode != 200) {
       throw Exception('Failed to create apps API key');
@@ -830,20 +743,12 @@ Future<(bool, String?)> verifyTwitterOwnership(String username, String handle, S
   if (personaId != null) {
     url += '&persona_id=$personaId';
   }
-  var response = await makeApiCall(
-    url: url,
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: url, headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return (false, null);
     log('verifyTwitterOwnership: ${response.body}');
     var data = jsonDecode(response.body);
-    return (
-      (data['verified'] ?? false) as bool,
-      data['persona_id'] as String?,
-    );
+    return ((data['verified'] ?? false) as bool, data['persona_id'] as String?);
   } catch (e, stackTrace) {
     Logger.debug(e.toString());
     PlatformManager.instance.crashReporter.reportCrash(e, stackTrace);
@@ -870,12 +775,7 @@ Future<String> getPersonaInitialMessage(String username) async {
 }
 
 Future<App?> getUserPersonaServer() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/personas',
-    headers: {},
-    body: '',
-    method: 'GET',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/personas', headers: {}, body: '', method: 'GET');
   try {
     if (response == null || response.statusCode != 200) return null;
     log('getPersonaProfile: ${response.body}');
@@ -926,12 +826,7 @@ Future<bool> migrateAppOwnerId(String oldId) async {
 }
 
 Future<Map<String, dynamic>?> getUpsertUserPersonaServer() async {
-  var response = await makeApiCall(
-    url: '${Env.apiBaseUrl}v1/user/persona',
-    headers: {},
-    body: '',
-    method: 'POST',
-  );
+  var response = await makeApiCall(url: '${Env.apiBaseUrl}v1/user/persona', headers: {}, body: '', method: 'POST');
   try {
     if (response == null || response.statusCode != 200) return null;
     log('getUpsertUserPersonaServer: ${response.body}');

@@ -8,12 +8,14 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/widgets/ai_consent_sheet.dart';
 import 'package:omi/pages/home/page.dart';
 import 'package:omi/pages/onboarding/auth.dart';
@@ -121,7 +123,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     _signInRefreshInFlight = true;
     final preferences = SharedPreferencesUtil();
     try {
-      await preferences.prepareEllaProvisioningAccount(uid);
+      await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: preferences);
       if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
       final hasCurrentConsent = await _createConsentService().refreshServerAuthority(uid: uid);
       if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
@@ -174,7 +176,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     final preferences = SharedPreferencesUtil();
     final uid = _authenticatedUid ?? '';
     if (widget.provisioningGateEnabled && uid.isNotEmpty) {
-      await preferences.prepareEllaProvisioningAccount(uid);
+      await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: preferences);
     }
     if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
     final consentService = _createConsentService();
@@ -247,6 +249,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   @override
   Widget build(BuildContext context) {
     final publicMode = SharedPreferencesUtil().publicMode;
+    final showGuardianSurfaces = allowsGuardianCareSurface(isPublicBuild: publicMode);
     if (!_isSignedIn) {
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,
@@ -270,11 +273,11 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
                 }),
               ),
               EllaConnect(
-                onNext: publicMode ? _completeOnboarding : () => _goToPage(2),
-                onSkip: publicMode ? _completeOnboarding : () => _goToPage(2),
+                onNext: showGuardianSurfaces ? () => _goToPage(2) : _completeOnboarding,
+                onSkip: showGuardianSurfaces ? () => _goToPage(2) : _completeOnboarding,
                 onBack: () => _goToPage(0),
               ),
-              if (!publicMode)
+              if (showGuardianSurfaces)
                 EllaEmergency(onComplete: _completeOnboarding, onSkip: _completeOnboarding, onBack: () => _goToPage(1)),
             ],
           ),
@@ -282,7 +285,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
             bottom: MediaQuery.of(context).padding.bottom + 8,
             left: 0,
             right: 0,
-            child: EllaProgressDots(currentPage: _currentPage, totalPages: publicMode ? 2 : 3),
+            child: EllaProgressDots(currentPage: _currentPage, totalPages: showGuardianSurfaces ? 3 : 2),
           ),
         ],
       ),

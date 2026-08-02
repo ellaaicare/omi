@@ -114,7 +114,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       channelKey,
       isAppInForeground: false,
     );
-  } else if (messageType == 'ella_notification') {
+  } else if (messageType == 'ella_notification' || EllaNotificationHandler.isGuardianPayload(data)) {
     await EllaNotificationHandler.handleEllaNotification(data, channelKey, isAppInForeground: false);
   }
 }
@@ -154,6 +154,7 @@ Future _init() async {
 
   await PlatformManager.initializeServices();
   await NotificationService.instance.initialize();
+  await EllaNotificationHandler.stopAndClearGuardianResidue();
 
   // Register FCM background message handler
   if (PlatformManager().isFCMSupported) {
@@ -163,7 +164,7 @@ Future _init() async {
   await SharedPreferencesUtil.init();
 
   bool isAuth = (await AuthService.instance.getIdToken()) != null;
-  if (F.env == Environment.prod && !SharedPreferencesUtil.isPublicBuild) {
+  if (F.env == Environment.prod || SharedPreferencesUtil.isPublicBuild) {
     SharedPreferencesUtil().clearDemoStateForAccountBuild();
   }
   if (isAuth) PlatformManager.instance.mixpanel.identify();
@@ -188,11 +189,7 @@ Future _init() async {
   };
 
   PlatformDispatcher.instance.onError = (error, stack) {
-    FirebaseCrashlytics.instance.recordError(
-      Exception(redactedCrashExceptionMessage(error)),
-      stack,
-      fatal: true,
-    );
+    FirebaseCrashlytics.instance.recordError(Exception(redactedCrashExceptionMessage(error)), stack, fatal: true);
     return true;
   };
 
@@ -206,34 +203,33 @@ Future _init() async {
 }
 
 void main() {
-  runZonedGuarded(() async {
-    // Ensure
-    WidgetsFlutterBinding.ensureInitialized();
-    if (PlatformService.isDesktop) {
-      await windowManager.ensureInitialized();
-      WindowOptions windowOptions = const WindowOptions(
-        size: Size(1300, 800),
-        minimumSize: Size(1100, 700),
-        center: true,
-        title: "Omi",
-        titleBarStyle: TitleBarStyle.hidden,
-      );
-      windowManager.waitUntilReadyToShow(windowOptions, () async {
-        await windowManager.setAsFrameless();
-        await windowManager.show();
-        await windowManager.focus();
-      });
-    }
+  runZonedGuarded(
+    () async {
+      // Ensure
+      WidgetsFlutterBinding.ensureInitialized();
+      if (PlatformService.isDesktop) {
+        await windowManager.ensureInitialized();
+        WindowOptions windowOptions = const WindowOptions(
+          size: Size(1300, 800),
+          minimumSize: Size(1100, 700),
+          center: true,
+          title: "Omi",
+          titleBarStyle: TitleBarStyle.hidden,
+        );
+        windowManager.waitUntilReadyToShow(windowOptions, () async {
+          await windowManager.setAsFrameless();
+          await windowManager.show();
+          await windowManager.focus();
+        });
+      }
 
-    await _init();
-    runApp(const MyApp());
-  }, (error, stack) {
-    FirebaseCrashlytics.instance.recordError(
-      Exception(redactedCrashExceptionMessage(error)),
-      stack,
-      fatal: true,
-    );
-  });
+      await _init();
+      runApp(const MyApp());
+    },
+    (error, stack) {
+      FirebaseCrashlytics.instance.recordError(Exception(redactedCrashExceptionMessage(error)), stack, fatal: true);
+    },
+  );
 }
 
 class MyApp extends StatefulWidget {

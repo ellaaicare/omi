@@ -1,0 +1,105 @@
+import 'dart:async';
+
+import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/ella/services/guardian_mode_service.dart';
+import 'package:omi/ella/services/v2v_client.dart';
+import 'package:omi/services/services.dart';
+import 'package:omi/services/notifications/ella_notification_handler.dart';
+import 'package:omi/utils/wal_file_manager.dart';
+
+class EllaAccountIsolationService {
+  const EllaAccountIsolationService({
+    this.stopCapture,
+    this.stopV2v,
+    this.stopGuardian,
+    this.stopServices,
+    this.quarantineLegacy,
+    this.stopNotificationAudio,
+    this.clearGuardianNotifications,
+  });
+
+  final FutureOr<void> Function()? stopCapture;
+  final FutureOr<void> Function()? stopV2v;
+  final FutureOr<void> Function()? stopGuardian;
+  final FutureOr<void> Function()? stopServices;
+  final FutureOr<void> Function()? quarantineLegacy;
+  final FutureOr<void> Function()? stopNotificationAudio;
+  final FutureOr<void> Function()? clearGuardianNotifications;
+
+  static final Map<Object, FutureOr<void> Function()> _captureProducers = {};
+
+  static Object registerCaptureProducer(FutureOr<void> Function() stop) {
+    final token = Object();
+    _captureProducers[token] = stop;
+    return token;
+  }
+
+  static void unregisterCaptureProducer(Object token) {
+    _captureProducers.remove(token);
+  }
+
+  static Future<void> _stopRegisteredCaptureProducers() async {
+    final producers = List<FutureOr<void> Function()>.from(_captureProducers.values);
+    for (final stop in producers) {
+      await stop();
+    }
+  }
+
+  Future<void> stopForAccountTransition() async {
+    SharedPreferencesUtil().invalidateAccountAuthorityForTransition();
+    EllaAccountCommitBarrier.quiesceForAccountTransition();
+    if (stopGuardian != null) {
+      await stopGuardian!.call();
+    } else {
+      await GuardianModeService().stopForAccountTransition();
+    }
+    if (stopNotificationAudio != null) {
+      await stopNotificationAudio!.call();
+    } else {
+      await EllaNotificationHandler.stopAudio();
+    }
+    if (clearGuardianNotifications != null) {
+      await clearGuardianNotifications!.call();
+    } else {
+      await EllaNotificationHandler.clearGuardianNotificationResidue();
+    }
+    await _stopRegisteredCaptureProducers();
+    if (ServiceManager.isInitialized) {
+      await ServiceManager.instance().stopCaptureForAccountTransition();
+    }
+    await stopCapture?.call();
+    if (stopV2v != null) {
+      await stopV2v!.call();
+    } else {
+      await V2VClient.disconnectActiveForAccountTransition();
+    }
+    if (stopServices != null) {
+      await stopServices!.call();
+    } else if (ServiceManager.isInitialized) {
+      await ServiceManager.instance().suspendForAccountTransition();
+    }
+    if (quarantineLegacy != null) {
+      await quarantineLegacy!.call();
+    } else {
+      await WalFileManager.quarantineUnownedFiles();
+    }
+  }
+
+  Future<void> prepareProvisioningAccount(String newUid, {SharedPreferencesUtil? preferences}) async {
+    final prefs = preferences ?? SharedPreferencesUtil();
+    final previousUid = prefs.getString('ellaProvisioningAccountUid');
+    if (previousUid.isNotEmpty && previousUid != newUid) {
+      await stopForAccountTransition();
+    } else {
+      // First-run legacy files are quarantined by WAL initialization. Cache
+      // values can be isolated here without requiring platform file plugins.
+      await prefs.quarantineLegacyAccountCaches();
+    }
+    await prefs.prepareEllaProvisioningAccount(newUid);
+  }
+
+  Future<void> resumeAfterVerifiedProvisioning() async {
+    if (ServiceManager.isInitialized) await ServiceManager.instance().start();
+  }
+}

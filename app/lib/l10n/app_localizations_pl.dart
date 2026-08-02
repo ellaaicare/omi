@@ -9189,4 +9189,58 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get ellaVoiceDemoPreview => 'Demo preview — voice is not active';
+
+  @override
+  String get ellaWorkspaceTitle => 'Ella workspace';
+
+  @override
+  String get ellaWorkspaceSettingsSubtitle => 'See which private workspace and routes are verified';
+
+  @override
+  String get ellaWorkspacePrivacyDescription =>
+      'This page helps you confirm that Ella is using the private workspace for this account. A route stays unverified until the app receives proof for that route.';
+
+  @override
+  String get ellaWorkspaceAccount => 'Signed-in account';
+
+  @override
+  String get ellaWorkspacePrivateHermes => 'Private Hermes workspace';
+
+  @override
+  String get ellaWorkspaceFingerprint => 'Workspace fingerprint';
+
+  @override
+  String get ellaWorkspaceBindingRevision => 'Binding revision';
+
+  @override
+  String get ellaWorkspaceLastVerified => 'Last server verification';
+
+  @override
+  String get ellaWorkspaceProtectedAudio => 'Protected stored audio';
+
+  @override
+  String get ellaWorkspaceProtectedAudioExplanation =>
+      'These files have no matching account proof. Ella keeps them private and will not send or remove them.';
+
+  @override
+  String get ellaWorkspaceRoutes => 'Route verification';
+
+  @override
+  String get ellaWorkspaceChatRoute => 'Chat';
+
+  @override
+  String get ellaWorkspaceVoiceRoute => 'Voice';
+
+  @override
+  String get ellaWorkspaceWhispersRoute => 'Whispers';
+
+  @override
+  String get ellaWorkspaceVerified => 'Verified';
+
+  @override
+  String get ellaWorkspaceNotVerified => 'Not verified';
+
+  @override
+  String get ellaWorkspaceRouteExplanation =>
+      'Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet.';
 }

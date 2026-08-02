@@ -3,9 +3,14 @@ import 'dart:convert';
 import 'package:uuid/uuid.dart';
 
 import 'package:omi/backend/http/shared.dart';
+import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 
-const bool isHermesProvisioningGateEnabled = bool.fromEnvironment('ELLA_HERMES_PROVISIONING_GATE', defaultValue: true);
+const bool isHermesProvisioningGateConfigured = bool.fromEnvironment(
+  'ELLA_HERMES_PROVISIONING_GATE',
+  defaultValue: true,
+);
+const bool isHermesProvisioningGateEnabled = SharedPreferencesUtil.isPublicBuild || isHermesProvisioningGateConfigured;
 
 const String ellaProvisioningTargetSchema = 'hermes-user-v1';
 

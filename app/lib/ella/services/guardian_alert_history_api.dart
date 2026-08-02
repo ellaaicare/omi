@@ -4,7 +4,9 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/ella/models/guardian_alert.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -18,13 +20,22 @@ class GuardianAlertHistoryResult {
   bool get isLocalFallback => source == GuardianAlertHistorySource.localDebugLog;
 }
 
-enum GuardianAlertHistorySource { backend, localDebugLog }
+enum GuardianAlertHistorySource { backend, localDebugLog, disabled }
 
 class GuardianAlertHistoryApi {
   GuardianAlertHistoryApi._();
 
-  static Future<GuardianAlertHistoryResult> fetch({int limit = 50}) async {
-    if (SharedPreferencesUtil().demoMode) {
+  static Future<GuardianAlertHistoryResult> fetch({
+    int limit = 50,
+    bool? guardianAllowed,
+    bool? allowLocalDebugFallback,
+    Future<GuardianAlertHistoryResult?> Function(int limit)? backendLoader,
+    Future<List<GuardianAlertRecord>> Function(int limit)? localLoader,
+  }) async {
+    if (!(guardianAllowed ?? allowsGuardianSurface())) {
+      return const GuardianAlertHistoryResult(records: [], source: GuardianAlertHistorySource.disabled);
+    }
+    if (SharedPreferencesUtil().demoMode && allowsGuardianCareSurface()) {
       return GuardianAlertHistoryResult(
         records: DemoFixtures.whispers()
             .where((record) => !record.isSystemWakeAcknowledgement)
@@ -33,10 +44,18 @@ class GuardianAlertHistoryApi {
         source: GuardianAlertHistorySource.backend,
       );
     }
-    final backend = await _fetchBackend(limit: limit);
+    final backend = await (backendLoader?.call(limit) ?? _fetchBackend(limit: limit));
     if (backend != null) return backend;
 
-    final fallback = await _fetchLocalDebugLogs(limit: limit);
+    if (!(allowLocalDebugFallback ?? allowsGuardianCareSurface())) {
+      return const GuardianAlertHistoryResult(
+        records: [],
+        source: GuardianAlertHistorySource.backend,
+        error: 'Authenticated Whispers history is unavailable.',
+      );
+    }
+
+    final fallback = await (localLoader?.call(limit) ?? _fetchLocalDebugLogs(limit: limit));
     return GuardianAlertHistoryResult(
       records: fallback,
       source: GuardianAlertHistorySource.localDebugLog,
@@ -46,7 +65,9 @@ class GuardianAlertHistoryApi {
 
   static Future<GuardianAlertHistoryResult?> _fetchBackend({required int limit}) async {
     final baseUrl = Env.apiBaseUrl;
-    if (baseUrl == null || baseUrl.isEmpty) return null;
+    final uid = SharedPreferencesUtil().uid.trim();
+    final authority = WalOwnerAuthority.active();
+    if (baseUrl == null || baseUrl.isEmpty || uid.isEmpty || authority == null || authority.uid != uid) return null;
 
     try {
       final response = await makeApiCall(
@@ -56,6 +77,9 @@ class GuardianAlertHistoryApi {
         method: 'GET',
         timeout: const Duration(seconds: 10),
         retries: 0,
+        requireAuthCheck: true,
+        expectedAuthenticatedUid: uid,
+        exactAuthority: authority,
       );
       if (response == null || response.statusCode == 404 || response.statusCode == 501) return null;
       if (response.statusCode < 200 || response.statusCode >= 300) {

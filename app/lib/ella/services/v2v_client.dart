@@ -213,6 +213,12 @@ class V2VClient {
 
   static V2VClient? _activeClient;
 
+  static Future<void> disconnectActiveForAccountTransition() async {
+    final active = _activeClient;
+    if (active != null) await active.disconnect();
+    _activeClient = null;
+  }
+
   WebSocketChannel? _channel;
   AudioRecorder? _recorder;
   StreamSubscription? _micSub;

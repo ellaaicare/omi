@@ -11,7 +11,17 @@ import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/other/validators.dart';
 
+typedef WebhooksStatusLoader = Future<dynamic> Function();
+typedef WebhookUrlLoader = Future<String> Function({required String type});
+
 class DeveloperModeProvider extends BaseProvider {
+  DeveloperModeProvider({WebhooksStatusLoader? webhooksStatusLoader, WebhookUrlLoader? webhookUrlLoader})
+      : _webhooksStatusLoader = webhooksStatusLoader ?? webhooksStatus,
+        _webhookUrlLoader = webhookUrlLoader ?? getUserWebhookUrl;
+
+  final WebhooksStatusLoader _webhooksStatusLoader;
+  final WebhookUrlLoader _webhookUrlLoader;
+
   final TextEditingController webhookOnConversationCreated = TextEditingController();
   final TextEditingController webhookOnTranscriptReceived = TextEditingController();
   final TextEditingController webhookAudioBytes = TextEditingController();
@@ -38,6 +48,7 @@ class DeveloperModeProvider extends BaseProvider {
   bool publicMode = SharedPreferencesUtil().publicMode;
 
   void onConversationEventsToggled(bool value) {
+    if (SharedPreferencesUtil.isPublicBuild) return;
     conversationEventsToggled = value;
     if (!value) {
       disableWebhook(type: 'memory_created');
@@ -48,6 +59,7 @@ class DeveloperModeProvider extends BaseProvider {
   }
 
   void onTranscriptsToggled(bool value) {
+    if (SharedPreferencesUtil.isPublicBuild) return;
     transcriptsToggled = value;
     if (!value) {
       disableWebhook(type: 'realtime_transcript');
@@ -58,6 +70,7 @@ class DeveloperModeProvider extends BaseProvider {
   }
 
   void onAudioBytesToggled(bool value) {
+    if (SharedPreferencesUtil.isPublicBuild) return;
     audioBytesToggled = value;
     if (!value) {
       disableWebhook(type: 'audio_bytes');
@@ -68,6 +81,7 @@ class DeveloperModeProvider extends BaseProvider {
   }
 
   void onDaySummaryToggled(bool value) {
+    if (SharedPreferencesUtil.isPublicBuild) return;
     daySummaryToggled = value;
     if (!value) {
       disableWebhook(type: 'day_summary');
@@ -78,7 +92,8 @@ class DeveloperModeProvider extends BaseProvider {
   }
 
   Future getWebhooksStatus() async {
-    var res = await webhooksStatus();
+    if (SharedPreferencesUtil.isPublicBuild) return;
+    var res = await _webhooksStatusLoader();
     if (res == null) {
       conversationEventsToggled = false;
       transcriptsToggled = false;
@@ -98,6 +113,10 @@ class DeveloperModeProvider extends BaseProvider {
   }
 
   Future initialize() async {
+    if (SharedPreferencesUtil.isPublicBuild) {
+      publicMode = true;
+      return;
+    }
     setIsLoading(true);
     webhookOnConversationCreated.text = SharedPreferencesUtil().webhookOnConversationCreated;
     webhookOnTranscriptReceived.text = SharedPreferencesUtil().webhookOnTranscriptReceived;
@@ -117,7 +136,7 @@ class DeveloperModeProvider extends BaseProvider {
 
     await Future.wait([
       getWebhooksStatus(),
-      getUserWebhookUrl(type: 'audio_bytes').then((url) {
+      loadWebhookUrl(type: 'audio_bytes').then((url) {
         List<dynamic> parts = url.split(',');
         if (parts.length == 2) {
           webhookAudioBytes.text = parts[0].toString();
@@ -129,15 +148,15 @@ class DeveloperModeProvider extends BaseProvider {
         SharedPreferencesUtil().webhookAudioBytes = webhookAudioBytes.text;
         SharedPreferencesUtil().webhookAudioBytesDelay = webhookAudioBytesDelay.text;
       }),
-      getUserWebhookUrl(type: 'realtime_transcript').then((url) {
+      loadWebhookUrl(type: 'realtime_transcript').then((url) {
         webhookOnTranscriptReceived.text = url;
         SharedPreferencesUtil().webhookOnTranscriptReceived = url;
       }),
-      getUserWebhookUrl(type: 'memory_created').then((url) {
+      loadWebhookUrl(type: 'memory_created').then((url) {
         webhookOnConversationCreated.text = url;
         SharedPreferencesUtil().webhookOnConversationCreated = url;
       }),
-      getUserWebhookUrl(type: 'day_summary').then((url) {
+      loadWebhookUrl(type: 'day_summary').then((url) {
         webhookDaySummary.text = url;
         SharedPreferencesUtil().webhookDaySummary = url;
       }),
@@ -147,8 +166,14 @@ class DeveloperModeProvider extends BaseProvider {
     notifyListeners();
   }
 
+  @visibleForTesting
+  Future<String> loadWebhookUrl({required String type}) async {
+    if (SharedPreferencesUtil.isPublicBuild) return '';
+    return _webhookUrlLoader(type: type);
+  }
+
   void saveSettings() async {
-    if (savingSettingsLoading) return;
+    if (SharedPreferencesUtil.isPublicBuild || savingSettingsLoading) return;
     setIsLoading(true);
     final prefs = SharedPreferencesUtil();
 
@@ -224,9 +249,7 @@ class DeveloperModeProvider extends BaseProvider {
     );
     setIsLoading(false);
     notifyListeners();
-    AppSnackbar.showSnackbar(
-      MyApp.navigatorKey.currentContext?.l10n.devModeSettingsSaved ?? 'Settings saved!',
-    );
+    AppSnackbar.showSnackbar(MyApp.navigatorKey.currentContext?.l10n.devModeSettingsSaved ?? 'Settings saved!');
   }
 
   void setIsLoading(bool value) {

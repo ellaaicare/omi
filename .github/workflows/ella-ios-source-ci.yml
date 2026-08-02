@@ -7,6 +7,19 @@ on:
       - main
     paths:
       - app/**
+      - backend/ella/routers/guardian.py
+      - backend/ella/routers/resolve.py
+      - backend/ella/routers/escalations.py
+      - backend/ella/routers/chat.py
+      - backend/ella/routers/voice.py
+      - backend/ella/routers/callbacks.py
+      - backend/tests/unit/test_ella_guardian_delivery.py
+      - backend/tests/unit/test_ella_canonical_context.py
+      - backend/tests/unit/test_ella_user_route_auth.py
+      - backend/utils/ella/exact_firebase_auth.py
+      - backend/utils/ella/scanner.py
+      - backend/utils/notifications.py
+      - backend/tests/unit/test_guardian_notification_delivery.py
       - .github/workflows/ella-ios-source-ci.yml
   workflow_dispatch:
 
@@ -69,7 +82,7 @@ jobs:
           git diff --name-only "${base_ref}...HEAD" | tee /tmp/ella-ios-source-ci-changed-files.txt
           while IFS= read -r -d '' changed_path; do
             case "$changed_path" in
-              app/*|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
+              app/*|backend/ella/routers/callbacks.py|backend/ella/routers/chat.py|backend/ella/routers/escalations.py|backend/ella/routers/guardian.py|backend/ella/routers/resolve.py|backend/ella/routers/voice.py|backend/utils/ella/exact_firebase_auth.py|backend/utils/ella/scanner.py|backend/utils/notifications.py|backend/tests/unit/test_ella_canonical_context.py|backend/tests/unit/test_ella_guardian_delivery.py|backend/tests/unit/test_ella_user_route_auth.py|backend/tests/unit/test_guardian_notification_delivery.py|docs/compliance/ella-managed-cloud-consent-v*.md|.github/workflows/ella-ios-source-ci.yml) ;;
               *)
                 echo "Ella iOS source CI rejects unrelated changed path: $changed_path" >&2
                 exit 1
@@ -101,6 +114,33 @@ jobs:
             exit 1
           fi
 
+      - name: Run executable native Guardian production manager and auth boundaries
+        working-directory: .
+        run: |
+          set -euo pipefail
+          swiftc -warnings-as-errors -D GUARDIAN_NATIVE_POLICY_TESTS \
+            app/ios/Runner/GuardianMode/GuardianNativePolicy.swift \
+            app/ios/Runner/GuardianMode/GuardianModePollingService.swift \
+            app/ios/Tests/GuardianNativePolicyTests.swift \
+            -o "$RUNNER_TEMP/guardian-native-policy-tests"
+          "$RUNNER_TEMP/guardian-native-policy-tests"
+
+      - name: Run Guardian data-only production boundary tests
+        working-directory: .
+        run: |
+          python3 -m venv "$RUNNER_TEMP/guardian-python"
+          source "$RUNNER_TEMP/guardian-python/bin/activate"
+          python -m pip install --disable-pip-version-check \
+            pytest==8.4.2 \
+            fastapi==0.112.0 \
+            firebase-admin==6.5.0 \
+            httpx==0.28.0 \
+            python-multipart==0.0.9
+          python -m unittest backend/tests/unit/test_guardian_notification_delivery.py
+          python -m pytest backend/tests/unit/test_ella_guardian_delivery.py \
+            -k 'guardian_next_audio_auth or guardian_playback_auth or guardian_mode'
+          python -m pytest backend/tests/unit/test_ella_user_route_auth.py
+
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
@@ -125,6 +165,24 @@ jobs:
       - name: Resolve pinned Dart dependencies
         run: flutter pub get --enforce-lockfile
 
+      - name: Enforce pinned Dart formatting for changed source
+        run: |
+          set -euo pipefail
+
+          changed_dart_files=()
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              app/*.dart|app/**/*.dart) changed_dart_files+=("${changed_path#app/}") ;;
+            esac
+          done < /tmp/ella-ios-source-ci-changed-files.txt
+
+          if [[ "${#changed_dart_files[@]}" -eq 0 ]]; then
+            echo "No changed Dart files require formatting."
+            exit 0
+          fi
+
+          dart format --output=none --set-exit-if-changed --line-length 120 "${changed_dart_files[@]}"
+
       - name: Verify protected test network sandbox
         run: |
           set -euo pipefail
@@ -142,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          expected_issue_test_count=32
+          expected_issue_test_count=35
           issue_test_count="$(find test/ella test/backend test/pages/onboarding/ella -type f -name '*_test.dart' | sort | tee /tmp/ella-issue-tests.txt | wc -l | tr -d ' ')"
           if [[ "$issue_test_count" -ne "$expected_issue_test_count" ]]; then
             cat /tmp/ella-issue-tests.txt
@@ -150,7 +208,7 @@ jobs:
             exit 1
           fi
 
-          expected_app_test_count=53
+          expected_app_test_count=57
           all_app_test_count="$(find test -type f -name '*_test.dart' | sort | tee /tmp/ella-all-app-tests.txt | wc -l | tr -d ' ')"
           if [[ "$all_app_test_count" -ne "$expected_app_test_count" ]]; then
             cat /tmp/ella-all-app-tests.txt
@@ -196,17 +254,21 @@ jobs:
             test/ella/services/ella_invite_link_controller_test.dart
             test/ella/services/ella_entitlement_service_test.dart
             test/ella/services/ella_entitlement_provider_test.dart
+            test/ella/account_isolation_test.dart
+            test/services/wals/wal_account_isolation_test.dart
+            test/ella/public_build_call_paths_test.dart
             test/ella/pages/ella_entitlement_gate_page_test.dart
             test/ella/pages/ella_provisioning_gate_page_test.dart
             test/ella/pages/home_provisioning_gate_test.dart
             test/ella/services/ella_provisioning_service_test.dart
+            test/ella/services/guardian_mode_api_test.dart
             test/ella/pages/ella_voice_quota_states_test.dart
             test/ella/services/v2v_client_test.dart
             test/ella/services/voice_session_startup_guard_test.dart
             test/ella/widgets/v2v_fallback_dialog_test.dart
           )
 
-          expected_focused_test_count=21
+          expected_focused_test_count=25
           if [[ "${#focused_tests[@]}" -ne "$expected_focused_test_count" ]]; then
             echo "Focused source test manifest count drifted." >&2
             exit 1
@@ -216,6 +278,37 @@ jobs:
           done
 
           /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub "${focused_tests[@]}"
+
+      - name: Run conflicting public and internal call-path configurations
+        run: |
+          set -euo pipefail
+
+          conflicting_defines=(
+            --dart-define=ELLA_CALL_PATH_CONFIG_TEST=true
+            --dart-define=ELLA_ACCESS_DEMO_GALLERY=true
+            --dart-define=DEBUG_AUTO_CALL=true
+            --dart-define=ELLA_TODAY_DESIGN_PREVIEW=true
+            --dart-define=ELLA_ENTITLEMENT_STUBS=true
+            --dart-define=ELLA_HERMES_PROVISIONING_GATE=false
+          )
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=false
+
+          /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub \
+            test/ella/public_build_call_paths_test.dart \
+            "${conflicting_defines[@]}" \
+            --dart-define=ELLA_PUBLIC_BUILD=true \
+            --dart-define=ELLA_ENTITLEMENT_GATE=true \
+            --dart-define=ELLA_GUARDIAN_ENABLED=true
 
       - name: Run full Flutter tests
         run: /usr/bin/sandbox-exec -p "$ELLA_CI_NETWORK_SANDBOX" flutter test --no-pub

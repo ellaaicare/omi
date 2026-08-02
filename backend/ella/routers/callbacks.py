@@ -51,7 +51,7 @@ from ella.services.summary_writeback import (
     InvalidConversationSummaryCategoryError,
     write_conversation_summary,
 )
-from utils.notifications import send_notification
+from utils.notifications import send_guardian_notification
 from utils.ella.canonical_omi import write_omi_canonical_event
 from utils.other.storage import storage_client
 
@@ -623,7 +623,7 @@ async def ella_notification(request: NotificationRequest):
 
     # Step 3: Send FCM push notification
     try:
-        send_notification(
+        send_guardian_notification(
             user_id=request.uid,
             title="Ella",
             body=request.message,
@@ -717,7 +717,7 @@ async def ella_emergency(request: EmergencyRequest):
             "urgency": "EMERGENCY",
             "alert_id": alert_id,
         }
-        send_notification(
+        send_guardian_notification(
             user_id=request.uid,
             title="Ella - Emergency Alert Sent",
             body="Your emergency contacts are being notified.",

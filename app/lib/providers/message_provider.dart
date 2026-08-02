@@ -21,6 +21,8 @@ import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/main.dart';
 import 'package:omi/utils/alerts/app_snackbar.dart';
@@ -33,14 +35,84 @@ import 'package:omi/utils/streaming_text_coalescer.dart';
 
 bool get _isEllaApp => true;
 
+typedef ChatAppsRetriever = Future<List<App>> Function();
+typedef EllaChatStreamSender = Stream<ServerMessageChunk> Function(String text);
+typedef VoiceChatStreamSender = Stream<ServerMessageChunk> Function(List<File> files);
+typedef VoiceTempFileSaver = Future<File> Function(List<List<int>> audioBytes, int startTime, int frameSize);
+typedef AttachmentFilePicker = Future<List<File>> Function(int remainingSlots);
+typedef MessageFileUploader = Future<List<MessageFile>?> Function(
+  List<File> files,
+  String? appId,
+  ExactAccountAuthorityVerifier exactAuthority,
+);
+typedef AskAiStreamSender = Stream<ServerMessageChunk> Function(
+  String message,
+  List<String>? fileIds,
+  ExactAccountAuthorityVerifier exactAuthority,
+);
+typedef AskAiResponseSink = FutureOr<void> Function(Map<String, dynamic> chunk);
+typedef AiConsentEnsurer = Future<bool> Function();
+
+class MessageProtectedOperation {
+  MessageProtectedOperation._(this._lease, this.generation, this._currentCheck);
+
+  final EllaAccountCommitLease _lease;
+  final int generation;
+  final bool Function() _currentCheck;
+
+  bool get isCurrent => _currentCheck();
+  String get uid => _lease.uid;
+  ExactAccountAuthorityVerifier get exactAuthority => _lease;
+}
+
 class MessageProvider extends ChangeNotifier {
   static late MethodChannel _askAIChannel;
 
-  MessageProvider() {
+  MessageProvider({
+    ChatAppsRetriever? chatAppsRetriever,
+    ActiveAccountAuthorityProvider? activeAuthority,
+    EllaChatStreamSender? ellaChatStreamSender,
+    VoiceChatStreamSender? voiceChatStreamSender,
+    VoiceTempFileSaver? voiceTempFileSaver,
+    AttachmentFilePicker? filePicker,
+    MessageFileUploader? fileUploader,
+    AskAiStreamSender? askAiStreamSender,
+    AskAiResponseSink? askAiResponseSink,
+    AiConsentEnsurer? aiConsentEnsurer,
+  })  : _chatAppsRetriever = chatAppsRetriever ?? _retrieveInstalledChatApps,
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.operationEntry,
+        _ellaChatStreamSender = ellaChatStreamSender ?? sendEllaChatStream,
+        _voiceChatStreamSender = voiceChatStreamSender ?? sendVoiceMessageStreamServer,
+        _voiceTempFileSaver = voiceTempFileSaver ?? FileUtils.saveAudioBytesToTempFile,
+        _filePicker = filePicker,
+        _fileUploader = fileUploader ??
+            ((files, appId, authority) => uploadFilesServer(files, appId: appId, exactAuthority: authority)),
+        _askAiStreamSender = askAiStreamSender ??
+            ((message, fileIds, authority) =>
+                sendMessageStreamServer(message, filesId: fileIds, exactAuthority: authority)),
+        _askAiResponseSink = askAiResponseSink,
+        _aiConsentEnsurer = aiConsentEnsurer {
     if (PlatformService.isDesktop) {
       _askAIChannel = const MethodChannel('com.omi/ask_ai');
       _askAIChannel.setMethodCallHandler(_handleAskAIMethodCall);
     }
+  }
+
+  final ChatAppsRetriever _chatAppsRetriever;
+  final ActiveAccountAuthorityProvider _activeAuthority;
+  final EllaChatStreamSender _ellaChatStreamSender;
+  final VoiceChatStreamSender _voiceChatStreamSender;
+  final VoiceTempFileSaver _voiceTempFileSaver;
+  final AttachmentFilePicker? _filePicker;
+  final MessageFileUploader _fileUploader;
+  final AskAiStreamSender _askAiStreamSender;
+  final AskAiResponseSink? _askAiResponseSink;
+  final AiConsentEnsurer? _aiConsentEnsurer;
+  int _operationGeneration = 0;
+
+  static Future<List<App>> _retrieveInstalledChatApps() async {
+    final result = await retrieveAppsSearch(installedApps: true, limit: 50);
+    return result.apps;
   }
 
   AppProvider? appProvider;
@@ -70,12 +142,15 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<bool> _ensureAiConsent() async {
+    final ensure = _aiConsentEnsurer;
+    if (ensure != null) return ensure();
     if (SharedPreferencesUtil().aiConsentAccepted) return true;
     final context = MyApp.navigatorKey.currentContext;
     return context != null && await AiConsentCoordinator.ensure(context);
   }
 
   void reset() {
+    _operationGeneration++;
     messages = [];
     isLoadingMessages = false;
     hasCachedMessages = false;
@@ -85,6 +160,7 @@ class MessageProvider extends ChangeNotifier {
     aiStreamProgress = 1.0;
     firstTimeLoadingText = '';
     chatApps = [];
+    isLoadingChatApps = false;
     selectedFiles = [];
     selectedFileTypes = [];
     uploadedFiles = [];
@@ -92,6 +168,43 @@ class MessageProvider extends ChangeNotifier {
     uploadingFiles = {};
     notifyListeners();
   }
+
+  EllaAccountCommitLease? _beginAccountCommit([VoidCallback? onInvalidated]) => EllaAccountCommitBarrier.begin(
+        authorityProvider: _activeAuthority,
+        onInvalidated: () {
+          reset();
+          onInvalidated?.call();
+        },
+      );
+
+  Future<bool> _authorizeProtectedOperation(EllaAccountCommitLease lease, int generation) async =>
+      await _ensureAiConsent() && _canCommit(lease, generation);
+
+  Future<void> runProtectedOperationAtEntry(
+    Future<void> Function(MessageProtectedOperation operation) action, {
+    VoidCallback? onInvalidated,
+  }) {
+    final lease = _beginAccountCommit(onInvalidated);
+    if (lease == null) return Future<void>.value();
+    final generation = _operationGeneration;
+    final operation = MessageProtectedOperation._(lease, generation, () => _canCommit(lease, generation));
+    return _runProtectedOperation(operation, action);
+  }
+
+  Future<void> _runProtectedOperation(
+    MessageProtectedOperation operation,
+    Future<void> Function(MessageProtectedOperation operation) action,
+  ) async {
+    try {
+      if (!await _authorizeProtectedOperation(operation._lease, operation.generation)) return;
+      await action(operation);
+    } finally {
+      operation._lease.close();
+    }
+  }
+
+  bool _canCommit(EllaAccountCommitLease lease, int generation) =>
+      generation == _operationGeneration && lease.isCurrent;
 
   void setChatApps(List<App> apps) {
     chatApps = apps;
@@ -104,24 +217,27 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<void> fetchChatApps() async {
-    if (isLoadingChatApps) return;
-
+    if (SharedPreferencesUtil.isPublicBuild || isLoadingChatApps) return;
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     isLoadingChatApps = true;
     notifyListeners();
 
     try {
-      final result = await retrieveAppsSearch(
-        installedApps: true,
-        limit: 50,
-      );
-
-      chatApps = result.apps.where((app) => app.worksWithChat()).toList();
+      final apps = await _chatAppsRetriever();
+      if (!_canCommit(lease, generation)) return;
+      chatApps = apps.where((app) => app.worksWithChat()).toList();
     } catch (e) {
+      if (!_canCommit(lease, generation)) return;
       Logger.debug('Error fetching chat apps: $e');
       chatApps = [];
     } finally {
-      isLoadingChatApps = false;
-      notifyListeners();
+      if (_canCommit(lease, generation)) {
+        isLoadingChatApps = false;
+        notifyListeners();
+      }
+      lease.close();
     }
   }
 
@@ -152,34 +268,49 @@ class MessageProvider extends ChangeNotifier {
       return;
     }
 
-    List<File> filesToAdd = [];
-    List<String> typesToAdd = [];
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
 
-    for (var file in files) {
-      String ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
-      if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext)) {
-        typesToAdd.add('image');
-      } else {
-        typesToAdd.add('file');
-      }
+    try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
+      await _addFilesWithLease(files, lease, generation);
+    } finally {
+      lease.close();
+    }
+  }
+
+  Future<void> addFilesWithinOperation(List<File> files, MessageProtectedOperation operation) async {
+    if (!operation.isCurrent || selectedFiles.length + files.length > 4) return;
+    await _addFilesWithLease(files, operation._lease, operation.generation);
+  }
+
+  Future<void> _addFilesWithLease(List<File> files, EllaAccountCommitLease lease, int generation) async {
+    final filesToAdd = <File>[];
+    final typesToAdd = <String>[];
+    for (final file in files) {
+      final ext = p.extension(file.path).toLowerCase().replaceAll('.', '');
+      typesToAdd.add(
+        ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'tiff', 'tif'].contains(ext) ? 'image' : 'file',
+      );
       filesToAdd.add(file);
     }
 
-    if (filesToAdd.isNotEmpty) {
-      selectedFiles.addAll(filesToAdd);
-      selectedFileTypes.addAll(typesToAdd);
-      try {
-        await uploadFiles(filesToAdd, appProvider?.selectedChatAppId);
-      } catch (e) {
-        Logger.debug('Failed to upload files: $e');
-        if (selectedFiles.length >= filesToAdd.length) {
-          selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
-          selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
-        }
-        AppSnackbar.showSnackbarError('File upload failed. Please try again.');
+    if (filesToAdd.isEmpty || !_canCommit(lease, generation)) return;
+    selectedFiles.addAll(filesToAdd);
+    selectedFileTypes.addAll(typesToAdd);
+    try {
+      await _uploadFilesWithLease(filesToAdd, appProvider?.selectedChatAppId, lease, generation);
+    } catch (e) {
+      if (!_canCommit(lease, generation)) return;
+      Logger.debug('Failed to upload files: $e');
+      if (selectedFiles.length >= filesToAdd.length) {
+        selectedFiles.removeRange(selectedFiles.length - filesToAdd.length, selectedFiles.length);
+        selectedFileTypes.removeRange(selectedFileTypes.length - filesToAdd.length, selectedFileTypes.length);
       }
-      notifyListeners();
+      AppSnackbar.showSnackbarError('File upload failed. Please try again.');
     }
+    if (_canCommit(lease, generation)) notifyListeners();
   }
 
   bool isFileUploading(String id) {
@@ -211,43 +342,58 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void captureImage() async {
+  Future<void> captureImage() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (PlatformService.isDesktop) {
       AppSnackbar.showSnackbarError(l10n?.msgCameraNotAvailable ?? 'Camera capture is not available on this platform');
       return;
     }
 
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
       var res = await ImagePicker().pickImage(source: ImageSource.camera);
-      if (res != null) {
-        selectedFiles.add(File(res.path));
+      if (res != null && _canCommit(lease, generation)) {
+        final file = File(res.path);
+        selectedFiles.add(file);
         selectedFileTypes.add('image');
-        var index = selectedFiles.length - 1;
-        await uploadFiles([selectedFiles[index]], appProvider?.selectedChatAppId);
-        notifyListeners();
+        await _uploadFilesWithLease([file], appProvider?.selectedChatAppId, lease, generation);
+        if (_canCommit(lease, generation)) notifyListeners();
       }
     } on PlatformException catch (e) {
+      if (!_canCommit(lease, generation)) return;
       if (e.code == 'camera_access_denied') {
         AppSnackbar.showSnackbarError(
-            l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera');
+          l10n?.msgCameraPermissionDenied ?? 'Camera permission denied. Please allow access to camera',
+        );
       } else {
         AppSnackbar.showSnackbarError(
-            l10n?.msgCameraAccessError(e.message ?? e.code) ?? 'Error accessing camera: ${e.message ?? e.code}');
+          l10n?.msgCameraAccessError(e.message ?? e.code) ?? 'Error accessing camera: ${e.message ?? e.code}',
+        );
       }
     } catch (e) {
-      AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(l10n?.msgPhotoError ?? 'Error taking photo. Please try again.');
+      }
+    } finally {
+      lease.close();
     }
   }
 
-  void selectImage() async {
+  Future<void> selectImage() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (selectedFiles.length >= 4) {
       AppSnackbar.showSnackbarError(l10n?.msgMaxImagesLimit ?? 'You can only select up to 4 images');
       return;
     }
 
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
       List<File> files = [];
 
       if (PlatformService.isDesktop) {
@@ -271,12 +417,17 @@ class MessageProvider extends ChangeNotifier {
             return;
           }
         } on PlatformException catch (e) {
-          AppSnackbar.showSnackbarError(
-              l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}');
+          if (_canCommit(lease, generation)) {
+            AppSnackbar.showSnackbarError(
+              l10n?.msgFilePickerError(e.message ?? '') ?? 'Error opening file picker: ${e.message}',
+            );
+          }
           return;
         } catch (e) {
           Logger.debug('FilePicker general error: $e');
-          AppSnackbar.showSnackbarError(l10n?.msgSelectImagesError(e.toString()) ?? 'Error selecting images: $e');
+          if (_canCommit(lease, generation)) {
+            AppSnackbar.showSnackbarError(l10n?.msgSelectImagesError(e.toString()) ?? 'Error selecting images: $e');
+          }
           return;
         }
       } else {
@@ -295,64 +446,91 @@ class MessageProvider extends ChangeNotifier {
         }
       }
 
-      if (files.isNotEmpty) {
+      if (files.isNotEmpty && _canCommit(lease, generation)) {
         selectedFiles.addAll(files);
         selectedFileTypes.addAll(files.map((e) => 'image'));
-        await uploadFiles(files, appProvider?.selectedChatAppId);
+        await _uploadFilesWithLease(files, appProvider?.selectedChatAppId, lease, generation);
       }
-      notifyListeners();
+      if (_canCommit(lease, generation)) notifyListeners();
     } on PlatformException catch (e) {
       Logger.debug('🖼️ PlatformException during image picking: ${e.code} - ${e.message}');
+      if (!_canCommit(lease, generation)) return;
       if (e.code == 'photo_access_denied') {
-        AppSnackbar.showSnackbarError(l10n?.msgPhotosPermissionDenied ??
-            'Photos permission denied. Please allow access to photos to select images');
+        AppSnackbar.showSnackbarError(
+          l10n?.msgPhotosPermissionDenied ?? 'Photos permission denied. Please allow access to photos to select images',
+        );
       } else {
         AppSnackbar.showSnackbarError(
-            l10n?.msgSelectImagesError(e.message ?? e.code) ?? 'Error selecting images: ${e.message ?? e.code}');
+          l10n?.msgSelectImagesError(e.message ?? e.code) ?? 'Error selecting images: ${e.message ?? e.code}',
+        );
       }
     } catch (e) {
       Logger.debug('🖼️ General exception during image picking: $e');
-      AppSnackbar.showSnackbarError(l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgSelectImagesGenericError ?? 'Error selecting images. Please try again.',
+        );
+      }
+    } finally {
+      lease.close();
     }
   }
 
-  void selectFile() async {
+  Future<void> selectFile() async {
     final l10n = MyApp.navigatorKey.currentContext?.l10n;
     if (selectedFiles.length >= 4) {
       AppSnackbar.showSnackbarError(l10n?.msgMaxFilesLimit ?? 'You can only select up to 4 files');
       return;
     }
 
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
     try {
-      var res = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowMultiple: true,
-        allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp'],
-        dialogTitle: 'Select files',
-        withData: false,
-        withReadStream: false,
-      );
-
-      if (res != null && res.files.isNotEmpty) {
-        List<File> files = [];
-        for (var r in res.files) {
-          if (r.path != null && files.length < (4 - selectedFiles.length)) {
-            files.add(File(r.path!));
+      if (!await _authorizeProtectedOperation(lease, generation)) return;
+      List<File> files;
+      if (_filePicker != null) {
+        files = await _filePicker!(4 - selectedFiles.length);
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowMultiple: true,
+          allowedExtensions: ['jpeg', 'md', 'pdf', 'gif', 'doc', 'png', 'pptx', 'txt', 'xlsx', 'webp'],
+          dialogTitle: 'Select files',
+          withData: false,
+          withReadStream: false,
+        );
+        files = [];
+        if (result != null) {
+          for (final platformFile in result.files) {
+            if (platformFile.path != null && files.length < (4 - selectedFiles.length)) {
+              files.add(File(platformFile.path!));
+            }
           }
         }
+      }
 
-        if (files.isNotEmpty) {
-          selectedFiles.addAll(files);
-          selectedFileTypes.addAll(files.map((e) => 'file'));
-          await uploadFiles(files, appProvider?.selectedChatAppId);
-        }
+      if (!_canCommit(lease, generation)) return;
+      if (files.isNotEmpty) {
+        selectedFiles.addAll(files);
+        selectedFileTypes.addAll(files.map((e) => 'file'));
+        await _uploadFilesWithLease(files, appProvider?.selectedChatAppId, lease, generation);
+      }
+      if (_canCommit(lease, generation)) {
         notifyListeners();
       }
     } on PlatformException catch (e) {
-      AppSnackbar.showSnackbarError(
-          l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(
+          l10n?.msgSelectFilesError(e.message ?? e.code) ?? 'Error selecting files: ${e.message ?? e.code}',
+        );
+      }
     } catch (e) {
-      AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
+      if (_canCommit(lease, generation)) {
+        AppSnackbar.showSnackbarError(l10n?.msgSelectFilesGenericError ?? 'Error selecting files. Please try again.');
+      }
+    } finally {
+      lease.close();
     }
   }
 
@@ -375,23 +553,44 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<MessageFile>?> uploadFiles(List<File> files, String? appId) async {
-    if (!await _ensureAiConsent()) return null;
-    if (files.isNotEmpty) {
-      setMultiUploadingFileStatus(files.map((e) => e.path).toList(), true);
-      var res = await uploadFilesServer(files, appId: appId);
-      if (res != null) {
-        uploadedFiles.addAll(res);
+    final lease = _beginAccountCommit();
+    if (lease == null) return null;
+    final generation = _operationGeneration;
+    try {
+      if (!await _authorizeProtectedOperation(lease, generation)) return null;
+      return await _uploadFilesWithLease(files, appId, lease, generation);
+    } finally {
+      lease.close();
+    }
+  }
+
+  Future<List<MessageFile>?> _uploadFilesWithLease(
+    List<File> files,
+    String? appId,
+    EllaAccountCommitLease lease,
+    int generation,
+  ) async {
+    if (files.isEmpty || !_canCommit(lease, generation)) return null;
+    final paths = files.map((file) => file.path).toList();
+    setMultiUploadingFileStatus(paths, true);
+    try {
+      if (!_canCommit(lease, generation)) return null;
+      final result = await _fileUploader(files, appId, lease);
+      if (!_canCommit(lease, generation)) return null;
+      if (result != null) {
+        uploadedFiles.addAll(result);
       } else {
         clearSelectedFiles();
         final l10n = MyApp.navigatorKey.currentContext?.l10n;
         AppSnackbar.showSnackbarError(l10n?.msgUploadFileFailed ?? 'Failed to upload file, please try again later');
       }
-      setMultiUploadingFileStatus(files.map((e) => e.path).toList(), false);
-      notifyListeners();
-      return res;
+      return result;
+    } finally {
+      if (_canCommit(lease, generation)) {
+        setMultiUploadingFileStatus(paths, false);
+        notifyListeners();
+      }
     }
-
-    return null;
   }
 
   void removeLocalMessage(String id) {
@@ -400,60 +599,69 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future refreshMessages({bool dropdownSelected = false}) async {
-    setLoadingMessages(true);
-    if (SharedPreferencesUtil().demoMode) {
-      messages = DemoFixtures.chatMessages();
-      setHasCachedMessages(true);
-      setLoadingMessages(false);
-      notifyListeners();
-      return;
-    }
-    if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
-      setHasCachedMessages(true);
-    }
-
-    // Ella mode: use local cache first, fall back to server history API.
-    final isEllaApp = _isEllaApp; // TODO: replace with flavor check
-    if (isEllaApp) {
-      final cached = SharedPreferencesUtil().cachedMessages;
-      if (cached.isNotEmpty) {
-        messages = cached;
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setLoadingMessages(true);
+      if (SharedPreferencesUtil().demoMode) {
+        messages = DemoFixtures.chatMessages();
+        setHasCachedMessages(true);
+        setLoadingMessages(false);
+        notifyListeners();
+        return;
+      }
+      if (SharedPreferencesUtil().cachedMessages.isNotEmpty) {
         setHasCachedMessages(true);
       }
 
-      // Always try to rehydrate from server so a bad local/demo cache from a
-      // previous TestFlight cannot mask the real account timeline.
-      final history = await fetchEllaChatHistory(limit: 50);
-      if (history.isNotEmpty) {
-        messages = history;
+      // Ella mode: use local cache first, fall back to server history API.
+      final isEllaApp = _isEllaApp; // TODO: replace with flavor check
+      if (isEllaApp) {
+        final cached = SharedPreferencesUtil().cachedMessages;
+        if (cached.isNotEmpty) {
+          messages = cached;
+          setHasCachedMessages(true);
+        }
+
+        // Always try to rehydrate from server so a bad local/demo cache from a
+        // previous TestFlight cannot mask the real account timeline.
+        final history = await fetchEllaChatHistory(limit: 50);
+        if (!_canCommit(lease, generation)) return;
+        if (history.isNotEmpty) {
+          messages = history;
+          SharedPreferencesUtil().cachedMessages = messages;
+          setHasCachedMessages(true);
+        }
+        messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        setLoadingMessages(false);
+        notifyListeners();
+        return;
+      }
+
+      // Stock OMI mode: fetch from /v2/messages as before
+      // Preserve locally-injected voice messages before server fetch
+      final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
+      messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
+      if (!_canCommit(lease, generation)) return;
+      if (messages.isEmpty) {
+        messages = SharedPreferencesUtil().cachedMessages;
+      } else {
+        // Merge back voice messages that aren't on server yet
+        for (final vm in localVoiceMessages) {
+          if (messages.firstWhereOrNull((m) => m.id == vm.id) == null) {
+            messages.add(vm);
+          }
+        }
         SharedPreferencesUtil().cachedMessages = messages;
         setHasCachedMessages(true);
       }
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       setLoadingMessages(false);
       notifyListeners();
-      return;
+    } finally {
+      lease.close();
     }
-
-    // Stock OMI mode: fetch from /v2/messages as before
-    // Preserve locally-injected voice messages before server fetch
-    final localVoiceMessages = messages.where((m) => m.fromVoice == true).toList();
-    messages = await getMessagesFromServer(dropdownSelected: dropdownSelected);
-    if (messages.isEmpty) {
-      messages = SharedPreferencesUtil().cachedMessages;
-    } else {
-      // Merge back voice messages that aren't on server yet
-      for (final vm in localVoiceMessages) {
-        if (messages.firstWhereOrNull((m) => m.id == vm.id) == null) {
-          messages.add(vm);
-        }
-      }
-      SharedPreferencesUtil().cachedMessages = messages;
-      setHasCachedMessages(true);
-    }
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setLoadingMessages(false);
-    notifyListeners();
   }
 
   void setMessagesFromCache() {
@@ -466,42 +674,63 @@ class MessageProvider extends ChangeNotifier {
   }
 
   Future<List<ServerMessage>> getMessagesFromServer({bool dropdownSelected = false}) async {
-    final l10n = MyApp.navigatorKey.currentContext?.l10n;
-    if (!hasCachedMessages) {
-      firstTimeLoadingText = l10n?.msgReadingMemories ?? 'Reading your memories...';
+    final lease = _beginAccountCommit();
+    if (lease == null) return const [];
+    final generation = _operationGeneration;
+    try {
+      final l10n = MyApp.navigatorKey.currentContext?.l10n;
+      if (!hasCachedMessages) {
+        firstTimeLoadingText = l10n?.msgReadingMemories ?? 'Reading your memories...';
+        notifyListeners();
+      }
+      setLoadingMessages(true);
+      var mes = await getMessagesServer(appId: appProvider?.selectedChatAppId, dropdownSelected: dropdownSelected);
+      if (!_canCommit(lease, generation)) return const [];
+      if (!hasCachedMessages) {
+        firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
+        notifyListeners();
+      }
+      messages = mes;
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      setLoadingMessages(false);
       notifyListeners();
+      return messages;
+    } finally {
+      lease.close();
     }
-    setLoadingMessages(true);
-    var mes = await getMessagesServer(
-      appId: appProvider?.selectedChatAppId,
-      dropdownSelected: dropdownSelected,
-    );
-    if (!hasCachedMessages) {
-      firstTimeLoadingText = l10n?.msgLearningMemories ?? 'Learning from your memories...';
-      notifyListeners();
-    }
-    messages = mes;
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setLoadingMessages(false);
-    notifyListeners();
-    return messages;
   }
 
   Future setMessageNps(ServerMessage message, int value, {String? reason}) async {
-    await setMessageResponseRating(message.id, value, reason: reason);
-    message.askForNps = false;
-    // Update local message rating so it persists when scrolling
-    message.rating = value == 0 ? null : value;
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      await setMessageResponseRating(message.id, value, reason: reason);
+      if (!_canCommit(lease, generation)) return;
+      message.askForNps = false;
+      // Update local message rating so it persists when scrolling
+      message.rating = value == 0 ? null : value;
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   Future clearChat() async {
-    setClearingChat(true);
-    var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
-    messages = mes;
-    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    setClearingChat(false);
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setClearingChat(true);
+      var mes = await clearChatServer(appId: appProvider?.selectedChatAppId);
+      if (!_canCommit(lease, generation)) return;
+      messages = mes;
+      messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      setClearingChat(false);
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   void addMessageLocally(String messageText) {
@@ -541,204 +770,282 @@ class MessageProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future sendVoiceMessageStreamToServer(List<List<int>> audioBytes,
-      {Function? onFirstChunkRecived, BleAudioCodec? codec}) async {
-    if (!await _ensureAiConsent()) return;
-    var file = await FileUtils.saveAudioBytesToTempFile(
-      audioBytes,
-      DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
-      codec?.getFrameSize() ?? 160,
-    );
-
-    var currentAppId = appProvider?.selectedChatAppId;
-    if (currentAppId == 'no_selected') {
-      currentAppId = null;
+  bool addVoiceMessagesForProtectedOperation(
+    ServerMessage userMessage,
+    ServerMessage assistantMessage,
+    MessageProtectedOperation operation,
+  ) {
+    if (!operation.isCurrent) return false;
+    final additions = [userMessage, assistantMessage]
+        .where((message) => messages.firstWhereOrNull((existing) => existing.id == message.id) == null)
+        .toList();
+    if (additions.isEmpty) return true;
+    messages.addAll(additions);
+    if (!operation.isCurrent) {
+      messages.removeWhere((message) => additions.any((addition) => addition.id == message.id));
+      return false;
     }
-    String chatTargetId = currentAppId ?? 'omi';
-    App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
-    bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
-
-    MixpanelManager().chatVoiceInputUsed(
-      chatTargetId: chatTargetId,
-      isPersonaChat: isPersonaChat,
-    );
-
-    setShowTypingIndicator(true);
-    var message = ServerMessage.empty();
-    messages.add(message);
-    var aiIndex = messages.length - 1;
-    final textCoalescer = StreamingTextCoalescer();
+    SharedPreferencesUtil().cachedMessages = messages;
     notifyListeners();
+    return true;
+  }
 
+  Future sendVoiceMessageStreamToServer(
+    List<List<int>> audioBytes, {
+    Function? onFirstChunkRecived,
+    BleAudioCodec? codec,
+  }) async {
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final operationGeneration = _operationGeneration;
     try {
-      bool firstChunkRecieved = false;
-      await for (var chunk in sendVoiceMessageStreamServer([file])) {
-        if (!firstChunkRecieved &&
-            [MessageChunkType.message, MessageChunkType.data, MessageChunkType.done, MessageChunkType.think]
-                .contains(chunk.type)) {
-          firstChunkRecieved = true;
-          if (onFirstChunkRecived != null) {
-            onFirstChunkRecived();
-          }
-        }
+      if (!await _authorizeProtectedOperation(lease, operationGeneration)) return;
+      var file = await _voiceTempFileSaver(
+        audioBytes,
+        DateTime.now().millisecondsSinceEpoch ~/ 1000 - (audioBytes.length / 100).ceil(),
+        codec?.getFrameSize() ?? 160,
+      );
+      if (!_canCommit(lease, operationGeneration)) return;
 
-        if (chunk.type == MessageChunkType.think) {
-          message.thinkings.add(chunk.text);
-          notifyListeners();
-          continue;
-        }
+      var currentAppId = appProvider?.selectedChatAppId;
+      if (currentAppId == 'no_selected') {
+        currentAppId = null;
+      }
+      String chatTargetId = currentAppId ?? 'omi';
+      App? targetApp =
+          currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
+      bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-        if (chunk.type == MessageChunkType.data) {
-          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
-          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
-          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
-          notifyListeners();
-          continue;
-        }
+      MixpanelManager().chatVoiceInputUsed(chatTargetId: chatTargetId, isPersonaChat: isPersonaChat);
 
-        if (chunk.type == MessageChunkType.done) {
-          if (chunk.message != null) {
-            message = chunk.message!;
-            messages[aiIndex] = message;
-          }
-          textCoalescer.complete(chunk.messageId);
-          notifyListeners();
-          continue;
-        }
+      if (!_canCommit(lease, operationGeneration)) return;
+      setShowTypingIndicator(true);
+      var message = ServerMessage.empty();
+      messages.add(message);
+      var aiIndex = messages.length - 1;
+      final textCoalescer = StreamingTextCoalescer();
+      notifyListeners();
 
-        if (chunk.type == MessageChunkType.message) {
-          final incoming = chunk.message;
-          if (incoming != null) {
-            final existingIndex = messages.indexWhere((candidate) => candidate.id == incoming.id);
-            if (existingIndex >= 0) {
-              messages[existingIndex] = incoming;
-              if (existingIndex == aiIndex) message = incoming;
-            } else {
-              messages.insert(aiIndex, incoming);
-              aiIndex++;
+      try {
+        bool firstChunkRecieved = false;
+        await for (var chunk in _voiceChatStreamSender([file])) {
+          if (!_canCommit(lease, operationGeneration)) return;
+          if (!firstChunkRecieved &&
+              [
+                MessageChunkType.message,
+                MessageChunkType.data,
+                MessageChunkType.done,
+                MessageChunkType.think,
+              ].contains(chunk.type)) {
+            firstChunkRecieved = true;
+            if (onFirstChunkRecived != null) {
+              onFirstChunkRecived();
             }
           }
-          notifyListeners();
-          continue;
-        }
 
-        if (chunk.type == MessageChunkType.error) {
-          message.text = chunk.text;
-          notifyListeners();
-          continue;
+          if (chunk.type == MessageChunkType.think) {
+            message.thinkings.add(chunk.text);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.data) {
+            final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+            if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+            message.text = textCoalescer.addPartial(utteranceId, chunk.text);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.done) {
+            if (chunk.message != null) {
+              message = chunk.message!;
+              messages[aiIndex] = message;
+            }
+            textCoalescer.complete(chunk.messageId);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.message) {
+            final incoming = chunk.message;
+            if (incoming != null) {
+              final existingIndex = messages.indexWhere((candidate) => candidate.id == incoming.id);
+              if (existingIndex >= 0) {
+                messages[existingIndex] = incoming;
+                if (existingIndex == aiIndex) message = incoming;
+              } else {
+                messages.insert(aiIndex, incoming);
+                aiIndex++;
+              }
+            }
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.error) {
+            message.text = chunk.text;
+            notifyListeners();
+            continue;
+          }
         }
+      } catch (e) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        message.text = ServerMessageChunk.failedMessage().text;
+        notifyListeners();
       }
-    } catch (e) {
-      message.text = ServerMessageChunk.failedMessage().text;
-      notifyListeners();
-    }
 
-    setShowTypingIndicator(false);
+      if (_canCommit(lease, operationGeneration)) setShowTypingIndicator(false);
+    } finally {
+      lease.close();
+    }
   }
 
   Future sendMessageStreamToServer(String text) async {
-    if (!await _ensureAiConsent()) return;
-    if (SharedPreferencesUtil().demoMode) {
-      messages = DemoFixtures.chatMessages();
-      setSendingMessage(false);
-      setShowTypingIndicator(false);
-      notifyListeners();
-      return;
-    }
-    aiStreamProgress = 0.0;
-    setShowTypingIndicator(true);
-    var currentAppId = appProvider?.selectedChatAppId;
-    if (currentAppId == 'no_selected') {
-      currentAppId = null;
-    }
-
-    String chatTargetId = currentAppId ?? 'omi';
-    App? targetApp = currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
-    bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
-
-    MixpanelManager().chatMessageSent(
-      message: text,
-      includesFiles: uploadedFiles.isNotEmpty,
-      numberOfFiles: uploadedFiles.length,
-      chatTargetId: chatTargetId,
-      isPersonaChat: isPersonaChat,
-      isVoiceInput: _isNextMessageFromVoice,
-    );
-    _isNextMessageFromVoice = false;
-
-    var message = ServerMessage.empty(appId: currentAppId);
-    messages.add(message);
-    final aiIndex = messages.length - 1;
-    final textCoalescer = StreamingTextCoalescer();
-    notifyListeners();
-    List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
-    clearSelectedFiles();
-    clearUploadedFiles();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final operationGeneration = _operationGeneration;
     try {
-      // Ella uses its own simple chat endpoint; OMI uses the graph chat
-      final isEllaApp = _isEllaApp; // TODO: replace with flavor check
-      var stream =
-          isEllaApp ? sendEllaChatStream(text) : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
-      await for (var chunk in stream) {
-        if (chunk.type == MessageChunkType.think) {
-          message.thinkings.add(chunk.text);
-          notifyListeners();
-          continue;
-        }
+      if (!await _authorizeProtectedOperation(lease, operationGeneration)) return;
+      if (SharedPreferencesUtil().demoMode) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        messages = DemoFixtures.chatMessages();
+        setSendingMessage(false);
+        setShowTypingIndicator(false);
+        notifyListeners();
+        return;
+      }
+      if (!_canCommit(lease, operationGeneration)) return;
+      aiStreamProgress = 0.0;
+      setShowTypingIndicator(true);
+      var currentAppId = appProvider?.selectedChatAppId;
+      if (currentAppId == 'no_selected') {
+        currentAppId = null;
+      }
 
-        if (chunk.type == MessageChunkType.data) {
-          final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
-          if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
-          message.text = textCoalescer.addPartial(utteranceId, chunk.text);
-          aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
-          HapticFeedback.lightImpact();
-          notifyListeners();
-          continue;
-        }
+      String chatTargetId = currentAppId ?? 'omi';
+      App? targetApp =
+          currentAppId != null ? appProvider?.apps.firstWhereOrNull((app) => app.id == currentAppId) : null;
+      bool isPersonaChat = targetApp != null ? !targetApp.isNotPersona() : false;
 
-        if (chunk.type == MessageChunkType.done) {
-          // Guard: OpenAI-style done chunks may have null message
-          if (chunk.message != null) {
-            message = chunk.message!;
-            messages[aiIndex] = message;
+      MixpanelManager().chatMessageSent(
+        message: text,
+        includesFiles: uploadedFiles.isNotEmpty,
+        numberOfFiles: uploadedFiles.length,
+        chatTargetId: chatTargetId,
+        isPersonaChat: isPersonaChat,
+        isVoiceInput: _isNextMessageFromVoice,
+      );
+      _isNextMessageFromVoice = false;
+
+      if (!_canCommit(lease, operationGeneration)) return;
+      var message = ServerMessage.empty(appId: currentAppId);
+      messages.add(message);
+      final aiIndex = messages.length - 1;
+      final textCoalescer = StreamingTextCoalescer();
+      notifyListeners();
+      List<String> fileIds = uploadedFiles.map((e) => e.id).toList();
+      clearSelectedFiles();
+      clearUploadedFiles();
+      try {
+        // Ella uses its own simple chat endpoint; OMI uses the graph chat
+        final isEllaApp = _isEllaApp; // TODO: replace with flavor check
+        var stream = isEllaApp
+            ? _ellaChatStreamSender(text)
+            : sendMessageStreamServer(text, appId: currentAppId, filesId: fileIds);
+        await for (var chunk in stream) {
+          if (!_canCommit(lease, operationGeneration)) return;
+          if (chunk.type == MessageChunkType.think) {
+            message.thinkings.add(chunk.text);
+            notifyListeners();
+            continue;
           }
-          textCoalescer.complete(chunk.messageId);
-          notifyListeners();
-          continue;
-        }
 
-        if (chunk.type == MessageChunkType.error) {
-          message.text = chunk.text;
-          notifyListeners();
-          continue;
+          if (chunk.type == MessageChunkType.data) {
+            final utteranceId = chunk.messageId.isEmpty ? message.id : chunk.messageId;
+            if (message.isEmpty && utteranceId.isNotEmpty) message.id = utteranceId;
+            message.text = textCoalescer.addPartial(utteranceId, chunk.text);
+            aiStreamProgress = (aiStreamProgress + 0.05).clamp(0.0, 1.0);
+            HapticFeedback.lightImpact();
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.done) {
+            // Guard: OpenAI-style done chunks may have null message
+            if (chunk.message != null) {
+              message = chunk.message!;
+              messages[aiIndex] = message;
+            }
+            textCoalescer.complete(chunk.messageId);
+            notifyListeners();
+            continue;
+          }
+
+          if (chunk.type == MessageChunkType.error) {
+            message.text = chunk.text;
+            notifyListeners();
+            continue;
+          }
+        }
+      } catch (e) {
+        if (!_canCommit(lease, operationGeneration)) return;
+        message.text = ServerMessageChunk.failedMessage().text;
+        notifyListeners();
+      } finally {
+        if (_canCommit(lease, operationGeneration)) {
+          aiStreamProgress = 1.0;
+          setShowTypingIndicator(false);
+          setSendingMessage(false);
+          // Persist only while the exact account authority remains current.
+          SharedPreferencesUtil().cachedMessages = messages;
         }
       }
-    } catch (e) {
-      message.text = ServerMessageChunk.failedMessage().text;
-      notifyListeners();
     } finally {
-      aiStreamProgress = 1.0;
-      setShowTypingIndicator(false);
-      setSendingMessage(false);
-      // Persist full message list to cache so Ella messages survive refresh
-      SharedPreferencesUtil().cachedMessages = messages;
+      lease.close();
     }
   }
 
   Future sendInitialAppMessage(App? app) async {
-    setSendingMessage(true);
-    ServerMessage message = await getInitialAppMessage(app?.id);
-    addMessage(message);
-    setSendingMessage(false);
-    notifyListeners();
+    final lease = _beginAccountCommit();
+    if (lease == null) return;
+    final generation = _operationGeneration;
+    try {
+      setSendingMessage(true);
+      ServerMessage message = await getInitialAppMessage(app?.id);
+      if (!_canCommit(lease, generation)) return;
+      addMessage(message);
+      setSendingMessage(false);
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   App? messageSenderApp(String? appId) {
     return appProvider?.apps.firstWhereOrNull((p) => p.id == appId);
   }
 
-  Future<void> _handleAskAIMethodCall(MethodCall call) async {
-    if (!PlatformService.isDesktop) {
+  Future<void> _emitAskAiChunk(
+    Map<String, dynamic> chunk,
+    EllaAccountCommitLease lease,
+    int generation,
+  ) async {
+    if (!_canCommit(lease, generation)) return;
+    final sink = _askAiResponseSink;
+    if (sink != null) {
+      await sink(chunk);
+    } else {
+      await _askAIChannel.invokeMethod('aiResponseChunk', chunk);
+    }
+    if (!_canCommit(lease, generation)) return;
+  }
+
+  @visibleForTesting
+  Future<void> handleAskAIForTesting(MethodCall call) => _handleAskAIMethodCall(call, allowAnyPlatform: true);
+
+  Future<void> _handleAskAIMethodCall(MethodCall call, {bool allowAnyPlatform = false}) async {
+    if (!allowAnyPlatform && !PlatformService.isDesktop) {
       return;
     }
     switch (call.method) {
@@ -747,24 +1054,32 @@ class MessageProvider extends ChangeNotifier {
         final message = args['message'] as String;
         final filePath = args['filePath'] as String?;
 
-        List<String>? fileIds;
-        if (filePath != null && filePath.isNotEmpty) {
-          final file = File(filePath);
-          final uploadedFilesResult = await uploadFiles([file], null);
-          if (uploadedFilesResult != null) {
-            fileIds = uploadedFilesResult.map((f) => f.id).toList();
-          } else {
-            final l10n = MyApp.navigatorKey.currentContext?.l10n;
-            _askAIChannel.invokeMethod('aiResponseChunk', {
-              'type': 'error',
-              'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
-            });
-            return;
-          }
-        }
+        final lease = _beginAccountCommit();
+        if (lease == null) return;
+        final generation = _operationGeneration;
 
         try {
-          await for (var chunk in sendMessageStreamServer(message, filesId: fileIds)) {
+          if (!await _authorizeProtectedOperation(lease, generation)) return;
+          List<String>? fileIds;
+          if (filePath != null && filePath.isNotEmpty) {
+            final file = File(filePath);
+            final uploadedFilesResult = await _uploadFilesWithLease([file], null, lease, generation);
+            if (!_canCommit(lease, generation)) return;
+            if (uploadedFilesResult != null) {
+              fileIds = uploadedFilesResult.map((f) => f.id).toList();
+            } else {
+              final l10n = MyApp.navigatorKey.currentContext?.l10n;
+              await _emitAskAiChunk({
+                'type': 'error',
+                'text': l10n?.msgUploadAttachedFileFailed ?? 'Failed to upload the attached file.',
+              }, lease, generation);
+              return;
+            }
+          }
+
+          if (!_canCommit(lease, generation)) return;
+          await for (var chunk in _askAiStreamSender(message, fileIds, lease)) {
+            if (!_canCommit(lease, generation)) return;
             final chunkMap = {
               'type': chunk.type.toString().split('.').last,
               'text': chunk.text,
@@ -773,23 +1088,23 @@ class MessageProvider extends ChangeNotifier {
             if (chunk.type == MessageChunkType.done && chunk.message != null) {
               chunkMap['text'] = chunk.message!.text;
             }
-            _askAIChannel.invokeMethod('aiResponseChunk', chunkMap);
+            await _emitAskAiChunk(chunkMap, lease, generation);
           }
         } catch (e) {
+          if (!_canCommit(lease, generation)) return;
           final failedChunk = ServerMessageChunk.failedMessage();
           final chunkMap = {
             'type': failedChunk.type.toString().split('.').last,
             'text': failedChunk.text,
             'messageId': failedChunk.messageId,
           };
-          _askAIChannel.invokeMethod('aiResponseChunk', chunkMap);
+          await _emitAskAiChunk(chunkMap, lease, generation);
+        } finally {
+          lease.close();
         }
         break;
       default:
-        throw PlatformException(
-          code: 'Unimplemented',
-          details: 'Method ${call.method} not implemented.',
-        );
+        throw PlatformException(code: 'Unimplemented', details: 'Method ${call.method} not implemented.');
     }
   }
 }

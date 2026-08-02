@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:gradient_borders/gradient_borders.dart';
 
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/core/app_shell.dart';
+import 'package:omi/services/auth_service.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 import 'package:omi/utils/other/temp.dart';
@@ -68,7 +68,7 @@ class _DeleteAccountState extends State<DeleteAccount> {
 
     try {
       (widget.onDeleteSucceeded ?? MixpanelManager().deleteUser).call();
-      await (widget.signOut ?? FirebaseAuth.instance.signOut).call();
+      await (widget.signOut ?? AuthService.instance.signOut).call();
       await (widget.clearWal ?? WalFileManager.clearAll).call();
       if (widget.clearPreferences != null) {
         widget.clearPreferences!.call();

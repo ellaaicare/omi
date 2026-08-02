@@ -3,12 +3,33 @@ import 'package:flutter/material.dart';
 import 'package:omi/backend/http/api/speech_profile.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/backend/schema/person.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/settings/language_selection_dialog.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/analytics/analytics_manager.dart';
 import 'package:omi/utils/logger.dart';
 
 class HomeProvider extends ChangeNotifier {
+  HomeProvider({
+    Future<List<Person>> Function()? fetchPeople,
+    SharedPreferencesUtil? preferences,
+    ActiveAccountAuthorityProvider? activeAuthority,
+  })  : _fetchPeople = fetchPeople ?? getAllPeople,
+        _preferences = preferences ?? SharedPreferencesUtil(),
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount {
+    chatFieldFocusNode.addListener(_onFocusChange);
+    appsSearchFieldFocusNode.addListener(_onFocusChange);
+    convoSearchFieldFocusNode.addListener(_onConvoSearchFocusChange);
+    memoriesSearchFieldFocusNode.addListener(_onFocusChange);
+  }
+
+  final Future<List<Person>> Function() _fetchPeople;
+  final SharedPreferencesUtil _preferences;
+  final ActiveAccountAuthorityProvider _activeAuthority;
+  int _peopleOperationGeneration = 0;
+
   int selectedIndex = 0;
   Function(int idx)? onSelectedIndexChanged;
   final FocusNode chatFieldFocusNode = FocusNode();
@@ -84,17 +105,16 @@ class HomeProvider extends ChangeNotifier {
     'Vietnamese': 'vi',
   };
 
-  HomeProvider() {
-    chatFieldFocusNode.addListener(_onFocusChange);
-    appsSearchFieldFocusNode.addListener(_onFocusChange);
-    convoSearchFieldFocusNode.addListener(_onConvoSearchFocusChange);
-    memoriesSearchFieldFocusNode.addListener(_onFocusChange);
-  }
-
   void _onFocusChange() {
     isChatFieldFocused = chatFieldFocusNode.hasFocus;
     isAppsSearchFieldFocused = appsSearchFieldFocusNode.hasFocus;
     isMemoriesSearchFieldFocused = memoriesSearchFieldFocusNode.hasFocus;
+    notifyListeners();
+  }
+
+  void setChatFieldFocused(bool value) {
+    if (isChatFieldFocused == value) return;
+    isChatFieldFocused = value;
     notifyListeners();
   }
 
@@ -221,8 +241,20 @@ class HomeProvider extends ChangeNotifier {
   }
 
   Future setUserPeople() async {
-    SharedPreferencesUtil().cachedPeople = await getAllPeople();
-    notifyListeners();
+    final lease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAuthority,
+      onInvalidated: () => _peopleOperationGeneration++,
+    );
+    if (lease == null) return;
+    final generation = _peopleOperationGeneration;
+    try {
+      final people = await _fetchPeople();
+      if (generation != _peopleOperationGeneration || !lease.isCurrent) return;
+      _preferences.cachedPeople = people;
+      notifyListeners();
+    } finally {
+      lease.close();
+    }
   }
 
   @override

@@ -5,6 +5,7 @@ import 'package:collection/collection.dart';
 import 'package:omi/backend/http/api/apps.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/app.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/main.dart';
 import 'package:omi/providers/base_provider.dart';
 import 'package:omi/utils/alerts/app_dialog.dart';
@@ -274,10 +275,7 @@ class AppProvider extends BaseProvider {
 
         // Track search if there was a query
         if (queryBeingSearched.isNotEmpty) {
-          MixpanelManager().appsSearched(
-            searchTerm: queryBeingSearched,
-            resultCount: result.apps.length,
-          );
+          MixpanelManager().appsSearched(searchTerm: queryBeingSearched, resultCount: result.apps.length);
         }
       }
     } catch (e) {
@@ -409,8 +407,9 @@ class AppProvider extends BaseProvider {
     notifyListeners();
   }
 
-  Future getApps() async {
+  Future getApps({EllaAccountCommitLease? accountLease}) async {
     if (isLoading) return;
+    if (accountLease != null && !accountLease.isCurrent) return;
     setIsLoading(true);
 
     try {
@@ -421,6 +420,7 @@ class AppProvider extends BaseProvider {
 
       // Fetch grouped apps from server (backend handles all filtering and grouping)
       final groups = await retrieveAppsGrouped(offset: 0, limit: 20, includeReviews: true);
+      if (accountLease != null && !accountLease.isCurrent) return;
       groupedApps = groups;
 
       // Flatten for search/filter views
@@ -430,22 +430,28 @@ class AppProvider extends BaseProvider {
         flat.addAll(data);
       }
       apps = flat;
-      
+
       // Sync enabled state from local cache to fix install state mismatch bug
       _syncEnabledStateFromCache();
-      
+
       appLoading = List.filled(apps.length, false, growable: true);
 
       // Delay filtering to prevent UI freezing with large datasets
       await Future.delayed(const Duration(milliseconds: 50));
+      if (accountLease != null && !accountLease.isCurrent) return;
       filterApps();
     } catch (e) {
+      if (accountLease != null && !accountLease.isCurrent) return;
       Logger.debug('Error loading apps: $e');
       // Fallback to cached data
       setAppsFromCache();
     } finally {
-      setIsLoading(false);
+      if (accountLease == null || accountLease.isCurrent) setIsLoading(false);
     }
+  }
+
+  void cancelAccountScopedRefresh() {
+    isLoading = false;
   }
 
   Future getPopularApps() async {
@@ -530,7 +536,8 @@ class AppProvider extends BaseProvider {
         updatePrefApps();
         final context = MyApp.navigatorKey.currentState?.context;
         AppSnackbar.showSnackbarSuccess(
-            context != null ? context.l10n.appDeletedSuccessfully : 'App deleted successfully');
+          context != null ? context.l10n.appDeletedSuccessfully : 'App deleted successfully',
+        );
         notifyListeners();
       } else {
         print("Warning: Tried to delete app $appId but it wasn't found in the 'apps' list.");
@@ -538,7 +545,8 @@ class AppProvider extends BaseProvider {
     } else {
       final context = MyApp.navigatorKey.currentState?.context;
       AppSnackbar.showSnackbarError(
-          context != null ? context.l10n.appDeleteFailed : 'Failed to delete app. Please try again later.');
+        context != null ? context.l10n.appDeleteFailed : 'Failed to delete app. Please try again later.',
+      );
     }
   }
 
@@ -554,9 +562,11 @@ class AppProvider extends BaseProvider {
         filteredApps[filteredIdx] = apps[appIndex];
       }
       final context = MyApp.navigatorKey.currentState?.context;
-      AppSnackbar.showSnackbarSuccess(context != null
-          ? context.l10n.appVisibilityChangedSuccessfully
-          : 'App visibility changed successfully. It may take a few minutes to reflect.');
+      AppSnackbar.showSnackbarSuccess(
+        context != null
+            ? context.l10n.appVisibilityChangedSuccessfully
+            : 'App visibility changed successfully. It may take a few minutes to reflect.',
+      );
       notifyListeners();
     }
     // Refresh apps after a delay to get server-confirmed state
@@ -592,10 +602,10 @@ class AppProvider extends BaseProvider {
         flat.addAll(data);
       }
       apps = flat;
-      
+
       // Sync enabled state from local cache to fix install state mismatch bug
       _syncEnabledStateFromCache();
-      
+
       appLoading = List.filled(apps.length, false, growable: true);
 
       // Refresh popular apps too
@@ -810,11 +820,7 @@ class AppProvider extends BaseProvider {
     }
 
     if (!success && errorMessage != null) {
-      AppDialog.show(
-        title: context != null ? context.l10n.error : 'Error',
-        content: errorMessage,
-        singleButton: true,
-      );
+      AppDialog.show(title: context != null ? context.l10n.error : 'Error', content: errorMessage, singleButton: true);
     }
 
     if (success) {

@@ -27,9 +27,14 @@ class SharedPreferencesUtil {
   static String _verifiedAiConsentScopeHash = '';
   static DateTime? _verifiedAiConsentAt;
   static int _aiConsentAuthorityGeneration = 0;
+  static String _verifiedEllaProvisioningUid = '';
+  static int _verifiedEllaProvisioningBindingRevision = 0;
+  static String _verifiedEllaProvisioningPolicyRevision = '';
+  static int _verifiedEllaProvisioningAuthorityGeneration = -1;
 
   static const bool isPublicBuild = bool.fromEnvironment('ELLA_PUBLIC_BUILD');
-  static const bool isTodayDesignPreview = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
+  static const bool isTodayDesignPreviewConfigured = bool.fromEnvironment('ELLA_TODAY_DESIGN_PREVIEW');
+  static const bool isTodayDesignPreviewEnabled = !isPublicBuild && isTodayDesignPreviewConfigured;
   static const String currentAiConsentContractVersion = 'ai-data-processors-v8';
   static const String currentAiConsentProcessorSetHash =
       'sha256:d06b3056e06f092557d2d0e9add6ca04a515dabe7f1b6dc948c3bedbd1a3016d';
@@ -50,6 +55,7 @@ class SharedPreferencesUtil {
   static Future<void> init() async {
     _preferences = await SharedPreferences.getInstance();
     clearAiConsentServerVerification();
+    _clearEllaProvisioningServerVerification();
   }
 
   set uid(String value) {
@@ -209,9 +215,9 @@ class SharedPreferencesUtil {
 
   bool get dailyReflectionEnabled => getBool('dailyReflectionEnabled', defaultValue: true);
 
-  set demoMode(bool value) => saveBool('demoMode', value);
+  set demoMode(bool value) => saveBool('demoMode', isPublicBuild ? false : value);
 
-  bool get demoMode => isTodayDesignPreview || getBool('demoMode', defaultValue: false);
+  bool get demoMode => !isPublicBuild && (isTodayDesignPreviewEnabled || getBool('demoMode', defaultValue: false));
 
   set publicMode(bool value) {
     if (!isPublicBuild) saveBool('publicMode', value);
@@ -223,9 +229,7 @@ class SharedPreferencesUtil {
 
   bool get aiConsentAccepted => hasCurrentAiConsentAuthority();
 
-  bool hasCurrentAiConsentAuthority({
-    bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled,
-  }) {
+  bool hasCurrentAiConsentAuthority({bool enforceEnglishPilotLocale = isEllaInternalPilotEnabled}) {
     if (enforceEnglishPilotLocale && !isEllaInternalPilotLocaleSupported(getString('app_locale'))) {
       return false;
     }
@@ -357,7 +361,13 @@ class SharedPreferencesUtil {
   static void _invalidateAiConsentAuthority() {
     _aiConsentAuthorityGeneration++;
     clearAiConsentServerVerification();
+    _clearEllaProvisioningServerVerification();
   }
+
+  /// Invalidates every delayed account operation before Firebase identity is
+  /// allowed to change. This is intentionally synchronous so no in-flight
+  /// result can commit while transition quiescence is awaiting service stops.
+  void invalidateAccountAuthorityForTransition() => _invalidateAiConsentAuthority();
 
   void acceptAiConsent({
     String receiptId = '',
@@ -707,6 +717,33 @@ class SharedPreferencesUtil {
     saveString('cachedMessagesUid', '');
   }
 
+  String? _accountScopedKey(String base) {
+    final currentUid = uid;
+    return currentUid.isEmpty ? null : '$base:$currentUid';
+  }
+
+  Future<void> quarantineLegacyAccountCaches() async {
+    for (final key in const ['pendingMemories', 'cachedPeople']) {
+      final values = getStringList(key);
+      if (values.isNotEmpty) {
+        await saveStringList('ellaLegacyUnownedCache:$key', values);
+        await remove(key);
+      }
+    }
+    for (final key in const [
+      'modifiedConversationDetails',
+      'emergencyContactName',
+      'emergencyContactPhone',
+      'pendingEmergency',
+    ]) {
+      final value = getString(key);
+      if (value.isNotEmpty) {
+        await saveString('ellaLegacyUnownedCache:$key', value);
+        await remove(key);
+      }
+    }
+  }
+
   void clearDemoStateForAccountBuild() {
     demoMode = false;
     publicMode = false;
@@ -736,6 +773,54 @@ class SharedPreferencesUtil {
     await saveString(_ellaProvisioningReceiptKey(uid), jsonEncode(receipt));
   }
 
+  String _ellaProvisioningVerifiedAtKey(String uid) => 'ellaProvisioningVerifiedAt:$uid';
+
+  Future<void> markEllaProvisioningVerified(String uid, {DateTime? at}) async {
+    final receipt = getEllaProvisioningReceipt(uid);
+    final state = receipt?['state']?.toString().toLowerCase();
+    final bindingState = receipt?['binding_state']?.toString().toLowerCase();
+    final bindingRevision = receipt?['binding_revision'];
+    final policyRevision = receipt?['effective_policy_revision']?.toString() ?? '';
+    if (uid.isEmpty ||
+        uid != this.uid ||
+        state != 'ready' ||
+        bindingState != 'active' ||
+        bindingRevision is! int ||
+        bindingRevision <= 0 ||
+        policyRevision.isEmpty) {
+      _clearEllaProvisioningServerVerification();
+      return;
+    }
+    _verifiedEllaProvisioningUid = uid;
+    _verifiedEllaProvisioningBindingRevision = bindingRevision;
+    _verifiedEllaProvisioningPolicyRevision = policyRevision;
+    _verifiedEllaProvisioningAuthorityGeneration = _aiConsentAuthorityGeneration;
+    await saveString(_ellaProvisioningVerifiedAtKey(uid), (at ?? DateTime.now()).toUtc().toIso8601String());
+  }
+
+  bool hasCurrentEllaProvisioningAuthority({required String uid, required int bindingRevision}) {
+    if (uid.isEmpty || uid != this.uid || bindingRevision <= 0) return false;
+    final receipt = getEllaProvisioningReceipt(uid);
+    return _verifiedEllaProvisioningUid == uid &&
+        _verifiedEllaProvisioningBindingRevision == bindingRevision &&
+        _verifiedEllaProvisioningPolicyRevision.isNotEmpty &&
+        _verifiedEllaProvisioningAuthorityGeneration == _aiConsentAuthorityGeneration &&
+        receipt?['state']?.toString().toLowerCase() == 'ready' &&
+        receipt?['binding_state']?.toString().toLowerCase() == 'active' &&
+        receipt?['binding_revision'] == bindingRevision &&
+        receipt?['effective_policy_revision'] == _verifiedEllaProvisioningPolicyRevision;
+  }
+
+  static void _clearEllaProvisioningServerVerification() {
+    _verifiedEllaProvisioningUid = '';
+    _verifiedEllaProvisioningBindingRevision = 0;
+    _verifiedEllaProvisioningPolicyRevision = '';
+    _verifiedEllaProvisioningAuthorityGeneration = -1;
+  }
+
+  DateTime? getEllaProvisioningVerifiedAt(String uid) =>
+      DateTime.tryParse(getString(_ellaProvisioningVerifiedAtKey(uid)));
+
   String get ellaProvisionedVoiceMode {
     final receipt = getEllaProvisioningReceipt(uid);
     final value = receipt?['effective_voice_mode'];
@@ -751,6 +836,7 @@ class SharedPreferencesUtil {
     if (previousUid == newUid) return;
 
     _invalidateAiConsentAuthority();
+    await quarantineLegacyAccountCaches();
 
     if (previousUid.isNotEmpty) {
       // Retained users keep compatibility preferences when returning to the
@@ -769,6 +855,7 @@ class SharedPreferencesUtil {
       await remove(_ellaProvisioningReceiptKey(previousUid));
     }
     await remove(_ellaProvisioningReceiptKey(newUid));
+    await remove(_ellaProvisioningVerifiedAtKey(newUid));
 
     for (final key in const [
       'devTtsProvider',
@@ -802,13 +889,17 @@ class SharedPreferencesUtil {
 
   // Pending memories - memories created offline that need to be synced
   List<Memory> get pendingMemories {
-    final memories = getStringList('pendingMemories');
+    final key = _accountScopedKey('pendingMemories');
+    if (key == null) return [];
+    final memories = getStringList(key);
     return memories.map((e) => Memory.fromJson(jsonDecode(e))).toList();
   }
 
   set pendingMemories(List<Memory> value) {
+    final key = _accountScopedKey('pendingMemories');
+    if (key == null) return;
     final List<String> memories = value.map((e) => jsonEncode(e.toJson())).toList();
-    saveStringList('pendingMemories', memories);
+    saveStringList(key, memories);
   }
 
   void addPendingMemory(Memory memory) {
@@ -824,11 +915,14 @@ class SharedPreferencesUtil {
   }
 
   void clearPendingMemories() {
-    saveStringList('pendingMemories', []);
+    final key = _accountScopedKey('pendingMemories');
+    if (key != null) saveStringList(key, []);
   }
 
   List<Person> get cachedPeople {
-    final people = getStringList('cachedPeople');
+    final key = _accountScopedKey('cachedPeople');
+    if (key == null) return [];
+    final people = getStringList(key);
     return people.map((e) => Person.fromJson(jsonDecode(e))).toList();
   }
 
@@ -837,8 +931,10 @@ class SharedPreferencesUtil {
   }
 
   set cachedPeople(List<Person> value) {
+    final key = _accountScopedKey('cachedPeople');
+    if (key == null) return;
     final List<String> people = value.map((e) => jsonEncode(e.toJson())).toList();
-    saveStringList('cachedPeople', people);
+    saveStringList(key, people);
   }
 
   addCachedPerson(Person person) {
@@ -867,13 +963,16 @@ class SharedPreferencesUtil {
   }
 
   ServerConversation? get modifiedConversationDetails {
-    final String conversation = getString('modifiedConversationDetails');
+    final key = _accountScopedKey('modifiedConversationDetails');
+    if (key == null) return null;
+    final String conversation = getString(key);
     if (conversation.isEmpty) return null;
     return ServerConversation.fromJson(jsonDecode(conversation));
   }
 
   set modifiedConversationDetails(ServerConversation? value) {
-    saveString('modifiedConversationDetails', value == null ? '' : jsonEncode(value.toJson()));
+    final key = _accountScopedKey('modifiedConversationDetails');
+    if (key != null) saveString(key, value == null ? '' : jsonEncode(value.toJson()));
   }
 
   set calendarPermissionAlreadyRequested(bool value) => saveBool('calendarPermissionAlreadyRequested', value);
@@ -992,14 +1091,35 @@ class SharedPreferencesUtil {
 
   //--------------------------- Emergency Contact ----------------------------//
 
-  String get emergencyContactName => getString('emergencyContactName');
-  set emergencyContactName(String value) => saveString('emergencyContactName', value);
+  String get emergencyContactName {
+    final key = _accountScopedKey('emergencyContactName');
+    return key == null ? '' : getString(key);
+  }
 
-  String get emergencyContactPhone => getString('emergencyContactPhone');
-  set emergencyContactPhone(String value) => saveString('emergencyContactPhone', value);
+  set emergencyContactName(String value) {
+    final key = _accountScopedKey('emergencyContactName');
+    if (key != null) saveString(key, value);
+  }
 
-  String get pendingEmergency => getString('pendingEmergency');
-  set pendingEmergency(String value) => saveString('pendingEmergency', value);
+  String get emergencyContactPhone {
+    final key = _accountScopedKey('emergencyContactPhone');
+    return key == null ? '' : getString(key);
+  }
+
+  set emergencyContactPhone(String value) {
+    final key = _accountScopedKey('emergencyContactPhone');
+    if (key != null) saveString(key, value);
+  }
+
+  String get pendingEmergency {
+    final key = _accountScopedKey('pendingEmergency');
+    return key == null ? '' : getString(key);
+  }
+
+  set pendingEmergency(String value) {
+    final key = _accountScopedKey('pendingEmergency');
+    if (key != null) saveString(key, value);
+  }
 
   // TTS Provider (dev setting) — elevenlabs | fish-audio-s2 | kokoro
   String get ttsProvider => getString('devTtsProvider', defaultValue: 'elevenlabs');
@@ -1031,5 +1151,8 @@ class SharedPreferencesUtil {
 
   Future<bool> remove(String key) async => await _preferences?.remove(key) ?? false;
 
-  Future<bool> clear() async => await _preferences?.clear() ?? false;
+  Future<bool> clear() async {
+    _invalidateAiConsentAuthority();
+    return await _preferences?.clear() ?? false;
+  }
 }

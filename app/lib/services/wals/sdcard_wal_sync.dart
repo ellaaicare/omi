@@ -18,6 +18,9 @@ import 'package:omi/services/wals/wal_interfaces.dart';
 import 'package:omi/services/wifi/wifi_network_service.dart';
 
 class SDCardWalSyncImpl implements SDCardWalSync {
+  // Current SD-card firmware does not provide a signed owner/provenance proof.
+  // Device bytes therefore remain discoverable only as quarantined metadata.
+  static const bool _deviceOwnerProofProtocolAvailable = false;
   List<Wal> _wals = const [];
   BtDevice? _device;
 
@@ -140,6 +143,10 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
   @override
   Future deleteWal(Wal wal) async {
+    if (!_canMutateDeviceWal(wal)) {
+      Logger.debug('SDCardWalSync: Refused delete/clear for unverified device audio');
+      return;
+    }
     _wals.removeWhere((w) => w.id == wal.id);
 
     if (_device != null) {
@@ -181,7 +188,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
       wals.add(Wal(
         codec: codec,
         timerStart: timerStart,
-        status: WalStatus.miss,
+        status: WalStatus.quarantined,
         storage: WalStorage.sdcard,
         seconds: seconds,
         storageOffset: storageOffset,
@@ -191,6 +198,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
         deviceModel: deviceModel,
         totalFrames: seconds * codec.getFramesPerSecond(),
         syncedFrameOffset: 0,
+        quarantineReason: 'device_owner_provenance_unverified',
       ));
     }
 
@@ -199,8 +207,14 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
   @override
   Future<List<Wal>> getMissingWals() async {
-    return _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.sdcard).toList();
+    return _wals.where(_canMutateDeviceWal).toList();
   }
+
+  bool _canMutateDeviceWal(Wal wal) =>
+      _deviceOwnerProofProtocolAvailable &&
+      wal.storage == WalStorage.sdcard &&
+      wal.status == WalStatus.miss &&
+      wal.owner != null;
 
   @override
   Future start() async {
@@ -243,13 +257,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     String filePath = '${directory.path}/${wal.getFileNameByTimeStarts(timerStart)}';
     List<int> data = [];
 
-    // Debug: Log first frame info
-    if (chunk.isNotEmpty) {
-      final firstFrame = chunk[0];
-      final frameHex = firstFrame.take(8).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-      Logger.debug(
-          "SDCardWalSync _flushToDisk: ${chunk.length} frames, first frame size=${firstFrame.length}, hex: $frameHex");
-    }
+    Logger.debug('SDCardWalSync: Persisting one quarantined audio chunk (${chunk.length} frames)');
 
     for (int i = 0; i < chunk.length; i++) {
       var frame = chunk[i];
@@ -264,7 +272,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     final file = File(filePath);
     await file.writeAsBytes(data);
 
-    Logger.debug("SDCardWalSync _flushToDisk: Wrote ${data.length} bytes to $filePath");
+    Logger.debug('SDCardWalSync: Persisted ${data.length} quarantined audio bytes');
 
     return file;
   }
@@ -275,7 +283,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     int offset = wal.storageOffset;
     int timerStart = wal.timerStart;
 
-    Logger.debug("_readStorageBytesToFile ${offset}");
+    Logger.debug('SDCardWalSync: Reading quarantined device audio');
 
     List<List<int>> bytesData = [];
     var bytesLeft = 0;
@@ -390,7 +398,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
   }
 
   Future<SyncLocalFilesResponse> _syncWal(final Wal wal, Function(int offset, double speedKBps)? updates) async {
-    Logger.debug("SDCard sync (two-phase): ${wal.id} byte offset: ${wal.storageOffset} ts ${wal.timerStart}");
+    Logger.debug('SDCardWalSync: Starting verified device-audio transfer');
 
     if (_localSync == null) {
       Logger.debug("SDCard: ERROR - LocalWalSync not available, aborting to preserve data safety");
@@ -424,12 +432,11 @@ class SDCardWalSyncImpl implements SDCardWalSync {
           updates(offset, _currentSpeedKBps);
         }
 
-        Logger.debug(
-            "SDCard: Chunk $chunksDownloaded downloaded (ts: $timerStart, speed: ${_currentSpeedKBps.toStringAsFixed(1)} KB/s)");
+        Logger.debug('SDCardWalSync: Preserved quarantined chunk $chunksDownloaded');
       });
     } catch (e) {
       await _storageStream?.cancel();
-      Logger.debug('SDCard download failed: $e');
+      Logger.debug('SDCardWalSync: Quarantined transfer failed (${e.runtimeType})');
       if (chunksDownloaded > 0) {
         Logger.debug("SDCard: $chunksDownloaded chunks saved before failure");
       }
@@ -464,18 +471,18 @@ class SDCardWalSyncImpl implements SDCardWalSync {
       timerStart: timerStart,
       filePath: file.path.split('/').last,
       storage: WalStorage.disk,
-      status: WalStatus.miss,
+      status: WalStatus.quarantined,
       device: wal.device,
       deviceModel: wal.deviceModel,
       seconds: chunkSeconds,
       totalFrames: chunkSeconds * wal.codec.getFramesPerSecond(),
       syncedFrameOffset: 0,
       originalStorage: WalStorage.sdcard,
+      quarantineReason: 'device_owner_provenance_unverified',
     );
 
     await _localSync!.addExternalWal(localWal);
-    Logger.debug(
-        "SDCard: Registered chunk (ts: $timerStart) with LocalWalSync - codec=${localWal.codec}, sampleRate=${localWal.sampleRate}, channel=${localWal.channel}");
+    Logger.debug('SDCardWalSync: Registered one quarantined chunk with local preservation');
   }
 
   @override
@@ -483,7 +490,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
-    var wals = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.sdcard).toList();
+    var wals = _wals.where(_canMutateDeviceWal).toList();
     if (wals.isEmpty) {
       Logger.debug("SDCardWalSync: All synced!");
       return null;
@@ -496,7 +503,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
     for (var i = wals.length - 1; i >= 0; i--) {
       if (_isCancelled) {
-        Logger.debug("SDCardWalSync: Sync cancelled before processing WAL ${wals[i].id}");
+        Logger.debug('SDCardWalSync: Sync cancelled before processing verified device audio');
         break;
       }
 
@@ -534,7 +541,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
         wal.status = WalStatus.synced;
       } catch (e) {
-        Logger.debug("SDCardWalSync: Error syncing WAL ${wal.id}: $e");
+        Logger.debug('SDCardWalSync: Verified device-audio sync failed: ${e.runtimeType}');
         wal.isSyncing = false;
         wal.syncStartedAt = null;
         wal.syncEtaSeconds = null;
@@ -563,6 +570,10 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
+    if (!_canMutateDeviceWal(wal)) {
+      Logger.debug('SDCardWalSync: Refused transfer for unverified device audio');
+      return null;
+    }
     var walToSync = _wals.where((w) => w == wal).toList().first;
 
     _resetSyncState();
@@ -601,7 +612,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
 
       wal.status = WalStatus.synced;
     } catch (e) {
-      Logger.debug("SDCardWalSync: Error syncing WAL ${wal.id}: $e");
+      Logger.debug('SDCardWalSync: Verified device-audio sync failed: ${e.runtimeType}');
       walToSync.isSyncing = false;
       walToSync.syncStartedAt = null;
       walToSync.syncEtaSeconds = null;
@@ -725,7 +736,7 @@ class SDCardWalSyncImpl implements SDCardWalSync {
     IWalSyncProgressListener? progress,
     IWifiConnectionListener? connectionListener,
   }) async {
-    var wals = _wals.where((w) => w.status == WalStatus.miss && w.storage == WalStorage.sdcard).toList();
+    var wals = _wals.where(_canMutateDeviceWal).toList();
     if (wals.isEmpty) {
       Logger.debug("SDCardWalSync WiFi: All synced!");
       return null;

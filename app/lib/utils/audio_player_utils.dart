@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/wal_file_manager.dart';
 
 class AudioPlayerUtils extends ChangeNotifier {
   // Singleton pattern
@@ -59,9 +60,8 @@ class AudioPlayerUtils extends ChangeNotifier {
   bool isPlaying(String id) => _currentPlayingId == id;
 
   bool canPlayOrShare(Wal wal) {
-    return (wal.filePath != null && wal.filePath!.isNotEmpty) ||
-        wal.data.isNotEmpty ||
-        wal.storage == WalStorage.sdcard;
+    if (wal.status == WalStatus.quarantined || wal.owner == null) return false;
+    return (wal.filePath != null && wal.filePath!.isNotEmpty) || wal.data.isNotEmpty;
   }
 
   Future<void> togglePlayback(Wal wal) async {
@@ -100,7 +100,7 @@ class AudioPlayerUtils extends ChangeNotifier {
     final audioFilePath = await _getOrCreateAudioFile(wal);
     if (audioFilePath == null) {
       _resetPlaybackState();
-      Logger.debug('AudioPlayerUtils: Unable to create playable audio file for WAL ${wal.id}');
+      Logger.debug('AudioPlayerUtils: Unable to create playable audio for an active WAL');
       return;
     }
 
@@ -208,7 +208,7 @@ class AudioPlayerUtils extends ChangeNotifier {
 
   Future<String?> _getAudioFilePath(Wal wal) async {
     if (wal.filePath != null && wal.filePath!.isNotEmpty) {
-      final fullPath = await Wal.getFilePath(wal.filePath);
+      final fullPath = await WalFileManager.resolveWalFilePath(wal);
       if (fullPath != null) {
         final file = File(fullPath);
         if (file.existsSync()) return fullPath;
@@ -272,10 +272,8 @@ class AudioPlayerUtils extends ChangeNotifier {
     List<Uint8List> pcmFrames = [];
     for (final opusFrame in opusFrames) {
       final pcmFrame = decoder.decode(input: opusFrame);
-      if (pcmFrame != null) {
-        final uint8Frame = Uint8List.fromList(pcmFrame.buffer.asUint8List());
-        pcmFrames.add(uint8Frame);
-      }
+      final uint8Frame = Uint8List.fromList(pcmFrame.buffer.asUint8List());
+      pcmFrames.add(uint8Frame);
     }
 
     if (pcmFrames.isEmpty) return null;
@@ -306,7 +304,7 @@ class AudioPlayerUtils extends ChangeNotifier {
 
     while (offset < pcmFileData.length - 4) {
       final lengthBytes = pcmFileData.sublist(offset, offset + 4);
-      final length = ByteData.sublistView(pcmFileData, offset + 4, offset + 8).getUint32(0, Endian.little);
+      final length = ByteData.sublistView(Uint8List.fromList(lengthBytes)).getUint32(0, Endian.little);
       offset += 4;
 
       if (offset + length > pcmFileData.length) break;

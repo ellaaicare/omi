@@ -18,7 +18,9 @@ import 'package:omi/ella/pages/ella_daily_note_page.dart';
 import 'package:omi/ella/pages/ella_memories_page.dart';
 import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -32,6 +34,11 @@ import 'package:omi/utils/enums.dart';
 import 'package:omi/utils/l10n_extensions.dart';
 
 typedef DailySummaryLoader = Future<List<DailySummary>> Function();
+typedef TodayNowProvider = DateTime Function();
+typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
+typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
+typedef GuardianNativeLifecycle = Future<void> Function();
+typedef GuardianAvailability = bool Function();
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
@@ -55,9 +62,24 @@ List<ActionItemWithMetadata> todayUpcomingReminders(List<ActionItemWithMetadata>
 }
 
 class TodayPage extends StatefulWidget {
-  const TodayPage({super.key, this.dailySummaryLoader});
+  const TodayPage({
+    super.key,
+    this.dailySummaryLoader,
+    this.nowProvider,
+    this.guardianModeLoader,
+    this.guardianModeSetter,
+    this.guardianNativeStart,
+    this.guardianNativeStop,
+    this.guardianAvailability,
+  });
 
   final DailySummaryLoader? dailySummaryLoader;
+  final TodayNowProvider? nowProvider;
+  final GuardianModeLoader? guardianModeLoader;
+  final GuardianModeSetter? guardianModeSetter;
+  final GuardianNativeLifecycle? guardianNativeStart;
+  final GuardianNativeLifecycle? guardianNativeStop;
+  final GuardianAvailability? guardianAvailability;
 
   @override
   State<TodayPage> createState() => TodayPageState();
@@ -68,14 +90,20 @@ class TodayPageState extends State<TodayPage> {
   DailySummary? _dailySummary;
   bool _isLoading = true;
   bool _isReading = false;
-  bool _whispersOn = true;
+  bool _whispersOn = false;
   bool _updatingWhispers = false;
+
+  bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
   @override
   void initState() {
     super.initState();
-    _loadDailySummary();
-    _loadWhisperState();
+    if (allowsUnverifiedEllaSurface()) {
+      _loadDailySummary();
+    }
+    if (_guardianAvailable) {
+      _loadWhisperState();
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       unawaited(context.read<ConversationProvider>().ensureFreshConversations());
@@ -91,7 +119,7 @@ class TodayPageState extends State<TodayPage> {
 
   Future<void> _loadDailySummary() async {
     try {
-      final summaries = SharedPreferencesUtil.isTodayDesignPreview
+      final summaries = SharedPreferencesUtil.isTodayDesignPreviewEnabled
           ? DemoFixtures.dailySummaries(now: DateTime(2025, 7, 24, 9, 41))
           : await (widget.dailySummaryLoader?.call() ?? getDailySummaries(limit: 7));
       if (!mounted) return;
@@ -105,11 +133,29 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _loadWhisperState() async {
-    final info = await guardian_api.getGuardianMode();
-    if (!mounted || info == null) return;
-    setState(() {
-      _whispersOn = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
-    });
+    if (!_guardianAvailable) return;
+    final info = await (widget.guardianModeLoader?.call() ?? guardian_api.getGuardianMode());
+    if (info == null) {
+      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      if (!mounted) return;
+      setState(() => _whispersOn = false);
+      return;
+    }
+    if (!mounted) return;
+    var enabled = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+    try {
+      if (enabled) {
+        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
+      } else {
+        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      }
+    } catch (_) {
+      enabled = false;
+      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
+          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+    }
+    if (!mounted) return;
+    setState(() => _whispersOn = enabled);
   }
 
   void scrollToTop() {
@@ -134,23 +180,38 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _setWhispers(bool enabled) async {
-    if (_updatingWhispers) return;
-    final previous = _whispersOn;
+    if (_updatingWhispers || !_guardianAvailable) return;
     setState(() {
       _whispersOn = enabled;
       _updatingWhispers = true;
     });
     final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
-    final success = SharedPreferencesUtil().demoMode || await guardian_api.setGuardianModeTwoTier(state);
+    var success = false;
+    try {
+      if (!enabled) {
+        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      }
+      success = await (widget.guardianModeSetter?.call(state) ?? guardian_api.setGuardianModeTwoTier(state));
+      if (success && enabled) {
+        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
+      }
+    } catch (_) {
+      success = false;
+    }
+    if (!success && enabled) {
+      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
+          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+    }
     if (!mounted) return;
     setState(() {
       _updatingWhispers = false;
-      if (!success) _whispersOn = previous;
+      if (!success) _whispersOn = false;
     });
     if (!success) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Whispers could not be updated. Please try again.')));
+      ).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
   }
 
@@ -174,7 +235,9 @@ class TodayPageState extends State<TodayPage> {
 
   @override
   Widget build(BuildContext context) {
-    final now = SharedPreferencesUtil.isTodayDesignPreview ? DateTime(2025, 7, 24, 9, 41) : DateTime.now();
+    final now = SharedPreferencesUtil.isTodayDesignPreviewEnabled
+        ? DateTime(2025, 7, 24, 9, 41)
+        : (widget.nowProvider?.call() ?? DateTime.now());
     final reminders = todayUpcomingReminders(context.watch<ActionItemsProvider>().actionItems, now);
     final deviceConnected = context.select<DeviceProvider, bool>((provider) => provider.presentationIsConnected);
     final device = context.watch<DeviceProvider>();
@@ -192,6 +255,8 @@ class TodayPageState extends State<TodayPage> {
     );
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
+    final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
+    final showGuardianSurfaces = _guardianAvailable;
 
     return SafeArea(
       bottom: false,
@@ -200,8 +265,8 @@ class TodayPageState extends State<TodayPage> {
         backgroundColor: EllaColors.card,
         onRefresh: () async {
           await Future.wait([
-            _loadDailySummary(),
-            _loadWhisperState(),
+            if (showUnverifiedSurfaces) _loadDailySummary(),
+            if (showGuardianSurfaces) _loadWhisperState(),
             context.read<ActionItemsProvider>().fetchActionItems(),
             context.read<ConversationProvider>().getInitialConversations(),
           ]);
@@ -239,29 +304,36 @@ class TodayPageState extends State<TodayPage> {
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConnectDevicePage())),
               ),
             ],
-            const SizedBox(height: EllaSizes.cardGap),
-            _DailyNoteCard(
-              loading: _isLoading,
-              text: _noteText,
-              isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
-              isReading: _isReading,
-              enlarged: scale >= 1.45,
-              hasConversations: visibleConversations.isNotEmpty,
-              onTap: _openDailyNote,
-              onReadAloud: _toggleReadAloud,
-            ),
-            const SizedBox(height: EllaSizes.cardGap),
-            _WhisperPill(
-              enabled: _whispersOn,
-              live: isLive,
-              updating: _updatingWhispers,
-              onChanged: _setWhispers,
-              onOpenLive: () => _openLiveView(capture, conversations),
-            ),
-            _SeeWhispersLink(
-              onTap: () =>
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
-            ),
+            if (showUnverifiedSurfaces) ...[
+              const SizedBox(height: EllaSizes.cardGap),
+              _DailyNoteCard(
+                loading: _isLoading,
+                text: _noteText,
+                isToday: _dailySummary?.date == DateFormat('yyyy-MM-dd').format(now),
+                isReading: _isReading,
+                enlarged: scale >= 1.45,
+                hasConversations: visibleConversations.isNotEmpty,
+                onTap: _openDailyNote,
+                onReadAloud: _toggleReadAloud,
+              ),
+            ],
+            if (showGuardianSurfaces) ...[
+              const SizedBox(height: EllaSizes.cardGap),
+              KeyedSubtree(
+                key: const Key('guardian-whispers-control'),
+                child: _WhisperPill(
+                  enabled: _whispersOn,
+                  live: isLive,
+                  updating: _updatingWhispers,
+                  onChanged: _setWhispers,
+                  onOpenLive: () => _openLiveView(capture, conversations),
+                ),
+              ),
+              _SeeWhispersLink(
+                onTap: () =>
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardianAlertHistoryPage())),
+              ),
+            ],
             const SizedBox(height: EllaSizes.cardGap),
             if (memoriesLoading)
               const _RecentMemoriesLoading()

@@ -15,14 +15,31 @@ import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/structured.dart';
 import 'package:omi/backend/schema/transcript_segment.dart';
 import 'package:omi/ella/demo/demo_fixtures.dart';
+import 'package:omi/ella/services/ella_account_commit_barrier.dart';
 import 'package:omi/providers/app_provider.dart';
 import 'package:omi/providers/conversation_provider.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/display_text.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
 
+typedef ConversationReprocessor = Future<ServerConversation?> Function(String conversationId, {String? appId});
+
 class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixin {
+  ConversationDetailProvider({
+    ConversationReprocessor? reprocessConversation,
+    SharedPreferencesUtil? preferences,
+    ActiveAccountAuthorityProvider? activeAuthority,
+  })  : _reprocessConversation = reprocessConversation ?? reProcessConversationServer,
+        _preferences = preferences ?? SharedPreferencesUtil(),
+        _activeAuthority = activeAuthority ?? WalOwnerAuthority.activeAccount;
+
+  final ConversationReprocessor _reprocessConversation;
+  final SharedPreferencesUtil _preferences;
+  final ActiveAccountAuthorityProvider _activeAuthority;
+  int _operationGeneration = 0;
+
   AppProvider? appProvider;
   ConversationProvider? conversationProvider;
 
@@ -229,10 +246,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     titleFocusNode!.addListener(() {
       print('titleFocusNode focus changed');
       if (!titleFocusNode!.hasFocus) {
-        final persistedTitle = persistEllaDisplayValue(
-          titleController!.text,
-          isEllaGenerated: titleIsEllaGenerated,
-        );
+        final persistedTitle = persistEllaDisplayValue(titleController!.text, isEllaGenerated: titleIsEllaGenerated);
         conversation.structured.title = persistedTitle;
         if (!SharedPreferencesUtil().demoMode) {
           updateConversationTitle(conversation.id, persistedTitle);
@@ -279,12 +293,23 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   Future<bool> reprocessConversation({String? appId}) async {
     Logger.debug('_reProcessConversation with appId: $appId');
+    final lease = EllaAccountCommitBarrier.begin(
+      authorityProvider: _activeAuthority,
+      onInvalidated: _invalidateAccountOperations,
+    );
+    if (lease == null) return false;
+    final generation = _operationGeneration;
+    final sourceConversation = conversation;
+    if (!_canCommit(lease, generation)) {
+      lease.close();
+      return false;
+    }
     updateReprocessConversationLoadingState(true);
-    updateReprocessConversationId(conversation.id);
+    updateReprocessConversationId(sourceConversation.id);
     try {
-      var updatedConversation = await reProcessConversationServer(conversation.id, appId: appId);
-      if (_isDisposed) return false;
-      MixpanelManager().reProcessConversation(conversation);
+      final updatedConversation = await _reprocessConversation(sourceConversation.id, appId: appId);
+      if (!_canCommit(lease, generation)) return false;
+      MixpanelManager().reProcessConversation(sourceConversation);
       updateReprocessConversationLoadingState(false);
       updateReprocessConversationId('');
       if (updatedConversation == null) {
@@ -295,7 +320,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
       // else
       conversationProvider!.updateConversation(updatedConversation);
-      SharedPreferencesUtil().modifiedConversationDetails = updatedConversation;
+      _preferences.modifiedConversationDetails = updatedConversation;
 
       // Update the cached conversation to ensure we have the latest data
       _cachedConversation = updatedConversation;
@@ -306,26 +331,50 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
         String appId = summaryApp.appId!;
         bool appExists = appProvider!.apps.any((app) => app.id == appId);
         if (!appExists) {
-          await appProvider!.getApps();
-          if (_isDisposed) return false;
+          await appProvider!.getApps(accountLease: lease);
+          if (!_canCommit(lease, generation)) return false;
         }
       }
       notifyInfo('REPROCESS_SUCCESS');
       notifyListeners();
       return true;
     } catch (err, stacktrace) {
+      if (!_canCommit(lease, generation)) return false;
       print(err);
-      var conversationReporting = MixpanelManager().getConversationEventProperties(conversation);
-      await PlatformManager.instance.crashReporter.reportCrash(err, stacktrace, userAttributes: {
-        'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
-        'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
-      });
+      var conversationReporting = MixpanelManager().getConversationEventProperties(sourceConversation);
+      await PlatformManager.instance.crashReporter.reportCrash(
+        err,
+        stacktrace,
+        userAttributes: {
+          'conversation_transcript_length': conversationReporting['transcript_length'].toString(),
+          'conversation_transcript_word_count': conversationReporting['transcript_word_count'].toString(),
+        },
+      );
+      if (!_canCommit(lease, generation)) return false;
       notifyError('REPROCESS_FAILED');
       updateReprocessConversationLoadingState(false);
       updateReprocessConversationId('');
       notifyListeners();
       return false;
+    } finally {
+      lease.close();
     }
+  }
+
+  bool _canCommit(EllaAccountCommitLease lease, int generation) =>
+      !_isDisposed && generation == _operationGeneration && lease.isCurrent;
+
+  void _invalidateAccountOperations() {
+    _operationGeneration++;
+    _cachedConversation = null;
+    _cachedConversationId = null;
+    _cachedEnabledConversationApps.clear();
+    _cachedSuggestedApps.clear();
+    loadingReprocessConversation = false;
+    reprocessConversationId = '';
+    selectedAppForReprocessing = null;
+    appProvider?.cancelAccountScopedRefresh();
+    if (!_isDisposed) notifyListeners();
   }
 
   void unassignConversationTranscriptSegment(String conversationId, String segmentId) {
@@ -345,10 +394,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
     // If no appResults but we have structured overview, create a fake AppResponse
     if (conversation.structured.overview.isNotEmpty) {
-      return AppResponse(
-        conversation.structured.overview,
-        appId: null,
-      );
+      return AppResponse(conversation.structured.overview, appId: null);
     }
     return null;
   }
@@ -569,9 +615,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     final lastUsedId = getLastUsedSummarizationAppId();
     if (lastUsedId == null || appProvider == null) return null;
 
-    return appProvider!.apps.firstWhereOrNull(
-      (app) => app.id == lastUsedId && app.worksWithMemories() && app.enabled,
-    );
+    return appProvider!.apps.firstWhereOrNull((app) => app.id == lastUsedId && app.worksWithMemories() && app.enabled);
   }
 
   bool _isDisposed = false;

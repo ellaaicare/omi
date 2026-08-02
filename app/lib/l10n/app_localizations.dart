@@ -17078,6 +17078,108 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Demo preview — voice is not active'**
   String get ellaVoiceDemoPreview;
+
+  /// No description provided for @ellaWorkspaceTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Ella workspace'**
+  String get ellaWorkspaceTitle;
+
+  /// No description provided for @ellaWorkspaceSettingsSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'See which private workspace and routes are verified'**
+  String get ellaWorkspaceSettingsSubtitle;
+
+  /// No description provided for @ellaWorkspacePrivacyDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'This page helps you confirm that Ella is using the private workspace for this account. A route stays unverified until the app receives proof for that route.'**
+  String get ellaWorkspacePrivacyDescription;
+
+  /// No description provided for @ellaWorkspaceAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Signed-in account'**
+  String get ellaWorkspaceAccount;
+
+  /// No description provided for @ellaWorkspacePrivateHermes.
+  ///
+  /// In en, this message translates to:
+  /// **'Private Hermes workspace'**
+  String get ellaWorkspacePrivateHermes;
+
+  /// No description provided for @ellaWorkspaceFingerprint.
+  ///
+  /// In en, this message translates to:
+  /// **'Workspace fingerprint'**
+  String get ellaWorkspaceFingerprint;
+
+  /// No description provided for @ellaWorkspaceBindingRevision.
+  ///
+  /// In en, this message translates to:
+  /// **'Binding revision'**
+  String get ellaWorkspaceBindingRevision;
+
+  /// No description provided for @ellaWorkspaceLastVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Last server verification'**
+  String get ellaWorkspaceLastVerified;
+
+  /// No description provided for @ellaWorkspaceProtectedAudio.
+  ///
+  /// In en, this message translates to:
+  /// **'Protected stored audio'**
+  String get ellaWorkspaceProtectedAudio;
+
+  /// No description provided for @ellaWorkspaceProtectedAudioExplanation.
+  ///
+  /// In en, this message translates to:
+  /// **'These files have no matching account proof. Ella keeps them private and will not send or remove them.'**
+  String get ellaWorkspaceProtectedAudioExplanation;
+
+  /// No description provided for @ellaWorkspaceRoutes.
+  ///
+  /// In en, this message translates to:
+  /// **'Route verification'**
+  String get ellaWorkspaceRoutes;
+
+  /// No description provided for @ellaWorkspaceChatRoute.
+  ///
+  /// In en, this message translates to:
+  /// **'Chat'**
+  String get ellaWorkspaceChatRoute;
+
+  /// No description provided for @ellaWorkspaceVoiceRoute.
+  ///
+  /// In en, this message translates to:
+  /// **'Voice'**
+  String get ellaWorkspaceVoiceRoute;
+
+  /// No description provided for @ellaWorkspaceWhispersRoute.
+  ///
+  /// In en, this message translates to:
+  /// **'Whispers'**
+  String get ellaWorkspaceWhispersRoute;
+
+  /// No description provided for @ellaWorkspaceVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Verified'**
+  String get ellaWorkspaceVerified;
+
+  /// No description provided for @ellaWorkspaceNotVerified.
+  ///
+  /// In en, this message translates to:
+  /// **'Not verified'**
+  String get ellaWorkspaceNotVerified;
+
+  /// No description provided for @ellaWorkspaceRouteExplanation.
+  ///
+  /// In en, this message translates to:
+  /// **'Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet.'**
+  String get ellaWorkspaceRouteExplanation;
 }
 
 class _AppLocalizationsDelegate extends LocalizationsDelegate<AppLocalizations> {

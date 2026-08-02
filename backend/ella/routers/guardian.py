@@ -17,6 +17,7 @@ import binascii
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from datetime import datetime
@@ -46,8 +47,13 @@ from utils.ella.canonical_context import (
     canonical_events_to_chat_turns,
     fetch_canonical_timeline,
 )
+from utils.ella.exact_firebase_auth import (
+    EllaRequestAuthority,
+    get_exact_firebase_uid,
+    get_firebase_or_service_authority,
+    require_matching_firebase_uid,
+)
 from utils.ella.time_context import build_time_context, local_time_fields
-from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 alerts_router = APIRouter(prefix="/v1/ella", tags=["Guardian Mode"])
@@ -58,7 +64,8 @@ alerts_router = APIRouter(prefix="/v1/ella", tags=["Guardian Mode"])
 
 AUDIO_BASE_DIR = "/var/www/ella-ai-care.com/audio"
 AUDIO_PUBLIC_URL = "https://ella-ai-care.com/audio"
-GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "4f13699d8462adf71e35d2098e6a791f")
+GUARDIAN_WEBHOOK_KEY = os.getenv("GUARDIAN_WEBHOOK_KEY", "")
+ELLA_INTERNAL_TTS_KEY = os.getenv("ELLA_INTERNAL_TTS_KEY", "")
 SMTP_FROM = os.getenv("ELLA_SMTP_FROM", "guardian@ella-ai-care.com")
 N8N_GUARDIAN_DELIVER_WEBHOOK = os.getenv(
     "N8N_GUARDIAN_DELIVER_WEBHOOK",
@@ -94,6 +101,23 @@ _pool: Optional[asyncpg.Pool] = None
 
 # uid -> last playback event (resets on restart — used only for echo risk)
 _playback_events: dict[str, dict] = {}
+
+
+get_guardian_authenticated_uid = get_exact_firebase_uid
+
+
+def get_guardian_user_or_service_authority(
+    authorization: Optional[str] = Header(None),
+    x_guardian_key: Optional[str] = Header(None, alias="X-Guardian-Key"),
+    key: Optional[str] = Header(None, alias="X-Key"),
+) -> EllaRequestAuthority:
+    return get_firebase_or_service_authority(
+        authorization=authorization,
+        provided_service_key=x_guardian_key or key,
+        configured_service_key=GUARDIAN_WEBHOOK_KEY,
+        service="guardian",
+    )
+
 
 # Echo risk by iOS AVAudioSession portType rawValue
 _ECHO_RISK = {
@@ -146,14 +170,7 @@ def _verify_key(
 ) -> None:
     """Verify webhook authentication key."""
     provided = x_guardian_key or key
-    if provided != GUARDIAN_WEBHOOK_KEY:
-        raise HTTPException(status_code=403, detail="Invalid guardian key")
-
-
-def _verify_optional_trace_key(x_guardian_key: Optional[str] = None, key: Optional[str] = None) -> None:
-    """Allow legacy scanner trace posts without a key, but reject bad keys when present."""
-    provided = x_guardian_key or key
-    if provided and provided != GUARDIAN_WEBHOOK_KEY:
+    if not GUARDIAN_WEBHOOK_KEY or not provided or not secrets.compare_digest(provided, GUARDIAN_WEBHOOK_KEY):
         raise HTTPException(status_code=403, detail="Invalid guardian key")
 
 
@@ -388,6 +405,13 @@ class PlaybackEventRequest(BaseModel):
     device_uid: str = ""  # unique device ID from AVAudioSessionPortDescription
     duration_ms: int = 0  # estimated audio duration in ms
     metadata: Optional[dict] = None
+
+
+class GuardianModeUpdateRequest(BaseModel):
+    """Authenticated, user-scoped Whispers mode update."""
+
+    override: Optional[str] = None
+    features: list[str] = Field(default_factory=list)
 
 
 class PlaybackDebugEventRequest(BaseModel):
@@ -817,7 +841,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
 @alerts_router.get("/guardian-alerts")
 async def guardian_alerts(
     limit: int = Query(default=50, ge=1, le=200),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_guardian_authenticated_uid),
 ) -> dict[str, Any]:
     """Return newest-first Guardian alert history for the authenticated user."""
     return await _guardian_alert_history(uid, limit)
@@ -1196,11 +1220,80 @@ Rules:
 # ---------------------------------------------------------------------------
 
 
+_GUARDIAN_OVERRIDE_MODES = {"cyborg", "chatbot", "demo"}
+_GUARDIAN_FEATURE_MODES = {"active_support", "emergency_only", "memory_support", "maximum_awareness"}
+
+
+def _guardian_mode_response(guardian_mode: Optional[str]) -> dict[str, Any]:
+    normalized = _normalize_mode(guardian_mode)
+    current_mode = normalized.upper()
+    return {
+        "success": True,
+        "currentMode": current_mode,
+        "override": current_mode if normalized in _GUARDIAN_OVERRIDE_MODES else None,
+        "features": [current_mode] if normalized in _GUARDIAN_FEATURE_MODES else [],
+        "showDemo": False,
+    }
+
+
+def _requested_guardian_mode(req: GuardianModeUpdateRequest) -> Optional[str]:
+    normalized_override = _normalize_mode(req.override) if req.override else MODE_OFF
+    normalized_features = {_normalize_mode(value) for value in req.features if str(value).strip()}
+
+    if req.override:
+        if normalized_override not in _GUARDIAN_OVERRIDE_MODES:
+            raise HTTPException(status_code=422, detail="Unsupported Guardian override")
+        if normalized_features:
+            raise HTTPException(status_code=422, detail="Guardian override and features cannot be combined")
+        return normalized_override.upper()
+
+    if not normalized_features or normalized_features == {MODE_OFF}:
+        return None
+    if len(normalized_features) != 1 or not normalized_features.issubset(_GUARDIAN_FEATURE_MODES):
+        raise HTTPException(status_code=422, detail="Choose exactly one supported Guardian feature")
+    return next(iter(normalized_features)).upper()
+
+
+@router.get("/mode")
+async def get_guardian_mode(authenticated_uid: str = Depends(get_guardian_authenticated_uid)) -> dict[str, Any]:
+    """Read Whispers mode for the exact Firebase bearer subject."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER($1)",
+        authenticated_uid,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(row["guardian_mode"])
+
+
+@router.put("/mode")
+async def update_guardian_mode(
+    req: GuardianModeUpdateRequest,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+) -> dict[str, Any]:
+    """Update Whispers mode for the exact Firebase bearer subject."""
+    guardian_mode = _requested_guardian_mode(req)
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+        SET guardian_mode = $2
+        WHERE LOWER(omi_uid) = LOWER($1)
+        RETURNING guardian_mode
+        """,
+        authenticated_uid,
+        guardian_mode,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(row["guardian_mode"])
+
+
 @router.get("/next-audio")
-async def next_audio(uid: str):
+async def next_audio(uid: str, authenticated_uid: str = Depends(get_guardian_authenticated_uid)):
     """Pop next audio clip from queue. Consolidates if pile-up detected."""
-    if not uid or uid == "unknown":
-        return {"url": None}
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Guardian")
 
     _start = time.time()
     pool = await _get_pool()
@@ -1613,6 +1706,8 @@ async def synthesize_audio(
 ):
     """Resolve user voice settings and synthesize Guardian one-shot audio."""
     _verify_key(x_guardian_key, key)
+    if not ELLA_INTERNAL_TTS_KEY:
+        raise HTTPException(status_code=503, detail="Internal TTS service credential is not configured")
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text required")
@@ -1639,7 +1734,7 @@ async def synthesize_audio(
                 response = await client.post(
                     ELLA_INTERNAL_VOICE_TTS_URL,
                     json=payload,
-                    headers={"X-TTS-Provider": candidate},
+                    headers={"X-TTS-Provider": candidate, "X-Ella-TTS-Key": ELLA_INTERNAL_TTS_KEY},
                     timeout=30.0,
                 )
             except httpx.TimeoutException:
@@ -1776,8 +1871,12 @@ async def upload_audio_json(
 
 
 @router.get("/queue")
-async def view_queue(uid: str):
+async def view_queue(
+    uid: str,
+    authority: EllaRequestAuthority = Depends(get_guardian_user_or_service_authority),
+):
     """View pending queue items for a user (non-consuming read)."""
+    uid = authority.require_uid(uid, feature="Guardian queue")
     pool = await _get_pool()
 
     rows = await pool.fetch(
@@ -1906,16 +2005,17 @@ GUARDIAN_ACTIVE_AUDIO_URL = f"{AUDIO_PUBLIC_URL}/system/guardian-active.mp3"
 
 
 @router.post("/activate")
-async def activate_guardian(request: Request):
+async def activate_guardian(
+    request: Request,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+):
     """
     Called by iOS when user enables Guardian Mode.
     Enqueues a "Guardian active" confirmation audio message.
     Also called on first successful queue poll to confirm connectivity.
     """
     body = await request.json()
-    uid = body.get("uid")
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid is required")
+    uid = require_matching_firebase_uid(authenticated_uid, body.get("uid"), feature="Guardian activation")
 
     print(f"[FLOW:GUARDIAN-ACTIVATE] uid={uid} starting activation", flush=True)
 
@@ -1964,18 +2064,24 @@ async def activate_guardian(request: Request):
 
 
 @router.get("/trace/{conversation_id}")
-async def get_pipeline_trace(conversation_id: str):
+async def get_pipeline_trace(
+    conversation_id: str,
+    uid: str = Query(...),
+    authority: EllaRequestAuthority = Depends(get_guardian_user_or_service_authority),
+):
     """Get the full pipeline trace for a conversation."""
+    uid = authority.require_uid(uid, feature="Guardian trace")
     try:
         pool = await _get_pool()
         rows = await pool.fetch(
             """
             SELECT stage, status, latency_ms, metadata, created_at, uid
             FROM guardian_pipeline_events
-            WHERE trace_id = $1
+            WHERE trace_id = $1 AND uid = $2
             ORDER BY created_at ASC
             """,
             conversation_id,
+            uid,
         )
 
         if not rows:
@@ -2017,8 +2123,6 @@ async def get_pipeline_trace(conversation_id: str):
         audio_delivered = any(
             r["stage"] in ("audio_consumed", "ios_playback_started", "ios_playback_completed") for r in rows
         )
-
-        uid = rows[0]["uid"] if rows else ""
 
         print(
             f"[FLOW:GUARDIAN-TRACE] conv={conversation_id} uid={uid} stages={len(stages)} total_ms={total_ms} escalated={escalated}",
@@ -2294,7 +2398,7 @@ async def log_pipeline_event(
     key: Optional[str] = Header(None, alias="X-Key"),
 ):
     """Log a pipeline event (called by n8n workflows)."""
-    _verify_optional_trace_key(x_guardian_key, key)
+    _verify_key(x_guardian_key, key)
     metadata = dict(req.metadata or {})
     if req.error_detail:
         metadata["error_detail"] = req.error_detail
@@ -2348,11 +2452,15 @@ async def log_pipeline_event(
 
 
 @router.post("/playback-event")
-async def record_playback_event(req: PlaybackEventRequest):
+async def record_playback_event(
+    req: PlaybackEventRequest,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+):
     """iOS calls this when guardian audio starts playing.
     Records output route so the consolidator knows echo risk."""
+    uid = require_matching_firebase_uid(authenticated_uid, req.uid, feature="Guardian")
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
-    _playback_events[req.uid] = {
+    _playback_events[uid] = {
         "queue_item_id": req.queue_item_id,
         "trace_id": req.trace_id,
         "event_type": req.event_type,
@@ -2370,7 +2478,7 @@ async def record_playback_event(req: PlaybackEventRequest):
         status = "error" if event_type == "failed" else "success"
         await _log_pipeline_event(
             trace_id=trace_id,
-            uid=req.uid,
+            uid=uid,
             stage=f"ios_playback_{event_type}",
             status=status,
             latency_ms=req.duration_ms if event_type in ("completed", "failed") else None,
@@ -2386,14 +2494,17 @@ async def record_playback_event(req: PlaybackEventRequest):
         )
 
     print(
-        f"[FLOW:PLAYBACK-EVENT] uid={req.uid} trace={trace_id} item={req.queue_item_id} event={req.event_type} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
+        f"[FLOW:PLAYBACK-EVENT] uid={uid} trace={trace_id} item={req.queue_item_id} event={req.event_type} port={req.port_type} risk={echo_risk} device={req.port_name!r}",
         flush=True,
     )
     return {"ok": True, "trace_id": trace_id, "echo_risk": echo_risk}
 
 
 @router.post("/playback-debug")
-async def record_playback_debug_event(req: PlaybackDebugEventRequest):
+async def record_playback_debug_event(
+    req: PlaybackDebugEventRequest,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+):
     """Broader iOS Guardian debug-event sink.
 
     Unlike /playback-event, this accepts non-route lifecycle markers such as
@@ -2401,6 +2512,7 @@ async def record_playback_debug_event(req: PlaybackDebugEventRequest):
     failures that happen before AVFoundation playback starts.
     """
 
+    uid = require_matching_firebase_uid(authenticated_uid, req.uid, feature="Guardian playback debug")
     metadata = dict(req.metadata or {})
     event_name = (req.event_name or "unknown").strip().lower().replace(" ", "_")
     stage = req.stage or f"ios_debug_{event_name}"
@@ -2410,7 +2522,7 @@ async def record_playback_debug_event(req: PlaybackDebugEventRequest):
     if trace_id:
         await _log_pipeline_event(
             trace_id=trace_id,
-            uid=req.uid,
+            uid=uid,
             stage=stage,
             status=req.status,
             latency_ms=req.latency_ms,
@@ -2426,7 +2538,7 @@ async def record_playback_debug_event(req: PlaybackDebugEventRequest):
         )
 
     print(
-        f"[FLOW:PLAYBACK-DEBUG] uid={req.uid} trace={trace_id} item={req.queue_item_id} "
+        f"[FLOW:PLAYBACK-DEBUG] uid={uid} trace={trace_id} item={req.queue_item_id} "
         f"event={event_name} status={req.status} port={req.port_type or 'n/a'}",
         flush=True,
     )

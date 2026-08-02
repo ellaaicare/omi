@@ -19,6 +19,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   // WAL management
   List<Wal> _allWals = [];
   List<Wal> get allWals => _allWals;
+  List<Wal> get quarantinedWals => _allWals.where((wal) => wal.status == WalStatus.quarantined).toList();
   bool _isLoadingWals = false;
   bool get isLoadingWals => _isLoadingWals;
 
@@ -166,7 +167,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
     _updateSyncState(_syncState.toIdle());
     await _performSync(
       operation: () => _walService.getSyncs().syncWal(wal: wal, progress: this, connectionListener: connectionListener),
-      context: 'sync WAL ${wal.id}',
+      context: 'sync one WAL',
       failedWal: wal,
     );
   }
@@ -196,7 +197,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
       }
     } catch (e) {
       final errorMessage = _formatSyncError(e, failedWal);
-      Logger.debug('SyncProvider: Error in $context: $errorMessage');
+      Logger.debug('SyncProvider: $context failed (${e.runtimeType})');
       _updateSyncState(_syncState.toError(message: errorMessage, failedWal: failedWal));
     }
   }

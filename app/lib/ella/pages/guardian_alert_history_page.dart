@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/models/guardian_alert.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_alert_history_api.dart';
 import 'package:omi/pages/conversation_detail/page.dart';
 import 'package:omi/providers/conversation_provider.dart';
@@ -22,16 +23,22 @@ class _GuardianAlertHistoryPageState extends State<GuardianAlertHistoryPage> {
   @override
   void initState() {
     super.initState();
-    _future = GuardianAlertHistoryApi.fetch();
+    _future = allowsGuardianSurface()
+        ? GuardianAlertHistoryApi.fetch()
+        : Future.value(
+            const GuardianAlertHistoryResult(records: [], source: GuardianAlertHistorySource.disabled),
+          );
   }
 
   Future<void> _refresh() async {
+    if (!allowsGuardianSurface()) return;
     setState(() => _future = GuardianAlertHistoryApi.fetch());
     await _future;
   }
 
   @override
   Widget build(BuildContext context) {
+    if (!allowsGuardianSurface()) return const SizedBox.shrink();
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(

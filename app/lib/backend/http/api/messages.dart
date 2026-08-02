@@ -7,6 +7,7 @@ import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/other/string_utils.dart';
 
 Future<List<ServerMessage>> getMessagesServer({
@@ -103,6 +104,8 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   String text, {
   String? appId,
   List<String>? filesId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) return;
   var url = '${Env.apiBaseUrl}v2/messages?app_id=$appId';
@@ -115,6 +118,8 @@ Stream<ServerMessageChunk> sendMessageStreamServer(
   await for (var line in makeStreamingApiCall(
     url: url,
     body: jsonEncode({'text': text, 'file_ids': filesId}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   )) {
     var messageChunk = parseMessageChunk(line, messageId);
     if (messageChunk != null) {
@@ -134,10 +139,18 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   Map<String, String> headers = const {},
   String? clientMessageId,
   DateTime? clientSentAt,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   if (!SharedPreferencesUtil().aiConsentAccepted) return;
+  if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+    throw ExactAccountAuthorityChangedException('Exact account authority changed before Ella stream assembly');
+  }
   var url = '${Env.apiBaseUrl}v1/ella/chat/stream';
-  var uid = SharedPreferencesUtil().uid;
+  var uid = expectedAuthenticatedUid ?? exactAuthority?.uid ?? SharedPreferencesUtil().uid;
+  if (exactAuthority != null && exactAuthority.uid != uid) {
+    throw StateError('Ella stream UID does not match exact account authority');
+  }
   var messageId = "1000";
   final requestClientMessageId = clientMessageId ?? '';
   final requestClientSentAt = clientSentAt?.toUtc().toIso8601String() ?? '';
@@ -145,6 +158,8 @@ Stream<ServerMessageChunk> sendEllaMessageStream(
   await for (var line in makeStreamingApiCall(
     url: url,
     headers: headers,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
     body: jsonEncode({
       if (!isHermesProvisioningGateEnabled) 'uid': uid,
       'message': text,
@@ -207,6 +222,8 @@ Stream<ServerMessageChunk> sendVoiceMessageStreamServer(
 Future<List<MessageFile>?> uploadFilesServer(
   List<File> files, {
   String? appId,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before file upload');
@@ -217,7 +234,12 @@ Future<List<MessageFile>?> uploadFilesServer(
   }
 
   try {
-    var response = await makeMultipartApiCall(url: url, files: files);
+    var response = await makeMultipartApiCall(
+      url: url,
+      files: files,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
 
     if (response.statusCode == 200) {
       Logger.debug(

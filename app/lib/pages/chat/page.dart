@@ -14,6 +14,7 @@ import 'package:omi/backend/schema/app.dart';
 import 'package:omi/backend/schema/conversation.dart';
 import 'package:omi/backend/schema/message.dart';
 import 'package:omi/ella/services/ai_consent_coordinator.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/pages/apps/widgets/capability_apps_page.dart';
 import 'package:omi/pages/chat/widgets/ai_message.dart';
 import 'package:omi/pages/chat/widgets/user_message.dart';
@@ -40,11 +41,7 @@ class ChatPage extends StatefulWidget {
   final bool isPivotBottom;
   final String? autoMessage;
 
-  const ChatPage({
-    super.key,
-    this.isPivotBottom = false,
-    this.autoMessage,
-  });
+  const ChatPage({super.key, this.isPivotBottom = false, this.autoMessage});
 
   @override
   State<ChatPage> createState() => ChatPageState();
@@ -81,9 +78,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       setState(() {});
       // Sync focus state to HomeProvider so BottomNavBar hides when typing
       if (widget.isPivotBottom && mounted) {
-        final homeProvider = context.read<HomeProvider>();
-        homeProvider.isChatFieldFocused = textFieldFocusNode.hasFocus;
-        homeProvider.notifyListeners();
+        context.read<HomeProvider>().setChatFieldFocused(textFieldFocusNode.hasFocus);
       }
       if (textFieldFocusNode.hasFocus) {
         // Scroll to bottom when keyboard opens, with delay to allow keyboard animation
@@ -97,7 +92,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
         provider.refreshMessages();
       }
       // Fetch enabled chat apps
-      provider.fetchChatApps();
+      if (allowsInheritedOmiSurface()) provider.fetchChatApps();
       // Sync Apple Health data if connected (ensures fresh data for health queries)
       _syncAppleHealthIfConnected();
       // Auto-focus the text field only on initial load, not on app switches
@@ -186,6 +181,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     }
   }
 
+  // ignore: unused_element
   void _openSettingsDrawer() {
     HapticFeedback.mediumImpact();
     MixpanelManager().pageOpened('Settings');
@@ -229,10 +225,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                               valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                             ),
                             const SizedBox(height: 16),
-                            Text(
-                              provider.firstTimeLoadingText,
-                              style: const TextStyle(color: EllaColors.textPrimary),
-                            ),
+                            Text(provider.firstTimeLoadingText, style: const TextStyle(color: EllaColors.textPrimary)),
                           ],
                         )
                       : provider.isClearingChat
@@ -243,10 +236,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   valueColor: AlwaysStoppedAnimation<Color>(EllaColors.primary),
                                 ),
                                 const SizedBox(height: 16),
-                                Text(
-                                  context.l10n.deletingMessages,
-                                  style: const TextStyle(color: EllaColors.textPrimary),
-                                ),
+                                Text(context.l10n.deletingMessages,
+                                    style: const TextStyle(color: EllaColors.textPrimary)),
                               ],
                             )
                           : (provider.messages.isEmpty)
@@ -254,11 +245,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                   child: Padding(
                                     padding: const EdgeInsets.only(bottom: 32.0),
                                     child: Text(
-                                        connectivityProvider.isConnected
-                                            ? context.l10n.noMessagesYet
-                                            : context.l10n.noInternetConnection,
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(color: EllaColors.textPrimary)),
+                                      connectivityProvider.isConnected
+                                          ? context.l10n.noMessagesYet
+                                          : context.l10n.noInternetConnection,
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(color: EllaColors.textPrimary),
+                                    ),
                                   ),
                                 )
                               : Theme(
@@ -323,7 +315,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                                                       _selectedContext = text;
                                                     });
                                                     textFieldFocusNode.requestFocus();
-                                                  }),
+                                                  },
+                                                ),
                                         );
                                       },
                                     ),
@@ -335,339 +328,351 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   margin: const EdgeInsets.only(top: 10),
                   decoration: const BoxDecoration(
                     color: Colors.transparent,
-                    borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(22),
-                      topRight: Radius.circular(22),
-                    ),
+                    borderRadius: BorderRadius.only(topLeft: Radius.circular(22), topRight: Radius.circular(22)),
                   ),
                   child: Consumer2<HomeProvider, VoiceRecorderProvider>(
-                      builder: (context, home, voiceRecorderProvider, child) {
-                    bool shouldShowSendButton(MessageProvider p) {
-                      return !p.sendingMessage && !voiceRecorderProvider.isActive;
-                    }
+                    builder: (context, home, voiceRecorderProvider, child) {
+                      bool shouldShowSendButton(MessageProvider p) {
+                        return !p.sendingMessage && !voiceRecorderProvider.isActive;
+                      }
 
-                    bool shouldShowVoiceRecorderButton() {
-                      return !voiceRecorderProvider.isActive;
-                    }
+                      bool shouldShowVoiceRecorderButton() {
+                        return !voiceRecorderProvider.isActive;
+                      }
 
-                    bool shouldShowMenuButton() {
-                      return !voiceRecorderProvider.isActive;
-                    }
+                      bool shouldShowMenuButton() {
+                        return !voiceRecorderProvider.isActive;
+                      }
 
-                    return Column(children: [
-                      // Selected images display above the send bar
-                      Consumer<MessageProvider>(builder: (context, provider, child) {
-                        if (provider.selectedFiles.isNotEmpty) {
-                          return Container(
-                            margin: const EdgeInsets.only(top: 16, bottom: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            height: 70,
-                            child: ListView.builder(
-                              scrollDirection: Axis.horizontal,
-                              itemCount: provider.selectedFiles.length,
-                              itemBuilder: (ctx, idx) {
+                      return Column(
+                        children: [
+                          // Selected images display above the send bar
+                          Consumer<MessageProvider>(
+                            builder: (context, provider, child) {
+                              if (provider.selectedFiles.isNotEmpty) {
                                 return Container(
-                                  margin: const EdgeInsets.only(right: 8),
-                                  width: 60,
-                                  height: 60,
-                                  decoration: BoxDecoration(
-                                    color: EllaColors.bgTertiary,
-                                    borderRadius: BorderRadius.circular(16),
-                                    image: provider.selectedFileTypes[idx] == 'image'
-                                        ? DecorationImage(
-                                            image: FileImage(provider.selectedFiles[idx]),
-                                            fit: BoxFit.cover,
-                                          )
-                                        : null,
-                                  ),
-                                  child: Stack(
-                                    children: [
-                                      // File icon for non-images
-                                      if (provider.selectedFileTypes[idx] != 'image')
-                                        const Center(
-                                          child: Icon(
-                                            Icons.insert_drive_file,
-                                            color: EllaColors.textPrimary,
-                                            size: 24,
-                                          ),
+                                  margin: const EdgeInsets.only(top: 16, bottom: 8),
+                                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                                  height: 70,
+                                  child: ListView.builder(
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: provider.selectedFiles.length,
+                                    itemBuilder: (ctx, idx) {
+                                      return Container(
+                                        margin: const EdgeInsets.only(right: 8),
+                                        width: 60,
+                                        height: 60,
+                                        decoration: BoxDecoration(
+                                          color: EllaColors.bgTertiary,
+                                          borderRadius: BorderRadius.circular(16),
+                                          image: provider.selectedFileTypes[idx] == 'image'
+                                              ? DecorationImage(
+                                                  image: FileImage(provider.selectedFiles[idx]),
+                                                  fit: BoxFit.cover,
+                                                )
+                                              : null,
                                         ),
-                                      // Loading indicator
-                                      if (provider.isFileUploading(provider.selectedFiles[idx].path))
-                                        Container(
-                                          decoration: BoxDecoration(
-                                            color: Colors.black.withOpacity(0.5),
-                                            borderRadius: BorderRadius.circular(16),
-                                          ),
-                                          child: const Center(
-                                            child: SizedBox(
-                                              width: 16,
-                                              height: 16,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      // Close button
-                                      Positioned(
-                                        top: 4,
-                                        right: 4,
-                                        child: GestureDetector(
-                                          onTap: () {
-                                            provider.clearSelectedFile(idx);
-                                          },
-                                          child: Container(
-                                            width: 16,
-                                            height: 16,
-                                            decoration: BoxDecoration(
-                                              color: Colors.white,
-                                              borderRadius: BorderRadius.circular(10),
-                                            ),
-                                            child: const Icon(
-                                              FontAwesomeIcons.xmark,
-                                              size: 10,
-                                              color: Colors.black,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                          );
-                        } else {
-                          return const SizedBox.shrink();
-                        }
-                      }),
-                      // Send bar
-                      SafeArea(
-                        bottom: false,
-                        maintainBottomViewPadding: false,
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            left: 8,
-                            right: 8,
-                            top: provider.selectedFiles.isNotEmpty ? 0 : 8,
-                            bottom: widget.isPivotBottom
-                                ? (textFieldFocusNode.hasFocus
-                                    ? 6
-                                    : EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 8)
-                                : (textFieldFocusNode.hasFocus &&
-                                        (textController.text.length > 40 || textController.text.contains('\n'))
-                                    ? 0
-                                    : 2),
-                          ),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: EllaColors.bgSecondary,
-                              borderRadius: BorderRadius.circular(32),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                // Plus button
-                                if (shouldShowMenuButton())
-                                  GestureDetector(
-                                    onTap: () {
-                                      HapticFeedback.lightImpact();
-                                      FocusScope.of(context).unfocus();
-                                      if (provider.selectedFiles.length > 3) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(
-                                            content: Text(context.l10n.maxFilesLimit),
-                                            duration: const Duration(seconds: 2),
-                                          ),
-                                        );
-                                        return;
-                                      }
-                                      _showIOSStyleActionSheet(context);
-                                    },
-                                    child: Container(
-                                      height: 44,
-                                      width: 44,
-                                      decoration: BoxDecoration(
-                                        color: EllaColors.bgTertiary,
-                                        shape: BoxShape.circle,
-                                      ),
-                                      child: Center(
-                                        child: FaIcon(
-                                          FontAwesomeIcons.plus,
-                                          color: provider.selectedFiles.length > 3
-                                              ? EllaColors.textDisabled
-                                              : EllaColors.textPrimary,
-                                          size: 18,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                const SizedBox(width: 12),
-                                // Text field
-                                Expanded(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      if (_selectedContext != null && !voiceRecorderProvider.isActive)
-                                        Padding(
-                                          padding: const EdgeInsets.only(bottom: 4, top: 4, left: 2),
-                                          child: Container(
-                                            decoration: BoxDecoration(
-                                              color: EllaColors.bgTertiary,
-                                              borderRadius: BorderRadius.circular(16),
-                                            ),
-                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                            child: Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                const Padding(
-                                                  padding: EdgeInsets.only(top: 1),
-                                                  child: Icon(Icons.subdirectory_arrow_right,
-                                                      size: 14, color: Colors.blue),
+                                        child: Stack(
+                                          children: [
+                                            // File icon for non-images
+                                            if (provider.selectedFileTypes[idx] != 'image')
+                                              const Center(
+                                                child: Icon(
+                                                  Icons.insert_drive_file,
+                                                  color: EllaColors.textPrimary,
+                                                  size: 24,
                                                 ),
-                                                const SizedBox(width: 8),
-                                                Flexible(
-                                                  child: Text(
-                                                    _selectedContext!.length > 25
-                                                        ? '${_selectedContext!.substring(0, 25)}...'
-                                                        : _selectedContext!,
-                                                    style: const TextStyle(
-                                                      color: Colors.blue,
-                                                      fontSize: 14,
-                                                      fontWeight: FontWeight.w500,
+                                              ),
+                                            // Loading indicator
+                                            if (provider.isFileUploading(provider.selectedFiles[idx].path))
+                                              Container(
+                                                decoration: BoxDecoration(
+                                                  color: Colors.black.withOpacity(0.5),
+                                                  borderRadius: BorderRadius.circular(16),
+                                                ),
+                                                child: const Center(
+                                                  child: SizedBox(
+                                                    width: 16,
+                                                    height: 16,
+                                                    child: CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
                                                     ),
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
                                                   ),
                                                 ),
-                                                const SizedBox(width: 8),
-                                                GestureDetector(
-                                                  onTap: () {
-                                                    setState(() {
-                                                      _selectedContext = null;
-                                                    });
-                                                  },
-                                                  child: const Icon(Icons.close, size: 14, color: Colors.blue),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                      voiceRecorderProvider.isActive
-                                          ? VoiceRecorderWidget(
-                                              onTranscriptReady: (transcript) {
-                                                textController.text = transcript;
-                                                voiceRecorderProvider.close();
-                                                context.read<MessageProvider>().setNextMessageOriginIsVoice(true);
-                                              },
-                                              onClose: () {
-                                                voiceRecorderProvider.close();
-                                              },
-                                            )
-                                          : Theme(
-                                              data: Theme.of(context).copyWith(
-                                                textSelectionTheme: TextSelectionThemeData(
-                                                  selectionColor: EllaColors.primaryLight.withOpacity(0.4),
-                                                  selectionHandleColor: EllaColors.primary,
+                                              ),
+                                            // Close button
+                                            Positioned(
+                                              top: 4,
+                                              right: 4,
+                                              child: GestureDetector(
+                                                onTap: () {
+                                                  provider.clearSelectedFile(idx);
+                                                },
+                                                child: Container(
+                                                  width: 16,
+                                                  height: 16,
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.white,
+                                                    borderRadius: BorderRadius.circular(10),
+                                                  ),
+                                                  child: const Icon(
+                                                    FontAwesomeIcons.xmark,
+                                                    size: 10,
+                                                    color: Colors.black,
+                                                  ),
                                                 ),
                                               ),
-                                              child: TextField(
-                                                enabled: true,
-                                                controller: textController,
-                                                focusNode: textFieldFocusNode,
-                                                obscureText: false,
-                                                textAlign: TextAlign.start,
-                                                textAlignVertical: TextAlignVertical.center,
-                                                decoration: InputDecoration(
-                                                  hintText: context.l10n.askAnything,
-                                                  hintStyle:
-                                                      const TextStyle(fontSize: 16.0, color: EllaColors.textDisabled),
-                                                  focusedBorder: InputBorder.none,
-                                                  enabledBorder: InputBorder.none,
-                                                  contentPadding:
-                                                      const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-                                                  isDense: true,
-                                                ),
-                                                minLines: 1,
-                                                maxLines: 10,
-                                                keyboardType: TextInputType.multiline,
-                                                textCapitalization: TextCapitalization.sentences,
-                                                style: const TextStyle(
-                                                    fontSize: 16.0, color: EllaColors.textPrimary, height: 1.4),
-                                              ),
                                             ),
-                                    ],
-                                  ),
-                                ),
-                                // Microphone button
-                                if (shouldShowVoiceRecorderButton() && textController.text.isEmpty)
-                                  GestureDetector(
-                                    onTap: () {
-                                      HapticFeedback.lightImpact();
-                                      FocusScope.of(context).unfocus();
-                                      voiceRecorderProvider.startRecording();
-                                    },
-                                    child: Container(
-                                      height: 44,
-                                      width: 44,
-                                      alignment: Alignment.center,
-                                      child: const FaIcon(
-                                        FontAwesomeIcons.microphone,
-                                        color: EllaColors.textTertiary,
-                                        size: 20,
-                                      ),
-                                    ),
-                                  ),
-                                // Send button - only show when there's text
-                                if (shouldShowSendButton(provider))
-                                  ValueListenableBuilder<TextEditingValue>(
-                                    valueListenable: textController,
-                                    builder: (context, value, child) {
-                                      bool hasText = value.text.trim().isNotEmpty;
-                                      if (!hasText) return const SizedBox.shrink();
-
-                                      bool canSend = hasText &&
-                                          !provider.sendingMessage &&
-                                          !provider.isUploadingFiles &&
-                                          connectivityProvider.isConnected;
-
-                                      return GestureDetector(
-                                        onTap: canSend
-                                            ? () {
-                                                HapticFeedback.mediumImpact();
-                                                String message = textController.text.trim();
-                                                if (message.isEmpty) return;
-                                                _sendMessageUtil(message);
-                                              }
-                                            : null,
-                                        child: Container(
-                                          height: 44,
-                                          width: 44,
-                                          decoration: const BoxDecoration(
-                                            color: Colors.white,
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: const Center(
-                                            child: FaIcon(
-                                              FontAwesomeIcons.arrowUp,
-                                              color: EllaColors.textPrimary,
-                                              size: 18,
-                                            ),
-                                          ),
+                                          ],
                                         ),
                                       );
                                     },
                                   ),
-                              ],
+                                );
+                              } else {
+                                return const SizedBox.shrink();
+                              }
+                            },
+                          ),
+                          // Send bar
+                          SafeArea(
+                            bottom: false,
+                            maintainBottomViewPadding: false,
+                            child: Padding(
+                              padding: EdgeInsets.only(
+                                left: 8,
+                                right: 8,
+                                top: provider.selectedFiles.isNotEmpty ? 0 : 8,
+                                bottom: widget.isPivotBottom
+                                    ? (textFieldFocusNode.hasFocus
+                                        ? 6
+                                        : EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom + 8)
+                                    : (textFieldFocusNode.hasFocus &&
+                                            (textController.text.length > 40 || textController.text.contains('\n'))
+                                        ? 0
+                                        : 2),
+                              ),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: EllaColors.bgSecondary,
+                                  borderRadius: BorderRadius.circular(32),
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    // Plus button
+                                    if (shouldShowMenuButton())
+                                      GestureDetector(
+                                        onTap: () {
+                                          HapticFeedback.lightImpact();
+                                          FocusScope.of(context).unfocus();
+                                          if (provider.selectedFiles.length > 3) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                content: Text(context.l10n.maxFilesLimit),
+                                                duration: const Duration(seconds: 2),
+                                              ),
+                                            );
+                                            return;
+                                          }
+                                          _showIOSStyleActionSheet(context);
+                                        },
+                                        child: Container(
+                                          height: 44,
+                                          width: 44,
+                                          decoration: BoxDecoration(
+                                            color: EllaColors.bgTertiary,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: Center(
+                                            child: FaIcon(
+                                              FontAwesomeIcons.plus,
+                                              color: provider.selectedFiles.length > 3
+                                                  ? EllaColors.textDisabled
+                                                  : EllaColors.textPrimary,
+                                              size: 18,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    const SizedBox(width: 12),
+                                    // Text field
+                                    Expanded(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          if (_selectedContext != null && !voiceRecorderProvider.isActive)
+                                            Padding(
+                                              padding: const EdgeInsets.only(bottom: 4, top: 4, left: 2),
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  color: EllaColors.bgTertiary,
+                                                  borderRadius: BorderRadius.circular(16),
+                                                ),
+                                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                                child: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    const Padding(
+                                                      padding: EdgeInsets.only(top: 1),
+                                                      child: Icon(
+                                                        Icons.subdirectory_arrow_right,
+                                                        size: 14,
+                                                        color: Colors.blue,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    Flexible(
+                                                      child: Text(
+                                                        _selectedContext!.length > 25
+                                                            ? '${_selectedContext!.substring(0, 25)}...'
+                                                            : _selectedContext!,
+                                                        style: const TextStyle(
+                                                          color: Colors.blue,
+                                                          fontSize: 14,
+                                                          fontWeight: FontWeight.w500,
+                                                        ),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    GestureDetector(
+                                                      onTap: () {
+                                                        setState(() {
+                                                          _selectedContext = null;
+                                                        });
+                                                      },
+                                                      child: const Icon(Icons.close, size: 14, color: Colors.blue),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          voiceRecorderProvider.isActive
+                                              ? VoiceRecorderWidget(
+                                                  onTranscriptReady: (transcript) {
+                                                    textController.text = transcript;
+                                                    voiceRecorderProvider.close();
+                                                    context.read<MessageProvider>().setNextMessageOriginIsVoice(true);
+                                                  },
+                                                  onClose: () {
+                                                    voiceRecorderProvider.close();
+                                                  },
+                                                )
+                                              : Theme(
+                                                  data: Theme.of(context).copyWith(
+                                                    textSelectionTheme: TextSelectionThemeData(
+                                                      selectionColor: EllaColors.primaryLight.withOpacity(0.4),
+                                                      selectionHandleColor: EllaColors.primary,
+                                                    ),
+                                                  ),
+                                                  child: TextField(
+                                                    enabled: true,
+                                                    controller: textController,
+                                                    focusNode: textFieldFocusNode,
+                                                    obscureText: false,
+                                                    textAlign: TextAlign.start,
+                                                    textAlignVertical: TextAlignVertical.center,
+                                                    decoration: InputDecoration(
+                                                      hintText: context.l10n.askAnything,
+                                                      hintStyle: const TextStyle(
+                                                        fontSize: 16.0,
+                                                        color: EllaColors.textDisabled,
+                                                      ),
+                                                      focusedBorder: InputBorder.none,
+                                                      enabledBorder: InputBorder.none,
+                                                      contentPadding: const EdgeInsets.symmetric(
+                                                        horizontal: 4,
+                                                        vertical: 12,
+                                                      ),
+                                                      isDense: true,
+                                                    ),
+                                                    minLines: 1,
+                                                    maxLines: 10,
+                                                    keyboardType: TextInputType.multiline,
+                                                    textCapitalization: TextCapitalization.sentences,
+                                                    style: const TextStyle(
+                                                      fontSize: 16.0,
+                                                      color: EllaColors.textPrimary,
+                                                      height: 1.4,
+                                                    ),
+                                                  ),
+                                                ),
+                                        ],
+                                      ),
+                                    ),
+                                    // Microphone button
+                                    if (shouldShowVoiceRecorderButton() && textController.text.isEmpty)
+                                      GestureDetector(
+                                        onTap: () {
+                                          HapticFeedback.lightImpact();
+                                          FocusScope.of(context).unfocus();
+                                          voiceRecorderProvider.startRecording();
+                                        },
+                                        child: Container(
+                                          height: 44,
+                                          width: 44,
+                                          alignment: Alignment.center,
+                                          child: const FaIcon(
+                                            FontAwesomeIcons.microphone,
+                                            color: EllaColors.textTertiary,
+                                            size: 20,
+                                          ),
+                                        ),
+                                      ),
+                                    // Send button - only show when there's text
+                                    if (shouldShowSendButton(provider))
+                                      ValueListenableBuilder<TextEditingValue>(
+                                        valueListenable: textController,
+                                        builder: (context, value, child) {
+                                          bool hasText = value.text.trim().isNotEmpty;
+                                          if (!hasText) return const SizedBox.shrink();
+
+                                          bool canSend = hasText &&
+                                              !provider.sendingMessage &&
+                                              !provider.isUploadingFiles &&
+                                              connectivityProvider.isConnected;
+
+                                          return GestureDetector(
+                                            onTap: canSend
+                                                ? () {
+                                                    HapticFeedback.mediumImpact();
+                                                    String message = textController.text.trim();
+                                                    if (message.isEmpty) return;
+                                                    _sendMessageUtil(message);
+                                                  }
+                                                : null,
+                                            child: Container(
+                                              height: 44,
+                                              width: 44,
+                                              decoration: const BoxDecoration(
+                                                color: Colors.white,
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: const Center(
+                                                child: FaIcon(
+                                                  FontAwesomeIcons.arrowUp,
+                                                  color: EllaColors.textPrimary,
+                                                  size: 18,
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                  ],
+                                ),
+                              ),
                             ),
                           ),
-                        ),
-                      )
-                    ]);
-                  }),
+                        ],
+                      );
+                    },
+                  ),
                 ),
                 if (!widget.isPivotBottom) SizedBox(height: textFieldFocusNode.hasFocus ? 12 : 0),
                 if (!widget.isPivotBottom && !textFieldFocusNode.hasFocus)
@@ -736,11 +741,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
       if (currentPosition > 300) {
         scrollController.jumpTo(0);
       } else if (currentPosition > 10) {
-        scrollController.animateTo(
-          0,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOutCubic,
-        );
+        scrollController.animateTo(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic);
       }
     });
   }
@@ -751,11 +752,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
       // With reverse: true, bottom is offset 0
       if (scrollController.position.pixels > 20) {
-        scrollController.animateTo(
-          0,
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
-        );
+        scrollController.animateTo(0, duration: const Duration(milliseconds: 150), curve: Curves.easeOut);
       }
     });
   }
@@ -765,11 +762,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
 
     // With reverse: true, bottom is offset 0
     if (animated) {
-      scrollController.animateTo(
-        0,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+      scrollController.animateTo(0, duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
     } else {
       scrollController.jumpTo(0);
     }
@@ -805,14 +798,20 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     showDialog(
       context: context,
       builder: (ctx) {
-        return getDialog(context, () {
-          Navigator.of(context).pop();
-        }, () {
-          if (mounted) {
-            context.read<MessageProvider>().clearChat();
+        return getDialog(
+          context,
+          () {
             Navigator.of(context).pop();
-          }
-        }, context.l10n.clearChatQuestion, context.l10n.clearChatConfirm);
+          },
+          () {
+            if (mounted) {
+              context.read<MessageProvider>().clearChat();
+              Navigator.of(context).pop();
+            }
+          },
+          context.l10n.clearChatQuestion,
+          context.l10n.clearChatConfirm,
+        );
       },
     );
   }
@@ -901,10 +900,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               width: 36,
               height: 36,
               margin: const EdgeInsets.all(8),
-              decoration: const BoxDecoration(
-                color: EllaColors.bgTertiary,
-                shape: BoxShape.circle,
-              ),
+              decoration: const BoxDecoration(color: EllaColors.bgTertiary, shape: BoxShape.circle),
               child: IconButton(
                 padding: EdgeInsets.zero,
                 icon: const Icon(Icons.arrow_back_ios_new, color: EllaColors.textPrimary, size: 18),
@@ -927,10 +923,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               child: Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: EllaColors.bgTertiary,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
+                  decoration: BoxDecoration(color: EllaColors.bgTertiary, borderRadius: BorderRadius.circular(14)),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                     child: Text(
@@ -968,14 +961,12 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  // ignore: unused_element
   Widget _buildChatAppsEndDrawer(BuildContext context) {
     return Drawer(
       backgroundColor: EllaColors.bgSecondary,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(20),
-          bottomLeft: Radius.circular(20),
-        ),
+        borderRadius: BorderRadius.only(topLeft: Radius.circular(20), bottomLeft: Radius.circular(20)),
       ),
       child: SafeArea(
         child: Consumer2<MessageProvider, AppProvider>(
@@ -1018,10 +1009,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                     padding: EdgeInsets.only(left: 2, top: 1),
                     child: FaIcon(FontAwesomeIcons.solidTrashCan, color: Colors.redAccent, size: 20),
                   ),
-                  title: Text(
-                    context.l10n.clearChat,
-                    style: const TextStyle(color: Colors.redAccent, fontSize: 16),
-                  ),
+                  title: Text(context.l10n.clearChat, style: const TextStyle(color: Colors.redAccent, fontSize: 16)),
                   onTap: () {
                     Navigator.of(context).pop();
                     _handleAppSelection('clear_chat', appProvider);
@@ -1050,11 +1038,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   padding: const EdgeInsets.fromLTRB(16, 16, 20, 8),
                   child: Text(
                     context.l10n.selectApp,
-                    style: const TextStyle(
-                      color: EllaColors.textTertiary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                    ),
+                    style: const TextStyle(color: EllaColors.textTertiary, fontSize: 13, fontWeight: FontWeight.w500),
                   ),
                 ),
                 // App list
@@ -1073,19 +1057,21 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                         },
                       ),
                       // Enabled chat apps
-                      ...chatApps.map((app) => _buildDrawerAppItem(
-                            avatar: _getAppAvatar(app),
-                            name: app.getName(),
-                            isSelected: selectedAppId == app.id,
-                            appId: app.id,
-                            onTap: () {
-                              Navigator.of(context).pop();
-                              _handleAppSelection(app.id, appProvider);
-                            },
-                            onConfirmDelete: selectedAppId != app.id
-                                ? () => _handleAppUninstall(app.id, appProvider, messageProvider)
-                                : null,
-                          )),
+                      ...chatApps.map(
+                        (app) => _buildDrawerAppItem(
+                          avatar: _getAppAvatar(app),
+                          name: app.getName(),
+                          isSelected: selectedAppId == app.id,
+                          appId: app.id,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _handleAppSelection(app.id, appProvider);
+                          },
+                          onConfirmDelete: selectedAppId != app.id
+                              ? () => _handleAppUninstall(app.id, appProvider, messageProvider)
+                              : null,
+                        ),
+                      ),
                       if (chatApps.isEmpty)
                         Padding(
                           padding: const EdgeInsets.all(20),
@@ -1142,17 +1128,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                ),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
                 child: Text(
                   context.l10n.cancel,
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: const TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w500),
                 ),
               ),
             ),
@@ -1167,17 +1146,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.redAccent,
-                  borderRadius: BorderRadius.circular(16),
-                ),
+                decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(16)),
                 child: Text(
                   context.l10n.disable,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
                 ),
               ),
             ),
@@ -1221,18 +1193,10 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     return CachedNetworkImage(
       imageUrl: app.getImageUrl(),
       imageBuilder: (context, imageProvider) {
-        return CircleAvatar(
-          backgroundColor: Colors.white,
-          radius: 12,
-          backgroundImage: imageProvider,
-        );
+        return CircleAvatar(backgroundColor: Colors.white, radius: 12, backgroundImage: imageProvider);
       },
       errorWidget: (context, url, error) {
-        return const CircleAvatar(
-          backgroundColor: Colors.white,
-          radius: 12,
-          child: Icon(Icons.error_outline_rounded),
-        );
+        return const CircleAvatar(backgroundColor: Colors.white, radius: 12, child: Icon(Icons.error_outline_rounded));
       },
       progressIndicatorBuilder: (context, url, progress) => CircleAvatar(
         backgroundColor: Colors.white,
@@ -1245,19 +1209,13 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  // ignore: unused_element
   Widget _getOmiAvatar() {
     return Container(
       height: 24,
       width: 24,
-      decoration: const BoxDecoration(
-        color: EllaColors.primary,
-        borderRadius: BorderRadius.all(Radius.circular(12.0)),
-      ),
-      child: const Icon(
-        Icons.favorite,
-        color: Colors.white,
-        size: 14,
-      ),
+      decoration: const BoxDecoration(color: EllaColors.primary, borderRadius: BorderRadius.all(Radius.circular(12.0))),
+      child: const Icon(Icons.favorite, color: Colors.white, size: 14),
     );
   }
 
@@ -1265,15 +1223,8 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
     return Container(
       height: 24,
       width: 24,
-      decoration: const BoxDecoration(
-        color: EllaColors.primary,
-        borderRadius: BorderRadius.all(Radius.circular(12.0)),
-      ),
-      child: const Icon(
-        Icons.favorite,
-        color: Colors.white,
-        size: 14,
-      ),
+      decoration: const BoxDecoration(color: EllaColors.primary, borderRadius: BorderRadius.all(Radius.circular(12.0))),
+      child: const Icon(Icons.favorite, color: Colors.white, size: 14),
     );
   }
 
@@ -1376,12 +1327,7 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
                   textAlign: TextAlign.center,
                 ),
               ),
-              if (icon != null && !isCancel)
-                Icon(
-                  icon,
-                  color: EllaColors.textTertiary,
-                  size: 24,
-                ),
+              if (icon != null && !isCancel) Icon(icon, color: EllaColors.textTertiary, size: 24),
             ],
           ),
         ),
@@ -1390,10 +1336,6 @@ class ChatPageState extends State<ChatPage> with AutomaticKeepAliveClientMixin {
   }
 
   Widget _buildDivider() {
-    return Container(
-      height: 0.5,
-      color: EllaColors.bgTertiary,
-      margin: const EdgeInsets.symmetric(horizontal: 20),
-    );
+    return Container(height: 0.5, color: EllaColors.bgTertiary, margin: const EdgeInsets.symmetric(horizontal: 20));
   }
 }

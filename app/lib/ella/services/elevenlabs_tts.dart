@@ -9,6 +9,7 @@ import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
 /// TTS client that calls the backend TTS proxy (Kokoro local or ElevenLabs).
@@ -21,10 +22,16 @@ class ElevenLabsTts {
 
   /// Synthesize [text] to speech via the backend TTS proxy.
   /// Returns the path to a temporary audio file, or null on failure.
-  static Future<String?> synthesize(String text) async {
+  static Future<String?> synthesize(
+    String text, {
+    String? expectedAuthenticatedUid,
+    ExactAccountAuthorityVerifier? exactAuthority,
+  }) async {
     if (text.trim().isEmpty || !SharedPreferencesUtil().aiConsentAccepted) return null;
+    _requireCurrent(exactAuthority, 'before TTS request');
 
     final url = '${Env.apiBaseUrl}v1/voice/tts';
+    String? createdPath;
 
     try {
       final response = await makeApiCall(
@@ -36,14 +43,18 @@ class ElevenLabsTts {
         body: '{"text": ${_jsonEscapeString(text)}}',
         method: 'POST',
         timeout: const Duration(seconds: 30),
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        exactAuthority: exactAuthority,
       );
 
+      _requireCurrent(exactAuthority, 'after TTS response');
       if (response == null || response.statusCode != 200) {
         Logger.debug('[TTS] Backend failed: ${response?.statusCode}');
         return null;
       }
 
       _cachedTempDir ??= (await getTemporaryDirectory()).path;
+      _requireCurrent(exactAuthority, 'after TTS directory lookup');
       final ts = DateTime.now().millisecondsSinceEpoch;
       final contentType = response.headers['content-type'] ?? '';
 
@@ -51,16 +62,23 @@ class ElevenLabsTts {
         // Raw PCM16 from local Kokoro — wrap in WAV header
         final sampleRate = _parseSampleRate(contentType);
         final wavBytes = _pcmToWav(response.bodyBytes, sampleRate: sampleRate);
-        final path = '$_cachedTempDir/ella_tts_$ts.wav';
-        await File(path).writeAsBytes(wavBytes, flush: true);
-        Logger.debug('[TTS] PCM→WAV ${response.bodyBytes.length}b, ${sampleRate}Hz → $path');
-        return path;
+        createdPath = '$_cachedTempDir/ella_tts_$ts.wav';
+        _requireCurrent(exactAuthority, 'before TTS file creation');
+        await File(createdPath).writeAsBytes(wavBytes, flush: true);
+        _requireCurrent(exactAuthority, 'after TTS file creation');
+        Logger.debug('[TTS] PCM→WAV ${response.bodyBytes.length}b, ${sampleRate}Hz → $createdPath');
+        return createdPath;
       } else {
         // MP3 from ElevenLabs or other
-        final path = '$_cachedTempDir/ella_tts_$ts.mp3';
-        await File(path).writeAsBytes(response.bodyBytes, flush: true);
-        return path;
+        createdPath = '$_cachedTempDir/ella_tts_$ts.mp3';
+        _requireCurrent(exactAuthority, 'before TTS file creation');
+        await File(createdPath).writeAsBytes(response.bodyBytes, flush: true);
+        _requireCurrent(exactAuthority, 'after TTS file creation');
+        return createdPath;
       }
+    } on ExactAccountAuthorityChangedException {
+      if (createdPath != null) await discardSynthesizedFile(createdPath);
+      rethrow;
     } catch (e) {
       Logger.debug('[TTS] Error: $e');
       return null;
@@ -116,14 +134,20 @@ class ElevenLabsTts {
 
   /// Speak [text] using on-device iOS TTS. Returns a Future that completes
   /// when speech finishes. Used as fallback when the backend is unavailable.
-  static Future<void> speakOnDevice(String text) async {
+  static Future<void> speakOnDevice(
+    String text, {
+    ExactAccountAuthorityVerifier? exactAuthority,
+  }) async {
     if (text.trim().isEmpty) return;
+    _requireCurrent(exactAuthority, 'before on-device TTS');
     _flutterTts ??= FlutterTts();
     final tts = _flutterTts!;
 
     if (Platform.isIOS) {
       await tts.setSharedInstance(true);
+      _requireCurrent(exactAuthority, 'during on-device TTS setup');
       await tts.autoStopSharedSession(false);
+      _requireCurrent(exactAuthority, 'during on-device TTS setup');
       await tts.setIosAudioCategory(
         IosTextToSpeechAudioCategory.playAndRecord,
         const [
@@ -134,12 +158,18 @@ class ElevenLabsTts {
         ],
         IosTextToSpeechAudioMode.voicePrompt,
       );
+      _requireCurrent(exactAuthority, 'during on-device TTS setup');
     }
     await tts.setLanguage('en-US');
+    _requireCurrent(exactAuthority, 'during on-device TTS setup');
     await tts.setSpeechRate(0.48);
+    _requireCurrent(exactAuthority, 'during on-device TTS setup');
     await tts.setPitch(1.0);
+    _requireCurrent(exactAuthority, 'during on-device TTS setup');
     await tts.setVolume(1.0);
+    _requireCurrent(exactAuthority, 'during on-device TTS setup');
     await tts.awaitSpeakCompletion(false);
+    _requireCurrent(exactAuthority, 'before on-device TTS playback');
 
     final completer = Completer<void>();
     tts.setCompletionHandler(() {
@@ -154,17 +184,35 @@ class ElevenLabsTts {
     });
 
     final result = await tts.speak(text);
+    if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+      await tts.stop();
+      throw ExactAccountAuthorityChangedException('Exact account authority changed during on-device TTS playback');
+    }
     if (result != 1) {
       Logger.debug('[TTS] On-device speak did not start: $result');
       if (!completer.isCompleted) completer.complete();
     }
     await completer.future;
+    _requireCurrent(exactAuthority, 'after on-device TTS playback');
   }
 
   /// Stop any active on-device TTS playback.
   static Future<void> stopOnDevice() async {
     if (_flutterTts != null) {
       await _flutterTts!.stop();
+    }
+  }
+
+  static Future<void> discardSynthesizedFile(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  static void _requireCurrent(ExactAccountAuthorityVerifier? authority, String boundary) {
+    if (authority != null && !authority.isExactCurrent()) {
+      throw ExactAccountAuthorityChangedException('Exact account authority changed $boundary');
     }
   }
 

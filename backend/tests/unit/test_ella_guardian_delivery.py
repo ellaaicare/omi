@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from utils.ella import exact_firebase_auth
 
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
@@ -54,6 +55,12 @@ _ROUTER_SPEC = importlib.util.spec_from_file_location("ella_guardian_under_test"
 guardian = importlib.util.module_from_spec(_ROUTER_SPEC)
 assert _ROUTER_SPEC and _ROUTER_SPEC.loader
 _ROUTER_SPEC.loader.exec_module(guardian)
+
+
+@pytest.fixture(autouse=True)
+def _configured_service_credentials(monkeypatch):
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-guardian-key")
+    monkeypatch.setattr(guardian, "ELLA_INTERNAL_TTS_KEY", "configured-tts-key")
 
 
 class _FakePool:
@@ -247,6 +254,8 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     url, kwargs = _FakeAsyncClient.posts[0]
     assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
     assert kwargs["headers"]["X-TTS-Provider"] == "xai-tts"
+    assert kwargs["headers"]["X-Ella-TTS-Key"] == guardian.ELLA_INTERNAL_TTS_KEY
+    assert "X-Guardian-Key" not in kwargs["headers"]
     assert kwargs["json"]["text"] == "Hello"
     assert response.headers["x-guardian-tts-provider"] == "xai-tts"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
@@ -373,18 +382,20 @@ def test_wake_word_row_matches_fallback_variants():
     assert guardian._is_wake_word_row({"trigger_type": "wake_word_fallback", "metadata": {}})
 
 
-def test_trace_log_allows_missing_key_but_rejects_bad_key(monkeypatch):
+def test_trace_log_requires_configured_key_and_rejects_bad_key(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(guardian, "_pool", pool)
+    monkeypatch.setattr(guardian, "GUARDIAN_WEBHOOK_KEY", "configured-key")
 
-    ok = asyncio.run(
-        guardian.log_pipeline_event(
-            guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
-            x_guardian_key=None,
-            key=None,
+    with pytest.raises(HTTPException) as missing:
+        asyncio.run(
+            guardian.log_pipeline_event(
+                guardian.TraceLogRequest(trace_id="trace-1", uid="uid-1", stage="scanner_classified"),
+                x_guardian_key=None,
+                key=None,
+            )
         )
-    )
-    assert ok["logged"] is True
+    assert missing.value.status_code == 403
 
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
@@ -515,7 +526,7 @@ def test_guardian_alerts_endpoint_excludes_ack_only_rows_but_keeps_real_wake_wor
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
 
     response = TestClient(app).get("/v1/ella/guardian-alerts?limit=50")
 
@@ -548,7 +559,7 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
     client = TestClient(app)
 
     response = client.get("/v1/ella/guardian-alerts?limit=50&uid=other-user")
@@ -558,3 +569,189 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
     assert body["uid"] == "auth-uid"
     assert body["alerts"][0]["queue_item_id"] == "guardian_auth"
     assert pool.fetch_args[0] == ("auth-uid", 50)
+
+
+class _GuardianAuthPool:
+    def __init__(self):
+        self.fetchrow_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "COUNT(*) FILTER" in query:
+            return {"pending": 0}
+        if "UPDATE guardian_queue" in query:
+            return {
+                "id": "queue-a",
+                "url": "https://audio.example/a.mp3",
+                "priority": "normal",
+                "message": "",
+                "trigger_type": "guardian",
+                "metadata": {"trace_id": "trace-a"},
+                "created_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            }
+        return None
+
+
+class _GuardianModeAuthPool:
+    def __init__(self, mode=None):
+        self.mode = mode
+        self.fetchrow_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "UPDATE users" in query:
+            self.mode = args[1]
+        return {"guardian_mode": self.mode}
+
+
+def _guardian_auth_client(monkeypatch, pool):
+    monkeypatch.setattr(guardian, "_pool", pool)
+
+    def verify_token(token):
+        if token == "valid-a":
+            return {"uid": "uid-a"}
+        if token == "valid-b":
+            return {"uid": "uid-b"}
+        raise ValueError("expired or invalid")
+
+    monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
+    app = FastAPI()
+    app.include_router(guardian.router)
+    app.include_router(guardian.alerts_router)
+    return TestClient(app)
+
+
+def test_guardian_next_audio_auth_success_consumes_authenticated_owner_only(monkeypatch):
+    pool = _GuardianAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    response = client.get(
+        "/v1/ella/guardian/next-audio?uid=uid-a",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "queue-a"
+    assert len(pool.fetchrow_calls) == 2
+    assert all(args == ("uid-a",) for _, args in pool.fetchrow_calls)
+
+
+def test_guardian_mode_read_and_write_use_authenticated_owner_only(monkeypatch):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    read_response = client.get(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+    write_response = client.put(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.json()["currentMode"] == "OFF"
+    assert write_response.status_code == 200
+    assert write_response.json()["currentMode"] == "ACTIVE_SUPPORT"
+    assert pool.fetchrow_calls[0][1] == ("uid-a",)
+    assert pool.fetchrow_calls[1][1] == ("uid-a", "ACTIVE_SUPPORT")
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer expired", "Basic valid-a"])
+def test_guardian_mode_auth_denial_happens_before_user_read_or_write(monkeypatch, authorization):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    read_response = client.get("/v1/ella/guardian/mode", headers=headers)
+    write_response = client.put(
+        "/v1/ella/guardian/mode",
+        headers=headers,
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert read_response.status_code == 401
+    assert write_response.status_code == 401
+    assert pool.fetchrow_calls == []
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer expired", "Basic valid-a"])
+def test_guardian_history_auth_denial_happens_before_history_read(monkeypatch, authorization):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    response = client.get("/v1/ella/guardian-alerts", headers=headers)
+
+    assert response.status_code == 401
+    assert pool.fetchrow_calls == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "query_uid", "expected_status"),
+    [
+        ({}, "uid-a", 401),
+        ({"Authorization": "Bearer expired"}, "uid-a", 401),
+        ({"Authorization": "Bearer invalid"}, "uid-a", 401),
+        ({"Authorization": "Basic valid-a"}, "uid-a", 401),
+        ({"Authorization": "Bearer valid-b"}, "uid-a", 403),
+    ],
+)
+def test_guardian_next_audio_auth_denials_never_consume(
+    monkeypatch,
+    headers,
+    query_uid,
+    expected_status,
+):
+    pool = _GuardianAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    response = client.get(f"/v1/ella/guardian/next-audio?uid={query_uid}", headers=headers)
+
+    assert response.status_code == expected_status
+    assert pool.fetchrow_calls == []
+
+
+def test_guardian_playback_auth_success_mutates_authenticated_owner_only(monkeypatch):
+    guardian._playback_events.clear()
+    client = _guardian_auth_client(monkeypatch, _GuardianAuthPool())
+
+    response = client.post(
+        "/v1/ella/guardian/playback-event",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"uid": "uid-a", "event_type": "started", "port_type": "Speaker"},
+    )
+
+    assert response.status_code == 200
+    assert set(guardian._playback_events) == {"uid-a"}
+
+
+@pytest.mark.parametrize(
+    ("headers", "body_uid", "expected_status"),
+    [
+        ({}, "uid-a", 401),
+        ({"Authorization": "Bearer expired"}, "uid-a", 401),
+        ({"Authorization": "Bearer invalid"}, "uid-a", 401),
+        ({"Authorization": "Basic valid-a"}, "uid-a", 401),
+        ({"Authorization": "Bearer valid-b"}, "uid-a", 403),
+        ({"Authorization": "Bearer valid-a"}, "uid-b", 403),
+    ],
+)
+def test_guardian_playback_auth_denials_never_mutate(
+    monkeypatch,
+    headers,
+    body_uid,
+    expected_status,
+):
+    guardian._playback_events.clear()
+    client = _guardian_auth_client(monkeypatch, _GuardianAuthPool())
+
+    response = client.post(
+        "/v1/ella/guardian/playback-event",
+        headers=headers,
+        json={"uid": body_uid, "event_type": "started", "port_type": "Speaker"},
+    )
+
+    assert response.status_code == expected_status
+    assert guardian._playback_events == {}

@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
@@ -14,6 +17,51 @@ enum WalStatus {
   miss,
   synced,
   corrupted,
+  quarantined,
+}
+
+class WalOwner {
+  const WalOwner({
+    required this.uid,
+    required this.profileBindingId,
+    required this.bindingRevision,
+    required this.consentReceiptId,
+    required this.authorityGenerationAtCapture,
+  });
+
+  final String uid;
+  final String profileBindingId;
+  final int bindingRevision;
+  final String consentReceiptId;
+  final int authorityGenerationAtCapture;
+
+  String get storageNamespace {
+    final digest = sha256.convert(utf8.encode('$uid\n$profileBindingId\n$bindingRevision'));
+    return digest.toString().substring(0, 24);
+  }
+
+  bool matches(WalOwner other) =>
+      uid == other.uid &&
+      profileBindingId == other.profileBindingId &&
+      bindingRevision == other.bindingRevision &&
+      consentReceiptId == other.consentReceiptId &&
+      authorityGenerationAtCapture == other.authorityGenerationAtCapture;
+
+  factory WalOwner.fromJson(Map<String, dynamic> json) => WalOwner(
+        uid: json['uid'] as String? ?? '',
+        profileBindingId: json['profile_binding_id'] as String? ?? '',
+        bindingRevision: json['binding_revision'] as int? ?? 0,
+        consentReceiptId: json['consent_receipt_id'] as String? ?? '',
+        authorityGenerationAtCapture: json['authority_generation_at_capture'] as int? ?? 0,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'uid': uid,
+        'profile_binding_id': profileBindingId,
+        'binding_revision': bindingRevision,
+        'consent_receipt_id': consentReceiptId,
+        'authority_generation_at_capture': authorityGenerationAtCapture,
+      };
 }
 
 enum WalStorage {
@@ -98,8 +146,10 @@ class Wal {
   int syncedFrameOffset = 0;
 
   WalStorage? originalStorage;
+  WalOwner? owner;
+  String? quarantineReason;
 
-  String get id => '${device}_$timerStart';
+  String get id => '${owner?.storageNamespace ?? 'unknown'}_${device}_$timerStart';
 
   Wal({
     required this.timerStart,
@@ -119,6 +169,8 @@ class Wal {
     this.totalFrames = 0,
     this.syncedFrameOffset = 0,
     this.originalStorage,
+    this.owner,
+    this.quarantineReason,
   }) {
     frameSize = codec.getFrameSize();
   }
@@ -142,6 +194,8 @@ class Wal {
       syncedFrameOffset: json['synced_frame_offset'] ?? 0,
       originalStorage:
           json['original_storage'] != null ? WalStorage.values.asNameMap()[json['original_storage']] : null,
+      owner: json['owner'] is Map<String, dynamic> ? WalOwner.fromJson(json['owner'] as Map<String, dynamic>) : null,
+      quarantineReason: json['quarantine_reason'] as String?,
     );
   }
 
@@ -163,6 +217,8 @@ class Wal {
       'total_frames': totalFrames,
       'synced_frame_offset': syncedFrameOffset,
       'original_storage': originalStorage?.name,
+      'owner': owner?.toJson(),
+      'quarantine_reason': quarantineReason,
     };
   }
 
@@ -176,16 +232,19 @@ class Wal {
     return "audio_${device.replaceAll(RegExp(r'[^a-zA-Z0-9]'), "").toLowerCase()}_${codec}_${sampleRate}_${channel}_fs${frameSize}_${timestarts}.bin";
   }
 
-  static Future<String?> getFilePath(String? pathOrName) async {
+  static Future<String?> getFilePath(
+    String? pathOrName, {
+    WalOwner? owner,
+    bool quarantined = false,
+  }) async {
     if (pathOrName == null || pathOrName.isEmpty) {
       return null;
     }
 
     final directory = await getApplicationDocumentsDirectory();
-    if (pathOrName.contains('/')) {
-      final filename = pathOrName.split('/').last;
-      return '${directory.path}/$filename';
-    }
-    return '${directory.path}/$pathOrName';
+    final filename = pathOrName.split('/').last;
+    if (quarantined) return '${directory.path}/ella_wal_quarantine/$filename';
+    if (owner != null) return '${directory.path}/ella_wal_accounts/${owner.storageNamespace}/$filename';
+    return '${directory.path}/$filename';
   }
 }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
 import 'package:omi/utils/logger.dart';
 
@@ -84,7 +85,7 @@ class EllaProvisioningProvider extends ChangeNotifier {
     state = EllaProvisioningState.checking;
     errorCode = '';
 
-    await _preferences.prepareEllaProvisioningAccount(uid);
+    await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: _preferences);
     if (generation != _generation) return;
 
     final cached = _preferences.getEllaProvisioningReceipt(uid);
@@ -233,6 +234,12 @@ class EllaProvisioningProvider extends ChangeNotifier {
       state = nextReceipt.state;
     }
     notifyListeners();
+
+    if (isOperational) {
+      await _preferences.markEllaProvisioningVerified(_activeUid);
+      await const EllaAccountIsolationService().resumeAfterVerifiedProvisioning();
+      if (generation != _generation) return;
+    }
 
     if (_shouldPoll) {
       _schedulePoll(generation, _pollDelay(nextReceipt));

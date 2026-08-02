@@ -12,6 +12,7 @@ import 'package:omi/env/env.dart';
 import 'package:omi/models/subscription.dart';
 import 'package:omi/models/user_usage.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 
 Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) return false;
@@ -27,6 +28,7 @@ Future<bool> updateUserGeolocation({required Geolocation geolocation}) async {
 }
 
 Future<bool> setUserWebhookUrl({required String type, required String url}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type',
     headers: {},
@@ -39,6 +41,7 @@ Future<bool> setUserWebhookUrl({required String type, required String url}) asyn
 }
 
 Future<String> getUserWebhookUrl({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return '';
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type',
     headers: {},
@@ -54,6 +57,7 @@ Future<String> getUserWebhookUrl({required String type}) async {
 }
 
 Future disableWebhook({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type/disable',
     headers: {},
@@ -66,6 +70,7 @@ Future disableWebhook({required String type}) async {
 }
 
 Future enableWebhook({required String type}) async {
+  if (SharedPreferencesUtil.isPublicBuild) return false;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhook/$type/enable',
     headers: {},
@@ -78,6 +83,7 @@ Future enableWebhook({required String type}) async {
 }
 
 Future webhooksStatus() async {
+  if (SharedPreferencesUtil.isPublicBuild) return null;
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/developer/webhooks/status',
     headers: {},
@@ -92,18 +98,12 @@ Future webhooksStatus() async {
 }
 
 class AccountDeletionReceipt {
-  const AccountDeletionReceipt({
-    required this.requestId,
-    required this.serverCompletedAt,
-  });
+  const AccountDeletionReceipt({required this.requestId, required this.serverCompletedAt});
 
   final String requestId;
   final DateTime serverCompletedAt;
 
-  static AccountDeletionReceipt? tryParseResponse({
-    required int statusCode,
-    required String body,
-  }) {
+  static AccountDeletionReceipt? tryParseResponse({required int statusCode, required String body}) {
     if (statusCode != 200) return null;
     try {
       final decoded = jsonDecode(body);
@@ -122,10 +122,7 @@ class AccountDeletionReceipt {
       if (!RegExp(r'^aidel_[A-Za-z0-9_-]{16,128}$').hasMatch(requestId) || completedAt == null) {
         return null;
       }
-      return AccountDeletionReceipt(
-        requestId: requestId,
-        serverCompletedAt: completedAt.toUtc(),
-      );
+      return AccountDeletionReceipt(requestId: requestId, serverCompletedAt: completedAt.toUtc());
     } on FormatException {
       return null;
     }
@@ -140,10 +137,7 @@ Future<AccountDeletionReceipt?> deleteAccount() async {
     body: '',
   );
   if (response == null) return null;
-  final receipt = AccountDeletionReceipt.tryParseResponse(
-    statusCode: response.statusCode,
-    body: response.body,
-  );
+  final receipt = AccountDeletionReceipt.tryParseResponse(statusCode: response.statusCode, body: response.body);
   Logger.debug('deleteAccount completed with verified receipt: ${receipt != null}');
   return receipt;
 }
@@ -218,12 +212,18 @@ Future<bool> getPrivateCloudSyncEnabled() async {
   return false;
 }
 
-Future<Person?> createPerson(String name) async {
+Future<Person?> createPerson(
+  String name, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people',
     headers: {},
     method: 'POST',
     body: jsonEncode({'name': name}),
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return null;
   Logger.debug('createPerson response: ${response.body}');
@@ -248,12 +248,16 @@ Future<Person?> getSinglePerson(String personId, {bool includeSpeechSamples = fa
   return null;
 }
 
-Future<List<Person>> getAllPeople({bool includeSpeechSamples = true}) async {
+Future<List<Person>> getAllPeople({
+  bool includeSpeechSamples = true,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people?include_speech_samples=$includeSpeechSamples',
     headers: {},
     method: 'GET',
     body: '',
+    exactAuthority: exactAuthority,
   );
   if (response == null) return [];
   if (response.statusCode == 200) {
@@ -269,36 +273,56 @@ Future<List<Person>> getAllPeople({bool includeSpeechSamples = true}) async {
   return [];
 }
 
-Future<bool> updatePersonName(String personId, String newName) async {
+Future<bool> updatePersonName(
+  String personId,
+  String newName, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/name?value=$newName',
     headers: {},
     method: 'PATCH',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('updatePersonName response: ${response.body}');
   return response.statusCode == 200;
 }
 
-Future<bool> deletePerson(String personId) async {
+Future<bool> deletePerson(
+  String personId, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId',
     headers: {},
     method: 'DELETE',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('deletePerson response: ${response.body}');
   return response.statusCode == 204;
 }
 
-Future<bool> deletePersonSpeechSample(String personId, int sampleIndex) async {
+Future<bool> deletePersonSpeechSample(
+  String personId,
+  int sampleIndex, {
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   var response = await makeApiCall(
     url: '${Env.apiBaseUrl}v1/users/people/$personId/speech-samples/$sampleIndex',
     headers: {},
     method: 'DELETE',
     body: '',
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    exactAuthority: exactAuthority,
   );
   if (response == null) return false;
   Logger.debug('deletePersonSpeechSample response: ${response.body}');

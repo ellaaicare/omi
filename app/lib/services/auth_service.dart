@@ -17,6 +17,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
@@ -35,6 +36,16 @@ class AuthService {
   static AuthService get instance => _instance;
 
   AuthService._internal();
+
+  Future<T> runIdentityTransition<T>(Future<T> Function() mutation) async {
+    await const EllaAccountIsolationService().stopForAccountTransition();
+    return mutation();
+  }
+
+  Future<UserCredential> replaceIdentityWithCredential(AuthCredential credential) => runIdentityTransition(() async {
+        await FirebaseAuth.instance.signOut();
+        return FirebaseAuth.instance.signInWithCredential(credential);
+      });
 
   bool isSignedIn() => FirebaseAuth.instance.currentUser != null && !FirebaseAuth.instance.currentUser!.isAnonymous;
 
@@ -62,7 +73,7 @@ class AuthService {
 
     // Once signed in, return the UserCredential
     try {
-      var result = await FirebaseAuth.instance.signInWithCredential(credential);
+      var result = await runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
       await _updateUserPreferences(result, 'google');
       return result;
     } catch (_) {
@@ -87,9 +98,6 @@ class AuthService {
 
   Future<UserCredential?> signInWithAppleMobile() async {
     try {
-      // Sign out the current user first
-      await FirebaseAuth.instance.signOut();
-
       final rawNonce = generateNonce();
       final nonce = sha256ofString(rawNonce);
 
@@ -110,7 +118,7 @@ class AuthService {
       );
 
       // Sign in the user with Firebase.
-      UserCredential userCred = await FirebaseAuth.instance.signInWithCredential(oauthCredential);
+      UserCredential userCred = await replaceIdentityWithCredential(oauthCredential);
 
       // Extract name from Apple credential (only available on first sign-in)
       if (appleCredential.givenName != null && appleCredential.givenName!.isNotEmpty) {
@@ -142,7 +150,7 @@ class AuthService {
 
   Future<void> signInAnonymously() async {
     try {
-      await FirebaseAuth.instance.signInAnonymously();
+      await runIdentityTransition(FirebaseAuth.instance.signInAnonymously);
       var user = FirebaseAuth.instance.currentUser!;
       SharedPreferencesUtil().uid = user.uid;
       await getIdToken();
@@ -151,9 +159,7 @@ class AuthService {
     }
   }
 
-  Future<void> signOut() async {
-    await FirebaseAuth.instance.signOut();
-  }
+  Future<void> signOut() => runIdentityTransition(FirebaseAuth.instance.signOut);
 
   Future<String?> getIdToken() async {
     try {
@@ -315,7 +321,7 @@ class AuthService {
 
     // Use custom token if enabled and available
     if (useCustomToken && customToken != null) {
-      return await FirebaseAuth.instance.signInWithCustomToken(customToken);
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCustomToken(customToken));
     }
 
     // Fallback to OAuth credentials
@@ -324,10 +330,10 @@ class AuthService {
 
     if (provider == 'google') {
       final credential = GoogleAuthProvider.credential(idToken: idToken, accessToken: accessToken);
-      return await FirebaseAuth.instance.signInWithCredential(credential);
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
     } else if (provider == 'apple') {
       final credential = OAuthProvider('apple.com').credential(idToken: idToken, accessToken: accessToken);
-      return await FirebaseAuth.instance.signInWithCredential(credential);
+      return runIdentityTransition(() => FirebaseAuth.instance.signInWithCredential(credential));
     } else {
       throw Exception('Unsupported provider: $provider');
     }
@@ -583,11 +589,7 @@ class AuthService {
     // Get existing user credentials
     final existingCred = e.credential;
 
-    // Sign out current anonymous user
-    await FirebaseAuth.instance.signOut();
-
-    // Sign in with existing account
-    final result = await FirebaseAuth.instance.signInWithCredential(existingCred!);
+    final result = await replaceIdentityWithCredential(existingCred!);
     final newUserId = FirebaseAuth.instance.currentUser?.uid;
     await getIdToken();
 

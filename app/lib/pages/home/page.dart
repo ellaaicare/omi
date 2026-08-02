@@ -20,6 +20,7 @@ import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/services/ella_entitlement_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/main.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
 import 'package:omi/pages/chat/page.dart';
@@ -133,7 +134,16 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
 class HomePage extends StatefulWidget {
   final String? navigateToRoute;
   final String? autoMessage;
-  const HomePage({super.key, this.navigateToRoute, this.autoMessage});
+  final List<Widget>? pagesOverride;
+  final bool runtimeSideEffectsEnabled;
+
+  const HomePage({
+    super.key,
+    this.navigateToRoute,
+    this.autoMessage,
+    this.pagesOverride,
+    this.runtimeSideEffectsEnabled = true,
+  });
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -211,14 +221,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   void initState() {
-    _pages = [
-      TodayPage(key: _todayPageKey),
-      const ChatPage(isPivotBottom: true),
-      const EllaVoiceChatPage(),
-      const EllaSettingsPage(),
-    ];
-    SharedPreferencesUtil().onboardingCompleted = true;
-    updateUserOnboardingState(completed: true);
+    _pages = widget.pagesOverride ??
+        [
+          TodayPage(key: _todayPageKey),
+          const ChatPage(isPivotBottom: true),
+          const EllaVoiceChatPage(),
+          const EllaSettingsPage(),
+        ];
+    if (widget.runtimeSideEffectsEnabled) {
+      SharedPreferencesUtil().onboardingCompleted = true;
+      updateUserOnboardingState(completed: true);
+    }
 
     // Navigate uri
     Uri? navigateToUri;
@@ -226,8 +239,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     var homePageIdx = 0;
     String? detailPageId;
 
-    if (widget.navigateToRoute != null && widget.navigateToRoute!.isNotEmpty) {
-      navigateToUri = Uri.tryParse("http://localhost.com${widget.navigateToRoute!}");
+    final allowedNavigateToRoute = allowedEllaNavigationRoute(widget.navigateToRoute);
+    if (allowedNavigateToRoute != null) {
+      navigateToUri = Uri.tryParse("http://localhost.com$allowedNavigateToRoute");
       Logger.debug("initState ${navigateToUri?.pathSegments.join("...")}");
       var segments = navigateToUri?.pathSegments ?? [];
       if (segments.isNotEmpty) {
@@ -252,24 +266,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
     // Home controller
     context.read<HomeProvider>().selectedIndex = homePageIdx;
-    WidgetsBinding.instance.addObserver(this);
+    if (widget.runtimeSideEffectsEnabled) WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      _initiateApps();
+      if (widget.runtimeSideEffectsEnabled) {
+        if (allowsInheritedOmiSurface()) _initiateApps();
 
-      // ForegroundUtil.requestPermissions();
-      if (!PlatformService.isDesktop) {
-        await ForegroundUtil.initializeForegroundService();
-        await ForegroundUtil.startForegroundTask();
-      }
-      if (mounted) {
-        await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
-      }
-      if (mounted) {
-        await Provider.of<CaptureProvider>(
-          context,
-          listen: false,
-        ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        // ForegroundUtil.requestPermissions();
+        if (!PlatformService.isDesktop) {
+          await ForegroundUtil.initializeForegroundService();
+          await ForegroundUtil.startForegroundTask();
+        }
+        if (mounted) {
+          await Provider.of<HomeProvider>(context, listen: false).setUserPeople();
+        }
+        if (mounted) {
+          await Provider.of<CaptureProvider>(
+            context,
+            listen: false,
+          ).streamDeviceRecording(device: Provider.of<DeviceProvider>(context, listen: false).connectedDevice);
+        }
       }
 
       // Navigate
@@ -337,12 +353,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
           }
           break;
         case "settings":
-          // Use context from the current widget instead of navigator key for bottom sheet
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              SettingsDrawer.show(context);
-            }
-          });
+          if (allowsInheritedOmiSurface()) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) SettingsDrawer.show(context);
+            });
+          }
           if (detailPageId == 'data-privacy') {
             MyApp.navigatorKey.currentState?.push(MaterialPageRoute(builder: (context) => const DataPrivacyPage()));
           }
@@ -405,14 +420,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
       }
     });
 
-    _listenToMessagesFromNotification();
-    _listenToFreemiumThreshold();
-    _checkForAnnouncements();
+    if (widget.runtimeSideEffectsEnabled) {
+      _listenToMessagesFromNotification();
+      if (allowsInheritedOmiSurface()) _listenToFreemiumThreshold();
+      if (allowsInheritedOmiSurface()) _checkForAnnouncements();
+    }
 
     super.initState();
 
     // After init
-    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+    if (widget.runtimeSideEffectsEnabled) FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
   }
 
   void _checkForAnnouncements() {
@@ -485,154 +502,156 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
 
   @override
   Widget build(BuildContext context) {
+    final page = Consumer<ConnectivityProvider>(
+      builder: (ctx, connectivityProvider, child) {
+        bool isConnected = connectivityProvider.isConnected;
+        previousConnection ??= true;
+
+        if (previousConnection != isConnected &&
+            connectivityProvider.isInitialized &&
+            connectivityProvider.previousConnection != isConnected) {
+          previousConnection = isConnected;
+          if (!isConnected) {
+            // TODO: Re-enable when internet connection banners are redesigned
+            // Future.delayed(const Duration(seconds: 2), () {
+            //   if (mounted && !connectivityProvider.isConnected) {
+            //     ScaffoldMessenger.of(ctx).showMaterialBanner(
+            //       MaterialBanner(
+            //         content: const Text(
+            //           'No internet connection. Please check your connection.',
+            //           style: TextStyle(color: Colors.white70),
+            //         ),
+            //         backgroundColor: const Color(0xFF424242), // Dark gray instead of red
+            //         leading: const Icon(Icons.wifi_off, color: Colors.white70),
+            //         actions: [
+            //           TextButton(
+            //             onPressed: () {
+            //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+            //             },
+            //             child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
+            //           ),
+            //         ],
+            //       ),
+            //     );
+            //   }
+            // });
+          } else {
+            Future.delayed(Duration.zero, () {
+              // TODO: Re-enable when internet connection banners are redesigned
+              // if (mounted) {
+              //   ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //   ScaffoldMessenger.of(ctx).showMaterialBanner(
+              //     MaterialBanner(
+              //       content: const Text(
+              //         'Internet connection is restored.',
+              //         style: TextStyle(color: Colors.white),
+              //       ),
+              //       backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
+              //       leading: const Icon(Icons.wifi, color: Colors.white),
+              //       actions: [
+              //         TextButton(
+              //           onPressed: () {
+              //             if (mounted) {
+              //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //             }
+              //           },
+              //           child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
+              //         ),
+              //       ],
+              //       onVisible: () => Future.delayed(const Duration(seconds: 3), () {
+              //         if (mounted) {
+              //           ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
+              //         }
+              //       }),
+              //     ),
+              //   );
+              // }
+
+              WidgetsBinding.instance.addPostFrameCallback((_) async {
+                if (!mounted) return;
+
+                final convoProvider = ctx.read<ConversationProvider>();
+                final messageProvider = ctx.read<MessageProvider>();
+
+                if (convoProvider.conversations.isEmpty) {
+                  await convoProvider.getInitialConversations();
+                } else {
+                  // Force refresh when internet connection is restored
+                  await convoProvider.forceRefreshConversations();
+                }
+
+                if (messageProvider.messages.isEmpty) {
+                  await messageProvider.refreshMessages();
+                }
+              });
+            });
+          }
+        }
+        return child!;
+      },
+      child: Consumer<HomeProvider>(
+        builder: (context, homeProvider, _) {
+          return Scaffold(
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            resizeToAvoidBottomInset: false,
+            appBar: null,
+            body: DefaultTabController(
+              length: 4,
+              initialIndex: homeProvider.selectedIndex,
+              child: GestureDetector(
+                onTap: () {
+                  primaryFocus?.unfocus();
+                  // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
+                  // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
+                },
+                child: Stack(
+                  children: [
+                    Column(
+                      children: [
+                        Expanded(
+                          child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
+                        ),
+                        // Settings and other non-home tabs just need nav bar clearance
+                        if (context.watch<HomeProvider>().selectedIndex == 3)
+                          SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
+                      ],
+                    ),
+                    Consumer<HomeProvider>(
+                      builder: (context, home, child) {
+                        if (home.isChatFieldFocused) {
+                          return const SizedBox.shrink();
+                        }
+
+                        return BottomNavBar(
+                          onTabTap: (index, isRepeat) {
+                            if (isRepeat) {
+                              _scrollToTop(index);
+                            } else {
+                              home.setIndex(index);
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (!widget.runtimeSideEffectsEnabled) return page;
     return MyUpgradeAlert(
       upgrader: _upgrader,
       dialogStyle: Platform.isIOS ? UpgradeDialogStyle.cupertino : UpgradeDialogStyle.material,
-      child: Consumer<ConnectivityProvider>(
-        builder: (ctx, connectivityProvider, child) {
-          bool isConnected = connectivityProvider.isConnected;
-          previousConnection ??= true;
-
-          if (previousConnection != isConnected &&
-              connectivityProvider.isInitialized &&
-              connectivityProvider.previousConnection != isConnected) {
-            previousConnection = isConnected;
-            if (!isConnected) {
-              // TODO: Re-enable when internet connection banners are redesigned
-              // Future.delayed(const Duration(seconds: 2), () {
-              //   if (mounted && !connectivityProvider.isConnected) {
-              //     ScaffoldMessenger.of(ctx).showMaterialBanner(
-              //       MaterialBanner(
-              //         content: const Text(
-              //           'No internet connection. Please check your connection.',
-              //           style: TextStyle(color: Colors.white70),
-              //         ),
-              //         backgroundColor: const Color(0xFF424242), // Dark gray instead of red
-              //         leading: const Icon(Icons.wifi_off, color: Colors.white70),
-              //         actions: [
-              //           TextButton(
-              //             onPressed: () {
-              //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-              //             },
-              //             child: const Text('Dismiss', style: TextStyle(color: Colors.white70)),
-              //           ),
-              //         ],
-              //       ),
-              //     );
-              //   }
-              // });
-            } else {
-              Future.delayed(Duration.zero, () {
-                // TODO: Re-enable when internet connection banners are redesigned
-                // if (mounted) {
-                //   ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //   ScaffoldMessenger.of(ctx).showMaterialBanner(
-                //     MaterialBanner(
-                //       content: const Text(
-                //         'Internet connection is restored.',
-                //         style: TextStyle(color: Colors.white),
-                //       ),
-                //       backgroundColor: const Color(0xFF2E7D32), // Dark green instead of bright green
-                //       leading: const Icon(Icons.wifi, color: Colors.white),
-                //       actions: [
-                //         TextButton(
-                //           onPressed: () {
-                //             if (mounted) {
-                //               ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //             }
-                //           },
-                //           child: const Text('Dismiss', style: TextStyle(color: Colors.white)),
-                //         ),
-                //       ],
-                //       onVisible: () => Future.delayed(const Duration(seconds: 3), () {
-                //         if (mounted) {
-                //           ScaffoldMessenger.of(ctx).hideCurrentMaterialBanner();
-                //         }
-                //       }),
-                //     ),
-                //   );
-                // }
-
-                WidgetsBinding.instance.addPostFrameCallback((_) async {
-                  if (!mounted) return;
-
-                  final convoProvider = ctx.read<ConversationProvider>();
-                  final messageProvider = ctx.read<MessageProvider>();
-
-                  if (convoProvider.conversations.isEmpty) {
-                    await convoProvider.getInitialConversations();
-                  } else {
-                    // Force refresh when internet connection is restored
-                    await convoProvider.forceRefreshConversations();
-                  }
-
-                  if (messageProvider.messages.isEmpty) {
-                    await messageProvider.refreshMessages();
-                  }
-                });
-              });
-            }
-          }
-          return child!;
-        },
-        child: Consumer<HomeProvider>(
-          builder: (context, homeProvider, _) {
-            return Scaffold(
-              backgroundColor: Theme.of(context).colorScheme.primary,
-              resizeToAvoidBottomInset: false,
-              appBar: null,
-              body: DefaultTabController(
-                length: 4,
-                initialIndex: homeProvider.selectedIndex,
-                child: GestureDetector(
-                  onTap: () {
-                    primaryFocus?.unfocus();
-                    // context.read<HomeProvider>().memoryFieldFocusNode.unfocus();
-                    // context.read<HomeProvider>().chatFieldFocusNode.unfocus();
-                  },
-                  child: Stack(
-                    children: [
-                      Column(
-                        children: [
-                          Expanded(
-                            child: IndexedStack(index: context.watch<HomeProvider>().selectedIndex, children: _pages),
-                          ),
-                          // Settings and other non-home tabs just need nav bar clearance
-                          if (context.watch<HomeProvider>().selectedIndex == 3)
-                            SizedBox(height: EllaSizes.navBarHeight + MediaQuery.of(context).padding.bottom),
-                        ],
-                      ),
-                      Consumer<HomeProvider>(
-                        builder: (context, home, child) {
-                          if (home.isChatFieldFocused) {
-                            return const SizedBox.shrink();
-                          }
-
-                          return BottomNavBar(
-                            onTabTap: (index, isRepeat) {
-                              if (isRepeat) {
-                                _scrollToTop(index);
-                              } else {
-                                home.setIndex(index);
-                              }
-                            },
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      ),
+      child: page,
     );
   }
 
   @override
   Future<void> dispose() async {
-    WidgetsBinding.instance.removeObserver(this);
+    if (widget.runtimeSideEffectsEnabled) WidgetsBinding.instance.removeObserver(this);
     // Cancel stream subscription to prevent memory leak
     _notificationStreamSubscription?.cancel();
     // Remove capture provider listener using stored reference
@@ -649,8 +668,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver, Ticker
     // Clean up freemium handler
     _freemiumHandler.dispose();
     // Remove foreground task callback to prevent memory leak
-    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
-    ForegroundUtil.stopForegroundTask();
+    if (widget.runtimeSideEffectsEnabled) {
+      FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
+      ForegroundUtil.stopForegroundTask();
+    }
     super.dispose();
   }
 }

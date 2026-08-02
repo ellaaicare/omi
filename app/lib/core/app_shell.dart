@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/services/ella_invite_link_controller.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/desktop/desktop_app.dart';
 import 'package:omi/mobile/mobile_app.dart';
 import 'package:omi/pages/apps/app_detail/app_detail.dart';
@@ -60,6 +61,10 @@ class _AppShellState extends State<AppShell> {
   void openAppLink(Uri uri) async {
     if (EllaInviteLinkController.instance.accept(uri)) {
       Logger.debug('Ella invite link accepted');
+      return;
+    }
+    if (!allowsInheritedOmiSurface()) {
+      Logger.debug('Ignored inherited Omi app link in public Ella build');
       return;
     }
     if (uri.pathSegments.isEmpty) {
@@ -308,27 +313,31 @@ class _AppShellState extends State<AppShell> {
       context.read<HomeProvider>().setupUserPrimaryLanguage();
       context.read<UserProvider>().initialize();
       context.read<PeopleProvider>().initialize();
-      try {
-        await PlatformManager.instance.intercom.loginIdentifiedUser(SharedPreferencesUtil().uid);
-      } catch (e) {
-        Logger.debug('Failed to login to Intercom: $e');
+      if (allowsInheritedOmiSurface()) {
+        try {
+          await PlatformManager.instance.intercom.loginIdentifiedUser(SharedPreferencesUtil().uid);
+        } catch (e) {
+          Logger.debug('Failed to login to Intercom: $e');
+        }
       }
 
       if (!mounted) return;
       context.read<MessageProvider>().setMessagesFromCache();
-      context.read<AppProvider>().setAppsFromCache();
       context.read<MessageProvider>().refreshMessages();
-      context.read<UsageProvider>().fetchSubscription();
-      context.read<TaskIntegrationProvider>().loadFromBackend();
+      if (allowsInheritedOmiSurface()) {
+        context.read<AppProvider>().setAppsFromCache();
+        context.read<UsageProvider>().fetchSubscription();
+        context.read<TaskIntegrationProvider>().loadFromBackend();
+      }
 
       NotificationService.instance.saveNotificationToken();
-    } else {
+    } else if (allowsInheritedOmiSurface()) {
       if (!PlatformManager.instance.isAnalyticsSupported) {
         await PlatformManager.instance.intercom.loginUnidentifiedUser();
       }
       if (!mounted) return;
     }
-    PlatformManager.instance.intercom.setUserAttributes();
+    if (allowsInheritedOmiSurface()) PlatformManager.instance.intercom.setUserAttributes();
   }
 
   @override

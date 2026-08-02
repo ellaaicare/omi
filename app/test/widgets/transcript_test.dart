@@ -18,9 +18,10 @@ void main() {
 
   /// Helper to reset SharedPreferences with optional cached people
   Future<void> setupSharedPreferences({List<Map<String, dynamic>>? cachedPeople}) async {
-    final values = <String, Object>{};
+    const uid = 'transcript-test-user';
+    final values = <String, Object>{'uid': uid};
     if (cachedPeople != null) {
-      values['cachedPeople'] = cachedPeople.map((p) => jsonEncode(p)).toList();
+      values['cachedPeople:$uid'] = cachedPeople.map((p) => jsonEncode(p)).toList();
     }
     SharedPreferences.setMockInitialValues(values);
     await SharedPreferencesUtil.init();

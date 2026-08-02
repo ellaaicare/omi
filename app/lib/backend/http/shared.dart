@@ -9,6 +9,7 @@ import 'package:omi/backend/http/http_pool_manager.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/services/auth_service.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/log_redaction.dart';
 import 'package:omi/utils/platform/platform_manager.dart';
@@ -50,7 +51,14 @@ Future<String> getAuthHeader() async {
 Future<Map<String, String>> buildHeaders({
   required bool requireAuthCheck,
   Map<String, String> fromHeaders = const {},
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
+  _verifyRequestAuthority(
+    exactAuthority: exactAuthority,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    boundary: 'before request header construction',
+  );
   final headers = <String, String>{
     'X-Request-Start-Time': (DateTime.now().millisecondsSinceEpoch / 1000).toString(),
     'X-App-Platform': PlatformManager.instance.platform,
@@ -63,7 +71,26 @@ Future<Map<String, String>> buildHeaders({
     headers['Authorization'] = await getAuthHeader();
   }
 
+  _verifyRequestAuthority(
+    exactAuthority: exactAuthority,
+    expectedAuthenticatedUid: expectedAuthenticatedUid,
+    boundary: 'during request header construction',
+  );
+
   return headers;
+}
+
+void _verifyRequestAuthority({
+  required ExactAccountAuthorityVerifier? exactAuthority,
+  required String? expectedAuthenticatedUid,
+  required String boundary,
+}) {
+  if (exactAuthority != null && !exactAuthority.isExactCurrent()) {
+    throw ExactAccountAuthorityChangedException('Exact account authority changed $boundary');
+  }
+  if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+    throw StateError('Authenticated account changed $boundary');
+  }
 }
 
 bool _isRequiredAuthCheck(String url) {
@@ -92,12 +119,16 @@ Future<http.Response?> makeApiCall({
   Duration? timeout,
   int? retries,
   bool? requireAuthCheck,
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   try {
     final shouldCheckAuth = requireAuthCheck ?? _isRequiredAuthCheck(url);
     Map<String, String> builtHeaders = await buildHeaders(
       requireAuthCheck: shouldCheckAuth,
       fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
     );
 
     final effectiveTimeout =
@@ -108,6 +139,7 @@ Future<http.Response?> makeApiCall({
       () => _buildRequest(url, builtHeaders, body, method),
       timeout: effectiveTimeout,
       retries: effectiveRetries,
+      exactAuthority: exactAuthority,
     );
 
     if (shouldCheckAuth && response.statusCode == 401) {
@@ -117,11 +149,14 @@ Future<http.Response?> makeApiCall({
         builtHeaders = await buildHeaders(
           requireAuthCheck: shouldCheckAuth,
           fromHeaders: headers,
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          exactAuthority: exactAuthority,
         );
         response = await HttpPoolManager.instance.send(
           () => _buildRequest(url, builtHeaders, body, method),
           timeout: effectiveTimeout,
           retries: 0,
+          exactAuthority: exactAuthority,
         );
         Logger.log('Token refreshed and request retried');
         if (response.statusCode == 401) {
@@ -144,6 +179,7 @@ Future<http.Response?> makeApiCall({
 
     return response;
   } catch (e, stackTrace) {
+    if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.debug('HTTP request failed: $e, $stackTrace');
     PlatformManager.instance.crashReporter.reportCrash(
       e,
@@ -171,9 +207,22 @@ Future<http.Response> makeMultipartApiCall({
   Map<String, String> fields = const {},
   String fileFieldName = 'files',
   String method = 'POST',
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async {
   try {
-    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
+    final builtHeaders = await buildHeaders(
+      requireAuthCheck: _isRequiredAuthCheck(url),
+      fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+    _verifyRequestAuthority(
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      boundary: 'before multipart assembly',
+    );
 
     var request = http.MultipartRequest(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -186,9 +235,16 @@ Future<http.Response> makeMultipartApiCall({
       request.files.add(multipartFile);
     }
 
-    var streamedResponse = await HttpPoolManager.instance.sendStreaming(request);
-    return await http.Response.fromStream(streamedResponse);
+    var streamedResponse = await HttpPoolManager.instance.sendStreaming(request, exactAuthority: exactAuthority);
+    final response = await http.Response.fromStream(streamedResponse);
+    _verifyRequestAuthority(
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      boundary: 'after multipart response',
+    );
+    return response;
   } catch (e, stackTrace) {
+    if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.debug('Multipart HTTP request failed: $e, $stackTrace');
     PlatformManager.instance.crashReporter.reportCrash(
       e,
@@ -204,9 +260,16 @@ Stream<String> makeStreamingApiCall({
   Map<String, String> headers = const {},
   String body = '',
   String method = 'POST',
+  String? expectedAuthenticatedUid,
+  ExactAccountAuthorityVerifier? exactAuthority,
 }) async* {
   try {
-    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
+    final builtHeaders = await buildHeaders(
+      requireAuthCheck: _isRequiredAuthCheck(url),
+      fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
 
     var request = http.Request(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -216,7 +279,7 @@ Stream<String> makeStreamingApiCall({
       request.body = body;
     }
 
-    var streamedResponse = await HttpPoolManager.instance.sendStreaming(request);
+    var streamedResponse = await HttpPoolManager.instance.sendStreaming(request, exactAuthority: exactAuthority);
 
     if (streamedResponse.statusCode != 200) {
       Logger.error('Streaming request failed: ${streamedResponse.statusCode}');
@@ -225,6 +288,11 @@ Stream<String> makeStreamingApiCall({
 
     var buffers = <String>[];
     await for (var data in streamedResponse.stream.transform(utf8.decoder)) {
+      _verifyRequestAuthority(
+        exactAuthority: exactAuthority,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        boundary: 'during streaming response',
+      );
       var lines = data.split('\n\n');
       for (var line in lines.where((line) => line.isNotEmpty)) {
         // Handle package splitting by 1024 bytes in dart
@@ -240,15 +308,32 @@ Stream<String> makeStreamingApiCall({
           buffers.clear();
         }
 
+        _verifyRequestAuthority(
+          exactAuthority: exactAuthority,
+          expectedAuthenticatedUid: expectedAuthenticatedUid,
+          boundary: 'before streaming response delivery',
+        );
         yield line;
       }
     }
 
+    _verifyRequestAuthority(
+      exactAuthority: exactAuthority,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      boundary: 'after streaming response completion',
+    );
+
     // Flush remaining buffers
     if (buffers.isNotEmpty) {
+      _verifyRequestAuthority(
+        exactAuthority: exactAuthority,
+        expectedAuthenticatedUid: expectedAuthenticatedUid,
+        boundary: 'before final streaming response delivery',
+      );
       yield buffers.join();
     }
   } catch (e, stackTrace) {
+    if (e is ExactAccountAuthorityChangedException) rethrow;
     Logger.error('Streaming request error: $e');
     PlatformManager.instance.crashReporter.reportCrash(
       e,
