@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omi/ella/services/ella_legal_links.dart';
+import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/utils/debugging/crashlytics_manager.dart';
 import 'package:omi/utils/log_redaction.dart';
 
@@ -44,5 +45,13 @@ void main() {
     expect(EllaLegalLinks.terms.toString(), 'https://ella-ai-care.com/terms');
     expect(EllaLegalLinks.privacy.path, isNot(startsWith('/legal/')));
     expect(EllaLegalLinks.terms.path, isNot(startsWith('/legal/')));
+  });
+
+  test('public builds reject inherited Omi surfaces', () {
+    expect(allowsInheritedOmiSurface(isPublicBuild: true), isFalse);
+  });
+
+  test('non-public builds retain inherited Omi surfaces', () {
+    expect(allowsInheritedOmiSurface(isPublicBuild: false), isTrue);
   });
 }
