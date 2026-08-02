@@ -97,5 +97,32 @@ void main() {
       expect(records.map((record) => record.id), ['real-wake']);
       expect(records.single.isSystemWakeAcknowledgement, isFalse);
     });
+
+    test('invitation history never falls back to unowned device debug logs', () async {
+      var localCalls = 0;
+
+      final result = await GuardianAlertHistoryApi.fetch(
+        guardianAllowed: true,
+        allowLocalDebugFallback: false,
+        backendLoader: (_) async => null,
+        localLoader: (_) async {
+          localCalls++;
+          return [
+            GuardianAlertRecord(
+              id: 'prior-account',
+              alertText: 'Prior account data',
+              triggerType: 'wake_word',
+              deliveryTarget: 'user',
+              playbackStatus: 'played',
+              createdAt: DateTime.utc(2026, 8, 2),
+            ),
+          ];
+        },
+      );
+
+      expect(result.records, isEmpty);
+      expect(result.source, GuardianAlertHistorySource.backend);
+      expect(localCalls, 0);
+    });
   });
 }

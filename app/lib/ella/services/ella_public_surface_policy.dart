@@ -1,4 +1,5 @@
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/ella_pilot_locale_policy.dart';
 
 const bool isEllaAccessDemoGalleryConfigured = bool.fromEnvironment('ELLA_ACCESS_DEMO_GALLERY');
@@ -11,15 +12,41 @@ bool allowsInheritedOmiSurface({bool isPublicBuild = SharedPreferencesUtil.isPub
 /// authenticated end-to-end delivery paths have separate release receipts.
 bool allowsUnverifiedEllaSurface({bool isPublicBuild = SharedPreferencesUtil.isPublicBuild}) => !isPublicBuild;
 
-/// Guardian and related care surfaces are unavailable to public and invitation
-/// builds until every route is authenticated and account-isolated end to end.
-/// The capability remains off when its build flag is absent or misconfigured.
+bool get hasAuthenticatedGuardianIdentity {
+  final persistedUid = SharedPreferencesUtil().uid.trim();
+  final authenticatedUid = WalOwnerAuthority.authenticatedUid.trim();
+  return persistedUid.isNotEmpty && authenticatedUid == persistedUid;
+}
+
+/// Authenticated Whispers are available to invitation users while remaining
+/// fail-closed when the build capability or exact Firebase identity is absent.
 bool allowsGuardianSurface({
   bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
   bool isInvitationBuild = isEllaInternalPilotEnabled,
   bool guardianConfigured = isEllaGuardianConfigured,
+  bool? guardianAuthenticated,
+}) {
+  final hasExactIdentity = guardianAuthenticated ?? hasAuthenticatedGuardianIdentity;
+  return guardianConfigured && hasExactIdentity && (!isPublicBuild || isInvitationBuild);
+}
+
+/// Caregiver, emergency, and broad Guardian policy controls remain internal.
+/// The invitation capability is intentionally limited to authenticated audio
+/// Whispers until those separate delivery contracts are proven.
+bool allowsGuardianCareSurface({
+  bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
+  bool isInvitationBuild = isEllaInternalPilotEnabled,
+  bool guardianConfigured = isEllaGuardianConfigured,
+  bool? guardianAuthenticated,
 }) =>
-    guardianConfigured && !isPublicBuild && !isInvitationBuild;
+    allowsGuardianSurface(
+      isPublicBuild: isPublicBuild,
+      isInvitationBuild: isInvitationBuild,
+      guardianConfigured: guardianConfigured,
+      guardianAuthenticated: guardianAuthenticated,
+    ) &&
+    !isPublicBuild &&
+    !isInvitationBuild;
 
 /// Notification and alternate Home navigation is intentionally narrower than
 /// the app's internal route set. Public builds only accept exact routes for the
@@ -29,6 +56,7 @@ String? allowedEllaNavigationRoute(
   bool isPublicBuild = SharedPreferencesUtil.isPublicBuild,
   bool isInvitationBuild = isEllaInternalPilotEnabled,
   bool guardianConfigured = isEllaGuardianConfigured,
+  bool? guardianAuthenticated,
 }) {
   if (route == null || route.trim().isEmpty) return null;
 
@@ -37,13 +65,26 @@ String? allowedEllaNavigationRoute(
   final segments = uri.pathSegments.where((segment) => segment.isNotEmpty).toList(growable: false);
   if (segments.isEmpty) return '/';
 
-  final careAliases = {'guardian', 'guardian-alerts', 'whisper', 'whispers', 'caregiver', 'caregivers', 'emergency'};
-  final isCareAlias = segments.map((segment) => segment.toLowerCase()).any(careAliases.contains);
-  if (isCareAlias &&
+  final whisperAliases = {'guardian-alerts', 'whisper', 'whispers'};
+  final careAliases = {'guardian', 'caregiver', 'caregivers', 'emergency'};
+  final normalizedSegments = segments.map((segment) => segment.toLowerCase());
+  final isWhisperAlias = normalizedSegments.any(whisperAliases.contains);
+  final isCareAlias = normalizedSegments.any(careAliases.contains);
+  if (isWhisperAlias &&
       !allowsGuardianSurface(
         isPublicBuild: isPublicBuild,
         isInvitationBuild: isInvitationBuild,
         guardianConfigured: guardianConfigured,
+        guardianAuthenticated: guardianAuthenticated,
+      )) {
+    return null;
+  }
+  if (isCareAlias &&
+      !allowsGuardianCareSurface(
+        isPublicBuild: isPublicBuild,
+        isInvitationBuild: isInvitationBuild,
+        guardianConfigured: guardianConfigured,
+        guardianAuthenticated: guardianAuthenticated,
       )) {
     return null;
   }
@@ -56,6 +97,8 @@ String? allowedEllaNavigationRoute(
     ['voice'] => '/voice',
     ['settings'] => '/settings',
     ['settings', 'data-privacy'] => '/settings/data-privacy',
+    ['guardian-alerts'] when isWhisperAlias => '/guardian-alerts',
+    ['whispers'] when isWhisperAlias => '/whispers',
     _ => null,
   };
 }

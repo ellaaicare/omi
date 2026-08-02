@@ -34,7 +34,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
   @override
   void initState() {
     super.initState();
-    if (allowsGuardianSurface()) _loadData();
+    if (allowsGuardianCareSurface()) _loadData();
   }
 
   Future<void> _loadData() async {
@@ -233,7 +233,7 @@ class _GuardianModePageState extends State<GuardianModePage> {
 
   @override
   Widget build(BuildContext context) {
-    if (!allowsGuardianSurface()) return const SizedBox.shrink();
+    if (!allowsGuardianCareSurface()) return const SizedBox.shrink();
     return Scaffold(
       backgroundColor: EllaColors.bgPrimary,
       appBar: AppBar(

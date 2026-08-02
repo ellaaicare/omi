@@ -2,9 +2,12 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart' show Color;
 import 'package:http/http.dart' as http;
+import 'package:omi/backend/http/shared.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/ella/models/guardian_mode.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
+import 'package:omi/env/env.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
 const String _dashboardBase = 'https://ella-ai-care.com';
@@ -12,9 +15,44 @@ const String _dashboardBase = 'https://ella-ai-care.com';
 /// In-memory cache for presets (they change rarely).
 List<GuardianPreset>? _cachedPresets;
 
-String get _userId {
-  final ellaId = SharedPreferencesUtil().ellaUserId;
-  return ellaId.isNotEmpty ? ellaId : SharedPreferencesUtil().uid;
+String get _authenticatedUserId => SharedPreferencesUtil().uid.trim();
+
+typedef GuardianModeTransport = Future<http.Response?> Function({
+  required String url,
+  required String method,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+});
+
+Future<http.Response?> _defaultGuardianModeTransport({
+  required String url,
+  required String method,
+  required String body,
+  required String expectedAuthenticatedUid,
+  required ExactAccountAuthorityVerifier exactAuthority,
+}) =>
+    makeApiCall(
+      url: url,
+      headers: const {'Content-Type': 'application/json'},
+      body: body,
+      method: method,
+      timeout: const Duration(seconds: 10),
+      retries: 0,
+      requireAuthCheck: true,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+      exactAuthority: exactAuthority,
+    );
+
+({String uid, String url, ExactAccountAuthorityVerifier authority})? _guardianModeRequestContext({
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) {
+  final uid = _authenticatedUserId;
+  final baseUrl = Env.apiBaseUrl;
+  if (uid.isEmpty || baseUrl == null || baseUrl.isEmpty) return null;
+  final authority = exactAuthority ?? WalOwnerAuthority.active();
+  if (authority == null || authority.uid != uid || !authority.isExactCurrent()) return null;
+  return (uid: uid, url: '${baseUrl}v1/ella/guardian/mode', authority: authority);
 }
 
 /// GET /api/users/{userId}/guardian-mode
@@ -22,30 +60,34 @@ String get _userId {
 /// Returns a [GuardianModeInfo] that includes a [GuardianModeState] for the
 /// two-tier picker.  Handles both the new schema {override, features} and the
 /// legacy schema {mode}.
-Future<GuardianModeInfo?> getGuardianMode({bool? guardianAllowed, http.Client? client}) async {
+Future<GuardianModeInfo?> getGuardianMode({
+  bool? guardianAllowed,
+  GuardianModeTransport? transport,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   if (!(guardianAllowed ?? allowsGuardianSurface())) return null;
-  final uid = _userId;
-  if (uid.isEmpty) return null;
-  final transport = client ?? http.Client();
+  final context = _guardianModeRequestContext(exactAuthority: exactAuthority);
+  if (context == null) return null;
   try {
-    final response = await transport.get(
-      Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
-      headers: {'Content-Type': 'application/json'},
-    ).timeout(const Duration(seconds: 10));
+    final response = await (transport ?? _defaultGuardianModeTransport)(
+      url: context.url,
+      method: 'GET',
+      body: '',
+      expectedAuthenticatedUid: context.uid,
+      exactAuthority: context.authority,
+    );
 
-    if (response.statusCode == 200) {
+    if (response != null && response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       if (data['success'] == true) {
         return GuardianModeInfo.fromJson(data);
       }
     }
-    Logger.debug('getGuardianMode: ${response.statusCode} ${response.body}');
+    Logger.debug('getGuardianMode: ${response?.statusCode}');
     return null;
   } catch (e) {
     Logger.debug('getGuardianMode error: $e');
     return null;
-  } finally {
-    if (client == null) transport.close();
   }
 }
 
@@ -53,62 +95,53 @@ Future<GuardianModeInfo?> getGuardianMode({bool? guardianAllowed, http.Client? c
 ///
 /// Sends the new two-tier body:
 ///   { "override": "CYBORG" | "CHATBOT" | "DEMO" | null, "features": [...] }
-Future<bool> setGuardianModeTwoTier(GuardianModeState state, {bool? guardianAllowed, http.Client? client}) async {
+Future<bool> setGuardianModeTwoTier(
+  GuardianModeState state, {
+  bool? guardianAllowed,
+  GuardianModeTransport? transport,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) async {
   if (!(guardianAllowed ?? allowsGuardianSurface())) return false;
-  final uid = _userId;
-  if (uid.isEmpty) return false;
-  final transport = client ?? http.Client();
+  final context = _guardianModeRequestContext(exactAuthority: exactAuthority);
+  if (context == null) return false;
   try {
-    final response = await transport
-        .put(
-          Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(state.toJson()),
-        )
-        .timeout(const Duration(seconds: 10));
+    final response = await (transport ?? _defaultGuardianModeTransport)(
+      url: context.url,
+      method: 'PUT',
+      body: jsonEncode(state.toJson()),
+      expectedAuthenticatedUid: context.uid,
+      exactAuthority: context.authority,
+    );
 
-    if (response.statusCode == 200) {
+    if (response != null && response.statusCode == 200) {
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       return data['success'] == true;
     }
-    Logger.debug('setGuardianMode: ${response.statusCode} ${response.body}');
+    Logger.debug('setGuardianMode: ${response?.statusCode}');
     return false;
   } catch (e) {
     Logger.debug('setGuardianMode error: $e');
     return false;
-  } finally {
-    if (client == null) transport.close();
   }
 }
 
 /// Legacy single-mode PUT — kept for callers that haven't migrated yet.
-Future<bool> setGuardianMode(GuardianModeKey mode, {bool? guardianAllowed, http.Client? client}) async {
-  if (!(guardianAllowed ?? allowsGuardianSurface())) return false;
-  final uid = _userId;
-  if (uid.isEmpty) return false;
-  final transport = client ?? http.Client();
-  try {
-    final response = await transport
-        .put(
-          Uri.parse('$_dashboardBase/api/users/$uid/guardian-mode'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'mode': mode.toApiString()}),
-        )
-        .timeout(const Duration(seconds: 10));
-
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      return data['success'] == true;
-    }
-    Logger.debug('setGuardianMode: ${response.statusCode} ${response.body}');
-    return false;
-  } catch (e) {
-    Logger.debug('setGuardianMode error: $e');
-    return false;
-  } finally {
-    if (client == null) transport.close();
-  }
-}
+Future<bool> setGuardianMode(
+  GuardianModeKey mode, {
+  bool? guardianAllowed,
+  GuardianModeTransport? transport,
+  ExactAccountAuthorityVerifier? exactAuthority,
+}) =>
+    setGuardianModeTwoTier(
+      mode == GuardianModeKey.off
+          ? const GuardianModeState()
+          : mode.isOverride
+              ? GuardianModeState(override: mode.toApiString())
+              : GuardianModeState(features: [mode.toApiString()]),
+      guardianAllowed: guardianAllowed,
+      transport: transport,
+      exactAuthority: exactAuthority,
+    );
 
 /// GET /api/guardian/presets  (no auth required, cached in memory)
 Future<List<GuardianPreset>> getGuardianPresets({bool? guardianAllowed, http.Client? client}) async {

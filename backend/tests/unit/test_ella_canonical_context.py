@@ -70,7 +70,7 @@ def test_chat_history_prefers_canonical_timeline(monkeypatch):
     monkeypatch.setattr(ella_chat, "_fetch_chat_canonical_events", fake_events)
     monkeypatch.setattr(ella_chat, "resolve_user_routing", fail_resolve)
 
-    result = asyncio.run(ella_chat.ella_chat_history("uid-1", limit=5))
+    result = asyncio.run(ella_chat.ella_chat_history("uid-1", limit=5, authenticated_uid="uid-1"))
 
     assert result["source"] == "canonical_timeline"
     assert result["fallback"] is False

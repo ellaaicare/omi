@@ -15,6 +15,7 @@ import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/action_item.dart';
 import 'package:omi/backend/schema/daily_summary.dart';
 import 'package:omi/ella/demo/ella_access_demo_fixtures.dart';
+import 'package:omi/ella/models/guardian_mode.dart' as guardian_model;
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_settings_page.dart';
 import 'package:omi/ella/pages/ella_workspace_page.dart';
@@ -244,22 +245,42 @@ void main() {
     expect(explicitDemo.isActive, !SharedPreferencesUtil.isPublicBuild);
   });
 
-  test('Guardian is fail-closed for public, invitation, and missing-flag configurations', () async {
+  test('invitation Whispers require configured capability and exact Firebase identity', () async {
     expect(
-      allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true),
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: false,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
       isFalse,
     );
     expect(
-      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true),
-      isFalse,
-    );
-    expect(
-      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false),
-      isFalse,
-    );
-    expect(
-      allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: true),
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
       isTrue,
+    );
+    expect(
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: false,
+      ),
+      isFalse,
+    );
+    expect(
+      allowsGuardianCareSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
+      isFalse,
     );
 
     var backendCalls = 0;
@@ -284,7 +305,7 @@ void main() {
       modeCalls++;
       return http.Response('{}', 200);
     });
-    expect(await guardian_api.getGuardianMode(guardianAllowed: false, client: client), isNull);
+    expect(await guardian_api.getGuardianMode(guardianAllowed: false), isNull);
     expect(await guardian_api.getGuardianPresets(guardianAllowed: false, client: client), isEmpty);
     expect(modeCalls, 0);
 
@@ -311,6 +332,9 @@ void main() {
   testWidgets('Home IndexedStack mounts actual Today and Chat with public-safe runtime behavior', (tester) async {
     var catalogCalls = 0;
     var dailySummaryCalls = 0;
+    var guardianModeWrites = 0;
+    var guardianNativeStarts = 0;
+    guardian_model.GuardianModeState? writtenGuardianState;
     final runtimeNow = DateTime(2032, 5, 6, 9, 41);
     final previewNow = DateTime(2025, 7, 24, 9, 41);
     final actionItemsProvider = _FixedActionItemsProvider([
@@ -364,6 +388,20 @@ void main() {
             pagesOverride: [
               TodayPage(
                 nowProvider: () => runtimeNow,
+                guardianAvailability: () => isEllaInternalPilotEnabled && isEllaGuardianConfigured,
+                guardianModeLoader: () async => const guardian_model.GuardianModeInfo(
+                  currentMode: guardian_model.GuardianModeKey.off,
+                  twoTierState: guardian_model.GuardianModeState(),
+                ),
+                guardianModeSetter: (state) async {
+                  guardianModeWrites++;
+                  writtenGuardianState = state;
+                  return true;
+                },
+                guardianNativeStart: () async {
+                  guardianNativeStarts++;
+                },
+                guardianNativeStop: () async {},
                 dailySummaryLoader: () async {
                   dailySummaryCalls++;
                   return [
@@ -410,7 +448,21 @@ void main() {
       expect(dailySummaryCalls, 1);
       expect(find.textContaining('Runtime daily summary'), findsOneWidget);
     }
-    if (!allowsGuardianSurface()) {
+    if (isEllaInternalPilotEnabled && isEllaGuardianConfigured) {
+      expect(find.byKey(const Key('guardian-whispers-control')), findsOneWidget);
+      expect(find.textContaining('Whispers are off'), findsOneWidget);
+      expect(guardianNativeStarts, 0);
+
+      await tester
+          .tap(find.descendant(of: find.byKey(const Key('guardian-whispers-control')), matching: find.byType(Switch)));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(guardianModeWrites, 1);
+      expect(writtenGuardianState?.features, ['ACTIVE_SUPPORT']);
+      expect(guardianNativeStarts, 1);
+      expect(find.textContaining('Whispers are on'), findsOneWidget);
+    } else if (!allowsGuardianSurface()) {
       expect(find.byKey(const Key('guardian-whispers-control')), findsNothing);
       expect(find.byKey(const Key('whispers-history-entry')), findsNothing);
     }

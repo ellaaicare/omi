@@ -71,7 +71,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   Future<void> _loadData() async {
     try {
-      if (!allowsGuardianSurface()) return;
+      if (!allowsGuardianCareSurface()) return;
       final results = await Future.wait([
         caregiver_api.getCaregivers(),
         caregiver_api.getEmergencyContactId(),
@@ -215,7 +215,8 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
-    final showGuardianSurfaces = allowsGuardianSurface();
+    final showWhisperSurfaces = allowsGuardianSurface();
+    final showGuardianCareSurfaces = allowsGuardianCareSurface();
     final userName = SharedPreferencesUtil().givenName.isNotEmpty
         ? SharedPreferencesUtil().givenName
         : SharedPreferencesUtil().fullName;
@@ -266,7 +267,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
             const SizedBox(height: 8),
 
             // Internal policy picker, only available after the developer unlock.
-            if (_developerUnlocked && showGuardianSurfaces)
+            if (_developerUnlocked && showGuardianCareSurfaces)
               EllaSettingsRow(
                 key: const Key('guardian-mode-settings-entry'),
                 icon: Icons.shield,
@@ -299,7 +300,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
               ),
             ],
 
-            if (showGuardianSurfaces) ...[
+            if (showGuardianCareSurfaces) ...[
               // CARE TEAM section
               _buildSectionHeader(context.l10n.ellaCareTeamSection),
               EllaSettingsRow(
@@ -313,7 +314,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                 },
               ),
             ],
-            if (showGuardianSurfaces) ...[
+            if (showGuardianCareSurfaces) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
                 key: const Key('emergency-contact-settings-entry'),
@@ -353,7 +354,7 @@ class _EllaSettingsPageState extends State<EllaSettingsPage> with RouteAware {
                   : context.l10n.aiConsentNotAllowedStatus,
               onTap: _openListeningConsent,
             ),
-            if (showGuardianSurfaces) ...[
+            if (showWhisperSurfaces) ...[
               const SizedBox(height: 8),
               EllaSettingsRow(
                 key: const Key('guardian-history-settings-entry'),

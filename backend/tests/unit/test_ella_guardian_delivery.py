@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from utils.ella import exact_firebase_auth
 
 sys.modules.setdefault("asyncpg", types.SimpleNamespace(Pool=object, create_pool=None))
 sys.modules.setdefault("python_multipart", types.SimpleNamespace(__version__="0.0.20"))
@@ -247,6 +248,7 @@ def test_synthesize_audio_resolves_server_voice_settings(monkeypatch):
     url, kwargs = _FakeAsyncClient.posts[0]
     assert url == guardian.ELLA_INTERNAL_VOICE_TTS_URL
     assert kwargs["headers"]["X-TTS-Provider"] == "xai-tts"
+    assert kwargs["headers"]["X-Guardian-Key"] == guardian.GUARDIAN_WEBHOOK_KEY
     assert kwargs["json"]["text"] == "Hello"
     assert response.headers["x-guardian-tts-provider"] == "xai-tts"
     assert response.headers["x-guardian-voice-mode"] == "grok-voice"
@@ -515,7 +517,7 @@ def test_guardian_alerts_endpoint_excludes_ack_only_rows_but_keeps_real_wake_wor
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
 
     response = TestClient(app).get("/v1/ella/guardian-alerts?limit=50")
 
@@ -548,7 +550,7 @@ def test_guardian_alerts_endpoint_uses_authenticated_uid_not_query_uid(monkeypat
 
     app = FastAPI()
     app.include_router(guardian.alerts_router)
-    app.dependency_overrides[guardian.auth.get_current_user_uid] = lambda: "auth-uid"
+    app.dependency_overrides[guardian.get_guardian_authenticated_uid] = lambda: "auth-uid"
     client = TestClient(app)
 
     response = client.get("/v1/ella/guardian-alerts?limit=50&uid=other-user")
@@ -581,6 +583,18 @@ class _GuardianAuthPool:
         return None
 
 
+class _GuardianModeAuthPool:
+    def __init__(self, mode=None):
+        self.mode = mode
+        self.fetchrow_calls = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        if "UPDATE users" in query:
+            self.mode = args[1]
+        return {"guardian_mode": self.mode}
+
+
 def _guardian_auth_client(monkeypatch, pool):
     monkeypatch.setattr(guardian, "_pool", pool)
 
@@ -591,9 +605,10 @@ def _guardian_auth_client(monkeypatch, pool):
             return {"uid": "uid-b"}
         raise ValueError("expired or invalid")
 
-    monkeypatch.setattr(guardian.firebase_auth, "verify_id_token", verify_token)
+    monkeypatch.setattr(exact_firebase_auth.firebase_auth, "verify_id_token", verify_token)
     app = FastAPI()
     app.include_router(guardian.router)
+    app.include_router(guardian.alerts_router)
     return TestClient(app)
 
 
@@ -610,6 +625,58 @@ def test_guardian_next_audio_auth_success_consumes_authenticated_owner_only(monk
     assert response.json()["id"] == "queue-a"
     assert len(pool.fetchrow_calls) == 2
     assert all(args == ("uid-a",) for _, args in pool.fetchrow_calls)
+
+
+def test_guardian_mode_read_and_write_use_authenticated_owner_only(monkeypatch):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+
+    read_response = client.get(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+    )
+    write_response = client.put(
+        "/v1/ella/guardian/mode",
+        headers={"Authorization": "Bearer valid-a"},
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.json()["currentMode"] == "OFF"
+    assert write_response.status_code == 200
+    assert write_response.json()["currentMode"] == "ACTIVE_SUPPORT"
+    assert pool.fetchrow_calls[0][1] == ("uid-a",)
+    assert pool.fetchrow_calls[1][1] == ("uid-a", "ACTIVE_SUPPORT")
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer expired", "Basic valid-a"])
+def test_guardian_mode_auth_denial_happens_before_user_read_or_write(monkeypatch, authorization):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    read_response = client.get("/v1/ella/guardian/mode", headers=headers)
+    write_response = client.put(
+        "/v1/ella/guardian/mode",
+        headers=headers,
+        json={"override": None, "features": ["ACTIVE_SUPPORT"]},
+    )
+
+    assert read_response.status_code == 401
+    assert write_response.status_code == 401
+    assert pool.fetchrow_calls == []
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer expired", "Basic valid-a"])
+def test_guardian_history_auth_denial_happens_before_history_read(monkeypatch, authorization):
+    pool = _GuardianModeAuthPool()
+    client = _guardian_auth_client(monkeypatch, pool)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    response = client.get("/v1/ella/guardian-alerts", headers=headers)
+
+    assert response.status_code == 401
+    assert pool.fetchrow_calls == []
 
 
 @pytest.mark.parametrize(

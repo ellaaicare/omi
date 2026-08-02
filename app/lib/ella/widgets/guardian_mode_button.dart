@@ -61,7 +61,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
   }
 
   Future<void> _onTap() async {
-    if (!allowsGuardianSurface()) return;
+    if (!allowsGuardianCareSurface()) return;
     HapticFeedback.mediumImpact();
 
     try {
@@ -119,7 +119,7 @@ class _GuardianModeButtonState extends State<GuardianModeButton> with SingleTick
 
   @override
   Widget build(BuildContext context) {
-    if (!allowsGuardianSurface()) return const SizedBox.shrink();
+    if (!allowsGuardianCareSurface()) return const SizedBox.shrink();
     final isActive = _guardianService.currentState == GuardianModeState.active;
 
     return Column(

@@ -35,7 +35,7 @@ class EllaNotificationHandler {
     bool isAppInForeground = false,
   }) async {
     final guardianPayload = isGuardianPayload(data);
-    if (guardianPayload && !allowsGuardianSurface()) return;
+    if (guardianPayload && !allowsGuardianCareSurface()) return;
     final audioUrl = data['audio_url'] as String?;
     final title = data['title'] as String? ?? 'Ella';
     final body = data['body'] as String? ?? '';

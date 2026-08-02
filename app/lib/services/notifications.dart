@@ -71,7 +71,7 @@ class NotificationUtil {
     // TODO: for what?
     WidgetsFlutterBinding.ensureInitialized();
 
-    if (EllaNotificationHandler.isGuardianPayload(payload) && !allowsGuardianSurface()) {
+    if (EllaNotificationHandler.isGuardianPayload(payload) && !allowsGuardianCareSurface()) {
       Logger.debug('Guardian notification denied by build policy');
       return;
     }
@@ -111,7 +111,7 @@ class NotificationUtil {
   }
 
   static Future<void> triggerFallNotification() async {
-    if (!allowsGuardianSurface()) return;
+    if (!allowsGuardianCareSurface()) return;
     final allowed = await AwesomeNotifications().isNotificationAllowed();
     if (!allowed) return;
 

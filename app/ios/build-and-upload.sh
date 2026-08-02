@@ -16,6 +16,7 @@ set -euo pipefail
 #   FLAVOR         — "prod" (default) or "dev"
 #   ELLA_PUBLIC_BUILD — "true"/"1" forces public launch mode (default: true)
 #   ELLA_ENTITLEMENT_GATE — "true"/"1" enables invitation gating (default: false)
+#   ELLA_GUARDIAN_ENABLED — "true"/"1" enables authenticated Whispers (default: false)
 #   SKIP_PULL      — set to "1" to skip git pull
 #   RUN_TESTS      — set to "1" to run the Flutter suite after env generation
 #   SKIP_UPLOAD    — set to "1" to build only, no TestFlight upload
@@ -124,6 +125,9 @@ if [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; then
 fi
 if [ "${ELLA_ENTITLEMENT_GATE:-false}" = "true" ] || [ "${ELLA_ENTITLEMENT_GATE:-false}" = "1" ]; then
   DART_DEFINES+=(--dart-define=ELLA_ENTITLEMENT_GATE=true)
+fi
+if [ "${ELLA_GUARDIAN_ENABLED:-false}" = "true" ] || [ "${ELLA_GUARDIAN_ENABLED:-false}" = "1" ]; then
+  DART_DEFINES+=(--dart-define=ELLA_GUARDIAN_ENABLED=true)
 fi
 if { [ "$ELLA_PUBLIC_BUILD" = "true" ] || [ "$ELLA_PUBLIC_BUILD" = "1" ]; } &&
   { [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "true" ] || [ "${ELLA_ENTITLEMENT_STUBS:-false}" = "1" ]; }; then
@@ -255,7 +259,7 @@ if [ "${RUN_TESTS:-0}" = "1" ]; then
 fi
 
 # ── Step 4: Flutter build iOS (no codesign) ───────────────────
-log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD ELLA_ENTITLEMENT_GATE=${ELLA_ENTITLEMENT_GATE:-false}"
+log "Flutter build ios --flavor $FLAVOR --release --no-codesign ELLA_PUBLIC_BUILD=$ELLA_PUBLIC_BUILD ELLA_ENTITLEMENT_GATE=${ELLA_ENTITLEMENT_GATE:-false} ELLA_GUARDIAN_ENABLED=${ELLA_GUARDIAN_ENABLED:-false}"
 FLUTTER_BUILD_ARGS=(
   build ios
   --flavor "$FLAVOR" \

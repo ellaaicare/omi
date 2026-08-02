@@ -19,6 +19,7 @@ import base64
 import json
 import os
 import logging
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -33,6 +34,7 @@ from pydantic import BaseModel
 
 from database.conversations import _decrypt_conversation_data
 from utils.ella.canonical_context import fetch_canonical_timeline
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 
 # JWT handling
 try:
@@ -67,6 +69,7 @@ PROVISION_API_URL = os.getenv("ELLA_PROVISION_API_URL", "http://100.76.138.56:82
 PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 HERMES_VOICE_MEMORY_URL = os.getenv("HERMES_VOICE_MEMORY_URL", "http://100.76.138.56:8210/v1/voice/memory/lookup")
 HERMES_VOICE_MEMORY_TOKEN = os.getenv("HERMES_VOICE_MEMORY_TOKEN", PROVISION_API_TOKEN)
+ELLA_INTERNAL_TTS_KEY = os.getenv("ELLA_INTERNAL_TTS_KEY") or os.getenv("GUARDIAN_WEBHOOK_KEY", "")
 DEFAULT_GATEWAY_URL = os.getenv("OPENCLAW_URL", "http://100.76.138.56:19001")
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
@@ -142,7 +145,7 @@ V2V_PROVIDERS = {
 class VoiceSessionRequest(BaseModel):
     """Request for creating a V2V voice session."""
 
-    uid: str
+    uid: Optional[str] = None
     provider: str = "grok-voice"
     voice_mode: Optional[str] = None
 
@@ -368,6 +371,7 @@ async def get_voice_providers():
 @router.post("/session", response_model=VoiceSessionResponse)
 async def create_voice_session(
     body: Optional[VoiceSessionRequest] = None,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
     uid: Optional[str] = None,
     provider: Optional[str] = None,
     voice_mode: Optional[str] = None,
@@ -397,13 +401,12 @@ async def create_voice_session(
         expires_in: Token lifetime in seconds
         audio_format: Required audio configuration
     """
-    # Merge body and query params (body takes priority)
-    uid = (body.uid if body else None) or uid
+    # Validate every legacy caller claim, then derive the subject from Firebase.
+    if body is not None:
+        require_matching_firebase_uid(authenticated_uid, body.uid, feature="Voice")
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Voice")
     provider = (body.provider if body else None) or provider or "grok-voice"
     voice_mode = (body.voice_mode if body else None) or voice_mode
-
-    if not uid:
-        raise HTTPException(status_code=400, detail="uid required")
 
     # Validate provider
     if provider not in V2V_PROVIDERS:
@@ -497,6 +500,8 @@ async def get_voice_config():
 @router.post("/tts")
 async def synthesize_speech(
     request: TtsRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_guardian_key: Optional[str] = Header(default=None, alias="X-Guardian-Key"),
     x_tts_provider: Optional[str] = Header(default=None, alias="X-TTS-Provider"),
 ):
     """
@@ -514,6 +519,14 @@ async def synthesize_speech(
     V2V providers (grok-voice, gemini-live) return 422 directing iOS to use
     the /session endpoint instead — V2V replaces the entire STT→LLM→TTS chain.
     """
+    internal_authorized = bool(
+        ELLA_INTERNAL_TTS_KEY
+        and x_guardian_key
+        and secrets.compare_digest(x_guardian_key, ELLA_INTERNAL_TTS_KEY)
+    )
+    if not internal_authorized:
+        get_exact_firebase_uid(authorization)
+
     _start = time.time()
     text_len = len(request.text)
     provider = (x_tts_provider or "elevenlabs").lower()

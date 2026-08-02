@@ -27,7 +27,6 @@ from typing import Any, Optional
 import asyncpg
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
-from firebase_admin import auth as firebase_auth
 from pydantic import BaseModel, Field
 
 from ella.routers.resolve import resolve_user_routing
@@ -47,8 +46,8 @@ from utils.ella.canonical_context import (
     canonical_events_to_chat_turns,
     fetch_canonical_timeline,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.ella.time_context import build_time_context, local_time_fields
-from utils.other import endpoints as auth
 
 router = APIRouter(prefix="/v1/ella/guardian", tags=["Guardian Mode"])
 alerts_router = APIRouter(prefix="/v1/ella", tags=["Guardian Mode"])
@@ -97,19 +96,7 @@ _pool: Optional[asyncpg.Pool] = None
 _playback_events: dict[str, dict] = {}
 
 
-def get_guardian_authenticated_uid(authorization: Optional[str] = Header(None)) -> str:
-    """Verify an exact Firebase bearer without admin-key or local-dev fallbacks."""
-    parts = authorization.split() if authorization else []
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
-        raise HTTPException(status_code=401, detail="Missing or invalid Guardian bearer")
-    try:
-        decoded = firebase_auth.verify_id_token(parts[1])
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired Guardian bearer")
-    uid = str(decoded.get("uid") or "").strip() if isinstance(decoded, dict) else ""
-    if not uid:
-        raise HTTPException(status_code=401, detail="Invalid Guardian bearer subject")
-    return uid
+get_guardian_authenticated_uid = get_exact_firebase_uid
 
 
 # Echo risk by iOS AVAudioSession portType rawValue
@@ -405,6 +392,13 @@ class PlaybackEventRequest(BaseModel):
     device_uid: str = ""  # unique device ID from AVAudioSessionPortDescription
     duration_ms: int = 0  # estimated audio duration in ms
     metadata: Optional[dict] = None
+
+
+class GuardianModeUpdateRequest(BaseModel):
+    """Authenticated, user-scoped Whispers mode update."""
+
+    override: Optional[str] = None
+    features: list[str] = Field(default_factory=list)
 
 
 class PlaybackDebugEventRequest(BaseModel):
@@ -834,7 +828,7 @@ async def _guardian_alert_history(uid: str, limit: int) -> dict[str, Any]:
 @alerts_router.get("/guardian-alerts")
 async def guardian_alerts(
     limit: int = Query(default=50, ge=1, le=200),
-    uid: str = Depends(auth.get_current_user_uid),
+    uid: str = Depends(get_guardian_authenticated_uid),
 ) -> dict[str, Any]:
     """Return newest-first Guardian alert history for the authenticated user."""
     return await _guardian_alert_history(uid, limit)
@@ -1213,12 +1207,80 @@ Rules:
 # ---------------------------------------------------------------------------
 
 
+_GUARDIAN_OVERRIDE_MODES = {"cyborg", "chatbot", "demo"}
+_GUARDIAN_FEATURE_MODES = {"active_support", "emergency_only", "memory_support", "maximum_awareness"}
+
+
+def _guardian_mode_response(guardian_mode: Optional[str]) -> dict[str, Any]:
+    normalized = _normalize_mode(guardian_mode)
+    current_mode = normalized.upper()
+    return {
+        "success": True,
+        "currentMode": current_mode,
+        "override": current_mode if normalized in _GUARDIAN_OVERRIDE_MODES else None,
+        "features": [current_mode] if normalized in _GUARDIAN_FEATURE_MODES else [],
+        "showDemo": False,
+    }
+
+
+def _requested_guardian_mode(req: GuardianModeUpdateRequest) -> Optional[str]:
+    normalized_override = _normalize_mode(req.override) if req.override else MODE_OFF
+    normalized_features = {_normalize_mode(value) for value in req.features if str(value).strip()}
+
+    if req.override:
+        if normalized_override not in _GUARDIAN_OVERRIDE_MODES:
+            raise HTTPException(status_code=422, detail="Unsupported Guardian override")
+        if normalized_features:
+            raise HTTPException(status_code=422, detail="Guardian override and features cannot be combined")
+        return normalized_override.upper()
+
+    if not normalized_features or normalized_features == {MODE_OFF}:
+        return None
+    if len(normalized_features) != 1 or not normalized_features.issubset(_GUARDIAN_FEATURE_MODES):
+        raise HTTPException(status_code=422, detail="Choose exactly one supported Guardian feature")
+    return next(iter(normalized_features)).upper()
+
+
+@router.get("/mode")
+async def get_guardian_mode(authenticated_uid: str = Depends(get_guardian_authenticated_uid)) -> dict[str, Any]:
+    """Read Whispers mode for the exact Firebase bearer subject."""
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        "SELECT guardian_mode FROM users WHERE LOWER(omi_uid) = LOWER($1)",
+        authenticated_uid,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(row["guardian_mode"])
+
+
+@router.put("/mode")
+async def update_guardian_mode(
+    req: GuardianModeUpdateRequest,
+    authenticated_uid: str = Depends(get_guardian_authenticated_uid),
+) -> dict[str, Any]:
+    """Update Whispers mode for the exact Firebase bearer subject."""
+    guardian_mode = _requested_guardian_mode(req)
+    pool = await _get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+        SET guardian_mode = $2
+        WHERE LOWER(omi_uid) = LOWER($1)
+        RETURNING guardian_mode
+        """,
+        authenticated_uid,
+        guardian_mode,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Guardian user is not provisioned")
+    return _guardian_mode_response(row["guardian_mode"])
+
+
 @router.get("/next-audio")
 async def next_audio(uid: str, authenticated_uid: str = Depends(get_guardian_authenticated_uid)):
     """Pop next audio clip from queue. Consolidates if pile-up detected."""
-    if uid != authenticated_uid:
-        raise HTTPException(status_code=403, detail="Guardian UID does not match authenticated user")
-    uid = authenticated_uid
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Guardian")
 
     _start = time.time()
     pool = await _get_pool()
@@ -1657,7 +1719,7 @@ async def synthesize_audio(
                 response = await client.post(
                     ELLA_INTERNAL_VOICE_TTS_URL,
                     json=payload,
-                    headers={"X-TTS-Provider": candidate},
+                    headers={"X-TTS-Provider": candidate, "X-Guardian-Key": x_guardian_key or key or ""},
                     timeout=30.0,
                 )
             except httpx.TimeoutException:
@@ -2372,9 +2434,7 @@ async def record_playback_event(
 ):
     """iOS calls this when guardian audio starts playing.
     Records output route so the consolidator knows echo risk."""
-    if req.uid != authenticated_uid:
-        raise HTTPException(status_code=403, detail="Guardian UID does not match authenticated user")
-    uid = authenticated_uid
+    uid = require_matching_firebase_uid(authenticated_uid, req.uid, feature="Guardian")
     echo_risk = _ECHO_RISK.get(req.port_type, "unknown")
     _playback_events[uid] = {
         "queue_item_id": req.queue_item_id,

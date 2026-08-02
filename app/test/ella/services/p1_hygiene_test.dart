@@ -60,12 +60,52 @@ void main() {
     expect(allowsUnverifiedEllaSurface(isPublicBuild: false), isTrue);
   });
 
-  test('Guardian capability is default-off and cannot be enabled publicly or by invitation', () {
+  test('Guardian capability is default-off and invitation Whispers require an exact authenticated identity', () {
     expect(isEllaGuardianConfigured, isFalse);
-    expect(allowsGuardianSurface(isPublicBuild: true, isInvitationBuild: false, guardianConfigured: true), isFalse);
-    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: true, guardianConfigured: true), isFalse);
-    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: false), isFalse);
-    expect(allowsGuardianSurface(isPublicBuild: false, isInvitationBuild: false, guardianConfigured: true), isTrue);
+    expect(
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
+      isTrue,
+    );
+    expect(
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: false,
+      ),
+      isFalse,
+    );
+    expect(
+      allowsGuardianSurface(
+        isPublicBuild: true,
+        isInvitationBuild: false,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
+      isFalse,
+    );
+    expect(
+      allowsGuardianCareSurface(
+        isPublicBuild: true,
+        isInvitationBuild: true,
+        guardianConfigured: true,
+        guardianAuthenticated: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('release helper keeps Whispers default-off and passes only an explicit Guardian opt-in', () {
+    final script = File('${_appRoot().path}/ios/build-and-upload.sh').readAsStringSync();
+
+    expect(script, contains(r'ELLA_GUARDIAN_ENABLED:-false'));
+    expect(script, contains(r'DART_DEFINES+=(--dart-define=ELLA_GUARDIAN_ENABLED=true)'));
+    expect(script, contains(r'ELLA_GUARDIAN_ENABLED=${ELLA_GUARDIAN_ENABLED:-false}'));
   });
 
   test('native Guardian polling, playback reporting, and injection require explicit availability', () {

@@ -20,6 +20,7 @@ import 'package:omi/ella/pages/guardian_alert_history_page.dart';
 import 'package:omi/ella/services/elevenlabs_tts.dart';
 import 'package:omi/ella/services/ella_public_surface_policy.dart';
 import 'package:omi/ella/services/guardian_mode_api.dart' as guardian_api;
+import 'package:omi/ella/services/guardian_mode_service.dart' as guardian_native;
 import 'package:omi/ella/widgets/ella_breathing_dot.dart';
 import 'package:omi/pages/capture/connect.dart';
 import 'package:omi/pages/conversation_capturing/page.dart';
@@ -34,6 +35,10 @@ import 'package:omi/utils/l10n_extensions.dart';
 
 typedef DailySummaryLoader = Future<List<DailySummary>> Function();
 typedef TodayNowProvider = DateTime Function();
+typedef GuardianModeLoader = Future<GuardianModeInfo?> Function();
+typedef GuardianModeSetter = Future<bool> Function(GuardianModeState state);
+typedef GuardianNativeLifecycle = Future<void> Function();
+typedef GuardianAvailability = bool Function();
 
 String whisperStatusLead(bool enabled) => enabled ? 'Whispers are on' : 'Whispers are off';
 
@@ -57,10 +62,24 @@ List<ActionItemWithMetadata> todayUpcomingReminders(List<ActionItemWithMetadata>
 }
 
 class TodayPage extends StatefulWidget {
-  const TodayPage({super.key, this.dailySummaryLoader, this.nowProvider});
+  const TodayPage({
+    super.key,
+    this.dailySummaryLoader,
+    this.nowProvider,
+    this.guardianModeLoader,
+    this.guardianModeSetter,
+    this.guardianNativeStart,
+    this.guardianNativeStop,
+    this.guardianAvailability,
+  });
 
   final DailySummaryLoader? dailySummaryLoader;
   final TodayNowProvider? nowProvider;
+  final GuardianModeLoader? guardianModeLoader;
+  final GuardianModeSetter? guardianModeSetter;
+  final GuardianNativeLifecycle? guardianNativeStart;
+  final GuardianNativeLifecycle? guardianNativeStop;
+  final GuardianAvailability? guardianAvailability;
 
   @override
   State<TodayPage> createState() => TodayPageState();
@@ -71,8 +90,10 @@ class TodayPageState extends State<TodayPage> {
   DailySummary? _dailySummary;
   bool _isLoading = true;
   bool _isReading = false;
-  bool _whispersOn = true;
+  bool _whispersOn = false;
   bool _updatingWhispers = false;
+
+  bool get _guardianAvailable => widget.guardianAvailability?.call() ?? allowsGuardianSurface();
 
   @override
   void initState() {
@@ -80,7 +101,7 @@ class TodayPageState extends State<TodayPage> {
     if (allowsUnverifiedEllaSurface()) {
       _loadDailySummary();
     }
-    if (allowsGuardianSurface()) {
+    if (_guardianAvailable) {
       _loadWhisperState();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -112,12 +133,29 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _loadWhisperState() async {
-    if (!allowsGuardianSurface()) return;
-    final info = await guardian_api.getGuardianMode();
-    if (!mounted || info == null) return;
-    setState(() {
-      _whispersOn = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
-    });
+    if (!_guardianAvailable) return;
+    final info = await (widget.guardianModeLoader?.call() ?? guardian_api.getGuardianMode());
+    if (info == null) {
+      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      if (!mounted) return;
+      setState(() => _whispersOn = false);
+      return;
+    }
+    if (!mounted) return;
+    var enabled = !(info.twoTierState?.isOff ?? info.currentMode == GuardianModeKey.off);
+    try {
+      if (enabled) {
+        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
+      } else {
+        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      }
+    } catch (_) {
+      enabled = false;
+      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
+          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+    }
+    if (!mounted) return;
+    setState(() => _whispersOn = enabled);
   }
 
   void scrollToTop() {
@@ -142,23 +180,38 @@ class TodayPageState extends State<TodayPage> {
   }
 
   Future<void> _setWhispers(bool enabled) async {
-    if (_updatingWhispers || !allowsGuardianSurface()) return;
-    final previous = _whispersOn;
+    if (_updatingWhispers || !_guardianAvailable) return;
     setState(() {
       _whispersOn = enabled;
       _updatingWhispers = true;
     });
     final state = enabled ? const GuardianModeState(features: ['ACTIVE_SUPPORT']) : const GuardianModeState();
-    final success = SharedPreferencesUtil().demoMode || await guardian_api.setGuardianModeTwoTier(state);
+    var success = false;
+    try {
+      if (!enabled) {
+        await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      }
+      success = await (widget.guardianModeSetter?.call(state) ?? guardian_api.setGuardianModeTwoTier(state));
+      if (success && enabled) {
+        await (widget.guardianNativeStart?.call() ?? guardian_native.GuardianModeService().start());
+      }
+    } catch (_) {
+      success = false;
+    }
+    if (!success && enabled) {
+      await (widget.guardianNativeStop?.call() ?? guardian_native.GuardianModeService().stop());
+      await (widget.guardianModeSetter?.call(const GuardianModeState()) ??
+          guardian_api.setGuardianModeTwoTier(const GuardianModeState()));
+    }
     if (!mounted) return;
     setState(() {
       _updatingWhispers = false;
-      if (!success) _whispersOn = previous;
+      if (!success) _whispersOn = false;
     });
     if (!success) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Whispers could not be updated. Please try again.')));
+      ).showSnackBar(SnackBar(content: Text(context.l10n.anErrorOccurredTryAgain)));
     }
   }
 
@@ -203,7 +256,7 @@ class TodayPageState extends State<TodayPage> {
     final isLive = capture.recordingState != RecordingState.stop || capture.segments.isNotEmpty;
     final scale = MediaQuery.textScalerOf(context).scale(1);
     final showUnverifiedSurfaces = allowsUnverifiedEllaSurface();
-    final showGuardianSurfaces = allowsGuardianSurface();
+    final showGuardianSurfaces = _guardianAvailable;
 
     return SafeArea(
       bottom: false,

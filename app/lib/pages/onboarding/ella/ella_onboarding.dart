@@ -249,7 +249,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
   @override
   Widget build(BuildContext context) {
     final publicMode = SharedPreferencesUtil().publicMode;
-    final showGuardianSurfaces = allowsGuardianSurface(isPublicBuild: publicMode);
+    final showGuardianSurfaces = allowsGuardianCareSurface(isPublicBuild: publicMode);
     if (!_isSignedIn) {
       return Scaffold(
         backgroundColor: EllaColors.bgPrimary,

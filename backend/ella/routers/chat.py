@@ -28,7 +28,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -43,6 +43,7 @@ from utils.ella.canonical_context import (
     fetch_canonical_timeline,
     format_canonical_context,
 )
+from utils.ella.exact_firebase_auth import get_exact_firebase_uid, require_matching_firebase_uid
 from utils.ella.time_context import timezone_name
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ async def _hermes_nonstream_completion(messages: list[dict], session_key: str, m
 
 
 class EllaChatRequest(BaseModel):
-    uid: str
+    uid: str = ""
     message: str
     conversation_id: str = ""
     client_message_id: str = ""
@@ -869,6 +870,7 @@ async def _stream_hermes_chat(
 async def ella_chat_stream(
     request: EllaChatRequest,
     raw_request: Request,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
     x_ella_debug_level: str = Header(None, alias="X-Ella-Debug-Level"),
     x_ella_client_type: str = Header(None, alias="X-Ella-Client-Type"),
     x_ella_client_version: str = Header(None, alias="X-Ella-Client-Version"),
@@ -888,6 +890,7 @@ async def ella_chat_stream(
     """
     import time as _time
 
+    request.uid = require_matching_firebase_uid(authenticated_uid, request.uid, feature="Chat")
     _trace_start = _time.time()
 
     debug_level = _resolve_debug_level(x_ella_debug_level)
@@ -1013,9 +1016,10 @@ PROVISION_API_TOKEN = os.getenv("ELLA_PROVISION_API_TOKEN", "")
 
 @router.get("/chat/history")
 async def ella_chat_history(
-    uid: str,
+    uid: str = "",
     limit: int = 50,
     before: str = None,
+    authenticated_uid: str = Depends(get_exact_firebase_uid),
 ):
     """Return recent chat/context messages for a user from canonical timeline.
 
@@ -1030,6 +1034,7 @@ async def ella_chat_history(
         limit: Max messages to return (default 50, max 200)
         before: ISO timestamp — only return messages before this time
     """
+    uid = require_matching_firebase_uid(authenticated_uid, uid, feature="Chat")
     import time as _time
 
     _start = _time.time()
