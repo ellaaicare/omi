@@ -46,7 +46,9 @@ from ella.services.ai_consent import require_current_ai_consent
 from ella.services.provisioning import ProvisioningError
 from ella.services.runtime_resolver import (
     IsolatedRuntime,
+    revalidate_runtime_authority,
     resolve_isolated_runtime,
+    runtime_authority_identity,
     runtime_authority_enabled,
 )
 from utils.ella.canonical_context import (
@@ -732,15 +734,18 @@ async def _stream_hermes_chat(
     import time as _time
 
     _start = _time.time()
-    if runtime is None and runtime_authority_enabled(uid):
+    if runtime is None and await runtime_authority_enabled(uid):
         yield "data: Error: isolated runtime required\n\n"
         return
 
-    gateway_url = runtime.gateway_url if runtime else HERMES_GATEWAY_URL
-    gateway_token = runtime.gateway_token if runtime else HERMES_GATEWAY_TOKEN
-    agent_id = runtime.agent_id if runtime else HERMES_MODEL
-
-    if not gateway_token:
+    runtime_identity = None
+    if runtime is not None:
+        try:
+            runtime_identity = runtime_authority_identity(runtime)
+        except ProvisioningError as exc:
+            yield f"data: Error: {exc.code}\n\n"
+            return
+    elif not HERMES_GATEWAY_TOKEN:
         print(f"[FLOW:CHAT-HERMES] ERROR token_missing=true uid={uid}", flush=True)
         yield "data: Error: HERMES_API_SERVER_KEY not configured\n\n"
         return
@@ -805,6 +810,16 @@ async def _stream_hermes_chat(
     )
 
     try:
+        send_runtime = runtime
+        if runtime_identity is not None:
+            send_runtime = await revalidate_runtime_authority(runtime_identity)
+            if send_runtime.provider != "hermes":
+                raise ProvisioningError("self_hosted_runtime_required", retryable=False)
+        gateway_url = send_runtime.gateway_url if send_runtime else HERMES_GATEWAY_URL
+        gateway_token = send_runtime.gateway_token if send_runtime else HERMES_GATEWAY_TOKEN
+        agent_id = send_runtime.agent_id if send_runtime else HERMES_MODEL
+        if not gateway_token:
+            raise ProvisioningError("hermes_runtime_credential_missing", retryable=False)
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
@@ -847,13 +862,18 @@ async def _stream_hermes_chat(
 
         full_text = "".join(text).strip()
         if not full_text:
+            recovery_runtime = send_runtime
+            if runtime_identity is not None:
+                recovery_runtime = await revalidate_runtime_authority(runtime_identity)
+                if recovery_runtime.provider != "hermes":
+                    raise ProvisioningError("self_hosted_runtime_required", retryable=False)
             recovery_text = await _hermes_nonstream_completion(
                 messages,
                 session_key,
                 memory_key,
-                gateway_url=gateway_url,
-                gateway_token=gateway_token,
-                agent_id=agent_id,
+                gateway_url=recovery_runtime.gateway_url if recovery_runtime else HERMES_GATEWAY_URL,
+                gateway_token=recovery_runtime.gateway_token if recovery_runtime else HERMES_GATEWAY_TOKEN,
+                agent_id=recovery_runtime.agent_id if recovery_runtime else HERMES_MODEL,
             )
             if recovery_text:
                 text.append(recovery_text)
@@ -902,6 +922,10 @@ async def _stream_hermes_chat(
             flush=True,
         )
 
+    except ProvisioningError as exc:
+        _elapsed = int((_time.time() - _start) * 1000)
+        print(f"[FLOW:CHAT-HERMES] AUTHORITY_ERROR uid={uid} code={exc.code} latency={_elapsed}ms", flush=True)
+        yield f"data: Error: {exc.code}\n\n"
     except httpx.TimeoutException:
         _elapsed = int((_time.time() - _start) * 1000)
         print(f"[FLOW:CHAT-HERMES] TIMEOUT uid={uid} latency={_elapsed}ms", flush=True)
@@ -1211,7 +1235,7 @@ async def ella_chat_history(
     if uid and uid != authenticated_uid:
         raise HTTPException(status_code=403, detail={"code": "ownership_mismatch"})
     uid = authenticated_uid
-    runtime_bound = runtime_authority_enabled(authenticated_uid)
+    runtime_bound = await runtime_authority_enabled(authenticated_uid)
     if runtime_bound:
         try:
             await resolve_isolated_runtime(authenticated_uid, target_mode="hermes-cloud-chat")

@@ -110,6 +110,15 @@ def voice_auth(monkeypatch):
         lambda _runtime: SimpleNamespace(digest=RUNTIME_AUTHORITY_DIGEST),
     )
 
+    async def retained_runtime_not_invitation_owned(_uid):
+        return False
+
+    monkeypatch.setattr(
+        voice,
+        "self_hosted_runtime_authority_required",
+        retained_runtime_not_invitation_owned,
+    )
+
 
 def test_voice_session_token_has_firebase_subject_and_proxy_audience():
     encoded = voice.create_session_token(
@@ -360,11 +369,13 @@ def test_self_hosted_voice_proxy_re_resolves_exact_voice_target(monkeypatch):
         resolved.append((uid, kwargs))
         return runtime
 
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
+    async def self_hosted_required(_uid):
+        return True
+
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
 
     with pytest.raises(HTTPException) as unpinned:
@@ -487,6 +498,9 @@ def test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call(mo
         accept_calls.append(kwargs)
         raise AssertionError("provider/session acceptance must not run")
 
+    async def self_hosted_required(_uid):
+        return True
+
     provider = "gemini-live" if drift == "provider" else "hermes"
     mode = "v4" if drift == "mode" else "hermes-voice"
     model = "drifted-model" if drift == "model" else voice.SELF_HOSTED_RUNTIME_MODEL
@@ -497,11 +511,10 @@ def test_self_hosted_voice_accept_drift_fails_before_session_or_provider_call(mo
             lambda _runtime: SimpleNamespace(digest="b" * 64),
         )
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(voice.voice_canary_db, "accept_session", forbidden_accept)
 
@@ -623,19 +636,25 @@ def test_voice_proxy_legacy_bridge_is_bounded_to_nonisolated_tokens(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("bindings_enabled", "voice_enabled", "isolated_claim"),
+    ("self_hosted_required", "voice_enabled", "isolated_claim", "status_code", "error_code"),
     [
-        (True, False, True),
-        (False, True, False),
+        (True, False, True, 503, "isolated_voice_not_ready"),
+        (False, True, False, 409, "voice_runtime_claim_stale"),
     ],
 )
 def test_voice_runtime_rechecks_rollout_gate_on_every_request(
     monkeypatch,
-    bindings_enabled,
+    self_hosted_required,
     voice_enabled,
     isolated_claim,
+    status_code,
+    error_code,
 ):
-    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: bindings_enabled)
+    async def invitation_authority(_uid):
+        return self_hosted_required
+
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", invitation_authority)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: voice_enabled)
     principal = voice.VoiceProxyPrincipal(
         uid="uid-a",
@@ -648,8 +667,8 @@ def test_voice_runtime_rechecks_rollout_gate_on_every_request(
     with pytest.raises(HTTPException) as error:
         asyncio.run(voice._resolve_voice_runtime(principal))
 
-    assert error.value.status_code == 409
-    assert error.value.detail == {"code": "voice_runtime_claim_stale"}
+    assert error.value.status_code == status_code
+    assert error.value.detail == {"code": error_code}
 
 
 def test_isolated_context_uses_active_8210_agent_and_redacts_credentials(monkeypatch):

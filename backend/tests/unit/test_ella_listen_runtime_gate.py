@@ -45,7 +45,10 @@ def test_isolated_listen_requires_omi_identity(monkeypatch):
 
 
 def test_listen_runtime_gate_skips_legacy_users(monkeypatch):
-    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_bindings_enabled", lambda _uid: False)
+    async def authority_disabled(_uid):
+        return False
+
+    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_authority_enabled", authority_disabled)
     monkeypatch.setattr(
         auto_provision,
         "validate_isolated_listen_runtime",
@@ -80,7 +83,10 @@ def test_cloud_authority_forbids_direct_mini_auto_provision(monkeypatch):
     async def forbidden_pool():
         raise AssertionError("Cloud authority must be rejected before any Mini provisioning lookup")
 
-    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_authority_enabled", lambda _uid: True)
+    async def authority_enabled(_uid):
+        return True
+
+    monkeypatch.setattr(auto_provision.runtime_resolver, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(auto_provision, "_get_pool", forbidden_pool)
 
     result = asyncio.run(auto_provision.auto_provision_user("cloud-user"))

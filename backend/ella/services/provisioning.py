@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -108,13 +109,83 @@ def cloud_provisioning_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
-def self_hosted_provisioning_enabled(uid: Optional[str] = None) -> bool:
-    del uid
+def self_hosted_provisioning_configured() -> bool:
+    """Return the operator master switch without granting any account access."""
     return os.getenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false").strip().lower() in TRUE_VALUES
 
 
-def any_provisioning_enabled(uid: Optional[str] = None) -> bool:
-    return cloud_provisioning_enabled(uid) or provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+def current_self_hosted_runtime_lineage() -> RuntimeTargetLineage:
+    """Return the exact invitation consent lineage required by local Hermes."""
+    return RuntimeTargetLineage(
+        policy_version=CURRENT_POLICY_VERSION,
+        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
+        scope_version=CURRENT_SCOPE_VERSION,
+        scope_hash=CURRENT_SCOPE_HASH,
+    ).validate()
+
+
+def self_hosted_provisioning_enabled(
+    uid: Optional[str] = None,
+    *,
+    admission: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Admit only the exact UID backed by current invitation authority."""
+    if not self_hosted_provisioning_configured() or not uid or not admission:
+        return False
+    return hmac.compare_digest(str(admission.get("omi_uid") or ""), uid) and _self_hosted_invitation_matches(admission)
+
+
+async def self_hosted_invitation_admission(
+    uid: str,
+    *,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> Optional[dict[str, Any]]:
+    """Load current account-scoped invitation authority without caching revocable state."""
+    if not self_hosted_provisioning_configured() or not uid:
+        return None
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+        admission = await repository.get_self_hosted_invitation_admission(uid)
+    except ProvisioningSchemaNotReadyError as exc:
+        raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+    if not self_hosted_provisioning_enabled(uid, admission=admission):
+        return None
+    return admission
+
+
+async def self_hosted_runtime_authority_required(
+    uid: str,
+    *,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> bool:
+    """Detect sticky invitation ownership independently of rollout switches."""
+    if not uid:
+        return False
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+        return await repository.has_invitation_owned_self_hosted_runtime(uid)
+    except ProvisioningSchemaNotReadyError as exc:
+        raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
+    except ProvisioningError:
+        raise
+    except Exception as exc:
+        raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+
+
+def any_provisioning_enabled(
+    uid: Optional[str] = None,
+    *,
+    self_hosted_admission: Optional[dict[str, Any]] = None,
+) -> bool:
+    return (
+        cloud_provisioning_enabled(uid)
+        or provisioning_enabled(uid)
+        or self_hosted_provisioning_enabled(uid, admission=self_hosted_admission)
+    )
 
 
 def _self_hosted_invitation_matches(admission: Optional[dict[str, Any]]) -> bool:
@@ -525,10 +596,13 @@ class ProvisioningCoordinator:
         authority_snapshot: ProvisionAuthoritySnapshot | None = None,
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]], bool]:
         cloud_required = cloud_provisioning_enabled(identity.uid)
-        self_hosted_required = self_hosted_provisioning_enabled(identity.uid) and not cloud_required
+        legacy_required = provisioning_enabled(identity.uid)
+        self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+        invitation_admission = None
+        invitation_owned = False
         if (
             not cloud_required
-            and (self_hosted_required or provisioning_enabled(identity.uid))
+            and (self_hosted_configured or legacy_required)
             and isinstance(self.client, HermesProvisionClient)
         ):
             authority_snapshot = self._authority_snapshot(authority_snapshot)
@@ -538,7 +612,7 @@ class ProvisioningCoordinator:
             await self._repository_call(authority_snapshot, self.repository.assert_schema_ready)
             if cloud_required:
                 await self.repository.assert_cloud_schema_ready()
-            elif self_hosted_required:
+            elif self_hosted_configured or legacy_required:
                 await self._repository_call(
                     authority_snapshot,
                     self.repository.assert_self_hosted_invite_schema_ready,
@@ -547,18 +621,39 @@ class ProvisioningCoordinator:
             logger.error("Ella provisioning schema is incomplete: %s", ", ".join(exc.missing))
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True) from exc
 
-        invitation_admission = None
+        if not cloud_required and (self_hosted_configured or legacy_required):
+            try:
+                invitation_owned = await self._repository_call(
+                    authority_snapshot,
+                    self.repository.has_invitation_owned_self_hosted_runtime,
+                    identity.uid,
+                )
+                if self_hosted_configured:
+                    invitation_admission = await self._repository_call(
+                        authority_snapshot,
+                        self.repository.get_self_hosted_invitation_admission,
+                        identity.uid,
+                    )
+            except Exception as exc:
+                if isinstance(exc, ProvisioningError):
+                    raise
+                raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+
+        self_hosted_required = self_hosted_provisioning_enabled(
+            identity.uid,
+            admission=invitation_admission,
+        )
+        invitation_owned = invitation_owned or invitation_admission is not None
+        if invitation_owned and not self_hosted_configured:
+            raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+        if invitation_owned and not self_hosted_required:
+            raise ProvisioningError("invitation_authority_required", retryable=False)
+        if self_hosted_configured and not self_hosted_required and not legacy_required:
+            raise ProvisioningError("invitation_authority_required", retryable=False)
         if self_hosted_required:
-            # Invitation mode is itself authoritative. Even an already active
-            # binding must still resolve through the exact current invitation,
-            # entitlement, consent epoch, and lineage chain.
-            invitation_admission = await self._repository_call(
-                authority_snapshot,
-                self.repository.get_self_hosted_invitation_admission,
-                identity.uid,
-            )
-            if not _self_hosted_invitation_matches(invitation_admission):
-                raise ProvisioningError("invitation_authority_required", retryable=False)
+            # The current invitation, entitlement, consent epoch, and target
+            # chain were resolved before identity, job, or provider side effects.
+            assert invitation_admission is not None
 
         await self._repository_call(
             authority_snapshot,
@@ -627,16 +722,7 @@ class ProvisioningCoordinator:
                 template_version=target_schema_version,
                 target_mode="hermes-chat" if self_hosted_required else None,
                 required_provider="hermes",
-                authority_lineage=(
-                    RuntimeTargetLineage(
-                        policy_version=CURRENT_POLICY_VERSION,
-                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
-                        scope_version=CURRENT_SCOPE_VERSION,
-                        scope_hash=CURRENT_SCOPE_HASH,
-                    )
-                    if self_hosted_required
-                    else None
-                ),
+                authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
                 model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
             )
         if binding:
@@ -655,7 +741,7 @@ class ProvisioningCoordinator:
                     receipt={"type": "active_binding_reconciled", "binding_revision": binding["revision"]},
                 )
             return job, binding, False
-        if not cloud_required and not provisioning_enabled(identity.uid) and not self_hosted_required:
+        if not cloud_required and not legacy_required and not self_hosted_required:
             job = await self._repository_call(
                 authority_snapshot,
                 self.repository.update_job,
@@ -685,15 +771,47 @@ class ProvisioningCoordinator:
             return
         authority_snapshot = self._authority_snapshot(authority_snapshot)
         try:
-            self_hosted_required = self_hosted_provisioning_enabled(identity.uid)
-            if self_hosted_required:
-                invitation_admission = await self._repository_call(
+            invitation_admission = None
+            invitation_owned = False
+            legacy_required = provisioning_enabled(identity.uid)
+            await self._repository_call(
+                authority_snapshot,
+                self.repository.assert_self_hosted_invite_schema_ready,
+            )
+            try:
+                invitation_owned = await self._repository_call(
                     authority_snapshot,
-                    self.repository.get_self_hosted_invitation_admission,
+                    self.repository.has_invitation_owned_self_hosted_runtime,
                     identity.uid,
                 )
-                if not _self_hosted_invitation_matches(invitation_admission):
-                    raise ProvisioningError("invitation_authority_required", retryable=False)
+            except Exception as exc:
+                if isinstance(exc, ProvisioningError):
+                    raise
+                raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+            if self_hosted_provisioning_configured():
+                try:
+                    invitation_admission = await self._repository_call(
+                        authority_snapshot,
+                        self.repository.get_self_hosted_invitation_admission,
+                        identity.uid,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, ProvisioningError):
+                        raise
+                    raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+            self_hosted_required = self_hosted_provisioning_enabled(
+                identity.uid,
+                admission=invitation_admission,
+            )
+            invitation_owned = invitation_owned or invitation_admission is not None
+            if invitation_owned and not self_hosted_provisioning_configured():
+                raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+            if invitation_owned and not self_hosted_required:
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+            if self_hosted_provisioning_configured() and not self_hosted_required and not legacy_required:
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+            if not self_hosted_required and not legacy_required:
+                raise ProvisioningError("provisioning_disabled", retryable=False)
             if isinstance(self.client, HermesProvisionClient):
                 result = await self.client.provision(
                     identity,
@@ -733,16 +851,7 @@ class ProvisioningCoordinator:
                 uid=identity.uid,
                 provider="hermes",
                 require_invitation_target=self_hosted_required,
-                authority_lineage=(
-                    RuntimeTargetLineage(
-                        policy_version=CURRENT_POLICY_VERSION,
-                        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
-                        scope_version=CURRENT_SCOPE_VERSION,
-                        scope_hash=CURRENT_SCOPE_HASH,
-                    )
-                    if self_hosted_required
-                    else None
-                ),
+                authority_lineage=(current_self_hosted_runtime_lineage() if self_hosted_required else None),
                 model=SELF_HOSTED_RUNTIME_MODEL,
             )
             await self._repository_call(

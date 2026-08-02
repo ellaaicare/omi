@@ -51,12 +51,10 @@ from ella.services.ai_consent import (
 from ella.services.provisioning import (
     ProvisioningError,
     cloud_provisioning_enabled,
-    rollout_enabled,
-    self_hosted_provisioning_enabled,
+    self_hosted_runtime_authority_required,
 )
 from ella.services.runtime_resolver import (
     resolve_isolated_runtime,
-    runtime_authority_enabled,
     runtime_authority_identity,
     runtime_bindings_enabled,
 )
@@ -133,12 +131,27 @@ _VOICE_HONCHO_PROFILE_NEGATIVE_CACHE: dict[str, float] = {}
 
 
 def isolated_voice_routing_enabled(uid: Optional[str] = None) -> bool:
-    """Keep isolated users off the legacy OpenClaw voice proxy until cutover."""
-    return rollout_enabled(
-        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED",
-        "ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS",
-        uid,
-    )
+    """Require the voice master switch before honoring any exact UID selector."""
+    if os.getenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "false").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    allowed_uids = {
+        value.strip() for value in os.getenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS", "").split(",") if value.strip()
+    }
+    return not allowed_uids or bool(uid and uid in allowed_uids)
+
+
+async def _self_hosted_voice_required(uid: str) -> bool:
+    if cloud_provisioning_enabled(uid):
+        return False
+    try:
+        return await self_hosted_runtime_authority_required(uid)
+    except ProvisioningError as exc:
+        raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
 
 
 @dataclass(frozen=True)
@@ -303,18 +316,15 @@ def authenticate_voice_proxy_request(request: Request, requested_uid: str) -> Vo
 
 async def _resolve_voice_runtime(principal: VoiceProxyPrincipal):
     """Resolve an isolated session to the exact active Hermes receipt."""
-    self_hosted_required = self_hosted_provisioning_enabled(principal.uid) and not cloud_provisioning_enabled(
-        principal.uid
-    )
+    self_hosted_required = await _self_hosted_voice_required(principal.uid)
     authority_enabled = (
-        runtime_authority_enabled(principal.uid)
-        or runtime_bindings_enabled(principal.uid)
-        or cloud_provisioning_enabled(principal.uid)
-        or self_hosted_required
+        runtime_bindings_enabled(principal.uid) or cloud_provisioning_enabled(principal.uid) or self_hosted_required
     )
-    voice_enabled = isolated_voice_routing_enabled(principal.uid) or self_hosted_required
+    voice_enabled = isolated_voice_routing_enabled(principal.uid)
     if voice_enabled and not authority_enabled:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
+    if authority_enabled and not voice_enabled:
+        raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
     isolated_required = authority_enabled and voice_enabled
     if principal.isolated_runtime != isolated_required:
         raise HTTPException(status_code=409, detail={"code": "voice_runtime_claim_stale"})
@@ -1021,17 +1031,19 @@ async def create_voice_session(
     requested_scope = body.session_scope if body else None
 
     cloud_required = cloud_provisioning_enabled(uid)
-    self_hosted_required = self_hosted_provisioning_enabled(uid) and not cloud_required
-    runtime_bound = (
-        runtime_authority_enabled(uid) or runtime_bindings_enabled(uid) or cloud_required or self_hosted_required
-    )
-    voice_rollout_enabled = isolated_voice_routing_enabled(uid) or self_hosted_required
+    self_hosted_required = await _self_hosted_voice_required(uid)
+    runtime_bound = runtime_bindings_enabled(uid) or cloud_required or self_hosted_required
+    voice_rollout_enabled = isolated_voice_routing_enabled(uid)
     if voice_rollout_enabled and not runtime_bound:
         raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
     isolated_runtime = runtime_bound and voice_rollout_enabled
     runtime = None
     runtime_authority_digest = ""
     if runtime_bound:
+        if not isolated_runtime:
+            # Invitation-owned users remain authority-bound even while voice is
+            # disabled; they cannot enter the legacy provider registry.
+            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
         try:
             runtime = await resolve_isolated_runtime(
                 uid,
@@ -1039,10 +1051,6 @@ async def create_voice_session(
             )
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
-        if not isolated_runtime:
-            # Runtime-bound users must never fall through to legacy voice while
-            # their explicit isolated-voice rollout gate remains disabled.
-            raise HTTPException(status_code=503, detail={"code": "isolated_voice_not_ready"})
         if not runtime:
             raise HTTPException(status_code=503, detail={"code": "isolated_voice_runtime_required"})
         if self_hosted_required:

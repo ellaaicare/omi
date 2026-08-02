@@ -61,7 +61,13 @@ sys.modules["ella.services.runtime_errors"] = runtime_errors_module
 
 runtime_resolver_module = types.ModuleType("ella.services.runtime_resolver")
 runtime_resolver_module.runtime_bindings_enabled = lambda _uid: False
-runtime_resolver_module.runtime_authority_enabled = lambda _uid: False
+
+
+async def _runtime_authority_disabled(_uid):
+    return False
+
+
+runtime_resolver_module.runtime_authority_enabled = _runtime_authority_disabled
 runtime_resolver_module.resolve_isolated_runtime = lambda *_args, **_kwargs: None
 runtime_resolver_module.cloud_runtime_authority_identity = lambda runtime: runtime
 runtime_resolver_module.revalidate_cloud_runtime_authority = lambda identity: identity
@@ -641,6 +647,9 @@ def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(
         requested_modes.append(target_mode)
         return runtime
 
+    async def authority_enabled(uid):
+        return uid == "auth-uid"
+
     class CloudClient:
         provider_posts = 0
 
@@ -656,7 +665,7 @@ def test_guardian_cloud_consolidation_uses_exact_target_without_global_provider(
             type(self).provider_posts += 1
             return types.SimpleNamespace(text="One safe consolidated alert.")
 
-    monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
+    monkeypatch.setattr(guardian, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
 
@@ -702,6 +711,9 @@ def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypa
             raise _ProvisioningError("runtime_admission_revoked", retryable=False)
         return runtime
 
+    async def authority_enabled(uid):
+        return uid == "auth-uid"
+
     class CloudClient:
         provider_posts = 0
 
@@ -710,7 +722,7 @@ def test_guardian_cloud_target_revoked_at_provider_boundary_blocks_send(monkeypa
             type(self).provider_posts += 1
             return types.SimpleNamespace(text="must not send")
 
-    monkeypatch.setattr(guardian, "runtime_authority_enabled", lambda uid: uid == "auth-uid")
+    monkeypatch.setattr(guardian, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(guardian, "resolve_isolated_runtime", resolve)
     monkeypatch.setattr(guardian, "cloud_runtime_authority_identity", lambda selected: authority)
 

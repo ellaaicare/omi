@@ -68,8 +68,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _provision_url(uid: str = "") -> str:
-    if uid and runtime_authority_enabled(uid):
+def _provision_url(uid: str = "", *, isolated: bool = False) -> str:
+    if uid and isolated:
         return os.getenv("ELLA_HERMES_PROVISION_API_URL", "http://100.76.138.56:8210").rstrip("/")
     return (
         os.getenv("ELLA_PROVISION_API_URL")
@@ -79,8 +79,8 @@ def _provision_url(uid: str = "") -> str:
     ).rstrip("/")
 
 
-def _provision_token(uid: str = "") -> str:
-    if uid and runtime_authority_enabled(uid):
+def _provision_token(uid: str = "", *, isolated: bool = False) -> str:
+    if uid and isolated:
         return os.getenv("ELLA_HERMES_PROVISION_API_TOKEN", "")
     return (
         os.getenv("ELLA_PROVISION_API_TOKEN")
@@ -118,8 +118,8 @@ def _enabled() -> bool:
     return os.getenv("ELLA_SCANNER_KEYTERMS_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
 
 
-def _allow_shared_fallback(uid: str = "") -> bool:
-    if uid and runtime_authority_enabled(uid):
+def _allow_shared_fallback(uid: str = "", *, isolated: bool = False) -> bool:
+    if uid and isolated:
         return False
     return os.getenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "false").lower() in {"1", "true", "yes", "on"}
 
@@ -143,7 +143,7 @@ async def _resolve_agent_id(uid: str) -> str:
     if not uid:
         return ""
 
-    if runtime_authority_enabled(uid):
+    if await runtime_authority_enabled(uid):
         runtime = await resolve_isolated_runtime(uid, target_mode="hermes-cloud-guardian")
         if runtime is None:
             return ""
@@ -391,13 +391,15 @@ async def _fetch_scanner_tuning(agent_id: str, uid: str = "") -> str:
             "hermes_cloud_scanner_keyterms_unavailable",
             retryable=False,
         )
-    token = _provision_token(uid)
+    isolated = await runtime_authority_enabled(uid) if uid else False
+    token = _provision_token(uid, isolated=isolated)
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    url = f"{_provision_url(uid)}/workspace/{agent_id}/files/scanner-tuning.md"
+    provision_url = _provision_url(uid, isolated=isolated)
+    url = f"{provision_url}/workspace/{agent_id}/files/scanner-tuning.md"
     async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
         response = await client.get(url, headers=headers)
-        if response.status_code == 404 and _allow_shared_fallback(uid):
-            shared = f"{_provision_url(uid)}/workspace/shared/files/scanner-tuning.md"
+        if response.status_code == 404 and _allow_shared_fallback(uid, isolated=isolated):
+            shared = f"{provision_url}/workspace/shared/files/scanner-tuning.md"
             response = await client.get(shared, headers=headers)
         response.raise_for_status()
         try:
@@ -414,7 +416,7 @@ async def refresh_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> 
     if not _enabled() or not uid:
         return []
 
-    isolated = runtime_authority_enabled(uid)
+    isolated = await runtime_authority_enabled(uid)
     resolved_agent_id = await _resolve_agent_id(uid) if isolated else agent_id or await _resolve_agent_id(uid)
     key = resolved_agent_id or uid
     runtime_provider = _uid_runtime_providers.get(uid, "") if isolated else ""
@@ -477,7 +479,7 @@ async def get_scanner_keyterms(uid: str, agent_id: Optional[str] = None) -> list
 
     resolved_key = agent_id or _uid_agent_ids.get(uid) or uid
     entry = _cache.get(resolved_key) or _cache.get(uid)
-    if runtime_authority_enabled(uid):
+    if await runtime_authority_enabled(uid):
         runtime_provider = _uid_runtime_providers.get(uid, "")
         if not runtime_provider or runtime_provider == "hermes_cloud":
             entry = None

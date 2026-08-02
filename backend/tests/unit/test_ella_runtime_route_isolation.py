@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from dataclasses import replace
 from types import ModuleType
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ conversations_module._decrypt_conversation_data = lambda value: value
 sys.modules.setdefault("database.conversations", conversations_module)
 
 from ella.routers import chat, resolve, voice
+from ella.services import runtime_resolver
 from ella.services.provisioning import ProvisioningError
 
 RUNTIME_AUTHORITY_DIGEST = "a" * 64
@@ -19,8 +21,11 @@ RUNTIME_AUTHORITY_DIGEST = "a" * 64
 
 @pytest.fixture(autouse=True)
 def voice_authority_defaults(monkeypatch):
+    async def self_hosted_disabled(_uid):
+        return False
+
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", False)
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_disabled)
     monkeypatch.setattr(
         voice,
         "runtime_authority_identity",
@@ -32,7 +37,53 @@ def _request():
     return Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
 
 
-def test_chat_rejects_body_uid_that_differs_from_firebase_subject():
+def _invitation_chat_runtime(**overrides):
+    values = {
+        "uid": "invited-user",
+        "binding_id": "binding-1",
+        "provider": "hermes",
+        "status": "active",
+        "profile_name": "omi-invited-user",
+        "agent_id": "hermes",
+        "runtime_instance_id": "instance-1",
+        "gateway_url": "http://hermes.internal.test:8642",
+        "gateway_token": "test-hermes-token",
+        "workspace_root": "/srv/ella/invited-user",
+        "honcho_workspace": "honcho-invited-user",
+        "observed_peer": "invited-user",
+        "observer_peer": "ella-invited-user",
+        "prompt_pack_version": "hermes-user-v1",
+        "expected_model": "gpt-5.6-terra",
+        "model_context_window_tokens": 128000,
+        "allowed_tools": (),
+        "required_capabilities": (),
+        "model_policy_version": "frontier-v1",
+        "voice_policy_version": "ella-voice-v1",
+        "revision": 7,
+        "profile_class": "real",
+        "runtime_target_id": "target-chat-1",
+        "runtime_target_mode": "hermes-chat",
+        "runtime_target_updated_at": "2026-08-02T18:00:00+00:00",
+        "target_endpoint_ref": "",
+        "target_credential_ref": "",
+        "target_entitlement_revision": 11,
+        "consent_authority_epoch": "authority-epoch-1",
+        "account_user_id": "account-1",
+        "profile_user_id": "account-1",
+    }
+    values.update(overrides)
+    return chat.IsolatedRuntime(**values)
+
+
+async def _collect_stream(stream):
+    return [chunk async for chunk in stream]
+
+
+async def _runtime_authority_enabled(_uid=None):
+    return True
+
+
+def test_chat_rejects_body_uid_that_differs_from_firebase_subject(monkeypatch):
     with pytest.raises(HTTPException) as error:
         asyncio.run(
             chat.ella_chat_stream(
@@ -43,6 +94,110 @@ def test_chat_rejects_body_uid_that_differs_from_firebase_subject():
         )
     assert error.value.status_code == 403
     assert error.value.detail == {"code": "ownership_mismatch"}
+
+    async def no_events(*_args, **_kwargs):
+        return []
+
+    async def no_temporal(*_args, **_kwargs):
+        return "recent context", []
+
+    async def canonical_write(*_args, **_kwargs):
+        return None
+
+    class ForbiddenProviderClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("authority drift must fail before any provider HTTP client is created")
+
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+    monkeypatch.setattr(chat, "_write_ios_chat_canonical_event", canonical_write)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", ForbiddenProviderClient)
+    admitted = _invitation_chat_runtime()
+    drifted = (
+        ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False),
+        replace(admitted, target_entitlement_revision=12),
+        replace(admitted, runtime_target_id="target-chat-drifted"),
+        replace(admitted, consent_authority_epoch="authority-epoch-drifted"),
+        replace(admitted, account_user_id="account-drifted", profile_user_id="profile-drifted"),
+    )
+    for current in drifted:
+
+        async def resolve_current(*_args, _current=current, **_kwargs):
+            if isinstance(_current, Exception):
+                raise _current
+            return _current
+
+        monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", resolve_current)
+        chunks = asyncio.run(
+            _collect_stream(
+                chat._stream_hermes_chat(
+                    "content-free test",
+                    admitted.uid,
+                    runtime=admitted,
+                )
+            )
+        )
+        assert any(
+            code in "".join(chunks)
+            for code in (
+                "self_hosted_invitation_runtime_not_provisioned",
+                "hermes_runtime_authority_changed",
+            )
+        )
+
+    provider_effects = []
+    revalidation_calls = []
+
+    class EmptyStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_lines(self):
+            yield "data: [DONE]"
+
+    class EmptyStreamClient:
+        def __init__(self, *_args, **_kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            provider_effects.append("initial_stream")
+            return EmptyStreamResponse()
+
+        async def post(self, *_args, **_kwargs):
+            provider_effects.append("recovery_send")
+            raise AssertionError("recovery provider call must be denied after authority drift")
+
+    async def revalidate_for_recovery(_identity):
+        revalidation_calls.append("revalidate")
+        if len(revalidation_calls) == 1:
+            return admitted
+        raise ProvisioningError("hermes_runtime_authority_changed", retryable=False)
+
+    monkeypatch.setattr(chat, "revalidate_runtime_authority", revalidate_for_recovery)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", EmptyStreamClient)
+    recovery_chunks = asyncio.run(
+        _collect_stream(
+            chat._stream_hermes_chat(
+                "content-free recovery test",
+                admitted.uid,
+                runtime=admitted,
+            )
+        )
+    )
+    assert revalidation_calls == ["revalidate", "revalidate"]
+    assert provider_effects == ["initial_stream"]
+    assert "hermes_runtime_authority_changed" in "".join(recovery_chunks)
 
 
 def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
@@ -62,7 +217,7 @@ def test_isolated_history_never_uses_openclaw_fallback(monkeypatch):
     async def forbidden_legacy(uid):
         raise AssertionError("OpenClaw fallback must not run in isolated mode")
 
-    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", _runtime_authority_enabled)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
     monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
@@ -88,7 +243,7 @@ def test_cloud_history_never_uses_openclaw_fallback(monkeypatch):
     async def forbidden_legacy(uid):
         raise AssertionError("OpenClaw fallback must not run for a cloud-bound user")
 
-    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", _runtime_authority_enabled)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
     monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
@@ -107,13 +262,44 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
     async def missing_runtime(uid, **kwargs):
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
-    monkeypatch.setattr(chat, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(chat, "runtime_authority_enabled", _runtime_authority_enabled)
     monkeypatch.setattr(chat, "resolve_isolated_runtime", missing_runtime)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(chat.ella_chat_history("user-a", authenticated_uid="user-a"))
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "hermes_not_provisioned"}
+
+    class InvitationOwnedRepository:
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            assert uid == "invited-user"
+            return True
+
+        async def get_self_hosted_invitation_admission(self, _uid):
+            raise AssertionError("master-off quarantine must not treat invitation authority as enabled")
+
+    repository = InvitationOwnedRepository()
+
+    async def actual_authority(uid):
+        return await runtime_resolver.runtime_authority_enabled(uid, repository=repository)
+
+    async def actual_runtime(uid, **kwargs):
+        return await runtime_resolver.resolve_isolated_runtime(uid, repository=repository, **kwargs)
+
+    async def forbidden_legacy(_uid):
+        raise AssertionError("master-off invitation owner must never reach OpenClaw fallback")
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setattr(chat, "runtime_authority_enabled", actual_authority)
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", actual_runtime)
+    monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
+
+    with pytest.raises(HTTPException) as disabled:
+        asyncio.run(chat.ella_chat_history("invited-user", authenticated_uid="invited-user"))
+    assert disabled.value.status_code == 503
+    assert disabled.value.detail == {"code": "self_hosted_invitation_runtime_disabled"}
 
 
 def test_public_resolver_is_authenticated_and_redacts_internal_runtime(monkeypatch):
@@ -176,6 +362,7 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
 
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", missing_runtime)
 
     with pytest.raises(HTTPException) as error:
@@ -190,22 +377,35 @@ def test_voice_session_requires_active_runtime_when_isolation_enabled(monkeypatc
 
 
 def test_voice_session_stays_closed_while_isolated_voice_flag_is_disabled(monkeypatch):
-    async def ready_runtime(uid, **kwargs):
-        return object()
+    async def self_hosted_required(uid):
+        return uid == "invited-user"
 
-    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: True)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "resolve_isolated_runtime", ready_runtime)
+    async def forbidden_runtime(*_args, **_kwargs):
+        raise AssertionError("voice-off account must stop before runtime/provider resolution")
 
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(
-            voice.create_voice_session(
-                body=voice.VoiceSessionRequest(uid="user-a", provider="grok-voice"),
-                authenticated_uid="user-a",
+    stale_uid = "test-pr835-dryrun-20260504000956"
+    monkeypatch.setenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_ISOLATED_VOICE_ROUTING_ENABLED_UIDS", f"invited-user,{stale_uid}")
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
+    monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: uid == stale_uid)
+    monkeypatch.setattr(voice, "resolve_isolated_runtime", forbidden_runtime)
+    monkeypatch.setattr(
+        voice,
+        "resolve_processor",
+        lambda _provider: (_ for _ in ()).throw(AssertionError("legacy provider lookup must not run")),
+    )
+
+    for uid in ("invited-user", stale_uid):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(
+                voice.create_voice_session(
+                    body=voice.VoiceSessionRequest(uid=uid, provider="grok-voice"),
+                    authenticated_uid=uid,
+                )
             )
-        )
-    assert error.value.status_code == 503
-    assert error.value.detail == {"code": "isolated_voice_not_ready"}
+        assert voice.isolated_voice_routing_enabled(uid) is False
+        assert error.value.status_code == 503
+        assert error.value.detail == {"code": "isolated_voice_not_ready"}
 
 
 def test_voice_session_issues_isolated_token_for_enabled_uid_canary(monkeypatch):
@@ -273,13 +473,15 @@ def test_self_hosted_voice_session_uses_exact_invitation_authority_without_legac
     async def pool():
         return Pool()
 
+    async def self_hosted_required(uid):
+        return uid == "invited-user"
+
     monkeypatch.setattr(voice, "ELLA_SESSION_SECRET", "test-session-secret-at-least-32-bytes")
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: uid == "invited-user")
-    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: uid == "invited-user")
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: uid == "invited-user")
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve_runtime)
     monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", evaluate_issuance)
     monkeypatch.setattr(voice, "resolve_processor", lambda _provider: (_ for _ in ()).throw(AssertionError("legacy")))
@@ -344,12 +546,14 @@ def test_self_hosted_voice_session_activation_race_drift_fails_before_token_or_p
     async def pool():
         return Pool()
 
+    async def self_hosted_required(_uid):
+        return True
+
     monkeypatch.setattr(voice, "VOICE_CANARY_ENFORCEMENT_ENABLED", True)
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
-    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", resolve_runtime)
     monkeypatch.setattr(
         voice,
@@ -402,11 +606,13 @@ def test_self_hosted_voice_session_authority_denials_precede_provider_setup(monk
         provider_calls.append(kwargs)
         raise AssertionError("policy/provider setup must not run after authority denial")
 
-    monkeypatch.setattr(voice, "self_hosted_provisioning_enabled", lambda uid=None: True)
-    monkeypatch.setattr(voice, "runtime_authority_enabled", lambda uid=None: True)
+    async def self_hosted_required(_uid):
+        return True
+
+    monkeypatch.setattr(voice, "_self_hosted_voice_required", self_hosted_required)
     monkeypatch.setattr(voice, "runtime_bindings_enabled", lambda uid=None: False)
     monkeypatch.setattr(voice, "cloud_provisioning_enabled", lambda uid=None: False)
-    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: False)
+    monkeypatch.setattr(voice, "isolated_voice_routing_enabled", lambda uid=None: True)
     monkeypatch.setattr(voice, "resolve_isolated_runtime", deny_runtime)
     monkeypatch.setattr(voice.voice_canary_db, "evaluate_issuance", forbidden_policy)
     monkeypatch.setattr(voice, "V2V_PROVIDERS", {})

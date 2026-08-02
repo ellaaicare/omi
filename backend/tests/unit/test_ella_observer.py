@@ -442,10 +442,13 @@ def test_observer_extractor_uses_isolated_runtime_for_hermes(monkeypatch):
         captured.update(kwargs)
         return extractor_module.ExtractionResult(metadata={"extractor": "hermes"})
 
+    async def authority_enabled(uid=None):
+        return uid == "uid-isolated"
+
     monkeypatch.setattr(
         extractor_module.runtime_resolver,
         "runtime_authority_enabled",
-        lambda uid=None: uid == "uid-isolated",
+        authority_enabled,
     )
     monkeypatch.setattr(extractor_module.runtime_resolver, "resolve_isolated_runtime", fake_runtime)
     authority = extractor_module.runtime_resolver.CloudRuntimeAuthorityIdentity(

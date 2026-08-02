@@ -26,10 +26,6 @@ from database.runtime_targets import (
     SELF_HOSTED_RUNTIME_TARGET_MODES,
 )
 from ella.services.ai_consent import (
-    CURRENT_POLICY_VERSION,
-    CURRENT_PROCESSOR_SET_HASH,
-    CURRENT_SCOPE_HASH,
-    CURRENT_SCOPE_VERSION,
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
 )
@@ -43,9 +39,13 @@ from ella.services.provisioning import (
     PROFILE_NAME_RE,
     ProvisioningError,
     cloud_provisioning_enabled,
+    current_self_hosted_runtime_lineage,
     resolve_gateway_credential,
     rollout_enabled,
+    self_hosted_invitation_admission,
+    self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
+    self_hosted_runtime_authority_required,
     validate_internal_gateway_url,
 )
 
@@ -58,18 +58,23 @@ def runtime_bindings_enabled(uid: Optional[str] = None) -> bool:
     )
 
 
-def runtime_authority_enabled(uid: Optional[str] = None) -> bool:
+async def runtime_authority_enabled(
+    uid: Optional[str] = None,
+    *,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> bool:
     """Return whether this user must resolve through persisted runtime authority."""
-    return runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid) or self_hosted_provisioning_enabled(uid)
+    if runtime_bindings_enabled(uid) or cloud_provisioning_enabled(uid):
+        return True
+    if not uid:
+        return False
+    if await self_hosted_runtime_authority_required(uid, repository=repository):
+        return True
+    return False
 
 
 def _current_self_hosted_lineage() -> RuntimeTargetLineage:
-    return RuntimeTargetLineage(
-        policy_version=CURRENT_POLICY_VERSION,
-        processor_set_hash=CURRENT_PROCESSOR_SET_HASH,
-        scope_version=CURRENT_SCOPE_VERSION,
-        scope_hash=CURRENT_SCOPE_HASH,
-    ).validate()
+    return current_self_hosted_runtime_lineage()
 
 
 def _self_hosted_target_mode(target_mode: Optional[str]) -> str:
@@ -432,11 +437,25 @@ async def resolve_isolated_runtime(
 ) -> Optional[IsolatedRuntime]:
     """Resolve the one authoritative persisted runtime; never fall through modes."""
     cloud_required = cloud_provisioning_enabled(uid)
-    self_hosted_required = self_hosted_provisioning_enabled(uid) and not cloud_required
     retained_required = runtime_bindings_enabled(uid)
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+    try:
+        repository = repository or await EllaProvisioningRepository.create()
+    except Exception as exc:
+        raise ProvisioningError("self_hosted_invitation_authority_unavailable", retryable=True) from exc
+    invitation_admission = None
+    self_hosted_owned = False
+    if not cloud_required:
+        self_hosted_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
+        if self_hosted_owned and not self_hosted_configured:
+            raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+        if self_hosted_configured:
+            invitation_admission = await self_hosted_invitation_admission(uid, repository=repository)
+    self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
+    if self_hosted_owned and not self_hosted_required:
+        raise ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False)
     if not cloud_required and not self_hosted_required and not retained_required:
         return None
-    repository = repository or await EllaProvisioningRepository.create()
     try:
         if cloud_required:
             if target_mode not in CLOUD_RUNTIME_TARGET_MODES:
@@ -497,6 +516,24 @@ async def resolve_isolated_runtime(
     if retained_required:
         raise ProvisioningError("hermes_not_provisioned", retryable=True)
     return None
+
+
+async def revalidate_runtime_authority(
+    identity: CloudRuntimeAuthorityIdentity,
+    repository: Optional[EllaProvisioningRepository] = None,
+) -> IsolatedRuntime:
+    """Re-resolve and compare the exact runtime target immediately before use."""
+    current = await resolve_isolated_runtime(
+        identity.uid,
+        repository=repository,
+        target_mode=identity.target_mode,
+    )
+    if current is None:
+        raise ProvisioningError("hermes_runtime_required", retryable=False)
+    current_identity = runtime_authority_identity(current)
+    if not hmac.compare_digest(current_identity.digest, identity.digest):
+        raise ProvisioningError("hermes_runtime_authority_changed", retryable=False)
+    return current
 
 
 async def revalidate_cloud_runtime_authority(

@@ -158,7 +158,7 @@ async def validate_isolated_listen_runtime(uid: str, omi_user_exists=None) -> di
 
 async def listen_runtime_gate(uid: str, omi_user_exists=None) -> dict:
     """Apply the same isolated-runtime gate to every authenticated listen surface."""
-    required = runtime_resolver.runtime_authority_enabled(uid)
+    required = await runtime_resolver.runtime_authority_enabled(uid)
     if not required:
         return {"required": False, "success": True}
     result = await validate_isolated_listen_runtime(uid, omi_user_exists)
@@ -183,7 +183,7 @@ async def auto_provision_user(uid: str, name: str = "User") -> dict:
             - error: str (if success=False)
             - cluster: dict (if success=True)
     """
-    if runtime_resolver.runtime_authority_enabled(uid):
+    if await runtime_resolver.runtime_authority_enabled(uid):
         return {
             "success": False,
             "error": "isolated_runtime_auto_provision_forbidden",

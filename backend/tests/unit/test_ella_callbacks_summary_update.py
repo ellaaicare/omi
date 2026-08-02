@@ -383,6 +383,9 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
     async def fail_legacy(_uid):
         raise AssertionError("isolated summary metadata must not use OpenClaw routing")
 
+    async def authority_enabled(uid=None):
+        return uid == "uid-isolated"
+
     class FakeResponse:
         status_code = 200
 
@@ -403,7 +406,7 @@ def test_isolated_internal_assessment_uses_active_hermes_runtime(monkeypatch):
             requests.append((url, headers))
             return FakeResponse()
 
-    monkeypatch.setattr(callbacks, "runtime_authority_enabled", lambda uid=None: uid == "uid-isolated")
+    monkeypatch.setattr(callbacks, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(callbacks, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(callbacks, "_resolve_agent_id_for_uid", fail_legacy)
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", FakeClient)
@@ -432,11 +435,14 @@ def test_cloud_internal_assessment_never_calls_mini_or_openclaw(monkeypatch):
     async def fail_legacy(_uid):
         raise AssertionError("Cloud callback must not resolve a process-global Plato agent")
 
+    async def authority_enabled(uid=None):
+        return uid == "uid-cloud"
+
     class ForbiddenClient:
         def __init__(self, **_kwargs):
             raise AssertionError("Cloud callback must not call a Mini workspace endpoint")
 
-    monkeypatch.setattr(callbacks, "runtime_authority_enabled", lambda uid=None: uid == "uid-cloud")
+    monkeypatch.setattr(callbacks, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(callbacks, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(callbacks, "_resolve_agent_id_for_uid", fail_legacy)
     monkeypatch.setattr(callbacks.httpx, "AsyncClient", ForbiddenClient)

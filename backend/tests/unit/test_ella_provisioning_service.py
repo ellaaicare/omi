@@ -32,7 +32,12 @@ from ella.services.provisioning import (
     stable_payload_hash,
     validate_internal_gateway_url,
 )
-from ella.services.runtime_resolver import runtime_bindings_enabled, runtime_from_binding
+from ella.services.runtime_resolver import (
+    resolve_isolated_runtime,
+    runtime_authority_enabled,
+    runtime_bindings_enabled,
+    runtime_from_binding,
+)
 
 
 def _job(**overrides):
@@ -75,8 +80,9 @@ def _runtime_receipt(profile_name="omi-user-a"):
     }
 
 
-def _self_hosted_admission():
+def _self_hosted_admission(uid: str):
     return {
+        "omi_uid": uid,
         "consent_policy_version": CURRENT_POLICY_VERSION,
         "consent_processor_set_hash": CURRENT_PROCESSOR_SET_HASH,
         "consent_scope_version": CURRENT_SCOPE_VERSION,
@@ -96,6 +102,7 @@ class FakeRepository:
         omi_identity_error=None,
         schema_error=None,
         self_hosted_admission=None,
+        self_hosted_owned=None,
     ):
         self.job = _job()
         self.binding = binding
@@ -108,6 +115,9 @@ class FakeRepository:
         self.schema_checks = 0
         self.self_hosted_schema_checks = 0
         self.self_hosted_admission = self_hosted_admission
+        self.self_hosted_owned = (
+            self_hosted_admission is not None if self_hosted_owned is None else bool(self_hosted_owned)
+        )
         self.job_calls = []
 
     async def assert_schema_ready(self):
@@ -128,6 +138,9 @@ class FakeRepository:
 
     async def get_self_hosted_invitation_admission(self, _uid):
         return self.self_hosted_admission
+
+    async def has_invitation_owned_self_hosted_runtime(self, _uid):
+        return self.self_hosted_owned
 
     async def ensure_omi_user_document(self, **kwargs):
         if self.omi_identity_error:
@@ -376,7 +389,7 @@ def test_self_hosted_invitation_admission_precedes_identity_and_job_writes(monke
     assert repository.identity_calls == []
     assert repository.job_calls == []
 
-    repository.self_hosted_admission = _self_hosted_admission()
+    repository.self_hosted_admission = _self_hosted_admission(identity.uid)
     job, binding, claimed = asyncio.run(
         coordinator.ensure_job(
             identity=identity,
@@ -394,26 +407,48 @@ def test_self_hosted_invitation_admission_precedes_identity_and_job_writes(monke
 
 def test_self_hosted_authority_drift_blocks_before_provider_call(monkeypatch):
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
-    repository = FakeRepository(self_hosted_admission=_self_hosted_admission())
-    client = FakeProvisionClient(_runtime_receipt())
-    coordinator = ProvisioningCoordinator(repository, client)
     identity = VerifiedIdentity("invited-user", "user@example.test", "User", "UTC")
-    job, _, claimed = asyncio.run(
-        coordinator.ensure_job(
-            identity=identity,
-            target_schema_version="hermes-user-v1",
-            client_request_id="request-invited",
-            request_payload={"client": "ios"},
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", identity.uid)
+
+    for drift in ("revoked", "target", "consent"):
+        repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=True)
+        repository.authority_drift = drift
+        client = FakeProvisionClient(_runtime_receipt())
+        coordinator = ProvisioningCoordinator(repository, client)
+
+        with pytest.raises(ProvisioningError, match="invitation_authority_required"):
+            asyncio.run(
+                coordinator.ensure_job(
+                    identity=identity,
+                    target_schema_version="hermes-user-v1",
+                    client_request_id=f"request-{drift}",
+                    request_payload={"client": "ios", "drift": drift},
+                )
+            )
+        assert repository.identity_calls == []
+        assert repository.job_calls == []
+
+        repository.job = _job(state="provisioning", stage="profile_ready")
+        asyncio.run(coordinator.process_claimed_job(job=dict(repository.job), identity=identity))
+        assert client.calls == []
+        assert repository.job["state"] == "blocked"
+        assert repository.job["error_code"] == "invitation_authority_required"
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+    monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    repository = FakeRepository(self_hosted_admission=None, self_hosted_owned=True)
+
+    assert asyncio.run(runtime_authority_enabled(identity.uid, repository=repository)) is True
+    with pytest.raises(ProvisioningError, match="self_hosted_invitation_runtime_disabled") as disabled:
+        asyncio.run(
+            resolve_isolated_runtime(
+                identity.uid,
+                repository=repository,
+                target_mode="hermes-chat",
+            )
         )
-    )
-    assert claimed is True
-
-    repository.self_hosted_admission = None
-    asyncio.run(coordinator.process_claimed_job(job=job, identity=identity))
-
-    assert client.calls == []
-    assert repository.job["state"] == "blocked"
-    assert repository.job["error_code"] == "invitation_authority_required"
+    assert disabled.value.retryable is True
 
 
 def test_public_receipt_does_not_expose_runtime_secrets():

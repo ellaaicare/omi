@@ -694,9 +694,10 @@ def _runtime_receipt():
 
 
 class _RecordingRepository:
-    def __init__(self, *, binding=None):
+    def __init__(self, *, binding=None, invitation_owned=False):
         self.calls = []
         self.binding = binding
+        self.invitation_owned = invitation_owned
         self.job = {
             "id": "11111111-1111-1111-1111-111111111111",
             "target_schema_version": "hermes-user-v1",
@@ -715,9 +716,14 @@ class _RecordingRepository:
     async def assert_self_hosted_invite_schema_ready(self):
         self._record("assert_self_hosted_invite_schema_ready")
 
+    async def has_invitation_owned_self_hosted_runtime(self, _uid):
+        self._record("has_invitation_owned_self_hosted_runtime")
+        return self.invitation_owned
+
     async def get_self_hosted_invitation_admission(self, _uid):
         self._record("get_self_hosted_invitation_admission")
         return {
+            "omi_uid": _uid,
             "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
             "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
             "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,
@@ -852,7 +858,10 @@ def test_real_claimed_worker_stops_after_inflight_http_authority_drift(monkeypat
         pass
 
     assert sends == ["http"]
-    assert repository.calls == []
+    assert repository.calls == [
+        "assert_self_hosted_invite_schema_ready",
+        "has_invitation_owned_self_hosted_runtime",
+    ]
 
 
 @pytest.mark.parametrize("case", DRIFT_CASES)
@@ -935,7 +944,7 @@ def test_coordinator_rechecks_before_each_schema_identity_firebase_and_job_bound
     _configure_distinct_authorities(monkeypatch)
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
-    repository = _RecordingRepository()
+    repository = _RecordingRepository(invitation_owned=True)
     coordinator = _DriftBeforeCoordinator(
         repository,
         monkeypatch=monkeypatch,
@@ -968,7 +977,8 @@ def test_coordinator_rechecks_before_existing_binding_activation_and_job_receipt
             "user_status": "PENDING",
             "active": True,
             "template_version": "hermes-user-v1",
-        }
+        },
+        invitation_owned=True,
     )
     coordinator = _DriftBeforeCoordinator(
         repository,
