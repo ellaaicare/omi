@@ -11,6 +11,11 @@ from ella.services.provisioning import ProvisioningError
 from ella.utils.provision_authority import APPROVED_HERMES_PROVISION_URL, _authority_binding_value
 
 
+class _NonInvitationRepository:
+    async def has_invitation_owned_self_hosted_runtime(self, _uid):
+        return False
+
+
 def _configure_hermes_authority(monkeypatch):
     token = "onboarding-hermes-test-token"
     binding_env = "ELLA_TEST_ONBOARDING_AUTHORITY_BINDING"
@@ -67,6 +72,8 @@ def test_ensure_schedules_only_authenticated_subject(monkeypatch):
     captured = {}
 
     class FakeCoordinator:
+        repository = _NonInvitationRepository()
+
         async def ensure_job(self, **kwargs):
             captured.update(kwargs)
             return (
@@ -117,12 +124,12 @@ def test_ensure_schedules_only_authenticated_subject(monkeypatch):
 
 
 def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
-    async def forbidden_coordinator():
-        raise AssertionError("disabled onboarding must not touch provisioning storage")
+    async def coordinator():
+        return SimpleNamespace(repository=_NonInvitationRepository())
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
-    monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
+    monkeypatch.setattr(onboarding, "_coordinator", coordinator)
 
     async def no_retained_receipt(_uid, _target_schema_version):
         return None
@@ -143,8 +150,8 @@ def test_disabled_endpoint_returns_without_touching_database(monkeypatch):
 
 
 def test_disabled_endpoint_allows_existing_retained_account_without_provisioning(monkeypatch):
-    async def forbidden_coordinator():
-        raise AssertionError("retained onboarding must not start Hermes provisioning")
+    async def coordinator():
+        return SimpleNamespace(repository=_NonInvitationRepository())
 
     async def retained_receipt(uid, target_schema_version):
         assert uid == "retained-user"
@@ -159,7 +166,7 @@ def test_disabled_endpoint_allows_existing_retained_account_without_provisioning
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
-    monkeypatch.setattr(onboarding, "_coordinator", forbidden_coordinator)
+    monkeypatch.setattr(onboarding, "_coordinator", coordinator)
     monkeypatch.setattr(onboarding, "_retained_receipt", retained_receipt)
     monkeypatch.setattr(
         onboarding.auth,
@@ -181,6 +188,14 @@ def test_disabled_endpoint_allows_existing_retained_account_without_provisioning
 
 
 def test_disabled_status_allows_existing_retained_account(monkeypatch):
+    class RetainedRepository:
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            assert uid == "retained-user"
+            return False
+
+    async def retained_repository(**_kwargs):
+        return RetainedRepository()
+
     async def retained_receipt(uid, target_schema_version):
         assert uid == "retained-user"
         assert target_schema_version == "hermes-user-v1"
@@ -188,11 +203,86 @@ def test_disabled_status_allows_existing_retained_account(monkeypatch):
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", retained_repository)
     monkeypatch.setattr(onboarding, "_retained_receipt", retained_receipt)
 
     result = asyncio.run(onboarding.onboarding_status(uid="retained-user"))
 
     assert result == {"state": "ready", "binding_state": "active", "binding_revision": 1}
+
+    class InvitationRepository:
+        async def assert_schema_ready(self):
+            return None
+
+        async def assert_self_hosted_invite_schema_ready(self):
+            return None
+
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            assert uid == "invited-user"
+            return True
+
+        async def get_self_hosted_invitation_admission(self, uid):
+            return {
+                "omi_uid": uid,
+                "consent_policy_version": provisioning.CURRENT_POLICY_VERSION,
+                "consent_processor_set_hash": provisioning.CURRENT_PROCESSOR_SET_HASH,
+                "consent_scope_version": provisioning.CURRENT_SCOPE_VERSION,
+                "consent_scope_hash": provisioning.CURRENT_SCOPE_HASH,
+                "provider_allowlist": [provisioning.SELF_HOSTED_RUNTIME_PROVIDER],
+                "model_allowlist": [provisioning.SELF_HOSTED_RUNTIME_MODEL],
+                "mode_allowlist": list(provisioning.SELF_HOSTED_RUNTIME_TARGET_MODES),
+                "fallback_policy": {"enabled": False, "order": []},
+            }
+
+        async def get_job(self, uid, target_schema_version):
+            assert (uid, target_schema_version) == ("invited-user", "hermes-user-v1")
+            return {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "target_schema_version": target_schema_version,
+                "state": "ready",
+                "stage": "active",
+                "retryable": False,
+            }
+
+        async def resolve_active_runtime(self, uid, **kwargs):
+            assert uid == "invited-user"
+            assert kwargs["target_mode"] == "hermes-chat"
+            assert kwargs["required_provider"] == provisioning.SELF_HOSTED_RUNTIME_PROVIDER
+            assert kwargs["model"] == provisioning.SELF_HOSTED_RUNTIME_MODEL
+            assert kwargs["authority_lineage"].policy_version == provisioning.CURRENT_POLICY_VERSION
+            return {
+                "active": True,
+                "revision": 7,
+                "model_policy_version": "frontier-v1",
+                "voice_policy_version": "ella-voice-v1",
+                "provider": "hermes",
+                "status": "active",
+            }
+
+    repository = InvitationRepository()
+
+    async def invitation_repository(**_kwargs):
+        return repository
+
+    async def forbidden_retained(_uid, _target_schema_version):
+        raise AssertionError("invitation-owned status must not use retained compatibility")
+
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", invitation_repository)
+    monkeypatch.setattr(onboarding, "_retained_receipt", forbidden_retained)
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+    monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+
+    invited = asyncio.run(onboarding.onboarding_status(uid="invited-user"))
+    assert invited["state"] == "ready"
+    assert invited["runtime_provider"] == "hermes"
+    assert invited["binding_revision"] == 7
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+    with pytest.raises(onboarding.HTTPException) as disabled:
+        asyncio.run(onboarding.onboarding_status(uid="invited-user"))
+    assert disabled.value.status_code == 503
+    assert disabled.value.detail == {"code": "self_hosted_invitation_runtime_disabled"}
 
 
 def test_retained_receipt_uses_authenticated_uid_and_public_contract(monkeypatch):
@@ -239,12 +329,12 @@ def test_retained_receipt_rejects_uid_in_isolated_runtime_cutover(monkeypatch):
 
 
 def test_disabled_endpoint_does_not_claim_future_schema_for_retained_account(monkeypatch):
-    async def forbidden_create(**_kwargs):
-        raise AssertionError("future schemas must not use retained compatibility")
+    async def retained_repository(**_kwargs):
+        return _NonInvitationRepository()
 
     monkeypatch.setenv("ELLA_HERMES_PROVISIONING_ENABLED", "false")
     monkeypatch.delenv("ELLA_HERMES_PROVISIONING_ENABLED_UIDS", raising=False)
-    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", forbidden_create)
+    monkeypatch.setattr(onboarding.EllaProvisioningRepository, "create", retained_repository)
 
     with pytest.raises(onboarding.HTTPException) as error:
         asyncio.run(
@@ -265,6 +355,8 @@ def test_uid_allowlist_canaries_onboarding_without_global_cutover(monkeypatch):
     captured = {}
 
     class FakeCoordinator:
+        repository = _NonInvitationRepository()
+
         async def ensure_job(self, **kwargs):
             captured.update(kwargs)
             return (
@@ -312,6 +404,8 @@ def test_schema_not_ready_returns_retryable_service_unavailable(monkeypatch):
     _configure_hermes_authority(monkeypatch)
 
     class FakeCoordinator:
+        repository = _NonInvitationRepository()
+
         async def ensure_job(self, **_kwargs):
             raise ProvisioningError("provisioning_schema_not_ready", retryable=True)
 
@@ -385,6 +479,9 @@ def test_authority_rejection_precedes_identity_and_repository_side_effects(monke
 
     class Repository:
         admission = None
+
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            return bool(self.admission and self.admission["omi_uid"] == uid)
 
         async def get_self_hosted_invitation_admission(self, uid):
             return self.admission if self.admission and self.admission["omi_uid"] == uid else None
@@ -484,6 +581,8 @@ def test_onboarding_rechecks_before_background_job_creation(monkeypatch):
     )
 
     class FakeCoordinator:
+        repository = _NonInvitationRepository()
+
         async def ensure_job(self, **kwargs):
             assert "<opaque>" in repr(kwargs["authority_snapshot"])
             replacement_ref = "ELLA_TEST_ONBOARDING_ROTATED_BINDING"

@@ -15,7 +15,7 @@ from database.ella_provisioning import (
     IdentityConflictError,
     ProvisioningSchemaNotReadyError,
 )
-from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER
+from database.runtime_targets import CLOUD_RUNTIME_MODEL, CLOUD_RUNTIME_PROVIDER, SELF_HOSTED_RUNTIME_MODEL
 from ella.services.ai_consent import (
     MANAGED_CLOUD_MEMORY_PROVIDER,
     MANAGED_CLOUD_PHOTON_SCOPE,
@@ -30,6 +30,7 @@ from ella.services.provisioning import (
     VerifiedIdentity,
     any_provisioning_enabled,
     cloud_provisioning_enabled,
+    current_self_hosted_runtime_lineage,
     effective_target_schema_version,
     provisioning_enabled,
     public_receipt,
@@ -37,6 +38,7 @@ from ella.services.provisioning import (
     self_hosted_invitation_admission,
     self_hosted_provisioning_configured,
     self_hosted_provisioning_enabled,
+    self_hosted_runtime_authority_required,
 )
 from ella.services.runtime_resolver import runtime_bindings_enabled
 from utils.other import endpoints as auth
@@ -138,15 +140,30 @@ async def ensure_onboarding(
             raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
     coordinator = None
     invitation_admission = None
-    if self_hosted_configured:
-        coordinator = await _coordinator()
+    invitation_owned = False
+    if not cloud_provisioning_enabled(uid):
         try:
-            invitation_admission = await self_hosted_invitation_admission(
+            coordinator = await _coordinator()
+            invitation_owned = await self_hosted_runtime_authority_required(
                 uid,
                 repository=coordinator.repository,
             )
+            if invitation_owned and not self_hosted_configured:
+                raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+            if self_hosted_configured:
+                invitation_admission = await self_hosted_invitation_admission(
+                    uid,
+                    repository=coordinator.repository,
+                )
+            if invitation_owned and not self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
         except ProvisioningError as exc:
             raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "self_hosted_invitation_authority_unavailable"},
+            ) from exc
     if not any_provisioning_enabled(uid, self_hosted_admission=invitation_admission):
         receipt = await _retained_receipt(uid, payload.target_schema_version)
         if receipt:
@@ -218,23 +235,46 @@ async def onboarding_status(
         target_schema_version = effective_target_schema_version(uid, target_schema_version)
     except ProvisioningError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
-    if not any_provisioning_enabled(uid):
+    cloud_required = cloud_provisioning_enabled(uid)
+    self_hosted_configured = self_hosted_provisioning_configured() and not cloud_required
+    try:
+        repository = await EllaProvisioningRepository.create()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "self_hosted_invitation_authority_unavailable"},
+        ) from exc
+    invitation_admission = None
+    invitation_owned = False
+    if not cloud_required:
+        try:
+            invitation_owned = await self_hosted_runtime_authority_required(uid, repository=repository)
+            if invitation_owned and not self_hosted_configured:
+                raise ProvisioningError("self_hosted_invitation_runtime_disabled", retryable=True)
+            if self_hosted_configured:
+                invitation_admission = await self_hosted_invitation_admission(uid, repository=repository)
+            if invitation_owned and not self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+                raise ProvisioningError("invitation_authority_required", retryable=False)
+        except ProvisioningError as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail={"code": exc.code}) from exc
+    if not any_provisioning_enabled(uid, self_hosted_admission=invitation_admission):
         receipt = await _retained_receipt(uid, target_schema_version)
         if receipt:
             return receipt
         raise HTTPException(status_code=503, detail={"code": "provisioning_disabled"})
-    repository = await EllaProvisioningRepository.create()
     try:
         await repository.assert_schema_ready()
-        if cloud_provisioning_enabled(uid):
+        if cloud_required:
             await repository.assert_cloud_schema_ready()
+        elif self_hosted_provisioning_enabled(uid, admission=invitation_admission):
+            await repository.assert_self_hosted_invite_schema_ready()
     except ProvisioningSchemaNotReadyError as exc:
         logger.error("Ella provisioning status schema is incomplete: %s", ", ".join(exc.missing))
         raise HTTPException(status_code=503, detail={"code": "provisioning_schema_not_ready"}) from exc
     job = await repository.get_job(uid, target_schema_version)
     if not job:
         raise HTTPException(status_code=404, detail={"code": "setup_not_started"})
-    if cloud_provisioning_enabled(uid):
+    if cloud_required:
         profile_class = await repository.get_cloud_profile_class(uid)
         authority = current_cloud_authority(
             uid,
@@ -254,11 +294,15 @@ async def onboarding_status(
             model=CLOUD_RUNTIME_MODEL,
         )
     else:
+        self_hosted_required = self_hosted_provisioning_enabled(uid, admission=invitation_admission)
         binding = await repository.resolve_active_runtime(
             uid,
             template_version=target_schema_version,
+            target_mode="hermes-chat" if self_hosted_required else None,
             required_provider="hermes",
+            authority_lineage=current_self_hosted_runtime_lineage() if self_hosted_required else None,
+            model=SELF_HOSTED_RUNTIME_MODEL if self_hosted_required else CLOUD_RUNTIME_MODEL,
         )
-    if not binding and cloud_provisioning_enabled(uid):
+    if not binding and cloud_required:
         binding = await repository.resolve_cloud_binding_state(uid)
     return public_receipt(job, binding)

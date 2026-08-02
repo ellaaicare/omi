@@ -510,7 +510,7 @@ class EllaProvisioningRepository:
                     WHERE NOT EXISTS (
                         SELECT 1
                         FROM information_schema.columns
-                        WHERE table_schema = 'public'
+                        WHERE table_schema = current_schema()
                           AND table_name = required.table_name
                           AND column_name = required.column_name
                     )
@@ -521,7 +521,7 @@ class EllaProvisioningRepository:
                     FROM unnest($3::text[]) AS required(constraint_name)
                     WHERE NOT EXISTS (
                         SELECT 1 FROM pg_constraint
-                        WHERE connamespace = 'public'::regnamespace
+                        WHERE connamespace = current_schema()::regnamespace
                           AND conname = required.constraint_name
                     )
                     ORDER BY required.constraint_name
@@ -531,7 +531,7 @@ class EllaProvisioningRepository:
                     FROM unnest($4::text[]) AS required(index_name)
                     WHERE NOT EXISTS (
                         SELECT 1 FROM pg_indexes
-                        WHERE schemaname = 'public'
+                        WHERE schemaname = current_schema()
                           AND indexname = required.index_name
                     )
                     ORDER BY required.index_name
@@ -643,24 +643,18 @@ class EllaProvisioningRepository:
         return _row_dict(row)
 
     async def has_invitation_owned_self_hosted_runtime(self, uid: str) -> bool:
-        """Return whether this UID is bound to any invitation-owned Hermes target."""
+        """Return sticky invitation ownership even after authority or owner drift."""
         return bool(
             await self.pool.fetchval(
                 """
                 SELECT EXISTS (
                     SELECT 1
                     FROM users app_user
-                    JOIN voice_entitlements entitlement
-                      ON entitlement.uid = app_user.omi_uid
-                     AND entitlement.invitation_id IS NOT NULL
                     JOIN ella_invitation_redemptions redemption
-                      ON redemption.invitation_id = entitlement.invitation_id
-                     AND redemption.user_id = app_user.id
+                      ON redemption.user_id = app_user.id
                      AND redemption.user_mapping_state = 'mapped'
                     JOIN ella_runtime_targets target
                       ON target.invitation_target_id = redemption.invitation_target_id
-                     AND target.account_user_id = app_user.id
-                     AND target.profile_user_id = app_user.id
                      AND target.provider = $2
                     WHERE app_user.omi_uid = $1
                 )

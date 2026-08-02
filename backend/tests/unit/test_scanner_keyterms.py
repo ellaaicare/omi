@@ -2,6 +2,8 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from utils.ella import scanner_keyterms
 
 SCANNER_TUNING = """
@@ -44,6 +46,14 @@ SCANNER_TUNING = """
 
 def setup_function():
     scanner_keyterms.clear_scanner_keyterm_cache()
+
+
+@pytest.fixture(autouse=True)
+def retained_runtime_not_invitation_owned(monkeypatch):
+    async def authority_disabled(_uid):
+        return False
+
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_disabled)
 
 
 def test_parse_scanner_tuning_keyterms_prioritizes_active_wake_and_learned_terms():
@@ -194,6 +204,9 @@ def test_refresh_scanner_keyterms_fetches_provision_file(monkeypatch):
 def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypatch):
     requests = []
 
+    async def authority_enabled(_uid):
+        return True
+
     async def fake_runtime(uid, *, target_mode=None):
         assert uid == "uid-isolated"
         assert target_mode == "hermes-cloud-guardian"
@@ -235,6 +248,7 @@ def test_isolated_scanner_uses_hermes_workspace_and_drops_legacy_cache(monkeypat
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_URL", "http://hermes-provision")
     monkeypatch.setenv("ELLA_HERMES_PROVISION_API_TOKEN", "hermes-token")
     monkeypatch.setenv("ELLA_SCANNER_KEYTERMS_ALLOW_SHARED_FALLBACK", "true")
+    monkeypatch.setattr(scanner_keyterms, "runtime_authority_enabled", authority_enabled)
     monkeypatch.setattr(scanner_keyterms, "resolve_isolated_runtime", fake_runtime)
     monkeypatch.setattr(scanner_keyterms.httpx, "AsyncClient", FakeClient)
 

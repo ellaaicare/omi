@@ -45,9 +45,14 @@ def _disable_external_observer_side_effects(monkeypatch):
     async def noop_propagate(**kwargs):
         return None
 
+    async def retained_runtime(_uid, *, target_mode=None):
+        del target_mode
+        return None
+
     monkeypatch.setattr(corrections, "_emit_canonical_correction_event", noop_emit)
     monkeypatch.setattr(corrections, "_run_correction_propagation_for_submission", noop_propagate)
     monkeypatch.setattr(summary_recovery, "_conversation_vector_present", lambda uid, cid: False)
+    monkeypatch.setattr(summary_recovery, "resolve_isolated_runtime", retained_runtime)
 
 
 def _conversation():

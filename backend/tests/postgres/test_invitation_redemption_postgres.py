@@ -1167,6 +1167,18 @@ def test_self_hosted_runtime_resolution_is_invitation_authoritative_and_exact(mo
             is None
         )
 
+        monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+        assert await runtime_authority_enabled(uid, repository=repository) is True
+        with pytest.raises(ProvisioningError) as disabled:
+            await resolve_isolated_runtime(
+                uid,
+                repository=repository,
+                target_mode="hermes-cloud-chat",
+            )
+        assert disabled.value.code == "self_hosted_invitation_runtime_disabled"
+        assert await runtime_authority_enabled("any-public-user", repository=repository) is False
+        monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "true")
+
         runtime = await resolve_isolated_runtime(
             uid,
             repository=repository,
@@ -1694,7 +1706,15 @@ def test_self_hosted_post_provider_revoke_race_cannot_publish_or_retry(monkeypat
                 identity=VerifiedIdentity(uid, email, "Race User", "UTC"),
             )
         )
-        await client.started.wait()
+        provider_started = asyncio.create_task(client.started.wait())
+        completed, _ = await asyncio.wait(
+            {task, provider_started},
+            timeout=5,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if task in completed:
+            await task
+        assert provider_started in completed, "provider boundary did not become reachable"
         await pilot_invite_admin._revoke_invitation(
             receipt_id=issued["receipt_id"],
             expected_version=version,

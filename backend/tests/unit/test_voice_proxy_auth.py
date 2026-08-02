@@ -110,6 +110,15 @@ def voice_auth(monkeypatch):
         lambda _runtime: SimpleNamespace(digest=RUNTIME_AUTHORITY_DIGEST),
     )
 
+    async def retained_runtime_not_invitation_owned(_uid):
+        return False
+
+    monkeypatch.setattr(
+        voice,
+        "self_hosted_runtime_authority_required",
+        retained_runtime_not_invitation_owned,
+    )
+
 
 def test_voice_session_token_has_firebase_subject_and_proxy_audience():
     encoded = voice.create_session_token(

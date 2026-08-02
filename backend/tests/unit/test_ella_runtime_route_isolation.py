@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from dataclasses import replace
 from types import ModuleType
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ conversations_module._decrypt_conversation_data = lambda value: value
 sys.modules.setdefault("database.conversations", conversations_module)
 
 from ella.routers import chat, resolve, voice
+from ella.services import runtime_resolver
 from ella.services.provisioning import ProvisioningError
 
 RUNTIME_AUTHORITY_DIGEST = "a" * 64
@@ -35,11 +37,53 @@ def _request():
     return Request({"type": "http", "method": "POST", "path": "/v1/ella/chat/stream", "headers": []})
 
 
+def _invitation_chat_runtime(**overrides):
+    values = {
+        "uid": "invited-user",
+        "binding_id": "binding-1",
+        "provider": "hermes",
+        "status": "active",
+        "profile_name": "omi-invited-user",
+        "agent_id": "hermes",
+        "runtime_instance_id": "instance-1",
+        "gateway_url": "http://hermes.internal.test:8642",
+        "gateway_token": "test-hermes-token",
+        "workspace_root": "/srv/ella/invited-user",
+        "honcho_workspace": "honcho-invited-user",
+        "observed_peer": "invited-user",
+        "observer_peer": "ella-invited-user",
+        "prompt_pack_version": "hermes-user-v1",
+        "expected_model": "gpt-5.6-terra",
+        "model_context_window_tokens": 128000,
+        "allowed_tools": (),
+        "required_capabilities": (),
+        "model_policy_version": "frontier-v1",
+        "voice_policy_version": "ella-voice-v1",
+        "revision": 7,
+        "profile_class": "real",
+        "runtime_target_id": "target-chat-1",
+        "runtime_target_mode": "hermes-chat",
+        "runtime_target_updated_at": "2026-08-02T18:00:00+00:00",
+        "target_endpoint_ref": "",
+        "target_credential_ref": "",
+        "target_entitlement_revision": 11,
+        "consent_authority_epoch": "authority-epoch-1",
+        "account_user_id": "account-1",
+        "profile_user_id": "account-1",
+    }
+    values.update(overrides)
+    return chat.IsolatedRuntime(**values)
+
+
+async def _collect_stream(stream):
+    return [chunk async for chunk in stream]
+
+
 async def _runtime_authority_enabled(_uid=None):
     return True
 
 
-def test_chat_rejects_body_uid_that_differs_from_firebase_subject():
+def test_chat_rejects_body_uid_that_differs_from_firebase_subject(monkeypatch):
     with pytest.raises(HTTPException) as error:
         asyncio.run(
             chat.ella_chat_stream(
@@ -50,6 +94,110 @@ def test_chat_rejects_body_uid_that_differs_from_firebase_subject():
         )
     assert error.value.status_code == 403
     assert error.value.detail == {"code": "ownership_mismatch"}
+
+    async def no_events(*_args, **_kwargs):
+        return []
+
+    async def no_temporal(*_args, **_kwargs):
+        return "recent context", []
+
+    async def canonical_write(*_args, **_kwargs):
+        return None
+
+    class ForbiddenProviderClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("authority drift must fail before any provider HTTP client is created")
+
+    monkeypatch.setattr(chat, "_fetch_chat_canonical_events", no_events)
+    monkeypatch.setattr(chat, "_fetch_temporal_chat_context", no_temporal)
+    monkeypatch.setattr(chat, "_write_ios_chat_canonical_event", canonical_write)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", ForbiddenProviderClient)
+    admitted = _invitation_chat_runtime()
+    drifted = (
+        ProvisioningError("self_hosted_invitation_runtime_not_provisioned", retryable=False),
+        replace(admitted, target_entitlement_revision=12),
+        replace(admitted, runtime_target_id="target-chat-drifted"),
+        replace(admitted, consent_authority_epoch="authority-epoch-drifted"),
+        replace(admitted, account_user_id="account-drifted", profile_user_id="profile-drifted"),
+    )
+    for current in drifted:
+
+        async def resolve_current(*_args, _current=current, **_kwargs):
+            if isinstance(_current, Exception):
+                raise _current
+            return _current
+
+        monkeypatch.setattr(runtime_resolver, "resolve_isolated_runtime", resolve_current)
+        chunks = asyncio.run(
+            _collect_stream(
+                chat._stream_hermes_chat(
+                    "content-free test",
+                    admitted.uid,
+                    runtime=admitted,
+                )
+            )
+        )
+        assert any(
+            code in "".join(chunks)
+            for code in (
+                "self_hosted_invitation_runtime_not_provisioned",
+                "hermes_runtime_authority_changed",
+            )
+        )
+
+    provider_effects = []
+    revalidation_calls = []
+
+    class EmptyStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def aiter_lines(self):
+            yield "data: [DONE]"
+
+    class EmptyStreamClient:
+        def __init__(self, *_args, **_kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            provider_effects.append("initial_stream")
+            return EmptyStreamResponse()
+
+        async def post(self, *_args, **_kwargs):
+            provider_effects.append("recovery_send")
+            raise AssertionError("recovery provider call must be denied after authority drift")
+
+    async def revalidate_for_recovery(_identity):
+        revalidation_calls.append("revalidate")
+        if len(revalidation_calls) == 1:
+            return admitted
+        raise ProvisioningError("hermes_runtime_authority_changed", retryable=False)
+
+    monkeypatch.setattr(chat, "revalidate_runtime_authority", revalidate_for_recovery)
+    monkeypatch.setattr(chat.httpx, "AsyncClient", EmptyStreamClient)
+    recovery_chunks = asyncio.run(
+        _collect_stream(
+            chat._stream_hermes_chat(
+                "content-free recovery test",
+                admitted.uid,
+                runtime=admitted,
+            )
+        )
+    )
+    assert revalidation_calls == ["revalidate", "revalidate"]
+    assert provider_effects == ["initial_stream"]
+    assert "hermes_runtime_authority_changed" in "".join(recovery_chunks)
 
 
 def test_chat_history_rejects_query_uid_that_differs_from_firebase_subject():
@@ -121,6 +269,37 @@ def test_isolated_history_fails_closed_without_binding(monkeypatch):
         asyncio.run(chat.ella_chat_history("user-a", authenticated_uid="user-a"))
     assert error.value.status_code == 503
     assert error.value.detail == {"code": "hermes_not_provisioned"}
+
+    class InvitationOwnedRepository:
+        async def has_invitation_owned_self_hosted_runtime(self, uid):
+            assert uid == "invited-user"
+            return True
+
+        async def get_self_hosted_invitation_admission(self, _uid):
+            raise AssertionError("master-off quarantine must not treat invitation authority as enabled")
+
+    repository = InvitationOwnedRepository()
+
+    async def actual_authority(uid):
+        return await runtime_resolver.runtime_authority_enabled(uid, repository=repository)
+
+    async def actual_runtime(uid, **kwargs):
+        return await runtime_resolver.resolve_isolated_runtime(uid, repository=repository, **kwargs)
+
+    async def forbidden_legacy(_uid):
+        raise AssertionError("master-off invitation owner must never reach OpenClaw fallback")
+
+    monkeypatch.setenv("ELLA_SELF_HOSTED_PROVISIONING_ENABLED", "false")
+    monkeypatch.setenv("ELLA_RUNTIME_BINDINGS_ENABLED", "false")
+    monkeypatch.setenv("ELLA_HERMES_CLOUD_PROVISIONING_ENABLED", "false")
+    monkeypatch.setattr(chat, "runtime_authority_enabled", actual_authority)
+    monkeypatch.setattr(chat, "resolve_isolated_runtime", actual_runtime)
+    monkeypatch.setattr(chat, "resolve_user_routing", forbidden_legacy)
+
+    with pytest.raises(HTTPException) as disabled:
+        asyncio.run(chat.ella_chat_history("invited-user", authenticated_uid="invited-user"))
+    assert disabled.value.status_code == 503
+    assert disabled.value.detail == {"code": "self_hosted_invitation_runtime_disabled"}
 
 
 def test_public_resolver_is_authenticated_and_redacts_internal_runtime(monkeypatch):
