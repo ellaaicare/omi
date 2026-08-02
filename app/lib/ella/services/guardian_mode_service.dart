@@ -94,6 +94,7 @@ class GuardianModeService {
   }
 
   /// Start timer to inject test audio clips
+  // ignore: unused_element
   void _startTestAudioTimer() {
     _testClipCounter = 0;
     _testAudioTimer?.cancel();

@@ -273,10 +273,8 @@ class AudioPlayerUtils extends ChangeNotifier {
     List<Uint8List> pcmFrames = [];
     for (final opusFrame in opusFrames) {
       final pcmFrame = decoder.decode(input: opusFrame);
-      if (pcmFrame != null) {
-        final uint8Frame = Uint8List.fromList(pcmFrame.buffer.asUint8List());
-        pcmFrames.add(uint8Frame);
-      }
+      final uint8Frame = Uint8List.fromList(pcmFrame.buffer.asUint8List());
+      pcmFrames.add(uint8Frame);
     }
 
     if (pcmFrames.isEmpty) return null;
@@ -307,7 +305,7 @@ class AudioPlayerUtils extends ChangeNotifier {
 
     while (offset < pcmFileData.length - 4) {
       final lengthBytes = pcmFileData.sublist(offset, offset + 4);
-      final length = ByteData.sublistView(pcmFileData, offset + 4, offset + 8).getUint32(0, Endian.little);
+      final length = ByteData.sublistView(Uint8List.fromList(lengthBytes)).getUint32(0, Endian.little);
       offset += 4;
 
       if (offset + length > pcmFileData.length) break;
