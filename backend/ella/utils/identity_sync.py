@@ -113,6 +113,7 @@ def _sync_user_identity_with_authority(
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
     try:
+        hermes_provision_authority(send_snapshot)
         with _IDENTITY_SYNC_OPENER.open(req, timeout=15) as resp:
             response_body = resp.read()
         hermes_provision_authority(send_snapshot)
@@ -264,6 +265,7 @@ async def async_sync_user_identity(omi_uid: str, phone: str = None, email: str =
                 "Authorization": f"Bearer {authority.token}",
             }
             url = f"{authority.base_url}/identity-sync"
+            hermes_provision_authority(send_snapshot)
             resp = await client.post(url, headers=headers, json=payload)
             hermes_provision_authority(send_snapshot)
             if resp.status_code == 404:

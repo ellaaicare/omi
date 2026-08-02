@@ -1164,6 +1164,117 @@ def test_identity_sync_revalidates_after_payload_boundary_before_send(monkeypatc
     assert sends == []
 
 
+@pytest.mark.parametrize(
+    "entrypoint",
+    ("sync", "async_httpx", "async_fallback", "fire_and_forget", "reconcile"),
+)
+@pytest.mark.parametrize("case", DRIFT_CASES)
+def test_identity_sync_entrypoints_revalidate_after_request_construction_before_transport(
+    monkeypatch,
+    entrypoint,
+    case,
+):
+    _configure_distinct_authorities(monkeypatch)
+    side_effects = []
+    boundary = {"payload_built": False, "post_payload_checks": 0, "drifted": False}
+    original_payload = identity_sync._identity_payload
+    original_authority = identity_sync.hermes_provision_authority
+
+    def tracked_payload(*args, **kwargs):
+        payload = original_payload(*args, **kwargs)
+        boundary["payload_built"] = True
+        return payload
+
+    def authority_with_construction_boundary(expected_snapshot=None):
+        if expected_snapshot is not None and boundary["payload_built"] and not boundary["drifted"]:
+            boundary["post_payload_checks"] += 1
+            if boundary["post_payload_checks"] == 2:
+                boundary["drifted"] = True
+                _drift_authority(monkeypatch, case)
+        return original_authority(expected_snapshot)
+
+    def forbidden_open(*_args, **_kwargs):
+        side_effects.append("sync-http")
+        raise AssertionError("post-construction drift must stop urllib transport")
+
+    class ForbiddenAsyncClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            side_effects.append("async-http")
+            raise AssertionError("post-construction drift must stop HTTPX transport")
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            assert daemon is True
+            self.target = target
+
+        def start(self):
+            side_effects.append("thread-executed")
+            self.target()
+
+    monkeypatch.setattr(identity_sync, "_identity_payload", tracked_payload)
+    monkeypatch.setattr(identity_sync, "hermes_provision_authority", authority_with_construction_boundary)
+    monkeypatch.setattr(identity_sync._IDENTITY_SYNC_OPENER, "open", forbidden_open)
+
+    if entrypoint == "sync":
+        result = identity_sync.sync_user_identity(
+            "boundary-user-secret",
+            email="boundary-email-secret@example.test",
+        )
+        assert result["status"] == "error"
+    elif entrypoint == "async_httpx":
+        monkeypatch.setattr(identity_sync.httpx, "AsyncClient", ForbiddenAsyncClient)
+        result = asyncio.run(
+            identity_sync.async_sync_user_identity(
+                "boundary-user-secret",
+                email="boundary-email-secret@example.test",
+            )
+        )
+        assert result["status"] == "error"
+    elif entrypoint == "async_fallback":
+        monkeypatch.setattr(identity_sync, "httpx", None)
+        result = asyncio.run(
+            identity_sync.async_sync_user_identity(
+                "boundary-user-secret",
+                email="boundary-email-secret@example.test",
+            )
+        )
+        assert result["status"] == "error"
+    elif entrypoint == "fire_and_forget":
+        monkeypatch.setattr(identity_sync.threading, "Thread", ImmediateThread)
+        identity_sync.sync_user_identity_fire_and_forget(
+            "boundary-user-secret",
+            email="boundary-email-secret@example.test",
+        )
+    else:
+        monkeypatch.setattr(identity_sync, "_load_state", lambda: {"last_check": "2026-01-01T00:00:00Z"})
+        monkeypatch.setattr(
+            identity_sync,
+            "_get_changed_users",
+            lambda _last_check: [
+                {
+                    "omi_uid": "boundary-user-secret",
+                    "email": "boundary-email-secret@example.test",
+                    "identities": {},
+                    "updated_at": "2026-01-02T00:00:00Z",
+                }
+            ],
+        )
+        monkeypatch.setattr(identity_sync, "_save_state", lambda _state: side_effects.append("state"))
+        identity_sync.reconcile()
+
+    assert boundary == {"payload_built": True, "post_payload_checks": 2, "drifted": True}
+    assert side_effects == (["thread-executed"] if entrypoint == "fire_and_forget" else [])
+
+
 @pytest.mark.parametrize("entrypoint", ("sync", "async"))
 @pytest.mark.parametrize("case", DRIFT_CASES)
 def test_identity_sync_detects_inflight_http_drift_before_later_effects(monkeypatch, entrypoint, case):
