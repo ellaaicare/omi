@@ -1,5 +1,33 @@
 import Foundation
 
+final class GuardianModeAvailability {
+    static let shared = GuardianModeAvailability()
+
+    private let leaseGate = GuardianWorkLeaseGate()
+
+    private init() {}
+
+    var isEnabled: Bool {
+        leaseGate.isEnabled
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        leaseGate.setEnabled(enabled)
+    }
+
+    func captureLease() -> GuardianWorkLease? {
+        leaseGate.captureLease()
+    }
+
+    func isCurrent(_ lease: GuardianWorkLease) -> Bool {
+        leaseGate.isCurrent(lease)
+    }
+
+    func performIfCurrent(_ lease: GuardianWorkLease, _ sideEffect: () -> Bool) -> Bool {
+        leaseGate.performIfCurrent(lease, sideEffect)
+    }
+}
+
 struct GuardianWorkLease: Equatable {
     fileprivate let generation: UInt64
 }

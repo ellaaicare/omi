@@ -2,34 +2,6 @@ import Foundation
 import AVFoundation
 import Combine
 
-final class GuardianModeAvailability {
-    static let shared = GuardianModeAvailability()
-
-    private let leaseGate = GuardianWorkLeaseGate()
-
-    private init() {}
-
-    var isEnabled: Bool {
-        leaseGate.isEnabled
-    }
-
-    func setEnabled(_ enabled: Bool) {
-        leaseGate.setEnabled(enabled)
-    }
-
-    func captureLease() -> GuardianWorkLease? {
-        leaseGate.captureLease()
-    }
-
-    func isCurrent(_ lease: GuardianWorkLease) -> Bool {
-        leaseGate.isCurrent(lease)
-    }
-
-    func performIfCurrent(_ lease: GuardianWorkLease, _ sideEffect: () -> Bool) -> Bool {
-        leaseGate.performIfCurrent(lease, sideEffect)
-    }
-}
-
 /// GuardianModeManager - Progressive Buffering for 99.9% Reliability
 ///
 /// Architecture:
@@ -298,9 +270,15 @@ class GuardianModeManager: NSObject {
         traceId: String? = nil,
         triggerType: String? = nil,
         durationMs: Int = 0,
-        metadata: [String: Any]? = nil
+        metadata: [String: Any]? = nil,
+        validatedPollLease: GuardianWorkLease? = nil,
+        expectedUID: String? = nil
     ) {
-        guard GuardianModeAvailability.shared.isEnabled else { return }
+        // Poll responses call this while performIfCurrent holds the lease gate.
+        // Avoid reacquiring that lock; all other callers still fail closed here.
+        if validatedPollLease == nil {
+            guard GuardianModeAvailability.shared.isEnabled else { return }
+        }
         let session = AVAudioSession.sharedInstance()
         guard let port = session.currentRoute.outputs.first else { return }
 
@@ -312,6 +290,7 @@ class GuardianModeManager: NSObject {
                    ?? UserDefaults.standard.string(forKey: "uid")
                    ?? "unknown"
         guard uid != "unknown" else { return }
+        if let expectedUID, uid != expectedUID { return }
 
         let backendURL = GuardianModePollingService.shared.backendURL
         guard let url = URL(string: "\(backendURL)/v1/ella/guardian/playback-event") else { return }
@@ -358,13 +337,20 @@ class GuardianModeManager: NSObject {
         eventId: String,
         traceId: String? = nil,
         triggerType: String? = nil,
-        metadata: [String: Any]? = nil
+        metadata: [String: Any]? = nil,
+        pollLease: GuardianWorkLease? = nil
     ) {
-        guard GuardianModeAvailability.shared.isEnabled else { return }
         // Increment sequence counter on queue for thread-safety
         queue.async { [weak self] in
             guard let self = self else { return }
-            guard let lease = GuardianModeAvailability.shared.captureLease() else { return }
+            let lease: GuardianWorkLease
+            if let pollLease {
+                lease = pollLease
+                guard GuardianModeAvailability.shared.isCurrent(lease) else { return }
+            } else {
+                guard let capturedLease = GuardianModeAvailability.shared.captureLease() else { return }
+                lease = capturedLease
+            }
             self.injectionSequence += 1
             self.totalInjections += 1
             let seq = self.injectionSequence

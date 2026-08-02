@@ -72,9 +72,11 @@ void main() {
     final appRoot = _appRoot();
     final manager = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModeManager.swift').readAsStringSync();
     final polling = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianModePollingService.swift').readAsStringSync();
+    final nativePolicy = File('${appRoot.path}/ios/Runner/GuardianMode/GuardianNativePolicy.swift').readAsStringSync();
     final appDelegate = File('${appRoot.path}/ios/Runner/AppDelegate.swift').readAsStringSync();
 
-    expect(manager, contains('private let leaseGate = GuardianWorkLeaseGate()'));
+    expect(nativePolicy, contains('private let leaseGate = GuardianWorkLeaseGate()'));
+    expect(nativePolicy, contains('func performIfCurrent(_ lease: GuardianWorkLease'));
     expect(manager, contains('private var injectionTasks: [UUID: Task<Void, Never>]'));
     expect(manager, contains('performIfCurrent(lease)'));
     expect(manager, contains('func configureAvailability(_ enabled: Bool)'));
@@ -90,11 +92,12 @@ void main() {
       ),
       lessThan(manager.indexOf('URLSession.shared.dataTask', manager.indexOf('func reportPlaybackEvent'))),
     );
-    expect(
-      polling.indexOf('guard GuardianModeAvailability.shared.isEnabled else'),
-      lessThan(polling.indexOf('let endpoint =')),
-    );
-    expect(polling, contains('guard isPolling, GuardianModeAvailability.shared.isEnabled else'));
+    expect(polling, contains('private var inFlightPoll: InFlightPoll?'));
+    expect(polling, contains('inFlightPoll?.task.cancel()'));
+    expect(polling, contains('let lease = GuardianModeAvailability.shared.captureLease()'));
+    expect(polling, contains('let uid = uidProvider()'));
+    expect(polling, contains('GuardianModeAvailability.shared.performIfCurrent(lease)'));
+    expect(polling, contains('guard pollingIsActive(), uidProvider() == uid else'));
     expect(appDelegate, contains('case "configureAvailability":'));
     expect(appDelegate, contains('case "clearNotificationResidue":'));
     expect(appDelegate, contains('reason == .oldDeviceUnavailable && GuardianModeAvailability.shared.isEnabled'));

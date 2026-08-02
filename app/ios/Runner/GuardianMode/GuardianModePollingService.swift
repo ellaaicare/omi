@@ -1,22 +1,15 @@
 import Foundation
+#if !GUARDIAN_NATIVE_POLICY_TESTS
 import AVFoundation
+#endif
 
-class GuardianModePollingService {
+final class GuardianModePollingService: @unchecked Sendable {
+#if !GUARDIAN_NATIVE_POLICY_TESTS
     static let shared = GuardianModePollingService()
 
     // Strong reference — AVSpeechSynthesizer must outlive the speak call
     private let speechSynthesizer = AVSpeechSynthesizer()
-
-    private init() {}
-
-    private var pollTimer: DispatchSourceTimer?
-
-    private let session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10.0
-        config.timeoutIntervalForResource = 10.0
-        return URLSession(configuration: config)
-    }()
+#endif
 
     var pollInterval: TimeInterval = 3.0
     var backendURL: String = "https://api.ella-ai-care.com"
@@ -80,8 +73,53 @@ class GuardianModePollingService {
         }
     }
 
+    typealias PollTransport = (URLRequest) async throws -> (Data, URLResponse)
+    typealias UIDProvider = () -> String?
+    typealias ResponseHandler = (PollResponse, GuardianWorkLease, String) -> Void
+
+    private struct InFlightPoll {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
+    private let pollStateQueue = DispatchQueue(label: "com.ella.guardianmode.polling")
+    private let transport: PollTransport
+    private let uidProvider: UIDProvider
+    private let responseHandler: ResponseHandler?
+    private let schedulesTimer: Bool
+    private var pollTimer: DispatchSourceTimer?
+    private var inFlightPoll: InFlightPoll?
     private var isPolling = false
     private var consecutiveErrors: Int = 0
+
+#if !GUARDIAN_NATIVE_POLICY_TESTS
+    private init() {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 10.0
+        config.timeoutIntervalForResource = 10.0
+        let session = URLSession(configuration: config)
+        transport = { request in
+            try await session.data(for: request)
+        }
+        uidProvider = Self.currentUID
+        responseHandler = nil
+        schedulesTimer = true
+    }
+#endif
+
+    init(
+        backendURL: String = "https://api.ella-ai-care.com",
+        transport: @escaping PollTransport,
+        uidProvider: @escaping UIDProvider,
+        schedulesTimer: Bool = false,
+        responseHandler: @escaping ResponseHandler
+    ) {
+        self.backendURL = backendURL
+        self.transport = transport
+        self.uidProvider = uidProvider
+        self.schedulesTimer = schedulesTimer
+        self.responseHandler = responseHandler
+    }
 
     // MARK: - Public Methods
 
@@ -90,37 +128,45 @@ class GuardianModePollingService {
             stopPolling()
             return
         }
-        guard !isPolling else {
+
+        let started = pollStateQueue.sync {
+            guard !isPolling else { return false }
+            isPolling = true
+            consecutiveErrors = 0
+            if schedulesTimer {
+                createPollTimerLocked()
+            }
+            return true
+        }
+        guard started else {
             NSLog("GuardianPolling: Already polling")
             return
         }
 
-        isPolling = true
-        consecutiveErrors = 0
         NSLog("GuardianPolling: Starting poll timer (interval: \(pollInterval)s)")
-
-        createPollTimer()
     }
 
     func stopPolling() {
+#if !GUARDIAN_NATIVE_POLICY_TESTS
         speechSynthesizer.stopSpeaking(at: .immediate)
-        guard isPolling else { return }
+#endif
 
-        NSLog("GuardianPolling: Stopping poll timer")
+        let stopped = pollStateQueue.sync {
+            let wasPolling = isPolling || pollTimer != nil || inFlightPoll != nil
+            isPolling = false
+            pollTimer?.cancel()
+            pollTimer = nil
+            inFlightPoll?.task.cancel()
+            inFlightPoll = nil
+            return wasPolling
+        }
 
-        pollTimer?.cancel()
-        pollTimer = nil
-        isPolling = false
+        if stopped {
+            NSLog("GuardianPolling: Stopping poll timer")
+        }
     }
 
-    func pollForNewAudio() async throws -> PollResponse? {
-        guard GuardianModeAvailability.shared.isEnabled else {
-            throw NSError(domain: "GuardianPolling", code: 0, userInfo: [
-                NSLocalizedDescriptionKey: "Guardian is unavailable in this build"
-            ])
-        }
-        // Flutter shared_preferences stores with "flutter." prefix on iOS
-        let uid = UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid") ?? "unknown"
+    private func pollForNewAudio(uid: String) async throws -> PollResponse? {
         let endpoint = "\(backendURL)/v1/ella/guardian/next-audio?uid=\(uid)"
 
         guard let url = URL(string: endpoint) else {
@@ -129,7 +175,7 @@ class GuardianModePollingService {
             ])
         }
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await transport(URLRequest(url: url))
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "GuardianPolling", code: 2, userInfo: [
@@ -153,10 +199,15 @@ class GuardianModePollingService {
         return nil
     }
 
-    // MARK: - On-Device TTS
+    // MARK: - Private Methods
+
+#if !GUARDIAN_NATIVE_POLICY_TESTS
+    private static func currentUID() -> String? {
+        // Flutter shared_preferences stores with "flutter." prefix on iOS.
+        UserDefaults.standard.string(forKey: "flutter.uid") ?? UserDefaults.standard.string(forKey: "uid")
+    }
 
     private func speakText(_ text: String) {
-        guard GuardianModeAvailability.shared.isEnabled else { return }
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
@@ -164,84 +215,133 @@ class GuardianModePollingService {
         speechSynthesizer.speak(utterance)
         NSLog("TTS_SPEAK: \(text.prefix(80))")
     }
+#endif
 
-    // MARK: - Private Methods
-
-    private func createPollTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .background))
+    private func createPollTimerLocked() {
+        let timer = DispatchSource.makeTimerSource(queue: pollStateQueue)
 
         timer.schedule(deadline: .now(), repeating: pollInterval)
 
         timer.setEventHandler { [weak self] in
-            Task {
-                await self?.executePoll()
-            }
+            self?.schedulePollLocked()
         }
 
-        timer.resume()
         pollTimer = timer
+        timer.resume()
     }
 
-    private func executePoll() async {
-        guard isPolling, GuardianModeAvailability.shared.isEnabled else {
-            stopPolling()
-            return
+    func schedulePollNow() {
+        pollStateQueue.async { [weak self] in
+            self?.schedulePollLocked()
         }
+    }
+
+    private func schedulePollLocked() {
+        guard isPolling, inFlightPoll == nil else { return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            await self?.executePoll()
+            self?.pollStateQueue.async { [weak self] in
+                guard self?.inFlightPoll?.id == id else { return }
+                self?.inFlightPoll = nil
+            }
+        }
+        inFlightPoll = InFlightPoll(id: id, task: task)
+    }
+
+    func executePoll() async {
+        guard pollingIsActive(),
+              let lease = GuardianModeAvailability.shared.captureLease(),
+              let uid = uidProvider(),
+              !uid.isEmpty,
+              uid != "unknown" else { return }
 
         do {
-            if let result = try await pollForNewAudio() {
-                guard GuardianModeAvailability.shared.isEnabled else { return }
-                consecutiveErrors = 0
-                let metadata = result.metadata?.dict ?? [:]
-                let traceId = result.traceId
-                    ?? metadata["trace_id"] as? String
-                    ?? metadata["traceId"] as? String
-                let eventId = result.id ?? traceId ?? "unknown"
+            guard let result = try await pollForNewAudio(uid: uid), !Task.isCancelled else { return }
 
-                if result.priority == "debug" {
-                    // Route to debug buffer — never plays audio
-                    DebugEventBuffer.shared.add(
-                        id: result.id,
-                        triggerType: result.triggerType ?? "unknown",
-                        message: result.message ?? "",
-                        metadata: metadata
-                    )
-                } else if let urlString = result.url, !urlString.isEmpty,
-                          let audioURL = URL(string: urlString) {
-                    NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
-                    // Inject via GuardianModeManager (handles pre-download + retry)
-                    GuardianModeManager.shared.injectRemoteAudio(
-                        audioURL: audioURL,
-                        eventId: eventId,
-                        traceId: traceId,
-                        triggerType: result.triggerType,
-                        metadata: metadata
-                    )
-                } else if let message = result.message, !message.isEmpty {
-                    // Text-only (consolidated) — use on-device TTS
-                    NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
-                    var ttsMetadata = metadata
-                    ttsMetadata["playback_source"] = "on_device_tts"
-                    GuardianModeManager.shared.reportPlaybackEvent(
-                        eventType: "started",
-                        queueItemId: eventId,
-                        traceId: traceId,
-                        triggerType: result.triggerType,
-                        metadata: ttsMetadata
-                    )
-                    speakText(message)
-                }
+            let released = GuardianModeAvailability.shared.performIfCurrent(lease) {
+                guard pollingIsActive(), uidProvider() == uid else { return false }
+                releaseCurrentResponse(result, lease: lease, uid: uid)
+                return true
+            }
+            guard released else { return }
+            pollStateQueue.async { [weak self] in
+                self?.consecutiveErrors = 0
             }
         } catch {
-            consecutiveErrors += 1
-            if consecutiveErrors <= 3 || consecutiveErrors % 10 == 0 {
-                NSLog("GuardianPolling: Poll error (\(consecutiveErrors)x): \(error.localizedDescription)")
+            guard !Task.isCancelled else { return }
+            pollStateQueue.async { [weak self] in
+                guard let self, self.isPolling else { return }
+                self.consecutiveErrors += 1
+                if self.consecutiveErrors <= 3 || self.consecutiveErrors % 10 == 0 {
+                    NSLog("GuardianPolling: Poll error (\(self.consecutiveErrors)x): \(error.localizedDescription)")
+                }
             }
         }
 
         // Periodic cache cleanup every ~60 polls (5 minutes at 5s interval)
         if Int.random(in: 0..<60) == 0 {
-            GuardianModeManager.shared.cleanCache()
+            _ = GuardianModeAvailability.shared.performIfCurrent(lease) {
+                guard pollingIsActive(), uidProvider() == uid else { return false }
+#if !GUARDIAN_NATIVE_POLICY_TESTS
+                GuardianModeManager.shared.cleanCache()
+#endif
+                return true
+            }
         }
+    }
+
+    private func pollingIsActive() -> Bool {
+        pollStateQueue.sync { isPolling }
+    }
+
+    private func releaseCurrentResponse(_ result: PollResponse, lease: GuardianWorkLease, uid: String) {
+        if let responseHandler {
+            responseHandler(result, lease, uid)
+            return
+        }
+
+#if !GUARDIAN_NATIVE_POLICY_TESTS
+        let metadata = result.metadata?.dict ?? [:]
+        let traceId = result.traceId
+            ?? metadata["trace_id"] as? String
+            ?? metadata["traceId"] as? String
+        let eventId = result.id ?? traceId ?? "unknown"
+
+        if result.priority == "debug" {
+            // Route to debug buffer — never plays audio.
+            DebugEventBuffer.shared.add(
+                id: result.id,
+                triggerType: result.triggerType ?? "unknown",
+                message: result.message ?? "",
+                metadata: metadata
+            )
+        } else if let urlString = result.url, !urlString.isEmpty,
+                  let audioURL = URL(string: urlString) {
+            NSLog("POLL_RECEIVED(\(eventId)) ts=\(Date().timeIntervalSince1970)")
+            GuardianModeManager.shared.injectRemoteAudio(
+                audioURL: audioURL,
+                eventId: eventId,
+                traceId: traceId,
+                triggerType: result.triggerType,
+                metadata: metadata,
+                pollLease: lease
+            )
+        } else if let message = result.message, !message.isEmpty {
+            NSLog("POLL_TTS(\(eventId)) message=\(message.prefix(50))")
+            var ttsMetadata = metadata
+            ttsMetadata["playback_source"] = "on_device_tts"
+            GuardianModeManager.shared.reportPlaybackEvent(
+                eventType: "started",
+                queueItemId: eventId,
+                traceId: traceId,
+                triggerType: result.triggerType,
+                metadata: ttsMetadata,
+                validatedPollLease: lease,
+                expectedUID: uid
+            )
+            speakText(message)
+        }
+#endif
     }
 }

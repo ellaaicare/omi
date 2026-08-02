@@ -108,8 +108,9 @@ jobs:
         working-directory: .
         run: |
           set -euo pipefail
-          swiftc \
+          swiftc -warnings-as-errors -D GUARDIAN_NATIVE_POLICY_TESTS \
             app/ios/Runner/GuardianMode/GuardianNativePolicy.swift \
+            app/ios/Runner/GuardianMode/GuardianModePollingService.swift \
             app/ios/Tests/GuardianNativePolicyTests.swift \
             -o "$RUNNER_TEMP/guardian-native-policy-tests"
           "$RUNNER_TEMP/guardian-native-policy-tests"

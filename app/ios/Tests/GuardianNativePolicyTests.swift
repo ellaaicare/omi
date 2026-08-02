@@ -18,6 +18,236 @@ private func encodedDefines(_ values: [String]) -> String {
     values.map { Data($0.utf8).base64EncodedString() }.joined(separator: ",")
 }
 
+private final class LockedUID {
+    private let lock = NSLock()
+    private var value: String
+
+    init(_ value: String) {
+        self.value = value
+    }
+
+    func get() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ value: String) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+}
+
+private final class ControlledPollTransport {
+    let started = DispatchSemaphore(value: 0)
+    let cancelled = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        started.signal()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                self.continuation = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            self.cancelled.signal()
+        }
+    }
+
+    func complete() throws {
+        let url = URL(string: "https://api.ella-ai-care.com/v1/ella/guardian/next-audio")!
+        guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) else {
+            throw TestFailure.failed("could not create poll response")
+        }
+        let data = Data(#"{"url":"https://audio.example/account-a.mp3","id":"guardian-a","priority":"normal"}"#.utf8)
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        guard let continuation else { throw TestFailure.failed("poll transport was not waiting") }
+        continuation.resume(returning: (data, response))
+    }
+}
+
+private final class PollReleaseRecorder {
+    private let lock = NSLock()
+    private(set) var releasedUIDs: [String] = []
+
+    func record(uid: String) {
+        lock.lock()
+        releasedUIDs.append(uid)
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return releasedUIDs.count
+    }
+}
+
+private func makePollingService(
+    transport: ControlledPollTransport,
+    uid: LockedUID,
+    releases: PollReleaseRecorder
+) -> GuardianModePollingService {
+    GuardianModePollingService(
+        transport: transport.send,
+        uidProvider: uid.get,
+        responseHandler: { _, _, releasedUID in
+            releases.record(uid: releasedUID)
+        }
+    )
+}
+
+private func testProductionCurrentPollReleasesExactlyOnce() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    let poll = Task { await service.executePoll() }
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "current production poll did not start")
+    try transport.complete()
+    await poll.value
+
+    try expect(releases.count == 1, "current production poll did not release exactly once")
+    service.stopPolling()
+    availability.setEnabled(false)
+}
+
+private func testProductionPollResponseCannotCrossAccountReenable() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    let accountAPoll = Task { await service.executePoll() }
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "account-A production poll did not start")
+
+    availability.setEnabled(false)
+    service.stopPolling()
+    uid.set("uid-b")
+    availability.setEnabled(true)
+    service.startPolling()
+
+    try transport.complete()
+    await accountAPoll.value
+
+    try expect(releases.count == 0, "STALE_RESPONSE_RELEASED_UNDER_NEW_GENERATION")
+    service.stopPolling()
+    availability.setEnabled(false)
+}
+
+private func testProductionPollResponseCannotReleaseAfterDisable() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    let poll = Task { await service.executePoll() }
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "disable-boundary poll did not start")
+
+    availability.setEnabled(false)
+    service.stopPolling()
+    try transport.complete()
+    await poll.value
+
+    try expect(releases.count == 0, "in-flight response released after Guardian disable")
+    availability.setEnabled(false)
+}
+
+private func testProductionPollResponseCannotReleaseAfterSameUIDReenable() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    let oldGenerationPoll = Task { await service.executePoll() }
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "re-enable-boundary poll did not start")
+
+    availability.setEnabled(false)
+    service.stopPolling()
+    availability.setEnabled(true)
+    service.startPolling()
+    try transport.complete()
+    await oldGenerationPoll.value
+
+    try expect(releases.count == 0, "old generation released after same-UID re-enable")
+    service.stopPolling()
+    availability.setEnabled(false)
+}
+
+private func testProductionPollResponseCannotCrossUIDWithoutGenerationChange() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    let accountAPoll = Task { await service.executePoll() }
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "UID-drift poll did not start")
+
+    uid.set("uid-b")
+    try transport.complete()
+    await accountAPoll.value
+
+    try expect(releases.count == 0, "account-A response released after UID-only drift")
+    service.stopPolling()
+    availability.setEnabled(false)
+}
+
+private func testStopCancelsRetainedProductionPollTask() async throws {
+    let availability = GuardianModeAvailability.shared
+    availability.setEnabled(false)
+    let uid = LockedUID("uid-a")
+    let transport = ControlledPollTransport()
+    let releases = PollReleaseRecorder()
+    let service = makePollingService(transport: transport, uid: uid, releases: releases)
+
+    availability.setEnabled(true)
+    service.startPolling()
+    service.schedulePollNow()
+    try expect(transport.started.wait(timeout: .now() + 2) == .success, "tracked production poll did not start")
+
+    availability.setEnabled(false)
+    service.stopPolling()
+    try expect(transport.cancelled.wait(timeout: .now() + 2) == .success, "stop did not cancel the retained poll task")
+    uid.set("uid-b")
+    availability.setEnabled(true)
+    service.startPolling()
+    try transport.complete()
+    try await Task.sleep(nanoseconds: 50_000_000)
+
+    try expect(releases.count == 0, "cancelled account-A poll released under account B")
+    service.stopPolling()
+    availability.setEnabled(false)
+}
+
 private func testDisableDuringLoadCannotReplay() throws {
     let gate = GuardianWorkLeaseGate()
     gate.setEnabled(true)
@@ -153,7 +383,13 @@ private func testAccountSwitchResidueClassification() throws {
 
 @main
 private enum GuardianNativePolicyTests {
-    static func main() throws {
+    static func main() async throws {
+        try await testProductionCurrentPollReleasesExactlyOnce()
+        try await testProductionPollResponseCannotCrossAccountReenable()
+        try await testProductionPollResponseCannotReleaseAfterDisable()
+        try await testProductionPollResponseCannotReleaseAfterSameUIDReenable()
+        try await testProductionPollResponseCannotCrossUIDWithoutGenerationChange()
+        try await testStopCancelsRetainedProductionPollTask()
         try testDisableDuringLoadCannotReplay()
         try testDisableBeforeInsertAndAccountGenerationChange()
         try testProductionNotificationBoundary()
