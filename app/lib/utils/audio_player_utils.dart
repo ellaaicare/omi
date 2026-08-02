@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/wals.dart';
 import 'package:omi/utils/logger.dart';
+import 'package:omi/utils/wal_file_manager.dart';
 
 class AudioPlayerUtils extends ChangeNotifier {
   // Singleton pattern
@@ -208,7 +209,7 @@ class AudioPlayerUtils extends ChangeNotifier {
 
   Future<String?> _getAudioFilePath(Wal wal) async {
     if (wal.filePath != null && wal.filePath!.isNotEmpty) {
-      final fullPath = await Wal.getFilePath(wal.filePath);
+      final fullPath = await WalFileManager.resolveWalFilePath(wal);
       if (fullPath != null) {
         final file = File(fullPath);
         if (file.existsSync()) return fullPath;

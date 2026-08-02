@@ -2,282 +2,373 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/services/wals.dart';
+import 'package:omi/services/wals/wal_owner_authority.dart';
 import 'package:omi/utils/logger.dart';
 
 class WalFileManager {
   static const String _walFileName = 'wals.json';
   static const String _walBackupFileName = 'wals_backup.json';
   static const String _legacyPendingFilesKey = 'flash_page_pending_uploads';
-  static const String _migrationCompletedKey = 'limitless_wal_migration_v1';
+  static const String _migrationCompletedPreference = 'limitless_wal_owner_quarantine_v2';
+  static const String _accountsDirectoryName = 'ella_wal_accounts';
+  static const String _quarantineDirectoryName = 'ella_wal_quarantine';
 
-  static File? _walFile;
-  static File? _walBackupFile;
+  static Directory? _baseDirectory;
+  static WalOwner? _activeOwner;
+  static Future<void>? _initialization;
 
-  static Future<void> init() async {
-    final directory =
-        Platform.isMacOS ? await getApplicationSupportDirectory() : await getApplicationDocumentsDirectory();
-    _walFile = File('${directory.path}/$_walFileName');
-    _walBackupFile = File('${directory.path}/$_walBackupFileName');
+  static Directory get _accountsDirectory => Directory(p.join(_baseDirectory!.path, _accountsDirectoryName));
+  static Directory get _quarantineDirectory => Directory(p.join(_baseDirectory!.path, _quarantineDirectoryName));
+  static Directory? get _activeDirectory =>
+      _activeOwner == null ? null : Directory(p.join(_accountsDirectory.path, _activeOwner!.storageNamespace));
+
+  static File? get _activeWalFile =>
+      _activeDirectory == null ? null : File(p.join(_activeDirectory!.path, _walFileName));
+  static File? get _activeWalBackupFile =>
+      _activeDirectory == null ? null : File(p.join(_activeDirectory!.path, _walBackupFileName));
+  static File get _quarantineWalFile => File(p.join(_quarantineDirectory.path, _walFileName));
+
+  static Future<void> init({Directory? baseDirectory, WalOwner? activeOwner}) async {
+    while (_initialization != null) {
+      await _initialization;
+    }
+    final initialization = _initialize(baseDirectory: baseDirectory, activeOwner: activeOwner);
+    _initialization = initialization;
+    try {
+      await initialization;
+    } finally {
+      if (identical(_initialization, initialization)) _initialization = null;
+    }
   }
 
-  static Future<List<Wal>> loadWals() async {
-    if (_walFile == null) {
-      await init();
-    }
+  static Future<void> _initialize({Directory? baseDirectory, WalOwner? activeOwner}) async {
+    _baseDirectory = baseDirectory ??
+        _baseDirectory ??
+        (Platform.isMacOS ? await getApplicationSupportDirectory() : await getApplicationDocumentsDirectory());
+    _activeOwner = activeOwner ?? WalOwnerAuthority.currentOwner();
+    await _accountsDirectory.create(recursive: true);
+    await _quarantineDirectory.create(recursive: true);
+    if (_activeDirectory != null) await _activeDirectory!.create(recursive: true);
+    await _quarantineLegacyRootManifest();
+    await _quarantineLegacyRootAudioFiles();
+  }
 
-    if (_walFile == null || !_walFile!.existsSync()) {
-      Logger.debug('WAL file does not exist, returning empty list');
-      return [];
-    }
+  @visibleForTesting
+  static void resetForTesting() {
+    _baseDirectory = null;
+    _activeOwner = null;
+    _initialization = null;
+  }
 
-    final content = await _walFile!.readAsString();
-    if (content.isEmpty) {
-      Logger.debug('WAL file is empty, returning empty list');
-      return [];
+  static Future<List<Wal>> loadWals({WalOwner? activeOwner}) async {
+    await init(activeOwner: activeOwner);
+    final active = await _readWals(_activeWalFile);
+    final quarantine = await _readWals(_quarantineWalFile);
+    await SharedPreferencesUtil().saveInt('ellaWalQuarantineCount', quarantine.length);
+    final valid = <Wal>[];
+    for (final wal in active) {
+      if (_activeOwner != null && wal.owner != null && wal.owner!.matches(_activeOwner!)) {
+        valid.add(wal);
+      } else {
+        await quarantineWal(wal, reason: 'owner_manifest_mismatch', persist: false);
+        quarantine.add(wal);
+      }
     }
-
-    final jsonData = jsonDecode(content);
-    if (jsonData is! Map<String, dynamic> || jsonData['wals'] is! List) {
-      Logger.debug('Invalid WAL file format, returning empty list');
-      return [];
+    if (valid.length != active.length) {
+      await _writeWals(_activeWalFile, _activeWalBackupFile, valid);
+      await _writeWals(_quarantineWalFile, null, quarantine);
     }
-
-    final walsList = jsonData['wals'] as List;
-    return Wal.fromJsonList(walsList);
+    return valid;
   }
 
   static Future<bool> saveWals(List<Wal> wals) async {
-    if (_walFile == null) {
-      await init();
+    await init(activeOwner: _activeOwner);
+    final active = <Wal>[];
+    final quarantine = await _readWals(_quarantineWalFile);
+    for (final wal in wals) {
+      if (wal.status != WalStatus.quarantined &&
+          _activeOwner != null &&
+          wal.owner != null &&
+          wal.owner!.matches(_activeOwner!)) {
+        active.add(wal);
+      } else {
+        if (wal.status != WalStatus.quarantined) {
+          await quarantineWal(wal,
+              reason: wal.owner == null ? 'legacy_unknown_owner' : 'inactive_owner', persist: false);
+        }
+        quarantine.removeWhere((candidate) => candidate.id == wal.id && candidate.filePath == wal.filePath);
+        quarantine.add(wal);
+      }
     }
-
-    if (_walFile == null) {
-      Logger.debug('WAL file is null, cannot save');
-      return false;
-    }
-
-    await _createBackup();
-
-    final jsonData = {
-      'version': 1,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-      'wals': wals.map((wal) => wal.toJson()).toList(),
-    };
-
-    final jsonString = jsonEncode(jsonData);
-    await _walFile!.writeAsString(jsonString);
-
-    Logger.debug('Successfully saved ${wals.length} WALs to file');
+    await _writeWals(_activeWalFile, _activeWalBackupFile, active);
+    await _writeWals(_quarantineWalFile, null, quarantine);
     return true;
   }
 
-  static Future<void> _createBackup() async {
-    if (_walFile != null && _walFile!.existsSync() && _walBackupFile != null) {
-      await _walFile!.copy(_walBackupFile!.path);
+  static Future<String?> resolveWalFilePath(Wal wal) async {
+    if (_baseDirectory == null) await init(activeOwner: _activeOwner);
+    if (wal.filePath == null || wal.filePath!.isEmpty) return null;
+    final filename = p.basename(wal.filePath!);
+    if (wal.status == WalStatus.quarantined) return p.join(_quarantineDirectory.path, filename);
+    if (wal.owner != null) return p.join(_accountsDirectory.path, wal.owner!.storageNamespace, filename);
+    return p.join(_baseDirectory!.path, filename);
+  }
+
+  static Future<void> bindExternalWal(Wal wal, {WalOwner? owner}) async {
+    await init(activeOwner: owner);
+    final activeOwner = owner ?? _activeOwner;
+    if (activeOwner == null) {
+      await quarantineWal(wal, reason: 'capture_without_owner');
+      return;
+    }
+
+    final sourcePath = wal.filePath;
+    wal.owner = activeOwner;
+    wal.quarantineReason = null;
+    if (wal.status == WalStatus.quarantined) wal.status = WalStatus.miss;
+    if (sourcePath == null || sourcePath.isEmpty) return;
+    final source = File(sourcePath);
+    final fallbackSource = File(p.join(_baseDirectory!.path, p.basename(sourcePath)));
+    final actualSource = p.isAbsolute(sourcePath) && await source.exists()
+        ? source
+        : await fallbackSource.exists()
+            ? fallbackSource
+            : null;
+    final destination = File(p.join(_accountsDirectory.path, activeOwner.storageNamespace, p.basename(sourcePath)));
+    await destination.parent.create(recursive: true);
+    if (actualSource != null && actualSource.path != destination.path) await actualSource.rename(destination.path);
+    wal.filePath = destination.path;
+  }
+
+  static Future<void> quarantineWal(
+    Wal wal, {
+    required String reason,
+    bool persist = true,
+  }) async {
+    if (_baseDirectory == null) await init(activeOwner: _activeOwner);
+    final rawPath = wal.filePath;
+    final rawFile = rawPath == null || rawPath.isEmpty ? null : File(rawPath);
+    final previousPath = rawFile != null && p.isAbsolute(rawPath!) && await rawFile.exists()
+        ? rawFile.path
+        : await resolveWalFilePath(wal);
+    wal.status = WalStatus.quarantined;
+    wal.quarantineReason = reason;
+    if (wal.filePath != null && wal.filePath!.isNotEmpty) {
+      final source = File(previousPath ?? wal.filePath!);
+      final destination = p.dirname(source.path) == _quarantineDirectory.path
+          ? source
+          : await _uniqueDestination(p.basename(wal.filePath!));
+      if (await source.exists() && source.path != destination.path) {
+        await destination.parent.create(recursive: true);
+        await source.rename(destination.path);
+      }
+      wal.filePath = destination.path;
+    }
+    if (persist) {
+      final current = await _readWals(_quarantineWalFile);
+      current.removeWhere((candidate) => candidate.id == wal.id);
+      current.add(wal);
+      await _writeWals(_quarantineWalFile, null, current);
     }
   }
 
-  /// Load WALs from backup file
-  static Future<List<Wal>> _loadFromBackup() async {
-    if (_walBackupFile == null || !_walBackupFile!.existsSync()) {
+  static Future<int> quarantineUnownedFiles() async {
+    await init(activeOwner: _activeOwner);
+    await _quarantineLegacyRootManifest();
+    return migrateLegacyLimitlessFiles(await loadWals(activeOwner: _activeOwner));
+  }
+
+  static Future<void> _quarantineLegacyRootManifest() async {
+    if (_baseDirectory == null) return;
+    final legacyFile = File(p.join(_baseDirectory!.path, _walFileName));
+    final legacyBackup = File(p.join(_baseDirectory!.path, _walBackupFileName));
+    if (!legacyFile.existsSync() && !legacyBackup.existsSync()) return;
+
+    final quarantine = await _readWals(_quarantineWalFile);
+    for (final wal in await _readWals(legacyFile)) {
+      await quarantineWal(wal, reason: 'legacy_unknown_owner', persist: false);
+      quarantine.removeWhere((candidate) => candidate.id == wal.id);
+      quarantine.add(wal);
+    }
+    await _writeWals(_quarantineWalFile, null, quarantine);
+
+    final stamp = DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (legacyFile.existsSync()) {
+      await legacyFile.rename(p.join(_quarantineDirectory.path, 'legacy_wals_$stamp.json'));
+    }
+    if (legacyBackup.existsSync()) {
+      await legacyBackup.rename(p.join(_quarantineDirectory.path, 'legacy_wals_backup_$stamp.json'));
+    }
+  }
+
+  static Future<void> _quarantineLegacyRootAudioFiles() async {
+    if (_baseDirectory == null || !_baseDirectory!.existsSync()) return;
+    final quarantine = await _readWals(_quarantineWalFile);
+    var changed = false;
+    await for (final entity in _baseDirectory!.list(followLinks: false)) {
+      if (entity is! File || !RegExp(r'^audio_.*\.bin$').hasMatch(p.basename(entity.path))) continue;
+      final timestamp = RegExp(r'_(\d{10,13})\.bin$').firstMatch(p.basename(entity.path))?.group(1);
+      var timerStart = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (timestamp != null) {
+        final parsed = int.tryParse(timestamp);
+        if (parsed != null) timerStart = timestamp.length == 13 ? parsed ~/ 1000 : parsed;
+      }
+      final wal = Wal(
+        timerStart: timerStart,
+        codec: BleAudioCodec.opus,
+        seconds: ((await entity.length()) / 8000).ceil().clamp(1, 1 << 31).toInt(),
+        status: WalStatus.quarantined,
+        storage: WalStorage.disk,
+        filePath: entity.path,
+      );
+      await quarantineWal(wal, reason: 'legacy_orphan_unknown_owner', persist: false);
+      quarantine.removeWhere((candidate) => candidate.filePath == wal.filePath);
+      quarantine.add(wal);
+      changed = true;
+    }
+    if (changed) await _writeWals(_quarantineWalFile, null, quarantine);
+  }
+
+  static Future<File> _uniqueDestination(String filename) async {
+    var destination = File(p.join(_quarantineDirectory.path, filename));
+    if (!destination.existsSync()) return destination;
+    final stem = p.basenameWithoutExtension(filename);
+    final extension = p.extension(filename);
+    destination = File(
+      p.join(_quarantineDirectory.path, '${stem}_${DateTime.now().toUtc().microsecondsSinceEpoch}$extension'),
+    );
+    return destination;
+  }
+
+  static Future<List<Wal>> _readWals(File? file) async {
+    if (file == null || !file.existsSync()) return [];
+    try {
+      final content = await file.readAsString();
+      if (content.isEmpty) return [];
+      final jsonData = jsonDecode(content);
+      if (jsonData is! Map<String, dynamic> || jsonData['wals'] is! List) return [];
+      return Wal.fromJsonList(jsonData['wals'] as List);
+    } catch (error) {
+      Logger.debug('WalFileManager: Could not read ${file.path}: $error');
       return [];
     }
+  }
 
-    final content = await _walBackupFile!.readAsString();
-    if (content.isEmpty) {
-      return [];
+  static Future<void> _writeWals(File? file, File? backup, List<Wal> wals) async {
+    if (file == null) return;
+    await file.parent.create(recursive: true);
+    if (file.existsSync() && backup != null) {
+      await file.copy(backup.path);
     }
-
-    final jsonData = jsonDecode(content);
-    if (jsonData is! Map<String, dynamic> || jsonData['wals'] is! List) {
-      return [];
+    await file.writeAsString(jsonEncode({
+      'version': 2,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'wals': wals.map((wal) => wal.toJson()).toList(),
+    }));
+    if (file.path == _quarantineWalFile.path) {
+      await SharedPreferencesUtil().saveInt('ellaWalQuarantineCount', wals.length);
     }
-
-    final walsList = jsonData['wals'] as List;
-    return Wal.fromJsonList(walsList);
   }
 
   static Future<bool> migrateFromPreferences(List<Wal> prefsWals) async {
-    if (prefsWals.isEmpty) {
-      Logger.debug('No WALs to migrate from preferences');
-      return true;
+    for (final wal in prefsWals) {
+      await quarantineWal(wal, reason: 'legacy_preferences_unknown_owner', persist: false);
     }
-
-    final success = await saveWals(prefsWals);
-    if (success) {
-      Logger.debug('Successfully migrated ${prefsWals.length} WALs from preferences to file');
-    }
-    return success;
+    return saveWals(prefsWals);
   }
 
   static Future<void> clearAll() async {
-    if (_walFile != null && _walFile!.existsSync()) {
-      await _walFile!.delete();
+    await init(activeOwner: _activeOwner);
+    if (_activeDirectory != null && _activeDirectory!.existsSync()) {
+      await _activeDirectory!.delete(recursive: true);
     }
-    if (_walBackupFile != null && _walBackupFile!.existsSync()) {
-      await _walBackupFile!.delete();
+    if (_activeOwner != null) {
+      final quarantine = await _readWals(_quarantineWalFile);
+      final retained = <Wal>[];
+      for (final wal in quarantine) {
+        if (wal.owner != null && wal.owner!.matches(_activeOwner!)) {
+          final path = await resolveWalFilePath(wal);
+          if (path != null && File(path).existsSync()) await File(path).delete();
+        } else {
+          retained.add(wal);
+        }
+      }
+      await _writeWals(_quarantineWalFile, null, retained);
     }
-    Logger.debug('Cleared all WAL files');
+    Logger.debug('Cleared only the active account WAL files after confirmed account deletion');
   }
 
   static Future<Map<String, int>> getFileInfo() async {
-    int mainFileSize = 0;
-    int backupFileSize = 0;
-
-    if (_walFile != null && _walFile!.existsSync()) {
-      mainFileSize = await _walFile!.length();
-    }
-
-    if (_walBackupFile != null && _walBackupFile!.existsSync()) {
-      backupFileSize = await _walBackupFile!.length();
-    }
-
+    await init(activeOwner: _activeOwner);
+    final main = _activeWalFile;
+    final backup = _activeWalBackupFile;
     return {
-      'mainFileSize': mainFileSize,
-      'backupFileSize': backupFileSize,
+      'mainFileSize': main != null && main.existsSync() ? await main.length() : 0,
+      'backupFileSize': backup != null && backup.existsSync() ? await backup.length() : 0,
     };
   }
 
-  /// Migrate legacy Limitless pending files from SharedPreferences to the new WAL system.
-  /// This handles files that were saved under the old 'flash_page_pending_uploads' key.
-  /// The old implementation stored full absolute paths like '/path/to/docs/audio_limitless_...bin'
-  /// Returns the number of files migrated.
-  static Future<int> migrateLegacyLimitlessFiles(List<Wal> existingWals) async {
-    final prefs = SharedPreferencesUtil();
-
-    // Check if migration was already done
-    if (prefs.getBool(_migrationCompletedKey)) {
-      Logger.debug('WalFileManager: Legacy Limitless migration already completed');
-      return 0;
-    }
-
-    // Get legacy pending files from SharedPreferences (stored as full absolute paths)
-    final legacyFiles = prefs.getStringList(_legacyPendingFilesKey);
-    if (legacyFiles.isEmpty) {
-      Logger.debug('WalFileManager: No legacy Limitless files to migrate');
-      prefs.saveBool(_migrationCompletedKey, true);
-      return 0;
-    }
-
-    Logger.debug('WalFileManager: Found ${legacyFiles.length} legacy Limitless files to migrate');
-
-    int migratedCount = 0;
-    final newWals = <Wal>[];
-
-    for (final fullPath in legacyFiles) {
-      try {
-        // Old implementation stored full absolute paths
-        final file = File(fullPath);
-        if (!file.existsSync()) {
-          Logger.debug('WalFileManager: Legacy file not found, skipping: $fullPath');
-          continue;
-        }
-
-        // Extract just the filename for WAL storage (consistent with new system)
-        final fileName = fullPath.split('/').last;
-
-        // Check if this file is already tracked in existing WALs
-        final alreadyTracked = existingWals.any((wal) =>
-            wal.filePath == fullPath ||
-            wal.filePath == fileName ||
-            (wal.filePath != null && wal.filePath!.endsWith(fileName)));
-
-        if (alreadyTracked) {
-          Logger.debug('WalFileManager: File already tracked, skipping: $fileName');
-          continue;
-        }
-
-        // Parse info from filename
-        // Expected format: audio_limitless_opus_16000_1_fs320_r{random}_{timestampMs}.bin
-        int timerStart = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        int seconds = 30; // Default estimate
-
-        // Try to extract timestamp from filename (13-digit millisecond timestamp)
-        final timestampMatch = RegExp(r'_(\d{13})\.bin$').firstMatch(fileName);
-        if (timestampMatch != null) {
-          timerStart = int.parse(timestampMatch.group(1)!) ~/ 1000;
-        }
-
-        // Estimate duration from file size (~8KB per second for opus)
-        final fileSize = await file.length();
-        seconds = (fileSize / 8000).ceil();
-        if (seconds < 1) seconds = 1;
-
-        // Create WAL entry for this file
-        // Store just the filename (new system uses Wal.getFilePath() to resolve full path)
-        final wal = Wal(
-          timerStart: timerStart,
-          codec: BleAudioCodec.opus,
-          channel: 1,
-          sampleRate: 16000,
-          seconds: seconds,
-          status: WalStatus.miss,
-          storage: WalStorage.disk,
-          filePath: fileName,
-          device: 'limitless',
-          deviceModel: 'Limitless',
-          originalStorage: WalStorage.flashPage,
-        );
-
-        newWals.add(wal);
-        migratedCount++;
-        Logger.debug('WalFileManager: Migrated legacy file: $fileName (${seconds}s)');
-      } catch (e) {
-        Logger.debug('WalFileManager: Error migrating file $fullPath: $e');
-      }
-    }
-
-    // Save migrated WALs
-    if (newWals.isNotEmpty) {
-      final allWals = List<Wal>.from(existingWals)..addAll(newWals);
-      await saveWals(allWals);
-      Logger.debug('WalFileManager: Saved ${newWals.length} migrated WALs');
-    }
-
-    // Clear legacy SharedPreferences and mark migration complete
-    prefs.saveStringList(_legacyPendingFilesKey, []);
-    prefs.saveBool(_migrationCompletedKey, true);
-
-    Logger.debug('WalFileManager: Legacy Limitless migration complete. Migrated $migratedCount files.');
-    return migratedCount;
+  static Future<int> getQuarantineCount() async {
+    await init(activeOwner: _activeOwner);
+    return (await _readWals(_quarantineWalFile)).length;
   }
 
-  /// Also migrate any WALs that might be in inconsistent state from old implementation.
-  /// This fixes WALs that have storage=flashPage but already have a local file.
-  static Future<bool> migrateInconsistentWals(List<Wal> wals) async {
-    bool needsSave = false;
+  static Future<int> migrateLegacyLimitlessFiles(List<Wal> existingWals) async {
+    final prefs = SharedPreferencesUtil();
+    if (prefs.getBool(_migrationCompletedPreference)) return 0;
+    final legacyFiles = prefs.getStringList(_legacyPendingFilesKey);
+    var count = 0;
+    for (final fullPath in legacyFiles) {
+      final file = File(fullPath);
+      if (!file.existsSync()) continue;
+      final fileSize = await file.length();
+      final timestampMatch = RegExp(r'_(\d{13})\.bin$').firstMatch(p.basename(fullPath));
+      final wal = Wal(
+        timerStart: timestampMatch == null
+            ? DateTime.now().millisecondsSinceEpoch ~/ 1000
+            : int.parse(timestampMatch.group(1)!) ~/ 1000,
+        codec: BleAudioCodec.opus,
+        seconds: (fileSize / 8000).ceil().clamp(1, 1 << 31).toInt(),
+        status: WalStatus.quarantined,
+        storage: WalStorage.disk,
+        filePath: fullPath,
+        device: 'limitless',
+        deviceModel: 'Limitless',
+        originalStorage: WalStorage.flashPage,
+      );
+      await quarantineWal(wal, reason: 'legacy_limitless_unknown_owner', persist: false);
+      existingWals.add(wal);
+      count++;
+    }
+    await saveWals(existingWals);
+    await prefs.saveStringList(_legacyPendingFilesKey, []);
+    await prefs.saveBool(_migrationCompletedPreference, true);
+    return count;
+  }
 
-    for (var wal in wals) {
-      // Case 1: FlashPage WAL that has a file locally - was downloaded but not transitioned
-      if (wal.storage == WalStorage.flashPage && wal.filePath != null && wal.filePath!.isNotEmpty) {
-        Logger.debug('WalFileManager: Fixing inconsistent WAL ${wal.id} - has file but storage=flashPage');
+  static Future<bool> migrateInconsistentWals(List<Wal> wals) async {
+    var changed = false;
+    for (final wal in wals.where((wal) => wal.status != WalStatus.quarantined)) {
+      if (wal.storage == WalStorage.flashPage && wal.filePath?.isNotEmpty == true) {
         wal.storage = WalStorage.disk;
         wal.originalStorage = WalStorage.flashPage;
-        needsSave = true;
+        changed = true;
       }
-
-      // Case 2: Limitless device WAL on disk without originalStorage tracking
       if (wal.storage == WalStorage.disk &&
           wal.originalStorage == null &&
           (wal.deviceModel?.toLowerCase().contains('limitless') == true ||
               wal.filePath?.contains('limitless') == true)) {
-        Logger.debug('WalFileManager: Setting originalStorage=flashPage for Limitless WAL ${wal.id}');
         wal.originalStorage = WalStorage.flashPage;
-        needsSave = true;
+        changed = true;
       }
     }
-
-    if (needsSave) {
-      await saveWals(wals);
-      Logger.debug('WalFileManager: Saved WALs after inconsistency fixes');
-    }
-
-    return needsSave;
+    if (changed) await saveWals(wals);
+    return changed;
   }
 }

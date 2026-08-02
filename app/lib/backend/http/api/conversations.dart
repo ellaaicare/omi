@@ -694,7 +694,10 @@ Future<List<ServerConversation>> sendStorageToBackend(File file, String sdCardDa
   }
 }
 
-Future<SyncLocalFilesResponse> syncLocalFiles(List<File> files) async {
+Future<SyncLocalFilesResponse> syncLocalFiles(
+  List<File> files, {
+  String? expectedAuthenticatedUid,
+}) async {
   if (!SharedPreferencesUtil().aiConsentAccepted) {
     throw StateError('AI consent is required before stored audio sync');
   }
@@ -702,6 +705,7 @@ Future<SyncLocalFilesResponse> syncLocalFiles(List<File> files) async {
     var response = await makeMultipartApiCall(
       url: '${Env.apiBaseUrl}v1/sync-local-files',
       files: files,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
     );
 
     if (response.statusCode == 200) {

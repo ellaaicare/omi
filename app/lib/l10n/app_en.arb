@@ -10607,5 +10607,22 @@
   "ellaDemoStateSessionMaximum": "Voice — conversation-time limit",
   "ellaDemoStateTechnicalFailure": "Voice — technical connection issue",
   "todayPhoneOnly": "Phone only",
-  "ellaVoiceDemoPreview": "Demo preview — voice is not active"
+  "ellaVoiceDemoPreview": "Demo preview — voice is not active",
+  "ellaWorkspaceTitle": "Ella workspace",
+  "ellaWorkspaceSettingsSubtitle": "See which private workspace and routes are verified",
+  "ellaWorkspacePrivacyDescription": "This page helps you confirm that Ella is using the private workspace for this account. A route stays unverified until the app receives proof for that route.",
+  "ellaWorkspaceAccount": "Signed-in account",
+  "ellaWorkspacePrivateHermes": "Private Hermes workspace",
+  "ellaWorkspaceFingerprint": "Workspace fingerprint",
+  "ellaWorkspaceBindingRevision": "Binding revision",
+  "ellaWorkspaceLastVerified": "Last server verification",
+  "ellaWorkspaceProtectedAudio": "Protected stored audio",
+  "ellaWorkspaceProtectedAudioExplanation": "These files have no matching account proof. Ella keeps them private and will not send or remove them.",
+  "ellaWorkspaceRoutes": "Route verification",
+  "ellaWorkspaceChatRoute": "Chat",
+  "ellaWorkspaceVoiceRoute": "Voice",
+  "ellaWorkspaceWhispersRoute": "Whispers",
+  "ellaWorkspaceVerified": "Verified",
+  "ellaWorkspaceNotVerified": "Not verified",
+  "ellaWorkspaceRouteExplanation": "Not verified does not mean another account is in use. It means Ella has not received route-specific proof yet."
 }

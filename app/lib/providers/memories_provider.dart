@@ -10,12 +10,21 @@ import 'package:uuid/uuid.dart';
 import 'package:omi/backend/http/api/memories.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/backend/schema/memory.dart';
+import 'package:omi/ella/services/ai_consent_active_session_lease.dart';
 import 'package:omi/providers/connectivity_provider.dart';
 import 'package:omi/utils/analytics/mixpanel.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/widgets/extensions/string.dart';
 
 class MemoriesProvider extends ChangeNotifier {
+  MemoriesProvider({
+    Future<Memory?> Function(String content, String visibility, String category)? createMemory,
+    SharedPreferencesUtil? preferences,
+  })  : _createMemory = createMemory ?? createMemoryServer,
+        _preferences = preferences ?? SharedPreferencesUtil();
+
+  final Future<Memory?> Function(String content, String visibility, String category) _createMemory;
+  final SharedPreferencesUtil _preferences;
   List<Memory> _memories = [];
   bool _loading = true;
   String _searchQuery = '';
@@ -169,10 +178,17 @@ class MemoriesProvider extends ChangeNotifier {
   }
 
   Future<void> loadMemories({int limit = 100}) async {
+    final expectedUid = _preferences.uid;
     _loading = true;
     notifyListeners();
 
-    _memories = await getMemories(limit: limit);
+    final loaded = await getMemories(limit: limit);
+    if (expectedUid.isEmpty || _preferences.uid != expectedUid) {
+      _loading = false;
+      notifyListeners();
+      return;
+    }
+    _memories = loaded;
 
     // Merge pending memories that haven't synced yet
     final pendingMemories = SharedPreferencesUtil().pendingMemories;
@@ -190,7 +206,9 @@ class MemoriesProvider extends ChangeNotifier {
   Future<void> syncPendingMemories() async {
     if (_isSyncing) return;
 
-    final pendingMemories = SharedPreferencesUtil().pendingMemories;
+    final authority = AiConsentAuthoritySnapshot.capture(preferences: _preferences);
+    if (authority == null) return;
+    final pendingMemories = _preferences.pendingMemories;
     if (pendingMemories.isEmpty) return;
 
     _isSyncing = true;
@@ -198,14 +216,16 @@ class MemoriesProvider extends ChangeNotifier {
 
     for (var memory in List.from(pendingMemories)) {
       try {
-        final serverMemory = await createMemoryServer(
+        if (!authority.isCurrent(preferences: _preferences)) break;
+        final serverMemory = await _createMemory(
           memory.content,
-          memory.visibility.name,
-          memory.category.name,
+          memory.visibility.toString().split('.').last,
+          memory.category.toString().split('.').last,
         );
 
+        if (!authority.isCurrent(preferences: _preferences)) break;
         if (serverMemory != null) {
-          SharedPreferencesUtil().removePendingMemory(memory.id);
+          _preferences.removePendingMemory(memory.id);
           final idx = _memories.indexWhere((m) => m.id == memory.id);
           if (idx != -1) {
             _memories[idx].id = serverMemory.id;

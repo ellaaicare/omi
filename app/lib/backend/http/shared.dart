@@ -50,6 +50,7 @@ Future<String> getAuthHeader() async {
 Future<Map<String, String>> buildHeaders({
   required bool requireAuthCheck,
   Map<String, String> fromHeaders = const {},
+  String? expectedAuthenticatedUid,
 }) async {
   final headers = <String, String>{
     'X-Request-Start-Time': (DateTime.now().millisecondsSinceEpoch / 1000).toString(),
@@ -60,7 +61,13 @@ Future<Map<String, String>> buildHeaders({
   };
 
   if (requireAuthCheck) {
+    if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+      throw StateError('Authenticated account changed before request authorization');
+    }
     headers['Authorization'] = await getAuthHeader();
+    if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+      throw StateError('Authenticated account changed during request authorization');
+    }
   }
 
   return headers;
@@ -171,9 +178,18 @@ Future<http.Response> makeMultipartApiCall({
   Map<String, String> fields = const {},
   String fileFieldName = 'files',
   String method = 'POST',
+  String? expectedAuthenticatedUid,
 }) async {
   try {
-    final builtHeaders = await buildHeaders(requireAuthCheck: _isRequiredAuthCheck(url), fromHeaders: headers);
+    final builtHeaders = await buildHeaders(
+      requireAuthCheck: _isRequiredAuthCheck(url),
+      fromHeaders: headers,
+      expectedAuthenticatedUid: expectedAuthenticatedUid,
+    );
+
+    if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+      throw StateError('Authenticated account changed before multipart egress');
+    }
 
     var request = http.MultipartRequest(method, Uri.parse(url));
     request.headers.addAll(builtHeaders);
@@ -184,6 +200,10 @@ Future<http.Response> makeMultipartApiCall({
       var length = await file.length();
       var multipartFile = http.MultipartFile(fileFieldName, stream, length, filename: basename(file.path));
       request.files.add(multipartFile);
+    }
+
+    if (expectedAuthenticatedUid != null && AuthService.instance.getFirebaseUser()?.uid != expectedAuthenticatedUid) {
+      throw StateError('Authenticated account changed immediately before multipart upload');
     }
 
     var streamedResponse = await HttpPoolManager.instance.sendStreaming(request);

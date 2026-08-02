@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 
-import 'package:omi/backend/http/shared.dart';
 import 'package:omi/services/connectivity_service.dart';
 import 'package:omi/services/devices.dart';
 import 'package:omi/services/sockets.dart';
@@ -24,6 +22,7 @@ class ServiceManager {
   late ISystemAudioRecorderService _systemAudio;
 
   static ServiceManager? _instance;
+  bool _started = false;
 
   static ServiceManager _create() {
     ServiceManager sm = ServiceManager();
@@ -47,6 +46,8 @@ class ServiceManager {
 
     return _instance!;
   }
+
+  static bool get isInitialized => _instance != null;
 
   IMicRecorderService get mic => _mic;
 
@@ -72,12 +73,24 @@ class ServiceManager {
   }
 
   Future<void> start() async {
+    if (_started) return;
     _device.start();
     _wal.start();
+    _started = true;
     if (Platform.isMacOS) {
       // TODO: Decide if system audio should start automatically or be user-initiated
       // await _systemAudio.start();
     }
+  }
+
+  Future<void> suspendForAccountTransition() async {
+    if (!_started) return;
+    await _socket.stop();
+    await _wal.stop();
+    _mic.stop();
+    _device.stop();
+    if (Platform.isMacOS) _systemAudio.stop();
+    _started = false;
   }
 
   void deinit() async {
@@ -88,6 +101,7 @@ class ServiceManager {
     if (Platform.isMacOS) {
       _systemAudio.stop();
     }
+    _started = false;
   }
 }
 

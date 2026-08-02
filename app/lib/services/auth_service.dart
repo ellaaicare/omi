@@ -17,6 +17,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
 import 'package:omi/env/env.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/utils/logger.dart';
 import 'package:omi/utils/platform/platform_service.dart';
 
@@ -62,6 +63,9 @@ class AuthService {
 
     // Once signed in, return the UserCredential
     try {
+      if (FirebaseAuth.instance.currentUser != null) {
+        await const EllaAccountIsolationService().stopForAccountTransition();
+      }
       var result = await FirebaseAuth.instance.signInWithCredential(credential);
       await _updateUserPreferences(result, 'google');
       return result;
@@ -88,6 +92,7 @@ class AuthService {
   Future<UserCredential?> signInWithAppleMobile() async {
     try {
       // Sign out the current user first
+      await const EllaAccountIsolationService().stopForAccountTransition();
       await FirebaseAuth.instance.signOut();
 
       final rawNonce = generateNonce();
@@ -142,6 +147,9 @@ class AuthService {
 
   Future<void> signInAnonymously() async {
     try {
+      if (FirebaseAuth.instance.currentUser != null) {
+        await const EllaAccountIsolationService().stopForAccountTransition();
+      }
       await FirebaseAuth.instance.signInAnonymously();
       var user = FirebaseAuth.instance.currentUser!;
       SharedPreferencesUtil().uid = user.uid;
@@ -151,7 +159,10 @@ class AuthService {
     }
   }
 
-  Future<void> signOut() async {
+  Future<void> signOut({bool accountIsolationApplied = false}) async {
+    if (!accountIsolationApplied) {
+      await const EllaAccountIsolationService().stopForAccountTransition();
+    }
     await FirebaseAuth.instance.signOut();
   }
 
@@ -584,6 +595,7 @@ class AuthService {
     final existingCred = e.credential;
 
     // Sign out current anonymous user
+    await const EllaAccountIsolationService().stopForAccountTransition();
     await FirebaseAuth.instance.signOut();
 
     // Sign in with existing account

@@ -82,6 +82,17 @@ class GuardianModeService {
     }
   }
 
+  Future<void> stopForAccountTransition() async {
+    _stopTestAudioTimer();
+    try {
+      await _channel.invokeMethod('stop');
+    } catch (_) {
+      // The native side may not be initialized; local state still fails closed.
+    }
+    _updateState(GuardianModeState.idle);
+    _cleanup();
+  }
+
   /// Start timer to inject test audio clips
   void _startTestAudioTimer() {
     _testClipCounter = 0;

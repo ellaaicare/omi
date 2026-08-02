@@ -3,6 +3,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:omi/backend/http/api/apps.dart' as apps_api;
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/env/env.dart';
 import 'package:omi/main.dart';
 import 'package:omi/providers/base_provider.dart';
@@ -245,6 +246,7 @@ class AuthenticationProvider extends BaseProvider {
           final oldUserId = FirebaseAuth.instance.currentUser?.uid;
 
           // Sign out current anonymous user
+          await const EllaAccountIsolationService().stopForAccountTransition();
           await FirebaseAuth.instance.signOut();
 
           // Sign in with existing account

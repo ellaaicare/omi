@@ -1,5 +1,3 @@
-import 'package:flutter/cupertino.dart';
-
 import 'package:just_audio/just_audio.dart';
 
 import 'package:omi/backend/http/api/users.dart';
@@ -9,7 +7,17 @@ import 'package:omi/providers/base_provider.dart';
 import 'package:omi/utils/logger.dart';
 
 class PeopleProvider extends BaseProvider {
-  List<Person> people = SharedPreferencesUtil().cachedPeople;
+  PeopleProvider({
+    Future<List<Person>> Function()? fetchPeople,
+    SharedPreferencesUtil? preferences,
+  })  : _fetchPeople = fetchPeople ?? getAllPeople,
+        _preferences = preferences ?? SharedPreferencesUtil() {
+    people = _preferences.cachedPeople;
+  }
+
+  final Future<List<Person>> Function() _fetchPeople;
+  final SharedPreferencesUtil _preferences;
+  late List<Person> people;
   Map<String, List<String>> samplesUrl = {};
 
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -34,11 +42,20 @@ class PeopleProvider extends BaseProvider {
   }
 
   setPeople() async {
-    final value = await getAllPeople();
+    final expectedUid = _preferences.uid;
+    if (expectedUid.isEmpty) {
+      loading = false;
+      return;
+    }
+    final value = await _fetchPeople();
+    if (_preferences.uid != expectedUid) {
+      loading = false;
+      return;
+    }
     loading = false;
     people = value;
-    SharedPreferencesUtil().cachedPeople = people;
-    Logger.debug("${SharedPreferencesUtil().cachedPeople.length} people");
+    _preferences.cachedPeople = people;
+    Logger.debug("${_preferences.cachedPeople.length} people");
     notifyListeners();
   }
 

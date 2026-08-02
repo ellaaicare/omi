@@ -1,7 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
-
 import 'package:omi/backend/schema/bt_device/bt_device.dart';
 import 'package:omi/models/custom_stt_config.dart';
 import 'package:omi/services/sockets/transcription_service.dart';
@@ -13,7 +11,7 @@ export 'package:omi/services/freemium_transcription_service.dart';
 abstract class ISocketService {
   void start();
 
-  void stop();
+  Future<void> stop();
 
   Future<TranscriptSegmentSocketService?> conversation({
     required BleAudioCodec codec,
@@ -43,7 +41,7 @@ class SocketServicePool extends ISocketService {
   void start() {}
 
   @override
-  void stop() async {
+  Future<void> stop() async {
     await _socket?.stop();
     await _speechProfileSocket?.stop();
   }

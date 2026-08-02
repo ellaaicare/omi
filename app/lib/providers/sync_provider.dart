@@ -19,6 +19,7 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
   // WAL management
   List<Wal> _allWals = [];
   List<Wal> get allWals => _allWals;
+  List<Wal> get quarantinedWals => _allWals.where((wal) => wal.status == WalStatus.quarantined).toList();
   bool _isLoadingWals = false;
   bool get isLoadingWals => _isLoadingWals;
 

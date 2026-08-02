@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 
 import 'package:omi/backend/http/api/users.dart';
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/pages/ella_entitlement_gate_page.dart';
 import 'package:omi/ella/pages/ella_provisioning_gate_page.dart';
@@ -121,7 +122,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     _signInRefreshInFlight = true;
     final preferences = SharedPreferencesUtil();
     try {
-      await preferences.prepareEllaProvisioningAccount(uid);
+      await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: preferences);
       if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
       final hasCurrentConsent = await _createConsentService().refreshServerAuthority(uid: uid);
       if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
@@ -174,7 +175,7 @@ class _EllaOnboardingState extends State<EllaOnboarding> {
     final preferences = SharedPreferencesUtil();
     final uid = _authenticatedUid ?? '';
     if (widget.provisioningGateEnabled && uid.isNotEmpty) {
-      await preferences.prepareEllaProvisioningAccount(uid);
+      await const EllaAccountIsolationService().prepareProvisioningAccount(uid, preferences: preferences);
     }
     if (!mounted || !_isPilotLocaleAllowed || _authenticatedUid != uid) return;
     final consentService = _createConsentService();

@@ -6,6 +6,7 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:provider/provider.dart';
 
 import 'package:omi/backend/preferences.dart';
+import 'package:omi/ella/services/ella_account_isolation_service.dart';
 import 'package:omi/ella/ella_theme.dart';
 import 'package:omi/ella/services/ella_ai_consent_service.dart';
 import 'package:omi/ella/services/ella_provisioning_service.dart';
@@ -49,7 +50,7 @@ class _EllaProvisioningGatePageState extends State<EllaProvisioningGatePage> wit
 
     final preferences = SharedPreferencesUtil();
     preferences.uid = user.uid;
-    await preferences.prepareEllaProvisioningAccount(user.uid);
+    await const EllaAccountIsolationService().prepareProvisioningAccount(user.uid, preferences: preferences);
     if (!mounted) return;
 
     final consentService = EllaAiConsentService();
