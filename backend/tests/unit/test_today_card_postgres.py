@@ -308,8 +308,14 @@ def test_missing_today_card_table_rolls_back_savepoint_without_aborting_canonica
 
 
 def test_migration_defines_versioned_authority_and_source_indexes():
-    migration = (Path(__file__).parents[2] / "migrations" / "015_create_today_cards.sql").read_text(encoding="utf-8")
+    migrations = Path(__file__).parents[2] / "migrations"
+    migration_path = migrations / "016_create_today_cards.sql"
+    migration = migration_path.read_text(encoding="utf-8")
+    numbered_migrations = sorted((*migrations.glob("[0-9][0-9][0-9]_*.py"), *migrations.glob("[0-9][0-9][0-9]_*.sql")))
+    prefixes = [path.name.partition("_")[0] for path in numbered_migrations]
 
+    assert len(prefixes) == len(set(prefixes))
+    assert migration_path.name == "016_create_today_cards.sql"
     assert "UNIQUE (uid, local_date, contract_version)" in migration
     assert "ella_today_cards_ready_shape_check" in migration
     assert "ella_today_cards_new_user_shape_check" in migration

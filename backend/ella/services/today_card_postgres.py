@@ -668,7 +668,7 @@ async def invalidate_deleted_conversation_source(uid: str, conversation_id: str)
         )
     except asyncpg.UndefinedTableError:
         # Preserve the additive migration compatibility window. Once migration
-        # 015 exists, every other failure blocks deletion before content can be
+        # 016 exists, every other failure blocks deletion before content can be
         # detached from its source.
-        logger.warning("[FLOW:TODAY-CARD] delete invalidation unavailable before migration 015")
+        logger.warning("[FLOW:TODAY-CARD] delete invalidation unavailable before migration 016")
         return 0
